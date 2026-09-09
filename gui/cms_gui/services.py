@@ -59,6 +59,14 @@ CONSOLE_LINES = 2000
 #: it runs - a rotation mid-stream would cut a line in half.
 LOG_MAX_BYTES = 5 * 1024 * 1024
 
+#: How much of an adopted run's log is read back for its criteria, from where
+#: that run began. Bounded because this happens while the window is opening and a
+#: detached service may have been up for days; the lines that light a criterion
+#: are written at the *start* of a run, which is where this reads from. A run
+#: longer than this is therefore described by its beginning: an exclude rule
+#: speaks only for what fits, which beats reading a gigabyte to open a window.
+ADOPT_MAX_BYTES = 4 * 1024 * 1024
+
 #: How often the managed services and the detached pids are asked how they are.
 #: Attached services need no poll at all: they tell us.
 POLL_MS = 3000
@@ -116,6 +124,14 @@ def rotate(path, limit=LOG_MAX_BYTES):
     return True
 
 
+def file_size(path):
+    """How big a file is, or 0 for one that is not there yet."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
 class LogTail:
     """Whole new lines appended to a file since the last look.
 
@@ -137,11 +153,17 @@ class LogTail:
 
     def seek_end(self):
         """Ignore everything already there - used when a new run is starting."""
-        try:
-            self._offset = os.path.getsize(self.path)
-        except OSError:
-            self._offset = 0
+        self._offset = file_size(self.path)
         self._partial = ""
+
+    def offset(self):
+        """Where in the file it has read up to.
+
+        Taken right after :meth:`seek_end` it is where a run is about to start
+        writing, which is the one thing that tells a later window which part of a
+        shared log belongs to the run it has adopted.
+        """
+        return self._offset
 
     def read(self):
         try:
@@ -341,10 +363,20 @@ class DetachedState:
             return None
         return entry
 
-    def remember(self, key, project, name, pid, marker):
+    def remember(self, key, project, name, pid, marker, offset=None):
+        """Note a detached run. ``offset`` is where in the log it began writing.
+
+        The log is appended to across runs, so that offset is the only thing that
+        tells a later window which part of the file is the run it is adopting -
+        without it the criteria of an adopted service would answer for the boot
+        before, or for nothing at all. Left out for anything that has no such
+        file, and absent from entries written by an older build.
+        """
         entries = self.all()
         entries[key] = {"project": project, "name": name, "pid": int(pid),
                         "marker": marker}
+        if offset is not None:
+            entries[key]["offset"] = int(offset)
         self._store.save(entries)
 
     def forget(self, key):
@@ -680,8 +712,12 @@ class ServiceProcess(QObject):
         self._pid = int(child.pid)
         self._marker = argv[0]
         if self._state is not None:
+            # Where this run starts writing, taken from the tail that was just
+            # moved to the end of the file: the window that adopts this pid reads
+            # the run's own output from there. See reattach().
             self._state.remember(self.slug, self.project, self.runner.name,
-                                 self._pid, self._marker)
+                                 self._pid, self._marker,
+                                 offset=self._tail.offset())
         self._set_status(RUNNING)
 
     def _run_action(self, argv, cwd, starting):
@@ -924,7 +960,14 @@ class ServiceProcess(QObject):
 
     # -- adoption -------------------------------------------------------------
     def reattach(self):
-        """Pick up what is already running: a detached pid, or a live container."""
+        """Pick up what is already running: a detached pid, or a live container.
+
+        A managed service has nothing to read back: its log holds the output of
+        the last ``docker start`` this application ran, not the container's, so
+        what its criteria watch was never ours to see. A detached one wrote the
+        whole of its run to a file we know the name and the starting offset of,
+        and :meth:`_adopt_criteria` is that half.
+        """
         if self.is_managed():
             self.poll(force=True)
             return
@@ -940,7 +983,46 @@ class ServiceProcess(QObject):
         self._pid = int(pid)
         self._marker = marker
         self._tail.seek_end()
+        self._adopt_criteria(entry.get("offset"))
         self._set_status(RUNNING, "started before this window was opened")
+
+    def _adopt_criteria(self, offset):
+        """Let the criteria answer for a run that began before this window.
+
+        The console deliberately starts at the live end of the log - re-printing
+        however much a service wrote overnight is nobody's idea of useful - but a
+        criterion is the run's *answer*, not its narration, and an adopted
+        service printed its ready line long before anything here was watching.
+        Without this its tags stay grey for as long as the process lives, however
+        plainly the log says otherwise, and a scenario's ``wait_for_criterion``
+        sits out its whole timeout waiting for a line that will not be written
+        twice.
+
+        Read from ``offset``, never from the top: the file is appended to across
+        runs, so its beginning is the boot before this one. An entry that has no
+        offset was written by a build that did not record one - there is nothing
+        to read *from*, so nothing is claimed and the tags stay as they were.
+
+        Only the criteria that watch the service's own output. The ones reading a
+        file of their own have their own tail, which has no run to be told about.
+        """
+        own = [matcher for matcher in self._matchers if not matcher.source]
+        if offset is None or not own:
+            return
+        try:
+            with open(self.log_path, "rb") as handle:
+                handle.seek(int(offset))
+                data = handle.read(ADOPT_MAX_BYTES)
+        except (OSError, ValueError):
+            return
+        lines = data.decode("utf-8", "replace").split("\n")
+        if len(data) == ADOPT_MAX_BYTES:
+            lines.pop()             # the read stopped mid-line; that is not one
+        changed = False
+        for matcher in own:
+            changed = matcher.feed_all(lines) or changed
+        if changed:
+            self.criteria_changed.emit()
 
     # -- status ---------------------------------------------------------------
     def _fail(self, message):

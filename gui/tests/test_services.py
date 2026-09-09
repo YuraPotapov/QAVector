@@ -792,6 +792,76 @@ def test_a_detached_services_output_reaches_its_criteria(qapp, tmp_path, state,
     assert _pump(qapp, lambda: (service.poll(), _lit(service, "start"))[1] is True)
 
 
+def test_an_adopted_run_answers_for_what_it_printed_before_the_window(
+        qapp, tmp_path, state, stopper):
+    """A service that was up before this window still has to light its tags.
+
+    Its ready line was written once, before anything here was watching, and it
+    will not be written again for as long as the process lives - so a criterion
+    that only ever sees what arrives next stays grey forever, and a scenario's
+    wait_for_criterion waits out its whole timeout beside a log that plainly
+    says otherwise.
+    """
+    criterion = cr.CriterionRow(name="start", rules=[
+        cr.Rule(cr.MATCH, cr.TEXT, "ready to serve")])
+    row = _watching("adopted", "print('ready to serve');import time;time.sleep(30)",
+                    [criterion], detach=True)
+    first = services.ServiceProcess("Claim", row, str(tmp_path), state=state)
+    stopper.append(first)
+    first.start()
+    assert _pump(qapp, lambda: (first.poll(), _lit(first, "start"))[1] is True)
+
+    again = services.ServiceProcess("Claim", row, str(tmp_path), state=state)
+    again.reattach()
+    assert again.status == RUNNING
+    assert _lit(again, "start") is True
+
+
+def test_an_adopted_run_is_read_from_where_it_began_and_not_from_the_top(
+        qapp, tmp_path, state, stopper):
+    # The log is appended to across runs, so its top is the boot before this one.
+    # Reading from there would light a criterion from a process that is gone.
+    criterion = cr.CriterionRow(name="start", rules=[
+        cr.Rule(cr.MATCH, cr.TEXT, "ready to serve")])
+    said_it = _watching("adopted2", "print('ready to serve')", [criterion],
+                        detach=True)
+    quiet = _watching("adopted2", "import time;time.sleep(30)", [criterion],
+                      detach=True)
+
+    first = services.ServiceProcess("Claim", said_it, str(tmp_path), state=state)
+    first.start()
+    assert _pump(qapp, lambda: not services.pid_alive(first._pid, first._marker))
+
+    second = services.ServiceProcess("Claim", quiet, str(tmp_path), state=state)
+    stopper.append(second)
+    second.start()                      # the same log, a new run, saying nothing
+
+    again = services.ServiceProcess("Claim", quiet, str(tmp_path), state=state)
+    again.reattach()
+    assert again.status == RUNNING
+    assert _lit(again, "start") is False
+
+
+def test_an_entry_from_a_build_that_recorded_no_offset_claims_nothing(
+        qapp, tmp_path, state, stopper):
+    # Upgrading with a detached service already up: there is nothing to read
+    # *from*, so it is adopted as before rather than answered for from the top.
+    criterion = cr.CriterionRow(name="start", rules=[
+        cr.Rule(cr.MATCH, cr.TEXT, "ready to serve")])
+    row = _watching("adopted3", "print('ready to serve');import time;time.sleep(30)",
+                    [criterion], detach=True)
+    first = services.ServiceProcess("Claim", row, str(tmp_path), state=state)
+    stopper.append(first)
+    first.start()
+    assert _pump(qapp, lambda: (first.poll(), _lit(first, "start"))[1] is True)
+    state.remember(first.slug, "Claim", "adopted3", first._pid, first._marker)
+
+    again = services.ServiceProcess("Claim", row, str(tmp_path), state=state)
+    again.reattach()
+    assert again.status == RUNNING
+    assert _lit(again, "start") is False
+
+
 def test_stopping_keeps_what_the_run_lit(qapp, tmp_path, state, stopper):
     """Stopping is when what the log said matters most.
 

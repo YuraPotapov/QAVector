@@ -150,6 +150,20 @@ previous one still sitting in the console — including in the window where the 
 been accepted but the old process has not gone down yet, which is exactly when the step
 after it runs.
 
+**All three waits are about the run you asked for.** Once `service_start` or
+`service_restart` has been accepted, nothing is answered from what the service said or was
+before it: not a lit criterion, not a status that still says *running* because the old
+process has not gone down yet. So `wait_for_criterion` behind a `service_restart` waits for
+the new boot to light the tag, whether or not the service was already up when the scenario
+started — the two cases behave the same, which is the whole point. If that restart ends in
+a failure instead, the wait says so at once rather than sitting out its timeout.
+
+**A criterion on a service this window adopted still answers.** A detached service that was
+already running when the application opened printed its ready line before anything was
+watching, and will not print it again; its criteria are filled in from that run's own log,
+read from where the run began. Only its own output — a criterion that watches a file of its
+own always reads that file, adopted or not.
+
 **Status and criteria are different questions**, and the three waits keep them apart:
 `wait_for_service` is about the process, the other two are about what it wrote. A service
 whose port was already taken is *running* and has not printed its ready line; that is the

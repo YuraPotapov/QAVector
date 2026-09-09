@@ -313,6 +313,84 @@ def test_an_unknown_criterion_is_refused_rather_than_waited_out(bridge):
     assert "no criterion named" in replies.last["message"]
 
 
+def test_a_restart_then_a_criterion_wait_ignores_the_previous_runs_tag(bridge):
+    """The criterion half of the rule wait_for_out already keeps.
+
+    The criteria are cleared by the service's own start(), which for one that is
+    already up happens only after the old process is down - so at the moment the
+    step behind ``service_restart`` arrives they are still lit from the boot
+    being killed. Answering from them there passes the wait in microseconds and
+    sends the scenario on into a backend that is still going down.
+    """
+    bridge, supervisor, replies = bridge
+    supervisor.set_status(KEY, RUNNING)
+    supervisor.light(KEY, "Main started", lit=True)
+
+    request(bridge, "service_restart", request_id=1)
+    supervisor.set_status(KEY, STOPPING)              # not down yet
+    request(bridge, "wait_for_criterion", pattern="Main started", request_id=2)
+    assert [reply["id"] for reply in replies.sent] == [1]
+
+    # Nor by anything the old run lights on its way out.
+    supervisor.light(KEY, "Main started", lit=True)
+    assert [reply["id"] for reply in replies.sent] == [1]
+
+    supervisor.set_status(KEY, STOPPED)
+    supervisor.set_status(KEY, STARTING)              # cleared for the new run
+    supervisor.light(KEY, "Main started", lit=False, outstanding=["waiting"])
+    assert [reply["id"] for reply in replies.sent] == [1]
+
+    supervisor.light(KEY, "Main started", lit=True)
+    assert replies.last["id"] == 2 and replies.last["ok"] is True
+
+
+def test_a_start_that_changed_nothing_leaves_the_tag_worth_reading(bridge):
+    # The supervisor answers False for a service that is already up: no new run
+    # is coming, so what the criterion says is this run's and answers at once.
+    # Holding it back here would turn every such step into a 120 s timeout.
+    bridge, supervisor, replies = bridge
+    supervisor.set_status(KEY, RUNNING)
+    supervisor.light(KEY, "Main started", lit=True)
+    supervisor.start = lambda project, name: False
+
+    request(bridge, "service_start", request_id=1)
+    request(bridge, "wait_for_criterion", pattern="Main started", request_id=2)
+    assert replies.last["id"] == 2 and replies.last["ok"] is True
+    assert "already lit" in replies.last["message"]
+
+
+def test_a_restart_then_a_service_wait_waits_for_the_run_it_asked_for(bridge):
+    # The same hole in wait_for_service: a stop the supervisor has taken but not
+    # carried out yet leaves the status RUNNING, and that is the old process.
+    bridge, supervisor, replies = bridge
+    supervisor.set_status(KEY, RUNNING)
+
+    request(bridge, "service_restart", request_id=1)
+    request(bridge, "wait_for_service", request_id=2)
+    assert [reply["id"] for reply in replies.sent] == [1]
+
+    supervisor.set_status(KEY, STOPPING)
+    supervisor.set_status(KEY, STARTING)
+    supervisor.set_status(KEY, RUNNING)
+    assert replies.last["id"] == 2 and replies.last["ok"] is True
+
+
+def test_a_restart_that_failed_ends_the_wait_behind_it_at_once(bridge):
+    # The run the wait is for is not coming. Neither answer from the old run's
+    # tag nor two minutes of waiting for a start that has already not happened:
+    # the failure itself is the answer, and it arrives immediately.
+    bridge, supervisor, replies = bridge
+    supervisor.set_status(KEY, RUNNING)
+    supervisor.light(KEY, "Main started", lit=True)
+
+    request(bridge, "service_restart", request_id=1)
+    supervisor.set_status(KEY, STOPPING)
+    supervisor.set_status(KEY, FAILED)
+    request(bridge, "wait_for_criterion", pattern="Main started", request_id=2)
+    assert replies.last["id"] == 2 and replies.last["ok"] is False
+    assert "it failed" in replies.last["message"]
+
+
 def test_a_criterion_wait_that_fails_says_what_was_outstanding(bridge):
     bridge, supervisor, replies = bridge
     supervisor.light(KEY, "start", lit=False, outstanding=["waiting for 'ready'"])

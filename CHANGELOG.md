@@ -16,6 +16,32 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Fixed
+- **`wait_for_criterion` behind a `service_restart` answered from the run being
+  killed.** A criterion is cleared by the service's own start, which for a service
+  that is *already up* happens only once the old process is down — several seconds
+  for a backend, and the step behind the restart arrives in milliseconds. So the tag
+  still lit from the previous boot passed the wait instantly, and the scenario walked
+  on into a server that was still shutting down; the same sequence against a service
+  that had been *stopped* waited properly, because there the start had already run.
+  One of the two had to be wrong and it was never the same one twice. A service owes
+  the scenario a new run from the moment `service_start` or `service_restart` is
+  accepted until it actually starts, and for as long as it does, neither its criteria
+  nor its status can answer a wait. `wait_for_out` already kept this rule with a
+  buffer of its own; the other two waits keep it now as well. A restart that ends in
+  a failure ends the wait behind it immediately, rather than after two minutes of
+  waiting for a start that has already not happened.
+- **A service adopted from before the window opened showed no criteria at all.** A
+  detached service that outlived the last session is picked up by its pid and its
+  console starts at the live end of the log — which left every criterion grey for as
+  long as the process lived, however plainly the log said *started*, because the line
+  that lights one is written once at boot and never again. `wait_for_criterion` on
+  such a service could only ever time out. The run's own output is now read back for
+  the criteria when it is adopted, from the offset where that run began — remembered
+  beside its pid, since the log is appended to across runs and its top is the boot
+  before. A service started by an older build has no such offset recorded and is
+  adopted as before, claiming nothing; restarting it once is enough.
+
 ## [0.14.3] - 2026-09-04
 
 ### Fixed

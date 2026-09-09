@@ -23,6 +23,19 @@ service enters STARTING. That also covers the other half of the race: a service
 that prints its ready line in the moments between ``service_restart`` and the
 ``wait_for_out`` step has still printed it into the buffer, so the wait is
 satisfied rather than hanging on a line it just missed.
+
+The criteria need the same rule and cannot keep it themselves. They are cleared
+by ``ServiceProcess.start()``, which for a service that is *already running*
+happens only once the old process is down - so between ``service_restart`` and
+the step behind it they still describe the boot being killed. Reading them there
+answers a wait in microseconds with the previous run's answer, which is how a
+scenario walks on into a backend that is still going down. So an op that begins a
+new run marks the service in :attr:`ServiceBridge._awaiting_run` until STARTING
+says the clearing has happened, and while that mark is on, nothing is answered
+from the criteria or from the status - except the failure that means the run is
+not coming at all, which ends the wait rather than making it sit out its whole
+timeout. A service that was *down* is not marked at all: ``start()`` runs inside
+the request and the criteria are already this run's by the time it is answered.
 """
 
 import collections
@@ -49,6 +62,11 @@ ENDS_A_RUN = (STARTING, STOPPING, STOPPED)
 #: Ops that ask for something to happen and are answered as soon as it is asked.
 IMPERATIVE = ("service_start", "service_stop", "service_restart")
 
+#: The ones that ask for a *new run*. What the service has already said stops
+#: describing it the moment one of these is accepted, however long the old
+#: process then takes to go down.
+STARTS_A_RUN = ("service_start", "service_restart")
+
 
 class _Pending:
     """One request being waited on, and the timer that gives up on it."""
@@ -72,6 +90,9 @@ class ServiceBridge(QObject):
         self._send = send
         self._pending = {}
         self._buffers = {}
+        #: Keys asked to start again whose new run has not begun yet. What the
+        #: criteria and the status say about them is the previous run's.
+        self._awaiting_run = set()
         supervisor.status_changed.connect(self._status_changed)
         supervisor.output.connect(self._output)
         supervisor.criteria_changed.connect(self._criteria_changed)
@@ -137,15 +158,21 @@ class ServiceBridge(QObject):
         """An imperative op: ask, then say whether the asking worked."""
         project, name = pending.key
         if pending.op == "service_start":
-            self._supervisor.start(project, name)
+            acted = self._supervisor.start(project, name)
         elif pending.op == "service_stop":
-            self._supervisor.stop(project, name)
+            acted = self._supervisor.stop(project, name)
         else:
-            self._supervisor.restart(project, name)
+            acted = self._supervisor.restart(project, name)
         # A supervisor call returning False means "already in that state", which
         # is not a failure of the step. A configuration it cannot run reports
         # itself synchronously as FAILED, and that is.
         status = service.status
+        if acted and pending.op in STARTS_A_RUN and status != STARTING:
+            # A new run is coming but has not started, so the criteria have not
+            # been cleared and still hold the last one's answer. STARTING means
+            # the opposite: the service was down, start() ran inside the call
+            # above, and what the criteria say is already about this run.
+            self._awaiting_run.add(pending.key)
         ok = status != FAILED
         self._answer(pending.id, ok, status,
                      service.detail or status if not ok else status)
@@ -153,8 +180,13 @@ class ServiceBridge(QObject):
     def _start_wait(self, pending, service):
         """Set a wait up. False when it is already satisfied (or already lost)."""
         project, name = pending.key
+        # A restart this scenario asked for that has not begun: "already" means
+        # the run being killed, whatever it says. Wait for the new one instead.
+        stale = pending.key in self._awaiting_run
         if pending.op == "wait_for_service":
-            if service.status == RUNNING:
+            if self._lost(pending, service):
+                return False
+            if service.status == RUNNING and not stale:
                 self._answer(pending.id, True, RUNNING, "already running")
                 return False
             return True
@@ -164,17 +196,22 @@ class ServiceBridge(QObject):
             named = [row for row in state if row[0] == pending.pattern]
             if not named:
                 # Nothing configured by that name: waiting out the timeout would
-                # only delay the same answer.
+                # only delay the same answer. A name is a name whatever the
+                # service is doing, so this one is asked first of all.
                 self._answer(pending.id, False, service.status,
                              "no criterion named %r on %s" % (pending.pattern, name))
                 return False
-            if named[0][2]:
+            if self._lost(pending, service):
+                return False
+            if named[0][2] and not stale:
                 self._answer(pending.id, True, service.status,
                              "%r is already lit" % (pending.pattern,))
                 return False
             return True
 
         if pending.op == "wait_for_out":
+            if self._lost(pending, service):
+                return False
             rule = criteria_mod.Rule(mode=criteria_mod.MATCH,
                                      kind=criteria_mod.REGEX,
                                      pattern=pending.pattern or "")
@@ -191,11 +228,30 @@ class ServiceBridge(QObject):
         self._answer(pending.id, False, "", "unknown service op %r" % (pending.op,))
         return False
 
+    def _lost(self, pending, service):
+        """The run this wait is for is not coming. True when it said so.
+
+        Only for a service marked as owing this scenario a new run: the restart
+        it asked for ended in a failure instead, and nothing after that will
+        clear the mark. Answering now beats two minutes of waiting for a start
+        that has already not happened - and the message is the failure's own.
+        """
+        if pending.key not in self._awaiting_run or service.status != FAILED:
+            return False
+        self._answer(pending.id, False, FAILED, self._why(pending, "it failed"))
+        return True
+
     # -- what the supervisor says ---------------------------------------------
     def _status_changed(self, project, name, status):
         key = (project, name)
         if status in ENDS_A_RUN:
             self._new_run(key)
+        if status == STARTING:
+            # The moment _reset_criteria() has run: from here what the criteria
+            # and the status say is about the run that was asked for. A service
+            # that goes FAILED instead keeps the mark - the run is not coming,
+            # and _lost() answers for that rather than pretending otherwise.
+            self._awaiting_run.discard(key)
         for pending in self._for(key):
             if status == FAILED:
                 self._answer(pending.id, False, status, self._why(pending, "it failed"))
@@ -230,6 +286,10 @@ class ServiceBridge(QObject):
 
     def _criteria_changed(self, project, name):
         key = (project, name)
+        if key in self._awaiting_run:
+            # Still the old run's log talking - a service on its way down can
+            # finish a match rule with a line it prints while shutting down.
+            return
         waiting = [p for p in self._for(key) if p.op == "wait_for_criterion"]
         if not waiting:
             return
