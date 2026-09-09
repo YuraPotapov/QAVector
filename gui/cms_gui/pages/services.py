@@ -828,11 +828,20 @@ class RunnerDialog(RowDialog):
         for spec in self._type.form_fields():
             editor = self._editors[spec.key]
             if spec.kind == "env":
-                settings[spec.key] = editor.values()
+                filled = editor.values()
             elif spec.kind == "check":
-                settings[spec.key] = editor.isChecked()
+                filled = editor.isChecked()
             else:
-                settings[spec.key] = editor.text().strip()
+                filled = editor.text().strip()
+            # A field this row never had, left empty, stays absent. Writing it
+            # back as "" is a change to the file like any other, so a form that
+            # was only opened and closed lit Save up and offered to rewrite every
+            # service - which is what happened the first time a field was added
+            # to a form that already had rows in the wild (Stop timeout).
+            # Whatever the row already carries is written whatever it says now,
+            # so clearing a field still saves as a blank.
+            if filled or spec.key in settings:
+                settings[spec.key] = filled
         return sf.RunnerRow(name=self.name.text().strip(), type=self._type.id,
                             detach=self.detach.isChecked(), settings=settings,
                             depends=list(self.depends.checked()),

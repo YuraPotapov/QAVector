@@ -297,6 +297,32 @@ def test_a_generated_form_collects_what_its_type_declared(qapp):
     assert row.settings["env"] == {"PYTHONUNBUFFERED": "1"}
 
 
+def test_a_form_opened_and_accepted_untouched_changes_nothing(qapp):
+    """Otherwise Save lights up for a service somebody only looked at.
+
+    Every supervised form grew a *Stop timeout* in 0.14.3, and a row written
+    before that has no such key. Writing the empty field back as one is a change
+    to the file like any other: open a service, click in a field, press OK, and
+    the page offers to rewrite it - which is exactly the report this comes from,
+    and it happened on every row except the few edited since the field landed.
+    """
+    row = sf.RunnerRow(name="Odoo", type="python",
+                       settings={"script": "odoo-bin"})
+    dialog = RunnerDialog(runnertypes.BY_ID["python"], row)
+    assert "stop_grace" in dialog._editors, "the field is on the form"
+    assert dialog.value().to_entry() == row.to_entry()
+
+    # And it is written the moment it says anything, blank included, once the
+    # row has one - clearing a stop timeout has to save.
+    dialog._editors["stop_grace"].setText("30")
+    assert dialog.value().settings["stop_grace"] == "30"
+    kept = sf.RunnerRow(name="Odoo", type="python",
+                        settings={"script": "odoo-bin", "stop_grace": "30"})
+    cleared = RunnerDialog(runnertypes.BY_ID["python"], kept)
+    cleared._editors["stop_grace"].setText("")
+    assert cleared.value().settings["stop_grace"] == ""
+
+
 def test_a_form_will_not_be_accepted_until_its_type_is_satisfied(qapp):
     from PySide6.QtWidgets import QDialogButtonBox
     dialog = RunnerDialog(runnertypes.BY_ID["python"])

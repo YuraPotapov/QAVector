@@ -31,6 +31,16 @@ app-agnostic, since that will break things on purpose.
   buffer of its own; the other two waits keep it now as well. A restart that ends in
   a failure ends the wait behind it immediately, rather than after two minutes of
   waiting for a start that has already not happened.
+- **Opening a service's form and closing it lit up Save.** Nothing had been
+  typed, and Save offered to rewrite the file anyway — not always, which made it
+  look random: it happened on every service written before *Stop timeout* was
+  added to the forms in 0.14.3, and on none of the few edited since. The form
+  wrote back every field it draws, so a field the row had never carried came back
+  as `"stop_grace": ""` — an empty value, a real change, and a page that says
+  there is something to save. A field the row does not have and nobody filled in
+  now stays absent; anything the row already carries is still written whatever it
+  says, so clearing a field saves as before. On the file this report came from,
+  85 of 92 services changed on an untouched open; now none do.
 - **A service adopted from before the window opened showed no criteria at all.** A
   detached service that outlived the last session is picked up by its pid and its
   console starts at the live end of the log — which left every criterion grey for as
