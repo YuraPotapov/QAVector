@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "chrome-multi-session"
 # Single source of truth for the version. Read at runtime via importlib.metadata
 # (--version); never hardcode a second copy. See CHANGELOG.md for the bump rules.
-version = "0.14.3"
+version = "0.14.4"
 description = "Launch one isolated, auto-logged-in Chrome window per test user, then drive declarative flows over CDP."
 readme = "README.md"
 # 3.9 is the floor: ThreadPoolExecutor.shutdown(cancel_futures=...) is used for

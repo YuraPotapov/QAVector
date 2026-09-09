@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-09-09
+
 ### Fixed
 - **`wait_for_criterion` behind a `service_restart` answered from the run being
   killed.** A criterion is cleared by the service's own start, which for a service
