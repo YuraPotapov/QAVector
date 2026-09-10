@@ -23,7 +23,7 @@ from cms_gui.settings import Settings
 
 
 @pytest.fixture
-def window(qapp, monkeypatch):
+def window(qapp, monkeypatch, dispose):
     monkeypatch.delenv(titlebar.SYSTEM_FRAME_ENV, raising=False)
     settings = Settings()
     settings.sidebar_collapsed = False
@@ -34,7 +34,7 @@ def window(qapp, monkeypatch):
     qapp.processEvents()
     yield win
     win.history.clear()
-    win.close()
+    dispose(win)
 
 
 def _send(widget, kind, local, buttons=Qt.LeftButton):
@@ -224,7 +224,8 @@ def test_the_desktops_frame_can_be_kept(value, drawn):
     assert titlebar.wanted({}) is True
 
 
-def test_keeping_the_desktops_frame_leaves_the_window_as_it_was(qapp, monkeypatch):
+def test_keeping_the_desktops_frame_leaves_the_window_as_it_was(qapp, monkeypatch,
+                                                                dispose):
     monkeypatch.setenv(titlebar.SYSTEM_FRAME_ENV, "1")
     win = main_window_mod.MainWindow()
     try:
@@ -235,4 +236,4 @@ def test_keeping_the_desktops_frame_leaves_the_window_as_it_was(qapp, monkeypatc
             == (0, 0, 0, 0)
     finally:
         win.history.clear()
-        win.close()
+        dispose(win)

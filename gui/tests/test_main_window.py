@@ -20,7 +20,7 @@ from cms_gui.settings import Settings
 
 
 @pytest.fixture
-def window(qapp):
+def window(qapp, dispose):
     # What the rail is showing persists, so without this one test's View menu is
     # where the next test starts from.
     settings = Settings()
@@ -32,7 +32,7 @@ def window(qapp):
     qapp.processEvents()
     yield win
     win.history.clear()
-    win.close()
+    dispose(win)
 
 
 def _visible(window, key):
@@ -214,7 +214,7 @@ def test_the_menu_entry_and_the_rails_own_handle_stay_in_step(window):
     assert "Collapse" in window.collapse_button.toolTip()
 
 
-def test_the_collapsed_rail_survives_a_restart(window):
+def test_the_collapsed_rail_survives_a_restart(window, dispose):
     window.set_sidebar_collapsed(True)
     again = main_window_mod.MainWindow()
     try:
@@ -222,7 +222,7 @@ def test_the_collapsed_rail_survives_a_restart(window):
         assert again._nav_buttons["launch"].toolTip() == "Launch Sessions"
     finally:
         again.set_sidebar_collapsed(False)
-        again.close()
+        dispose(again)
 
 
 # ------------------------------------------------ choosing what the rail holds
@@ -298,7 +298,7 @@ def test_leaving_developer_mode_gives_the_rail_back_rather_than_emptying_it(wind
     assert _visible(window, "launch")
 
 
-def test_what_the_rail_holds_survives_a_restart(window):
+def test_what_the_rail_holds_survives_a_restart(window, dispose):
     window.set_nav_item_visible("log", False)
     again = main_window_mod.MainWindow()
     try:
@@ -306,7 +306,7 @@ def test_what_the_rail_holds_survives_a_restart(window):
         assert again._nav_actions["log"].isChecked() is False
     finally:
         again.settings.save_hidden_nav_items([])
-        again.close()
+        dispose(again)
 
 
 def test_launch_sessions_is_offered_in_both_modes(window):
@@ -387,7 +387,7 @@ def test_the_menu_item_and_the_button_stay_in_step(window):
     assert not window.settings.developer_mode
 
 
-def test_the_mode_survives_a_restart(window, qapp):
+def test_the_mode_survives_a_restart(window, qapp, dispose):
     window.set_developer_mode(True)
     again = main_window_mod.MainWindow()
     try:
@@ -395,7 +395,7 @@ def test_the_mode_survives_a_restart(window, qapp):
         assert _visible(again, "commands")
     finally:
         again.set_developer_mode(False)
-        again.close()
+        dispose(again)
 
 
 def test_leaving_developer_mode_while_on_the_command_page_moves_you_off_it(window):

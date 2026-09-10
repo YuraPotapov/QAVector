@@ -75,17 +75,18 @@ def test_a_packaged_build_reads_the_version_file_beside_it(tmp_path, monkeypatch
         cms_gui._version = None
 
 
-def test_about_names_both_halves(qapp):
+def test_about_names_both_halves(qapp, dispose):
     """The GUI and the core can be two different builds, so About says both."""
     from cms_gui import main_window as main_window_mod
 
     window = main_window_mod.MainWindow()
     try:
         text = window.about_text()
+        script = window.core.script     # read now: the window is gone below
     finally:
-        window.close()
+        dispose(window)
     assert "GUI: %s" % cms_gui.version() in text
     assert "\ncore: " in text
     assert "not detected" not in text.split("\ncore: ")[1].split("\n")[0] or \
-        not window.core.script                     # no core to ask is allowed
+        not script                                  # no core to ask is allowed
     assert "PySide6: " in text and "Python: " in text

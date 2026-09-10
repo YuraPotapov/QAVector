@@ -31,6 +31,121 @@ os.environ["USERPROFILE"] = os.environ["HOME"]      # the same thing on Windows
 os.makedirs(os.environ["HOME"], exist_ok=True)
 
 
+def _dispose(widget):
+    """Close ``widget`` and delete it now, rather than at the end of the process.
+
+    A closed window is only hidden, and a MainWindow is never collected either:
+    its lambdas capture ``self`` and are connected to its own children's signals,
+    so every one of them is a cycle through C++ that Python's collector cannot
+    see. After test_main_window alone 1,945 windows and 92,265 widgets were still
+    alive - and a test that sets the application's stylesheet restyles every one
+    of them, which is how the light/dark tests came to run for ever and take the
+    whole suite with them.
+
+    Before it goes, _quiet stops what it still has running and delivers what
+    that posted - see there for the crashes each step is there to prevent. If
+    something will not stop, the window is left alone: a leaked window costs a
+    little memory, a deleted one with a thread still in it costs the whole run.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    widget.close()
+    if not _quiet(widget):
+        return
+    widget.deleteLater()
+    # This widget's deletion and nothing else's. No event loop runs in the suite,
+    # so every deleteLater() the application itself made in earlier tests - a
+    # finished status probe, a removed service - is still queued, some of them on
+    # objects already gone with their parent. Delivering all of those at once
+    # (receiver None) destroyed one a second time and took the run down.
+    QCoreApplication.sendPostedEvents(widget, QEvent.DeferredDelete)
+
+
+#: How long a window's thread may still need. Its loader thread runs --describe,
+#: which cms_gui.core allows 90 s; stopping short of that is how a window got
+#: deleted with the thread still in it and Qt aborted the whole process.
+THREAD_WAIT_MS = 95000
+
+
+def _quiet(widget):
+    """Stop what ``widget`` still has running, deliver what it posted. True if it did.
+
+    Every step here is the answer to a crash, not tidiness:
+
+    * timers are stopped, so nothing new starts - a Services page polls its
+      services on one and starts a status probe from it;
+    * threads are waited for, as long as they may take: a QThread destroyed while
+      it runs aborts the whole process, and a close refused by one of a window's
+      own questions never reaches the wait in its closeEvent;
+    * processes are killed and waited for: a QProcess destroyed while it runs is
+      killed from its own destructor, and its finished() then lands on objects
+      already half torn down;
+    * and whatever all of that posted is delivered while the widget still exists:
+      a window's loader thread hands its inventory back as a queued signal, and
+      one deleted with that still in the queue crashed the process on the next
+      test's first processEvents().
+
+    Then it looks again, because delivering can start more. A window schedules
+    its inventory refresh with QTimer.singleShot, which is no child timer of
+    its own to stop; when a close has been refused the window is not closing,
+    so that refresh fired during the delivery above and started a fresh loader
+    thread - and the window was deleted with it running. So the whole pass
+    repeats until one finds nothing running, a few times at most; anything
+    still going after that is reported, not deleted.
+    """
+    from PySide6.QtCore import QCoreApplication, QProcess, QThread, QTimer
+
+    for timer in widget.findChildren(QTimer):
+        timer.stop()
+    for _pass in range(QUIET_PASSES):
+        for thread in widget.findChildren(QThread):
+            if thread.isRunning() and not thread.wait(THREAD_WAIT_MS):
+                return False
+        for process in widget.findChildren(QProcess):
+            if process.state() != QProcess.NotRunning:
+                process.kill()
+                if not process.waitForFinished(3000):
+                    return False
+        QCoreApplication.processEvents()
+        if not (any(thread.isRunning() for thread in widget.findChildren(QThread))
+                or any(process.state() != QProcess.NotRunning
+                       for process in widget.findChildren(QProcess))):
+            return True
+    return False
+
+
+#: How many wait-and-deliver passes _quiet makes before it gives up on a widget.
+QUIET_PASSES = 5
+
+
+@pytest.fixture
+def dispose():
+    """``dispose(widget)`` - close a window and delete it before the next test."""
+    return _dispose
+
+
+#: The tests that set the whole application's stylesheet. Each one restyles
+#: every widget still alive, so they go first - see below.
+RESTYLE_FIRST = ("test_theme.py", "test_titlebar.py")
+
+
+def pytest_collection_modifyitems(items):
+    """Run the tests that restyle the whole application before everything else.
+
+    Setting the application's stylesheet restyles every widget in the process,
+    and a closed page, dialog or log window is still a widget until something
+    deletes it. Main windows are disposed of; the rest are not, and forcing it
+    from here is not safe - deleting a Services page from outside its own
+    teardown crashed the process even once it was quiet. Run alphabetically, the
+    light/dark tests came near the end, after 45,524 of those, and ran for as
+    long as anyone would wait. First, they meet a nearly empty process.
+
+    A stable sort: the order inside each group is exactly as collected.
+    """
+    items.sort(key=lambda item: 0 if os.path.basename(str(item.fspath)) in RESTYLE_FIRST
+               else 1)
+
+
 @pytest.fixture(scope="session")
 def qapp():
     from PySide6.QtWidgets import QApplication
