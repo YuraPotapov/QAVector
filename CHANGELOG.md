@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-09-10
+
 ### Added
 - **The GUI draws its own title bar.** The desktop's frame — GNOME's grey band
   reading "chrome-multi-session — GUI" in the system font — is replaced by one in
