@@ -691,6 +691,22 @@ def test_every_page_operation_refuses_with_no_browser():
     result = runner._run_step(adapter, 0, Step("fill", target=".x", value="y"))
     assert result.status == ERROR and "no browser" in result.message
 
+
+def test_the_observers_are_told_the_scenario_s_id_not_only_its_name(broker, monkeypatch,
+                                                                    tmp_path):
+    _compiled(monkeypatch, [Step("service_start", target="Storefront/Web")])
+    seen = {}
+
+    class Overlay(runner.NullOverlay):
+        def flow_start(self, root, role=None, scenario_id=None):
+            seen["id"] = scenario_id
+
+    runner._run_scenario(runner.NoBrowserAdapter(), "claim75_dashboard_backend",
+                         "dev-agent", None, {}, runner.RunContext(), str(tmp_path),
+                         overlay=Overlay(), browser=False)
+    assert seen == {"id": "claim75_dashboard_backend"}
+
+
 # --------------------------------------------------- per-step element marker
 
 class _MarkRecorder:

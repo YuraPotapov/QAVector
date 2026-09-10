@@ -16,6 +16,7 @@ import os
 import re
 import signal
 import sys
+import time
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
@@ -247,6 +248,9 @@ class RunState(QObject):
                                    "scenarios": [], "tree": None, "steps": {},
                                    "current": None, "done": 0, "total": 0,
                                    "scenario": "", "flows": [],
+                                   # What the current scenario's record in "runs"
+                                   # is filed under: its id when the core says it.
+                                   "scenario_key": "",
                                    # Backend log lines belonging to THIS window
                                    # (--server-log), newest last, capped so a
                                    # chatty server cannot grow the model without
@@ -338,6 +342,11 @@ class RunState(QObject):
         session = self._session(name)
         session["state"] = "running"
         session["scenario"] = event.get("scenario", "")
+        # Filed under the id, which is what session.start listed. Filed under the
+        # name, a scenario with a name: of its own showed twice - once done, and
+        # once more, by id, as still to come. A core older than the id sends the
+        # name alone, and then the name is the key, as it always was.
+        session["scenario_key"] = event.get("id") or session["scenario"]
         session["tree"] = event.get("tree")
         session["total"] = int(event.get("steps") or 0)
         session["done"] = 0
@@ -345,10 +354,13 @@ class RunState(QObject):
         session["current"] = None
         # Its own record, kept for the rest of the run. The step handlers below
         # write through to it, so the finished scenarios keep their marks.
-        session["runs"][session["scenario"]] = {
+        session["runs"][session["scenario_key"]] = {
             "scenario": session["scenario"], "tree": session["tree"],
             "steps": session["steps"], "total": session["total"],
-            "done": 0, "status": "running"}
+            "done": 0, "status": "running",
+            # The launcher's clock, stamped on the event: how long a scenario
+            # took is measured where it ran, not when this window got to it.
+            "started": event.get("ts") or time.time(), "ended": None}
 
     def _on_step_start(self, event, name):
         session = self._session(name)
@@ -365,7 +377,7 @@ class RunState(QObject):
         if status == "pass":
             session["done"] += 1
         session["current"] = None
-        run = session["runs"].get(session.get("scenario"))
+        run = session["runs"].get(session.get("scenario_key"))
         if run is not None:
             run["done"] = session["done"]
 
@@ -381,11 +393,12 @@ class RunState(QObject):
                                  "status": status,
                                  "passed": event.get("passed"),
                                  "total": event.get("total")})
-        run = session["runs"].get(session.get("scenario"))
+        run = session["runs"].get(session.get("scenario_key"))
         if run is not None:
             run["status"] = status
             run["done"] = event.get("passed", run["done"])
             run["total"] = event.get("total", run["total"])
+            run["ended"] = event.get("ts") or time.time()
         # The WORST outcome so far, not the latest one. A session whose first
         # scenario failed and whose last one passed has not passed, and saying
         # PASS beside a tree with a red mark in it is worse than saying nothing.

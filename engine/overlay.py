@@ -61,7 +61,7 @@ class NullOverlay:
     def session_start(self, scenario_ids):
         pass
 
-    def flow_start(self, root, role=None):
+    def flow_start(self, root, role=None, scenario_id=None):
         pass
 
     def step_start(self, index):
@@ -146,8 +146,10 @@ class ExecutionOverlay:
         else:
             children = [{"id": entry["node"] + "/_", "label": "not started yet",
                          "kind": "step"}]
-        return {"id": entry["node"], "label": entry["id"], "kind": "group",
-                "children": children}
+        # Named by the flow once it has started - what the scenario calls itself -
+        # and by its id until then, which is all session_start knows.
+        return {"id": entry["node"], "label": entry.get("label") or entry["id"],
+                "kind": "group", "children": children}
 
     def _rebuild_tree(self):
         """Compose the session tree; bump the version so the HUD re-renders it."""
@@ -171,19 +173,24 @@ class ExecutionOverlay:
                                for c in node["children"]]
         return out
 
-    def flow_start(self, root, role=None):
+    def flow_start(self, root, role=None, scenario_id=None):
         leaves = list(root.leaves())
         # Graft this scenario's real tree into its slot, keeping every other
         # scenario on screen. Ids are namespaced per scenario, so leaf states from
         # earlier ones survive untouched in _node_states.
-        entry = self._entry_for(root.label)
+        # By id: session_start planned the slots by id, and a scenario with a
+        # name of its own used to miss its slot, get a new one appended, and leave
+        # the planned one saying "not started yet" beside its own result.
+        entry = self._entry_for(scenario_id or root.label)
         if entry is None:
             # Either session_start was never called (a bare flow, or a test driving
             # the overlay directly) or this scenario is running again - append a
             # slot so nothing already on screen is overwritten.
-            entry = {"id": root.label, "node": "s%d" % len(self._planned), "tree": None}
+            entry = {"id": scenario_id or root.label,
+                     "node": "s%d" % len(self._planned), "tree": None}
             self._planned.append(entry)
         prefix = entry["node"]
+        entry["label"] = root.label
         entry["tree"] = self._namespace(root.to_dict(), prefix)
         self._active_node = prefix
 

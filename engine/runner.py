@@ -878,7 +878,7 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
             log.error("[%s] %s", scenario_id, result.error)
             return result
 
-    overlay.flow_start(plan, role=ctx.user.get("class"))
+    overlay.flow_start(plan, role=ctx.user.get("class"), scenario_id=scenario_id)
     reporter.capture_start()
     for index, step in enumerate(steps):
         if _stopping(session_name):

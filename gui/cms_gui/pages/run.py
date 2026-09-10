@@ -136,6 +136,35 @@ class _PulseDot(QWidget):
         painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
 
 
+def format_duration(seconds):
+    """How long, in the unit that reads: 3.2 s, 42 s, 1 min 18 s, 1 h 02 min.
+
+    Seconds alone stopped being readable the moment a run of backend tests went
+    past a minute: 78.3 s has to be worked out, 1 min 18 s does not.
+    """
+    if seconds is None:
+        return ""
+    seconds = max(0.0, float(seconds))
+    if seconds < 10:
+        return "%.1f s" % seconds
+    if seconds < 60:
+        return "%d s" % seconds
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        return "%d min %02d s" % (minutes, secs)
+    hours, minutes = divmod(minutes, 60)
+    return "%d h %02d min" % (hours, minutes)
+
+
+def _took(run, now=None):
+    """How long one scenario took, or has taken so far. "" before it starts."""
+    started = run.get("started")
+    if not started:
+        return ""
+    ended = run.get("ended") or (now if now is not None else time.time())
+    return format_duration(ended - started)
+
+
 def _mark(status):
     """(icon name, colour) for a step in ``status``."""
     return STATUS_MARKS.get(status, ("pending", theme.NEUTRAL[500]))
@@ -184,6 +213,10 @@ class SessionPanel(widgets.BlueprintPanel):
         self.steps_layout.setContentsMargins(14, 8, 14, 12)
         self.steps_layout.setSpacing(1)
         column.addWidget(self.steps)
+
+        # The running scenario's time label and its record, so the page's clock
+        # can move it on without rebuilding the tree twice a second.
+        self._live = None
 
         # --server-log only. Folded away and hidden entirely until the first line
         # arrives, so a run without it looks exactly as it did before.
@@ -385,6 +418,7 @@ class SessionPanel(widgets.BlueprintPanel):
             item = self.steps_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._live = None
 
         runs = session.get("runs") or {}
         if not runs and not session.get("scenarios"):
@@ -393,23 +427,36 @@ class SessionPanel(widgets.BlueprintPanel):
             self.steps_layout.addWidget(hint)
             return
 
-        for scenario, run in runs.items():
-            self.steps_layout.addWidget(_scenario_header(scenario, run))
+        # Filed under the scenario's id; shown by its name, which is what the
+        # overlay shows too.
+        for key, run in runs.items():
+            header, took = _scenario_header(run.get("scenario") or key, run)
+            if run.get("status") == "running" and run.get("started"):
+                self._live = (took, run)
+            self.steps_layout.addWidget(header)
             for node, depth in _walk(run.get("tree") or {}):
                 if depth == 0:
                     continue        # the header above already names the flow
                 self.steps_layout.addWidget(_step_row(node, depth, run))
         for scenario in session.get("scenarios") or []:
             if scenario not in runs:
-                self.steps_layout.addWidget(
-                    _scenario_header(scenario, {"status": "pending"}))
+                header, _took = _scenario_header(scenario, {"status": "pending"})
+                self.steps_layout.addWidget(header)
+
+    def tick(self, now=None):
+        """Move the running scenario's time on, and nothing else."""
+        if self._live is not None:
+            label, run = self._live
+            label.setText(_took(run, now))
 
 
 def _scenario_header(scenario, run):
-    """One scenario's own line: its mark, its id, and how far it got."""
+    """One scenario's own line: its mark, its name, how far it got, how long it took.
+
+    Returns ``(row, time label)`` - the label so a running scenario's time can be
+    moved on without the tree being rebuilt.
+    """
     status = run.get("status", "pending")
-    mark = {"pass": "pass", "fail": "fail", "error": "fail",
-            "running": "running"}.get(status, "pending")
     counts = ""
     if run.get("total"):
         counts = "   %s/%s" % (run.get("done", 0), run["total"])
@@ -417,13 +464,19 @@ def _scenario_header(scenario, run):
     label = QLabel("%s%s" % (scenario, counts))
     label.setStyleSheet("font-family: %s; font-size: 12px; font-weight: 600; "
                         "color: %s;" % (theme.MONO_CSS, colour))
+    took = QLabel(_took(run))
+    took.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
+                       % (theme.MONO_CSS, theme.NEUTRAL[600]))
     row = QWidget()
     line = QHBoxLayout(row)
     line.setContentsMargins(0, 6, 0, 0)
     line.setSpacing(0)
     line.addWidget(_mark_label(name, colour))
-    line.addWidget(label, 1)
-    return row
+    line.addWidget(label)
+    line.addSpacing(14)
+    line.addWidget(took)
+    line.addStretch(1)
+    return row, took
 
 
 def _walk(node, depth=0):
@@ -471,6 +524,10 @@ class RunPage(QWidget):
         self.run_state = run_state
         self._panels = {}
         self._started_at = None
+        # When the scenarios ended. Kept, because run_finished is called twice -
+        # once for run.finished and again when the launcher exits, which without
+        # --close-after is whenever the windows are closed.
+        self._finished_at = None
 
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
@@ -525,6 +582,7 @@ class RunPage(QWidget):
     # -- lifecycle ------------------------------------------------------------
     def run_started(self, meta=""):
         self._started_at = time.time()
+        self._finished_at = None
         self._panels.clear()
         while self.body_layout.count():
             item = self.body_layout.takeAt(0)
@@ -546,12 +604,18 @@ class RunPage(QWidget):
         calls this again with the same answer.
         """
         self._timer.stop()
+        if self._started_at and self._finished_at is None:
+            self._finished_at = time.time()
+        took = (format_duration(self._finished_at - self._started_at)
+                if self._started_at else "")
+        if took:
+            self.elapsed.setText(took)
         self.tag.set("FINISHED (%d)" % code, "accent" if code == 0 else "bad")
         summary = self.run_state.summary
         if summary:
             self.summary.setText(
-                "RUN SUMMARY    %d/%d passed · exit %s · %s"
-                % (summary.get("passed", 0), summary.get("total", 0),
+                "RUN SUMMARY    %d/%d passed · %s · exit %s · %s"
+                % (summary.get("passed", 0), summary.get("total", 0), took or "—",
                    summary.get("exit_code", code), self.run_state.run_dir or "—"))
             self.summary.setVisible(True)
         elif self.run_state.run_dir:
@@ -560,7 +624,10 @@ class RunPage(QWidget):
 
     def _tick(self):
         if self._started_at:
-            self.elapsed.setText("%.1f s" % (time.time() - self._started_at))
+            now = time.time()
+            self.elapsed.setText(format_duration(now - self._started_at))
+            for panel in self._panels.values():
+                panel.tick(now)
 
     # -- rendering ------------------------------------------------------------
     def refresh(self):

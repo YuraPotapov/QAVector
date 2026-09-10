@@ -134,10 +134,12 @@ class EventObserver:
     def session_start(self, scenario_ids):
         self._emit("session.start", scenarios=list(scenario_ids))
 
-    def flow_start(self, root, role=None):
+    def flow_start(self, root, role=None, scenario_id=None):
         # root.to_dict() is the very tree the in-page HUD draws, so a consumer
-        # can render an identical step tree with no extra plumbing.
-        self._emit("flow.start", scenario=root.label, role=role,
+        # can render an identical step tree with no extra plumbing. ``scenario``
+        # is what the flow is called; ``id`` is what session.start listed it as,
+        # which is the only thing a consumer can match the two up by.
+        self._emit("flow.start", scenario=root.label, id=scenario_id, role=role,
                    tree=root.to_dict(), steps=sum(1 for _ in root.leaves()))
 
     def step_start(self, index):
@@ -191,8 +193,8 @@ class Tee:
     def session_start(self, scenario_ids):
         self._fan("session_start", scenario_ids)
 
-    def flow_start(self, root, role=None):
-        self._fan("flow_start", root, role=role)
+    def flow_start(self, root, role=None, scenario_id=None):
+        self._fan("flow_start", root, role=role, scenario_id=scenario_id)
 
     def step_start(self, index):
         self._fan("step_start", index)

@@ -265,6 +265,34 @@ def test_a_session_where_everything_passed_reports_pass(qapp):
     assert state.sessions["s"]["state"] == "passed"
 
 
+def test_a_scenario_is_filed_under_its_id_and_timed_by_the_launcher(qapp):
+    # session.start lists ids. Filed under its name, a scenario with a name: of
+    # its own showed twice - done, and again by id as still to come.
+    state = RunState()
+    _feed(state,
+          {"kind": "session.start", "session": "s",
+           "scenarios": ["claim75_dashboard_backend"]},
+          {"kind": "flow.start", "session": "s", "id": "claim75_dashboard_backend",
+           "scenario": "CLAIM-75 - backend tests", "tree": TREE, "steps": 2,
+           "ts": 1000.0},
+          {"kind": "step.end", "session": "s", "index": 0, "status": "pass"},
+          {"kind": "flow.end", "session": "s", "status": "pass", "passed": 2,
+           "total": 2, "ts": 1072.5})
+    runs = state.sessions["s"]["runs"]
+    assert list(runs) == ["claim75_dashboard_backend"]
+    run = runs["claim75_dashboard_backend"]
+    assert run["scenario"] == "CLAIM-75 - backend tests"      # still shown by name
+    assert run["steps"][0]["status"] == "pass" and run["status"] == "pass"
+    assert (run["started"], run["ended"]) == (1000.0, 1072.5)
+
+
+def test_a_core_without_ids_still_files_by_name(qapp):
+    state = RunState()
+    _flow(state, "s", "smoke", ["a"])
+    run = state.sessions["s"]["runs"]["smoke"]
+    assert run["status"] == "pass" and run["started"] and run["ended"]
+
+
 def test_the_scenarios_finishing_is_not_the_launcher_finishing(qapp):
     # Without --close-after the launcher stays up holding the windows open, so
     # the page waited for a process exit that was minutes away and kept saying

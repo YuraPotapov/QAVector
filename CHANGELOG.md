@@ -26,6 +26,19 @@ app-agnostic, since that will break things on purpose.
   whenever anything selected needs a page, and the launcher refuses such a run too,
   before it starts. On the command line it is `--no-browser`; `--describe` now says
   per scenario which page steps it takes (`browser_actions`, `[]` for none).
+- **Each scenario says how long it took.** The Run page puts the time beside every
+  scenario in a session's panel, and a running one's time moves on while it runs,
+  events or not — a backend test run can go minutes without one. The run's own
+  clock reads *1 min 18 s* rather than *78.3 s*, and the run summary carries it
+  too. Scenarios are timed by the launcher's clock on the events, not by when the
+  window got round to drawing them.
+
+### Fixed
+- **A scenario with a `name:` of its own showed twice on the Run page** — done,
+  under its name, and again at the bottom by id, as though it had never run. The
+  page filed a run under the name `flow.start` gave it and checked the planned list
+  by id. `flow.start` now carries the scenario's `id` as well, and the page files
+  by that.
 
 ## [0.14.5] - 2026-09-10
 

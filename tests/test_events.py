@@ -147,6 +147,26 @@ def test_flow_start_carries_the_plan_tree_the_hud_draws():
     assert [c["label"] for c in line["tree"]["children"]] == ["goto", "assert_visible"]
 
 
+def test_flow_start_names_the_scenario_by_id_as_well_as_by_name():
+    # session.start lists ids; without the id here a consumer cannot tell that
+    # "Smoke - app loads" and "demo_smoke" are one scenario.
+    buf = _capture()
+    events.EventObserver("s").flow_start(_plan(), role="Admin", scenario_id="smoke_id")
+    line = _lines(buf)[0]
+    assert line["id"] == "smoke_id" and line["scenario"] == "smoke"
+
+
+def test_the_tee_passes_the_scenario_id_on():
+    seen = []
+
+    class Observer:
+        def flow_start(self, root, role=None, scenario_id=None):
+            seen.append(scenario_id)
+
+    events.Tee([Observer()]).flow_start(_plan(), role="Admin", scenario_id="x")
+    assert seen == ["x"]
+
+
 def test_step_end_reports_status_attempts_and_message():
     buf = _capture()
     events.EventObserver("s").step_end(3, "fail", 2, "not visible")

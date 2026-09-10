@@ -75,6 +75,18 @@ def test_component_list_is_forwarded():
     assert adapter.renders[-1]["components"] == ["tree", "logs"]
 
 
+def test_a_named_scenario_fills_the_slot_planned_for_its_id():
+    # session_start plans by id; the flow is called something else. Matched by
+    # its name it missed the slot, got a second one appended, and the planned one
+    # sat there saying "not started yet" beside its own result.
+    ov, adapter = _overlay()
+    ov.session_start(["claim75_dashboard_backend"])
+    ov.flow_start(_tree(), role="Admin", scenario_id="claim75_dashboard_backend")
+    state = adapter.renders[-1]
+    assert [c["label"] for c in state["tree"]["children"]] == ["Scenario"]
+    assert state["activeNode"] == "s0"
+
+
 # --- step transitions -------------------------------------------------------
 def test_step_start_and_end_update_states_and_progress():
     ov, adapter = _overlay()
