@@ -23,6 +23,7 @@ not need this module to know.
 import json
 import os
 
+from . import core
 from . import criteria as criteria_mod
 from . import runnertypes
 # One clock for both files. The Services & Logs page shows rows from this file
@@ -424,10 +425,9 @@ def fingerprint(path):
         return None
 
 
-#: The directory an installed build keeps a user's own files in. Named here
-#: rather than imported: the GUI never imports the core, so it duplicates the
-#: handful of core constants it needs, as logsourcesfile already does.
-USER_DIR_NAME = "ChromeMultiSession"
+#: The user's own folder. cms_gui.core keeps the GUI's copy of the core's name
+#: for it, and resolves it to the old name's folder until that has moved.
+USER_DIR_NAME = core.USER_DIR_NAME
 
 
 def default_path():
@@ -439,7 +439,7 @@ def default_path():
     GUI's own file landed in somebody's repository - which is how it ended up
     needing a .gitignore entry to stay out of a commit.
     """
-    return os.path.join(os.path.expanduser("~"), USER_DIR_NAME, "services.json")
+    return os.path.join(core.home_folder(), "services.json")
 
 
 def legacy_path(log_sources_path):

@@ -110,7 +110,7 @@ def _emit_server_lines(session, log_name, lines):
 # Where things live. In a source checkout every one of these is the checkout
 # itself, so the project stays self-contained and movable; in an installed build
 # the read-only resources come out of the bundle and everything writable moves to
-# ~/ChromeMultiSession, so an upgrade cannot touch it. See runtime_paths.
+# ~/QAVector, so an upgrade cannot touch it. See runtime_paths.
 # The sessions dir and the user config file can be overridden on the command line.
 SCRIPT_DIR = runtime_paths.app_root()
 
@@ -125,7 +125,7 @@ def version():
     """
     try:
         from importlib.metadata import PackageNotFoundError, version as _version
-        return _version("chrome-multi-session")
+        return _version("qavector")
     except Exception:
         return runtime_paths.bundled_version() or "dev (not installed)"
 
@@ -2795,7 +2795,7 @@ def main():
         if arg in ("--help", "-h"):
             _print_help()   # prints all parameters and exits 0
         elif arg in ("--version", "-V"):
-            print("chrome-multi-session %s" % version())
+            print("qavector %s" % version())
             sys.exit(0)
         elif arg == "--detach":
             detach = True

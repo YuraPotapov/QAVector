@@ -1,6 +1,6 @@
 # Packaging
 
-Builds an installable Chrome Multi Session for someone who has no Python, no pip,
+Builds an installable QAVector for someone who has no Python, no pip,
 no git and no interest in any of them. They get one file, install it, and find the
 app in their launcher.
 
@@ -59,7 +59,7 @@ directory you run it from.
 
 ```
 installers\windows\<version>\
-  chrome-multi-session-<version>-setup.exe
+  qavector-<version>-setup.exe
   SHA256SUMS
 ```
 
@@ -89,9 +89,9 @@ the `.deb`). The likely stumbles, in the order they would appear:
 ## What comes out
 
 ```
-installers/linux/0.4.0/
-  chrome-multi-session_0.4.0_amd64.deb   the canonical Debian name
-  chrome_session_amd64.deb               the same file, under the short name
+installers/linux/0.15.0/
+  qavector_0.15.0_amd64.deb   the canonical Debian name
+  qavector_amd64.deb          the same file, under the short name
   SHA256SUMS
 ```
 
@@ -103,26 +103,26 @@ released and with which checksum.
 ## Installing
 
 ```bash
-sudo apt install ./chrome_session_amd64.deb
+sudo apt install ./qavector_amd64.deb
 ```
 
 `apt`, not `dpkg -i`: the package depends on the X, GL and xkb libraries that Qt
-loads at runtime, and apt is what resolves them. `sudo dpkg -i chrome_session_amd64.deb`
+loads at runtime, and apt is what resolves them. `sudo dpkg -i qavector_amd64.deb`
 works too on a normal desktop, where those libraries are already present.
 
-Then: **Chrome Multi Session** in the applications menu, or `chrome-multi-session`
+Then: **QAVector** in the applications menu, or `qavector`
 in a terminal for the CLI.
 
 ## What gets installed where
 
 | Path | What |
 |---|---|
-| `/opt/chrome-multi-session/core/` | the launcher, frozen (Python, cryptography, pyyaml, playwright + its Node driver, `flows/`, `extensions/`, `hud.js`) |
-| `/opt/chrome-multi-session/gui/` | the PySide6 front-end, frozen |
-| `/usr/bin/chrome-multi-session{,-gui}` | wrappers onto the two bundles |
+| `/opt/qavector/core/` | the launcher, frozen (Python, cryptography, pyyaml, playwright + its Node driver, `flows/`, `extensions/`, `hud.js`) |
+| `/opt/qavector/gui/` | the PySide6 front-end, frozen |
+| `/usr/bin/qavector{,-gui}` | wrappers onto the two bundles |
 | `/usr/share/applications/…desktop` | the launcher entry |
-| `~/ChromeMultiSession/` | **the user's**: `users.json`, `user_sessions/`, `reports/`, `flows/` |
-| `~/.local/share/chrome-multi-session/gui/` | the GUI's run history and saved configurations |
+| `~/QAVector/` | **the user's**: `users.json`, `user_sessions/`, `reports/`, `flows/` |
+| `~/.local/share/qavector/gui/` | the GUI's run history and saved configurations |
 
 The split is the point. Everything under `/opt` is replaced wholesale on upgrade;
 nothing under `~` is ever touched by dpkg. `runtime_paths.py` is what draws the
@@ -131,8 +131,14 @@ line, and `tests/test_runtime_paths.py` is what keeps it drawn.
 ## Upgrading
 
 ```bash
-sudo apt install ./chrome_session_amd64.deb    # the new one, over the old one
+sudo apt install ./qavector_amd64.deb    # the new one, over the old one
 ```
+
+Upgrading from **chrome-multi-session** (QAVector's name before 0.15.0) is the
+same command: the package replaces that one. The first start then moves
+`~/ChromeMultiSession` to `~/QAVector` and the GUI's own folders to their new
+names, leaving a link at each old path, so anything that still points there -
+a script in `services.json`, a desktop link - keeps working.
 
 No uninstall, no reinstalling dependencies, no recreating configuration. Sessions,
 credentials, reports and GUI history all survive, because dpkg never created them.
@@ -150,7 +156,7 @@ run. A onefile build would unpack a 200 MB archive into `/tmp` each time.
 
 **Two flows trees.** The bundled `flows/` is read-only - it lives in the
 PyInstaller bundle and is replaced wholesale on upgrade - so anything written by
-the Scenarios page or the recorder goes to `~/ChromeMultiSession/flows`, which is
+the Scenarios page or the recorder goes to `~/QAVector/flows`, which is
 searched *first*. A scenario there shadows a bundled one of the same id and can
 still `use:` the shipped blocks without copying them; `selectors.yaml` is merged
 rather than replaced. `--flows-dir` still means exactly the directory it names -
@@ -182,7 +188,7 @@ are the whole of it; the exclusion list in `gui.spec` already drops WebEngine, Q
 
 Not built here — PyInstaller does not cross-compile, and this is a Linux
 workstation. The runtime work Windows needs is already done and tested:
-`runtime_paths` resolves `%USERPROFILE%\ChromeMultiSession` and reads `$CMS_HOME`,
+`runtime_paths` resolves `%USERPROFILE%\QAVector` and reads `$CMS_HOME`,
 `find_chrome()` reads the `App Paths` registry key and probes Program Files,
 `session_dir_for()` produces NTFS-legal profile names, `seed_password()` steps
 aside where Chrome's password store cannot be written from outside, and

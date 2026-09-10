@@ -19,8 +19,8 @@ from cms_gui import core as core_mod
 @pytest.fixture
 def packaged(tmp_path, monkeypatch):
     """A frozen GUI with the core executable beside it, in the .deb's layout."""
-    prefix = tmp_path / "opt" / "chrome-multi-session"
-    gui_exe = prefix / "gui" / "chrome-multi-session-gui"
+    prefix = tmp_path / "opt" / "qavector"
+    gui_exe = prefix / "gui" / "qavector-gui"
     core_exe = prefix / "core" / core_mod.CORE_EXE
     for path in (gui_exe, core_exe):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,7 +36,7 @@ def packaged(tmp_path, monkeypatch):
 
 def test_a_py_file_needs_an_interpreter_and_an_executable_does_not():
     assert core_mod.needs_interpreter("/x/session_launcher.py")
-    assert not core_mod.needs_interpreter("/x/chrome-multi-session-core")
+    assert not core_mod.needs_interpreter("/x/qavector-core")
     assert not core_mod.needs_interpreter("")
 
 
@@ -59,7 +59,7 @@ def test_a_packaged_core_is_the_whole_command(packaged):
 
 def test_a_stale_interpreter_setting_cannot_derail_a_packaged_core(packaged):
     # Someone who ran the GUI from source has core/interpreter in QSettings; it
-    # must not become "python chrome-multi-session-core" after they install.
+    # must not become "python qavector-core" after they install.
     core = core_mod.Core(interpreter="/usr/bin/python3")
     assert core.argv() == [packaged]
 
@@ -88,7 +88,7 @@ def test_the_data_directory_is_created_before_a_core_is_spawned(packaged, tmp_pa
     # A working directory that does not exist stops the process from starting at
     # all - WinError 267 on Windows - and the core cannot create the directory
     # it is being started in. First launch of an installed build is exactly that
-    # case: nothing has made ~/ChromeMultiSession yet.
+    # case: nothing has made ~/QAVector yet.
     core = core_mod.Core()
     assert not (tmp_path / "data").exists()
     assert core.spawn_dir() == str(tmp_path / "data")

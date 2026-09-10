@@ -1,4 +1,4 @@
-"""Desktop front-end for chrome-multi-session.
+"""Desktop front-end for QAVector.
 
 The GUI is a *client* of the launcher, never a copy of it: it spawns
 ``session_launcher.py`` through a configured interpreter, asks ``--describe``
@@ -37,7 +37,7 @@ def version():
 def _installed_version():
     try:
         from importlib.metadata import version as _metadata_version
-        return _metadata_version("chrome-multi-session")
+        return _metadata_version("qavector")
     except Exception:
         return ""
 

@@ -8,8 +8,12 @@
 # the app. Nothing here ever overwrites something that already exists.
 set -e
 
-APP_DIR=/opt/chrome-multi-session
-USER_DIR_NAME=ChromeMultiSession
+APP_DIR=/opt/qavector
+USER_DIR_NAME=QAVector
+# What the folder was called before 0.15.0, when QAVector was chrome-multi-session.
+# The app moves it to the new name on first start and leaves a link behind (see
+# runtime_paths.migrate_legacy_dir); this script only has to stay out of its way.
+LEGACY_DIR_NAME=ChromeMultiSession
 
 case "$1" in
   configure)
@@ -21,18 +25,28 @@ case "$1" in
       group=$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")
       if [ -n "$home" ] && [ -d "$home" ]; then
         project="$home/$USER_DIR_NAME"
-        mkdir -p "$project/user_sessions" "$project/reports" \
-                 "$project/flows/scenarios"
-        if [ ! -e "$project/users.json" ]; then
-          example="$APP_DIR/core/_internal/users.example.json"
-          if [ -f "$example" ]; then
-            # 0600 from the start: this file grows real passwords.
-            install -m 600 "$example" "$project/users.json"
+        legacy="$home/$LEGACY_DIR_NAME"
+        if [ ! -e "$project" ] && [ -d "$legacy" ] && [ ! -L "$legacy" ]; then
+          # Not created here. A new folder beside the old one would make the move
+          # look done already, and the app would start on an empty folder while
+          # everything the user has sat in the old one.
+          echo "QAVector: your sessions, credentials and reports in"
+          echo "  $legacy"
+          echo "move to $project the first time QAVector starts."
+        else
+          mkdir -p "$project/user_sessions" "$project/reports" \
+                   "$project/flows/scenarios"
+          if [ ! -e "$project/users.json" ]; then
+            example="$APP_DIR/core/_internal/users.example.json"
+            if [ -f "$example" ]; then
+              # 0600 from the start: this file grows real passwords.
+              install -m 600 "$example" "$project/users.json"
+            fi
           fi
+          chown -R "$SUDO_USER:$group" "$project" 2>/dev/null || true
+          echo "QAVector: your sessions, credentials and reports live in"
+          echo "  $project"
         fi
-        chown -R "$SUDO_USER:$group" "$project" 2>/dev/null || true
-        echo "Chrome Multi Session: your sessions, credentials and reports live in"
-        echo "  $project"
       fi
     fi
 
@@ -40,7 +54,7 @@ case "$1" in
        && ! command -v google-chrome-stable >/dev/null 2>&1 \
        && ! command -v chromium >/dev/null 2>&1 \
        && ! command -v chromium-browser >/dev/null 2>&1; then
-      echo "Chrome Multi Session: Google Chrome was not found." >&2
+      echo "QAVector: Google Chrome was not found." >&2
       echo "  Download the .deb from https://www.google.com/chrome/ and run:" >&2
       echo "    sudo apt install ./google-chrome-stable_current_amd64.deb" >&2
     fi

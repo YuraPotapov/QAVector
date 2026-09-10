@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=QAVector
+GenericName=Test sessions, scenarios and services
+Comment=Explore. Build. Verify. - one signed-in Chrome profile per test user, scenarios run against them
+Exec=/usr/bin/qavector-gui
+Icon=qavector
+Terminal=false
+Categories=Development;Utility;
+Keywords=qa;testing;chrome;session;profile;automation;playwright;cdp;services;
+StartupNotify=true
+StartupWMClass=qavector-gui

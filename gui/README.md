@@ -1,4 +1,4 @@
-# chrome-multi-session — GUI
+# QAVector — GUI
 
 A desktop front-end for `session_launcher.py`, at two levels: **Launch Sessions**
 describes a run in the words of the job, **Command** exposes every flag the
@@ -138,7 +138,7 @@ for an instruction about what to run when. A dependency that cannot start says s
 on the row that was waiting for it; a loop is refused with the ring named, and is
 broken rather than recursed into if a hand-edited file has one. Runners live in
 `services.json`, which is the GUI's own; the launcher has never heard of it.
-Both that file and `logsources.json` default to `~/ChromeMultiSession` and are
+Both that file and `logsources.json` default to `~/QAVector` and are
 settable in **Settings**. The second is not the GUI's alone — `--server-log`
 reads it — so wherever it goes the GUI passes `--log-sources` on every call,
 and the file being edited and the file a run reads stay the same one.
@@ -253,8 +253,8 @@ Log page.
 
 | | |
 | --- | --- |
-| paths, the last form state, the current mode, what Artifacts and Log were last showing | `QSettings` (`~/.config/chrome-multi-session/gui.conf` on Linux) |
-| history, saved configurations, archived logs | `~/.local/share/chrome-multi-session/gui/` |
+| paths, the last form state, the current mode, what Artifacts and Log were last showing | `QSettings` (`~/.config/qavector/gui.conf` on Linux) |
+| history, saved configurations, archived logs | `~/.local/share/qavector/gui/` |
 
 Both are plain files, and the history is readable JSON. Nothing the launcher owns
 (users, environments, scenarios) is copied into either.

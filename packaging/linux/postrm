@@ -1,10 +1,10 @@
 #!/bin/sh
 # User data is deliberately never removed.
 #
-# ~/ChromeMultiSession holds signed-in Chrome profiles, credentials and run
-# reports, and it belongs to the user rather than to this package - dpkg did not
-# create it (the app did, on first run) and dpkg does not delete it. Say where it
-# is instead, so anyone who does want it gone can remove it themselves.
+# ~/QAVector holds signed-in Chrome profiles, credentials and run reports, and it
+# belongs to the user rather than to this package - dpkg did not create it (the
+# app did, on first run) and dpkg does not delete it. Say where it is instead, so
+# anyone who does want it gone can remove it themselves.
 set -e
 
 case "$1" in
@@ -15,8 +15,8 @@ case "$1" in
 esac
 
 if [ "$1" = purge ]; then
-  echo "Chrome Multi Session: your sessions, credentials and reports were left in"
-  echo "  ~/ChromeMultiSession   (and ~/.local/share/chrome-multi-session)"
+  echo "QAVector: your sessions, credentials and reports were left in"
+  echo "  ~/QAVector   (and ~/.local/share/qavector)"
   echo "Remove those directories by hand if you want them gone."
 fi
 

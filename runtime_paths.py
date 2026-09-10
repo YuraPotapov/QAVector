@@ -13,7 +13,7 @@ have to become two:
                     users.json, user_sessions/, reports/
 
 In a checkout both answer the same directory, so nothing about the development
-workflow changes. Frozen, user_data_root() moves to ~/ChromeMultiSession - a
+workflow changes. Frozen, user_data_root() moves to ~/QAVector - a
 plain visible folder, because it holds Chrome profiles and run reports the user
 is expected to open, not opaque application state.
 
@@ -30,7 +30,12 @@ FROZEN = bool(getattr(sys, "frozen", False))
 
 #: Name of the per-user directory created for an installed build. Deliberately
 #: capitalised and in $HOME rather than hidden in ~/.local: the user browses it.
-USER_DIR_NAME = "ChromeMultiSession"
+USER_DIR_NAME = "QAVector"
+
+#: What it was called before 0.15.0, when QAVector was chrome-multi-session.
+#: Moved to USER_DIR_NAME on first start, with a link left behind; read in its
+#: place for as long as it has not been (see migrate_legacy_dir).
+LEGACY_USER_DIR_NAME = "ChromeMultiSession"
 
 #: Overrides everything, on every platform. The escape hatch for a second
 #: installation, a shared data directory, or a test run.
@@ -99,8 +104,9 @@ def user_data_root():
     """The directory holding everything the user owns.
 
     $CMS_HOME wins, then the directory chosen at install time, then the default:
-    an installed build uses ~/ChromeMultiSession and a source checkout uses the
-    checkout itself, which is what it has always done.
+    an installed build uses ~/QAVector - or ~/ChromeMultiSession while that has
+    not been moved yet - and a source checkout uses the checkout itself, which is
+    what it has always done.
 
     The environment variable stays on top of the installed choice on purpose -
     it is what runs a second copy against a scratch directory without
@@ -113,8 +119,70 @@ def user_data_root():
     if chosen:
         return chosen
     if FROZEN:
-        return os.path.join(os.path.expanduser("~"), USER_DIR_NAME)
+        return _home_folder()
     return app_root()
+
+
+def _home_folder():
+    """~/QAVector - or ~/ChromeMultiSession while that is still the real one.
+
+    Until the move has happened, or where it could not, the old folder is where
+    the user's sessions and credentials are, and starting on an empty new one
+    would look like having lost them.
+    """
+    home = os.path.expanduser("~")
+    new = os.path.join(home, USER_DIR_NAME)
+    old = os.path.join(home, LEGACY_USER_DIR_NAME)
+    if not os.path.exists(new) and os.path.isdir(old):
+        return old
+    return new
+
+
+def migrate_legacy_dir(old, new):
+    """Move ``old`` to ``new`` once, leaving a link at ``old``. Returns the one in use.
+
+    The link is what makes the move safe rather than merely tidy: absolute paths
+    into the old folder are written in places this code never sees - a runner's
+    script in services.json, a desktop link, a test checkout's generated conf -
+    and every one of them keeps working through it. So where no link can be made
+    the folder goes back where it was and the old name stays the one in use.
+
+    Nothing happens when ``new`` already exists (it is never overwritten), when
+    ``old`` is not there, or when ``old`` is itself a link. Never raises.
+    cms_gui.core.move_folder is the GUI's mirror of this; keep the two in step.
+    """
+    if os.path.lexists(new):
+        return new
+    if not os.path.isdir(old):
+        return new
+    if os.path.islink(old):
+        return old
+    try:
+        os.rename(old, new)
+    except OSError:
+        return old          # in use, or on another device: stay where it is
+    try:
+        _link_directory(new, old)
+    except OSError:
+        try:
+            os.rename(new, old)
+        except OSError:
+            return new
+        return old
+    return new
+
+
+def _link_directory(target, link):
+    """A link at ``link`` to the folder ``target``: a symlink, a junction on Windows.
+
+    A junction there because a Windows symlink needs a privilege most accounts do
+    not have, and a junction needs none.
+    """
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(target, link)
+    else:
+        os.symlink(target, link, target_is_directory=True)
 
 
 # -- the individual locations -------------------------------------------------
@@ -211,7 +279,16 @@ def ensure_user_data_root(example_config=None):
     source checkout the root *is* the checkout, and there the absence of users.json
     is meaningful - it is what sends a developer to --init-users-json - so nothing
     is written.
+
+    The first start after the rename to QAVector moves ~/ChromeMultiSession to
+    ~/QAVector here - only for an installed build on its default folder: never
+    under $CMS_HOME, which is how a test or a second copy stays off the real one,
+    and never onto a folder the installer was told to use, which is the user's.
     """
+    if FROZEN and not os.environ.get(HOME_ENV, "").strip() and not configured_data_root():
+        home = os.path.expanduser("~")
+        migrate_legacy_dir(os.path.join(home, LEGACY_USER_DIR_NAME),
+                           os.path.join(home, USER_DIR_NAME))
     root = user_data_root()
     for path in (root, sessions_dir(), reports_dir(),
                  # Scenarios are written here - by the editor, and later by the

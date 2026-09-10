@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for the PySide6 front-end.
 
-Produces ``chrome-multi-session-gui`` as a onedir bundle. It ships no core: the
+Produces ``qavector-gui`` as a onedir bundle. It ships no core: the
 GUI finds the core executable next to it at runtime (cms_gui.core.frozen_core),
 which keeps the process boundary the front-end is built around.
 
@@ -77,7 +77,7 @@ exe = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="chrome-multi-session-gui",
+    name="qavector-gui",
     debug=False,
     strip=False,
     upx=False,

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for the core launcher.
 
-Produces ``chrome-multi-session-core`` as a *onedir* bundle. Onedir rather than
+Produces ``qavector-core`` as a *onedir* bundle. Onedir rather than
 onefile on purpose: the GUI spawns this executable for every --describe and every
 run, and a onefile build would unpack a 200 MB archive into /tmp each time.
 
@@ -89,7 +89,7 @@ exe = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="chrome-multi-session-core",
+    name="qavector-core",
     debug=False,
     strip=False,
     upx=False,

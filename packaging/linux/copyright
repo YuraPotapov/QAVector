@@ -1,5 +1,5 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: chrome-multi-session
+Upstream-Name: qavector
 Source: https://github.com/YuraPotapov/chrome-multi-session
 
 Files: *
@@ -7,11 +7,11 @@ Copyright: Yurii Potapov
 License: proprietary
  All rights reserved. Not for redistribution outside the project.
 
-Files: opt/chrome-multi-session/*/_internal/*
+Files: opt/qavector/*/_internal/*
 Copyright: various
 License: various
  This package bundles a Python runtime and third-party libraries, each under its
  own licence: Python (PSF-2.0), PySide6 and Qt (LGPL-3.0), Playwright and its
  Node.js driver (Apache-2.0 and MIT), cryptography (Apache-2.0 or BSD-3-Clause),
  PyYAML (MIT). Their full licence texts are installed alongside the modules they
- belong to, under /opt/chrome-multi-session.
+ belong to, under /opt/qavector.

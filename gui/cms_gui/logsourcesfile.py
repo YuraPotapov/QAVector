@@ -20,6 +20,8 @@ import json
 import os
 import re
 
+from . import core
+
 # Keys the launcher reads, plus "added" - which it does not, and never will:
 # engine.serverlog sweeps every key it does not know into `extra` and ignores it.
 # It is here so a row that carries one keeps it as a field rather than as an
@@ -428,7 +430,7 @@ def fingerprint(path):
 
 
 #: The user's own directory, the same one ``services.json`` defaults into.
-USER_DIR_NAME = "ChromeMultiSession"
+USER_DIR_NAME = core.USER_DIR_NAME
 
 
 def default_path():
@@ -444,7 +446,7 @@ def default_path():
     makes into the core (``--log-sources``), or the file being edited and the
     file being read come apart.
     """
-    return os.path.join(os.path.expanduser("~"), USER_DIR_NAME, "logsources.json")
+    return os.path.join(core.home_folder(), "logsources.json")
 
 
 def resolve_path(configured, reported=""):

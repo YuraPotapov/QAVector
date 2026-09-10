@@ -287,7 +287,7 @@ def test_fingerprint_notices_a_change_underneath_the_editor(tmp_path):
 
 def test_it_defaults_under_the_users_own_directory():
     assert lsf.default_path() == os.path.join(
-        os.path.expanduser("~"), "ChromeMultiSession", "logsources.json")
+        os.path.expanduser("~"), "QAVector", "logsources.json")
 
 
 def test_a_configured_path_wins(tmp_path):

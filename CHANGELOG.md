@@ -33,6 +33,18 @@ app-agnostic, since that will break things on purpose.
   too. Scenarios are timed by the launcher's clock on the events, not by when the
   window got round to drawing them.
 
+### Changed
+- **chrome-multi-session is now QAVector** — *Explore. Build. Verify.* The name on
+  the window, the splash, the menus and the installers; the package and its
+  commands (`qavector`, `qavector-gui`, under `/opt/qavector`); and the folders it
+  keeps your things in. The new `.deb` replaces the old package. On first start the
+  folders move to their new names — `~/ChromeMultiSession` to `~/QAVector`, the
+  GUI's history under `~/.local/share` and its settings under `~/.config` — and a
+  link is left at each old folder, so whatever still points there, a runner's
+  script in `services.json` or a desktop link, keeps working. Where no link can be
+  made the folder is not moved and the old one stays in use; nothing is ever
+  overwritten. `$CMS_HOME`, `cms.ini` and the `cms_gui` module keep their names.
+
 ### Fixed
 - **A scenario with a `name:` of its own showed twice on the Run page** — done,
   under its name, and again at the bottom by id, as though it had never run. The

@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "chrome-multi-session"
+name = "qavector"
 # Single source of truth for the version. Read at runtime via importlib.metadata
 # (--version); never hardcode a second copy. See CHANGELOG.md for the bump rules.
 version = "0.14.5"
@@ -34,12 +34,12 @@ flows = [
     "pyyaml>=6.0,<7",
 ]
 dev = [
-    "chrome-multi-session[flows]",
+    "qavector[flows]",
     "pytest>=7.0,<10",
 ]
 
 [project.scripts]
-chrome-multi-session = "session_launcher:main"
+qavector = "session_launcher:main"
 
 [tool.setuptools]
 py-modules = ["session_launcher"]

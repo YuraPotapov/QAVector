@@ -56,16 +56,16 @@ def test_a_packaged_build_reads_the_version_file_beside_it(tmp_path, monkeypatch
 
     A frozen GUI has no distribution metadata and no pyproject.toml to fall back
     on; all it has is the VERSION file build_deb.sh installs at the prefix above
-    the two bundles (/opt/chrome-multi-session/VERSION, with the executable in
+    the two bundles (/opt/qavector/VERSION, with the executable in
     gui/ beside core/). If that lookup ever stops matching the layout, About
     silently reports "dev (not installed)" on every installed machine.
     """
-    prefix = tmp_path / "opt" / "chrome-multi-session"
+    prefix = tmp_path / "opt" / "qavector"
     (prefix / "gui").mkdir(parents=True)
     (prefix / "VERSION").write_text("9.9.9\n", encoding="utf-8")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable",
-                        str(prefix / "gui" / "chrome-multi-session-gui"))
+                        str(prefix / "gui" / "qavector-gui"))
     monkeypatch.setattr(cms_gui, "_version", None)
     # No installed distribution in a freeze - that is what makes VERSION the answer.
     monkeypatch.setattr(cms_gui, "_installed_version", lambda: "")

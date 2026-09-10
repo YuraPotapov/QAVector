@@ -87,7 +87,7 @@ def _inventory(*rows, blocks=(), selectors=None):
                          "selector_and_value": ["fill"],
                          "value_only": ["press"], "url_target": ["goto"],
                          "use": ["use"], "states": ["visible", "detached"]},
-        "flows_dir": "/home/u/ChromeMultiSession/flows",
+        "flows_dir": "/home/u/QAVector/flows",
     })
 
 
@@ -124,7 +124,7 @@ def test_the_search_box_hides_what_does_not_match(page):
 
 def test_the_lede_names_where_scenarios_are_written(page):
     page.set_inventory(_inventory(_row("alpha")))
-    assert "/home/u/ChromeMultiSession/flows" in page.lede.text()
+    assert "/home/u/QAVector/flows" in page.lede.text()
 
 
 # ---------------------------------------------------------------- opening one

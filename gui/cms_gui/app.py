@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from . import icon, theme
+from . import icon, migrate, theme
 from .settings import Settings
 from .main_window import MainWindow
 
@@ -79,7 +79,7 @@ def _claim_windows_identity():
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "chrome-multi-session.gui")
+            "qavector.gui")
     except Exception:
         pass
 
@@ -88,8 +88,11 @@ def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
     _claim_windows_identity()
     app = QApplication(argv)
-    app.setApplicationName("chrome-multi-session GUI")
-    app.setOrganizationName("chrome-multi-session")
+    app.setApplicationName("QAVector")
+    app.setOrganizationName("qavector")
+    # Before anything opens a setting or the data directory: the first start of
+    # 0.15.0 moves chrome-multi-session's folders and settings to QAVector's.
+    migrate.run()
     # Fusion is the one style that looks the same on all three platforms, which
     # is what makes a single stylesheet enough to carry the design - plus the
     # indicators, which are painted because a stylesheet cannot draw them.

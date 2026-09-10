@@ -1,7 +1,7 @@
 """The window's own title bar, in place of the one the desktop draws.
 
 The desktop's frame is the one part of the window the design never reached:
-GNOME paints it in its own grey with "chrome-multi-session - GUI" in the system
+GNOME paints it in its own grey with the window's title in the system
 font, Windows in its own colours - a default the moment the window opens, above
 everything that is not. So the frame is switched off and this is drawn instead:
 the mark and the name in the design's type, on the icon's own slate, and the
@@ -60,7 +60,7 @@ CORNER = 10
 #: layout is inset by this much, so the line never covers the window's contents.
 EDGE = 1
 
-NAME = "CHROME MULTI-SESSION"
+NAME = "QAVECTOR"
 
 
 def wanted(environ=None):

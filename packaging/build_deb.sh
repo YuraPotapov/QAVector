@@ -18,7 +18,7 @@ BUILD="$ROOT/build"
 VENV="$BUILD/venv"
 STAGE="$BUILD/deb"
 ICONS="$BUILD/icons"
-PACKAGE=chrome-multi-session
+PACKAGE=qavector
 APP_DIR="/opt/$PACKAGE"
 KEEP_VENV=0
 [ "${1:-}" = --keep-venv ] && KEEP_VENV=1
@@ -41,7 +41,7 @@ ARCH="$(dpkg --print-architecture)"
 OUT="$ROOT/installers/linux/$VERSION"
 MAINTAINER="${DEB_MAINTAINER:-Yurii Potapov <potapovyura@gmail.com>}"
 
-say "chrome-multi-session $VERSION ($ARCH)"
+say "QAVector $VERSION ($ARCH)"
 
 # -- 1. build environment -----------------------------------------------------
 if [ "$KEEP_VENV" = 0 ] || [ ! -x "$VENV/bin/python" ]; then
@@ -71,8 +71,8 @@ for spec in core gui; do
       "packaging/pyinstaller/$spec.spec" )
 done
 
-CORE_BIN="$BUILD/dist/core/chrome-multi-session-core"
-GUI_BIN="$BUILD/dist/gui/chrome-multi-session-gui"
+CORE_BIN="$BUILD/dist/core/qavector-core"
+GUI_BIN="$BUILD/dist/gui/qavector-gui"
 [ -x "$CORE_BIN" ] || die "the core bundle was not produced"
 [ -x "$GUI_BIN" ] || die "the GUI bundle was not produced"
 
@@ -109,7 +109,7 @@ install -m 644 "$BUILD/VERSION" "$STAGE$APP_DIR/VERSION"
 
 install -m 755 "$ROOT/packaging/linux/wrapper-core.sh" "$STAGE/usr/bin/$PACKAGE"
 install -m 755 "$ROOT/packaging/linux/wrapper-gui.sh" "$STAGE/usr/bin/$PACKAGE-gui"
-install -m 644 "$ROOT/packaging/linux/chrome-multi-session-gui.desktop" \
+install -m 644 "$ROOT/packaging/linux/qavector-gui.desktop" \
         "$STAGE/usr/share/applications/$PACKAGE.desktop"
 install -m 644 "$ROOT/packaging/linux/copyright" "$STAGE/usr/share/doc/$PACKAGE/copyright"
 
@@ -142,12 +142,12 @@ DEB="$OUT/${PACKAGE}_${VERSION}_${ARCH}.deb"
 fakeroot dpkg-deb --build --root-owner-group "$STAGE" "$DEB" >/dev/null
 
 # The short, version-less name is the one the install instructions use.
-cp -f "$DEB" "$OUT/chrome_session_${ARCH}.deb"
+cp -f "$DEB" "$OUT/qavector_${ARCH}.deb"
 ( cd "$OUT" && sha256sum ./*.deb > SHA256SUMS )
 
 command -v lintian >/dev/null && lintian --no-tag-display-limit "$DEB" || true
 
 say "Done"
-printf '  %s\n  %s\n  %s\n\n' "$DEB" "$OUT/chrome_session_${ARCH}.deb" "$OUT/SHA256SUMS"
-printf 'Install with:\n  sudo apt install %s\n' "$OUT/chrome_session_${ARCH}.deb"
+printf '  %s\n  %s\n  %s\n\n' "$DEB" "$OUT/qavector_${ARCH}.deb" "$OUT/SHA256SUMS"
+printf 'Install with:\n  sudo apt install %s\n' "$OUT/qavector_${ARCH}.deb"
 printf '  (apt, not dpkg -i, so the Qt libraries it depends on are pulled in too)\n'

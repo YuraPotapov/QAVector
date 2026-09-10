@@ -23,7 +23,7 @@ def frozen(monkeypatch, tmp_path):
     monkeypatch.setattr("sys._MEIPASS", str(bundle), raising=False)
     # Every variable expanduser("~") consults, on either platform: $HOME is not
     # one of them on Windows, where setting it alone leaves these tests writing
-    # a users.json into the real %USERPROFILE%\ChromeMultiSession.
+    # a users.json into the real %USERPROFILE%\QAVector.
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("HOMEDRIVE", os.path.splitdrive(str(home))[0])
@@ -42,7 +42,7 @@ def _install(tmp_path, monkeypatch, text):
     core.mkdir(parents=True)
     (install / "cms.ini").write_text(text, encoding="utf-8")
     monkeypatch.setattr(rp, "FROZEN", True)
-    monkeypatch.setattr(sys, "executable", str(core / "chrome-multi-session-core.exe"))
+    monkeypatch.setattr(sys, "executable", str(core / "qavector-core.exe"))
     return install
 
 
@@ -186,6 +186,60 @@ def test_first_run_never_overwrites_existing_user_data(frozen):
 
     assert open(config, encoding="utf-8").read() == '{"mine": true}'
     assert os.path.isdir(profile)
+
+
+# ----------------------------------------------- from chrome-multi-session
+
+@pytest.mark.skipif(os.name == "nt", reason="the link is a junction there")
+def test_the_old_folder_moves_on_first_start_and_leaves_a_link(frozen):
+    bundle, home = frozen
+    old = home / rp.LEGACY_USER_DIR_NAME
+    (old / "user_sessions" / "localhost-admin").mkdir(parents=True)
+    (old / "users.json").write_text('{"mine": true}', encoding="utf-8")
+    root = rp.ensure_user_data_root()
+    assert root == str(home / rp.USER_DIR_NAME)
+    assert open(os.path.join(root, "users.json"), encoding="utf-8").read() == '{"mine": true}'
+    assert os.path.isdir(os.path.join(root, "user_sessions", "localhost-admin"))
+    # Paths written with the old name - a runner's script, a desktop link - still work.
+    assert old.is_symlink() and (old / "users.json").is_file()
+
+
+def test_an_old_folder_that_cannot_be_linked_stays_in_use(frozen, monkeypatch):
+    # Moved without a way back, every absolute path into it would break.
+    bundle, home = frozen
+    old = home / rp.LEGACY_USER_DIR_NAME
+    old.mkdir()
+    (old / "users.json").write_text("{}", encoding="utf-8")
+
+    def refuse(target, link):
+        raise OSError("no links here")
+
+    monkeypatch.setattr(rp, "_link_directory", refuse)
+    assert rp.ensure_user_data_root() == str(old)
+    assert (old / "users.json").is_file()
+    assert not (home / rp.USER_DIR_NAME).exists()
+
+
+def test_cms_home_never_moves_the_old_folder(frozen, tmp_path, monkeypatch):
+    bundle, home = frozen
+    old = home / rp.LEGACY_USER_DIR_NAME
+    old.mkdir()
+    monkeypatch.setenv(rp.HOME_ENV, str(tmp_path / "scratch"))
+    rp.ensure_user_data_root()
+    assert old.is_dir() and not old.is_symlink()
+    assert not (home / rp.USER_DIR_NAME).exists()
+
+
+def test_a_checkout_never_moves_anything(tmp_path, monkeypatch):
+    # Its data root is the checkout; the home folder is the GUI's to move.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv(rp.HOME_ENV, raising=False)
+    monkeypatch.setattr(rp, "FROZEN", False)
+    monkeypatch.setattr(rp, "app_root", lambda: str(tmp_path / "checkout"))
+    (tmp_path / rp.LEGACY_USER_DIR_NAME).mkdir()
+    rp.ensure_user_data_root()
+    assert not (tmp_path / rp.USER_DIR_NAME).exists()
 
 
 # ------------------------------------------------------ handing off to Chrome

@@ -1,4 +1,4 @@
-; Inno Setup script for Chrome Multi Session.
+; Inno Setup script for QAVector.
 ;
 ; Not run by hand - packaging\build_exe.ps1 passes the version and the repo root:
 ;   ISCC.exe /DAppVersion=0.8.1 /DRepoRoot=C:\src\cms /Oinstallers\windows\0.8.1 installer.iss
@@ -15,19 +15,21 @@
   #error Pass /DRepoRoot=<path to the checkout> (build_exe.ps1 does this)
 #endif
 
-#define AppName      "Chrome Multi Session"
+#define AppName      "QAVector"
 #define AppPublisher "Yurii Potapov"
-#define AppExeName   "chrome-multi-session-gui.exe"
-#define CoreExeName  "chrome-multi-session-core.exe"
+#define AppExeName   "qavector-gui.exe"
+#define CoreExeName  "qavector-core.exe"
 
 [Setup]
+; Kept from when this was Chrome Multi Session: the id is what makes a new
+; version an upgrade of that install rather than a second program beside it.
 AppId={{7C1F5B84-3E2A-4D6C-9A21-5E0B7D4C8F13}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\Chrome Multi Session
+DefaultDirName={autopf}\QAVector
 DefaultGroupName={#AppName}
-OutputBaseFilename=chrome-multi-session-{#AppVersion}-setup
+OutputBaseFilename=qavector-{#AppVersion}-setup
 SetupIconFile={#RepoRoot}\build\icons\icon.ico
 UninstallDisplayIcon={app}\gui\{#AppExeName}
 Compression=lzma2/max
@@ -55,7 +57,7 @@ Name: "addtopath"; Description: "Add the command-line tool to PATH"; \
 [Files]
 ; Both PyInstaller onedir bundles, whole. The GUI finds the core next to it at
 ; runtime (cms_gui.core.frozen_core), which is why the layout under {app} has to
-; match what the .deb puts under /opt/chrome-multi-session.
+; match what the .deb puts under /opt/qavector.
 Source: "{#RepoRoot}\build\dist\core\*"; DestDir: "{app}\core"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#RepoRoot}\build\dist\gui\*";  DestDir: "{app}\gui"; \
@@ -109,7 +111,7 @@ procedure InitializeWizard();
 begin
   DataDirPage := CreateInputDirPage(wpSelectDir,
     'Select Project Folder',
-    'Where should Chrome Multi Session keep your work?',
+    'Where should QAVector keep your work?',
     'Your accounts (users.json), the scenarios you record or edit, run reports' + #13#10 +
     'and screenshots, and one Chrome profile per test user are all stored here.' + #13#10#13#10 +
     'This folder is yours: installing, upgrading and uninstalling never touch' + #13#10 +
@@ -119,7 +121,7 @@ begin
   // An upgrade offers the folder already in use; a first install offers the
   // default the app would have picked for itself.
   DataDirPage.Values[0] := GetPreviousData('DataDir',
-    ExpandConstant('{%USERPROFILE}\ChromeMultiSession'));
+    ExpandConstant('{%USERPROFILE}\QAVector'));
 end;
 
 procedure RegisterPreviousData(PreviousDataKey: Integer);
@@ -173,7 +175,7 @@ begin
   if RegQueryStringValue(HKCU, 'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe', '', Dummy) then
     exit;
   if MsgBox('Google Chrome was not found on this computer.' + #13#10#13#10 +
-            'Chrome Multi Session drives Chrome; it does not include one. ' +
+            'QAVector drives Chrome; it does not include one. ' +
             'Install it from https://www.google.com/chrome/ and it will be ' +
             'found automatically.' + #13#10#13#10 + 'Continue anyway?',
             mbConfirmation, MB_YESNO) = IDNO then

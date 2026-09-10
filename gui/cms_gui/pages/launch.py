@@ -1167,7 +1167,7 @@ class LaunchSessionsPage(QWidget):
         if name in links and "path" in links[name]:
             return links[name]["path"]
         safe_name = name.replace(" ", "_").replace("/", "_")
-        return os.path.expanduser(f"~/Desktop/CMS_{safe_name}.desktop")
+        return os.path.expanduser(f"~/Desktop/QAVector_{safe_name}.desktop")
 
     def _toggle_desktop_link(self):
         name = self._current_config_name()
@@ -1180,7 +1180,7 @@ class LaunchSessionsPage(QWidget):
         if self.desktop_link.isChecked():
             safe_name = name.replace(" ", "_").replace("/", "_")
             default_path = os.path.expanduser("~/Desktop")
-            default_filename = f"CMS_{safe_name}.desktop"
+            default_filename = f"QAVector_{safe_name}.desktop"
             
             saved_dir = current.get("path")
             if saved_dir and os.path.isdir(os.path.dirname(saved_dir)):
@@ -1189,14 +1189,14 @@ class LaunchSessionsPage(QWidget):
                 initial_path = default_path
                 
             dlg = DesktopLinkDialog(self, 
-                                    current.get("name", f"CMS: {name}"), 
+                                    current.get("name", f"QAVector: {name}"), 
                                     initial_path, 
                                     current.get("icon", "google-chrome"))
             if dlg.exec() != QDialog.Accepted:
                 self.desktop_link.setChecked(False)
                 return
                 
-            custom_name = dlg.name_edit.text().strip() or f"CMS: {name}"
+            custom_name = dlg.name_edit.text().strip() or f"QAVector: {name}"
             custom_dir = dlg.path_edit.text().strip() or default_path
             custom_icon = dlg.icon_edit.text().strip() or "google-chrome"
             

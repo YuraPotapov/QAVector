@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         self._auto_launch = auto_launch
         self._headless = headless
         self._closing = False
-        self.setWindowTitle("chrome-multi-session — GUI")
+        self.setWindowTitle("QAVector")
         self.setWindowIcon(icon.app_icon())
         self.resize(1380, 880)
 
@@ -1391,10 +1391,11 @@ class MainWindow(QMainWindow):
         thing to be running - so About names both versions rather than one, and
         says which file the core one came from.
         """
-        QMessageBox.about(self, "chrome-multi-session GUI", self.about_text())
+        QMessageBox.about(self, "QAVector", self.about_text())
 
     def about_text(self):
-        return ("A front-end for session_launcher.py.\n\n"
+        return ("QAVector - Explore. Build. Verify.\n\n"
+                "A front-end for session_launcher.py.\n\n"
                 "The GUI never imports the core: it spawns the launcher through "
                 "the configured interpreter, reads --describe for what exists, "
                 "and follows --events=- for what happens.\n\n"
@@ -1417,7 +1418,7 @@ class MainWindow(QMainWindow):
             banner = self.core.version()
         except Exception:
             return "not detected"
-        # --version prints "chrome-multi-session <number>"; --describe carries
+        # --version prints "qavector <number>"; --describe carries
         # the number alone. Say the same thing either way.
         parts = (banner or "").split(None, 1)
         if len(parts) == 2 and not parts[0][:1].isdigit():

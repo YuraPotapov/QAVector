@@ -1,4 +1,4 @@
-Package: chrome-multi-session
+Package: qavector
 Version: @VERSION@
 Section: web
 Priority: optional
@@ -7,8 +7,10 @@ Maintainer: @MAINTAINER@
 Installed-Size: @INSTALLED_SIZE@
 Depends: libc6 (>= 2.35), libgl1, libegl1, libglib2.0-0, libdbus-1-3, libfontconfig1, libfreetype6, libx11-6, libx11-xcb1, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-render0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0, libsm6, libice6, libnss3
 Suggests: google-chrome-stable
+Replaces: chrome-multi-session
+Conflicts: chrome-multi-session
 Description: Launch one isolated, auto-logged-in Chrome window per test user
- Chrome Multi Session opens a separate Chrome profile per test user, so every
+ QAVector opens a separate Chrome profile per test user, so every
  user can be signed in at the same time, and drives declarative YAML flows
  against those windows over the Chrome DevTools Protocol.
  .
@@ -17,6 +19,9 @@ Description: Launch one isolated, auto-logged-in Chrome window per test user
  Chrome itself is not bundled and must be installed separately - the app says
  so on startup if it cannot find one.
  .
- This package installs the desktop front-end and the chrome-multi-session
+ This package installs the desktop front-end and the qavector
  command-line launcher. Sessions, credentials and run reports are kept in
- ~/ChromeMultiSession and are never touched by an upgrade.
+ ~/QAVector and are never touched by an upgrade.
+ .
+ QAVector was called chrome-multi-session before 0.15.0; this package
+ replaces that one, and the first start moves its folders to the new names.

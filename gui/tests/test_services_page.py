@@ -59,7 +59,7 @@ def _open(tmp_path, **kwargs):
     widget = ServicesPage()
     widget.set_environments([LOCAL, DEV])
     # The services path is named rather than left to resolve. Its default is
-    # ~/ChromeMultiSession/services.json, so a test that let it default would
+    # ~/QAVector/services.json, so a test that let it default would
     # read whatever the *previous* test's Save had put there - and the tmp file
     # it wrote for itself would be ignored.
     widget.load(str(_write(tmp_path, **kwargs)), str(tmp_path / "services.json"),

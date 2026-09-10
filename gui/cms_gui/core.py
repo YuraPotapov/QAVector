@@ -21,7 +21,7 @@ import tempfile
 
 #: The core executable an installed build ships. Its name is fixed by the
 #: PyInstaller spec (packaging/pyinstaller/core.spec).
-CORE_EXE = "chrome-multi-session-core" + (".exe" if os.name == "nt" else "")
+CORE_EXE = "qavector-core" + (".exe" if os.name == "nt" else "")
 
 #: Points the GUI at a core executable explicitly. The .deb's launcher wrapper
 #: sets it; it is also the way to test one build's GUI against another's core.
@@ -54,6 +54,74 @@ def needs_interpreter(path):
 #: installation. Mirrored from ``runtime_paths.INSTALL_CONFIG_NAME``.
 INSTALL_CONFIG_NAME = "cms.ini"
 INSTALL_CONFIG_KEY = "data_dir"
+
+#: The user's own folder: where an installed core keeps users.json, profiles and
+#: reports, and where services.json and logsources.json default to in any build.
+#: Named for the project; the name it had before 0.15.0 is still read wherever
+#: that folder has not been moved yet (see cms_gui.migrate).
+USER_DIR_NAME = "QAVector"
+LEGACY_USER_DIR_NAME = "ChromeMultiSession"
+
+
+def home_folder():
+    """``~/QAVector`` - or ``~/ChromeMultiSession`` while that is still the real one.
+
+    The move happens once, at startup (cms_gui.migrate). Until it has - or where
+    it could not, which leaves the old folder in place - the old one is where the
+    user's files are, and reading an empty new one would look like losing them.
+    """
+    home = os.path.expanduser("~")
+    new = os.path.join(home, USER_DIR_NAME)
+    old = os.path.join(home, LEGACY_USER_DIR_NAME)
+    if not os.path.exists(new) and os.path.isdir(old):
+        return old
+    return new
+
+
+def move_folder(old, new):
+    """Move ``old`` to ``new`` once, leaving a link at ``old``. Returns the one in use.
+
+    A deliberate mirror of ``runtime_paths.migrate_legacy_dir`` in the core, which
+    the GUI never imports. The link is what makes the move safe: absolute paths
+    into the old folder live in services.json, the settings and desktop links,
+    and every one of them keeps working through it. So where no link can be made
+    the folder goes back where it was, and the old name stays the one in use.
+
+    Nothing happens when ``new`` already exists - it is never overwritten - when
+    ``old`` is not there, or when ``old`` is itself a link.
+    """
+    if os.path.lexists(new):
+        return new
+    if not os.path.isdir(old):
+        return new
+    if os.path.islink(old):
+        return old
+    try:
+        os.rename(old, new)
+    except OSError:
+        return old          # in use, or on another device: stay where it is
+    try:
+        _link_folder(new, old)
+    except OSError:
+        try:
+            os.rename(new, old)
+        except OSError:
+            return new
+        return old
+    return new
+
+
+def _link_folder(target, link):
+    """A link at ``link`` to the folder ``target``: a symlink, a junction on Windows.
+
+    A junction there because a Windows symlink needs a privilege most accounts do
+    not have, and a junction needs none.
+    """
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(target, link)
+    else:
+        os.symlink(target, link, target_is_directory=True)
 
 
 def configured_data_root(program=""):
@@ -101,7 +169,7 @@ def user_data_root(program=""):
     chosen = configured_data_root(program)
     if chosen:
         return chosen
-    return os.path.join(os.path.expanduser("~"), "ChromeMultiSession")
+    return home_folder()
 
 
 def ensure_user_data_root(program=""):
@@ -178,7 +246,7 @@ class Core:
         if not needs_interpreter(self.script):
             # A native executable runs itself, and no interpreter can change that -
             # so a stale ``core/interpreter`` setting left over from a source
-            # checkout must not turn into "python chrome-multi-session-core".
+            # checkout must not turn into "python qavector-core".
             self.interpreter = ""
         else:
             self.interpreter = interpreter or auto_python or sys.executable

@@ -43,7 +43,7 @@ $Version = (Select-String -Path (Join-Path $Root "pyproject.toml") `
 if (-not $Version) { Die "no version in pyproject.toml" }
 $Out = Join-Path $Root "installers\windows\$Version"
 
-Say "chrome-multi-session $Version (windows x64)"
+Say "QAVector $Version (windows x64)"
 
 # -- 1. build environment -----------------------------------------------------
 if ((-not $KeepVenv) -or (-not (Test-Path $Py))) {
@@ -93,8 +93,8 @@ foreach ($spec in @("core", "gui")) {
     if ($LASTEXITCODE -ne 0) { Die "freezing $spec failed" }
 }
 
-$CoreBin = Join-Path $Build "dist\core\chrome-multi-session-core.exe"
-$GuiBin  = Join-Path $Build "dist\gui\chrome-multi-session-gui.exe"
+$CoreBin = Join-Path $Build "dist\core\qavector-core.exe"
+$GuiBin  = Join-Path $Build "dist\gui\qavector-gui.exe"
 if (-not (Test-Path $CoreBin)) { Die "the core bundle was not produced" }
 if (-not (Test-Path $GuiBin))  { Die "the GUI bundle was not produced" }
 
@@ -157,6 +157,6 @@ Get-Content SHA256SUMS
 Pop-Location
 
 Say "Done"
-Write-Host "  $Out\chrome-multi-session-$Version-setup.exe"
+Write-Host "  $Out\qavector-$Version-setup.exe"
 Write-Host ""
 Write-Host "Install by running that .exe. Chrome must already be on the machine."

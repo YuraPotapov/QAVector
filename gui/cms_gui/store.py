@@ -20,7 +20,18 @@ import time
 
 from PySide6.QtCore import QStandardPaths
 
-APP_DIR_NAME = os.path.join("chrome-multi-session", "gui")
+#: The GUI's own directory under the platform's data location, named for the
+#: project. The one the old name used is moved here once at startup (migrate),
+#: and read in its place for as long as it has not been.
+APP_NAME = "qavector"
+LEGACY_APP_NAME = "chrome-multi-session"
+APP_DIR_NAME = os.path.join(APP_NAME, "gui")
+
+
+def data_base():
+    """The platform's data location: ~/.local/share on Linux, AppData on Windows."""
+    base = QStandardPaths.writableLocation(QStandardPaths.GenericDataLocation)
+    return base or os.path.join(os.path.expanduser("~"), ".local", "share")
 
 
 def app_data_dir():
@@ -28,12 +39,15 @@ def app_data_dir():
 
     Built from GenericDataLocation and the name spelled out here rather than
     from AppDataLocation, because that one is derived from the application's
-    organisation name - which ``app.py`` deliberately never sets.
+    organisation name, which would move the history the day that name changed.
     """
-    base = QStandardPaths.writableLocation(QStandardPaths.GenericDataLocation)
-    if not base:
-        base = os.path.join(os.path.expanduser("~"), ".local", "share")
+    base = data_base()
     path = os.path.join(base, APP_DIR_NAME)
+    legacy = os.path.join(base, LEGACY_APP_NAME, "gui")
+    if not os.path.exists(os.path.join(base, APP_NAME)) and os.path.isdir(legacy):
+        # Not moved yet - or it could not be. The history is where it is, and an
+        # empty new directory would look like having lost it.
+        path = legacy
     try:
         os.makedirs(path, exist_ok=True)
     except OSError:

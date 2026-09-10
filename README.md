@@ -1,4 +1,6 @@
-# chrome-multi-session
+# QAVector
+
+*Explore. Build. Verify.*
 
 Open one isolated Chrome window per test user, each auto-logged in, each with its
 own persisted session and a single saved credential in Chrome's password manager.
@@ -126,15 +128,21 @@ ship inside the package. Google Chrome is the one thing that does not, and the a
 says so on startup if it cannot find one.
 
 ```bash
-sudo apt install ./chrome_session_amd64.deb
+sudo apt install ./qavector_amd64.deb
 ```
 
-Then launch **Chrome Multi Session** from the applications menu, or run
-`chrome-multi-session` for the CLI.
+Then launch **QAVector** from the applications menu, or run
+`qavector` for the CLI.
 
-Your sessions, credentials and reports live in `~/ChromeMultiSession`, separate
+Your sessions, credentials and reports live in `~/QAVector`, separate
 from the installed program, so installing a newer version over the top keeps all
 of them.
+
+Upgrading from **chrome-multi-session** (QAVector's name before 0.15.0) is the
+same command: the package replaces that one. The first start then moves
+`~/ChromeMultiSession` to `~/QAVector` and the GUI's own folders to their new
+names, leaving a link at each old path, so anything that still points there -
+a script in `services.json`, a desktop link - keeps working.
 
 ## Install (Windows 10+)
 
@@ -146,8 +154,8 @@ tree. On a Windows machine with Python 3.10+ and [Inno Setup
 powershell -ExecutionPolicy Bypass -File .\packaging\build_exe.ps1
 ```
 
-That writes `installers\windows\<version>\chrome-multi-session-<version>-setup.exe`.
-Run it, and **Chrome Multi Session** appears in the Start menu. It has to be built
+That writes `installers\windows\<version>\qavector-<version>-setup.exe`.
+Run it, and **QAVector** appears in the Start menu. It has to be built
 on Windows - PyInstaller does not cross-compile.
 
 Both builds, what lands where, and what to expect the first time the Windows one
@@ -184,7 +192,7 @@ python3 session_launcher.py --env=localhost --run-tests=my_scenario --execution-
 **Writing your own flows: [docs/flows.md](docs/flows.md).** The GUI's Scenarios
 page does the same thing without a text editor - it lists every scenario and
 block, shows what each named target resolves to, and writes into
-`~/ChromeMultiSession/flows`, which is searched before the tree that ships with
+`~/QAVector/flows`, which is searched before the tree that ships with
 the app.
 
 Somewhere else suits you better? Put the folder in the GUI's **Settings ->
@@ -554,7 +562,7 @@ python3 session_launcher.py --env=staging --server-log=all
 python3 session_launcher.py --server-log=list                     # what is configured
 python3 session_launcher.py --server-log-show=nginx               # read it
 python3 session_launcher.py --server-log-show=nginx --server-log-lines=all
-python3 session_launcher.py --log-sources=~/ChromeMultiSession/logsources.json \
+python3 session_launcher.py --log-sources=~/QAVector/logsources.json \
                            --server-log=list          # read it from elsewhere
 ```
 
@@ -569,7 +577,7 @@ Tail** / **Open Full** buttons are this command.
 also holds the *services* each project is made of — a Python script, a shell command,
 a Docker container, a Compose file — with live status, a console, and a per-service
 **Detach allowed** deciding whether it survives closing the window. Those live in `services.json`, under
-`~/ChromeMultiSession` by default and settable in the GUI's **Settings**; copy
+`~/QAVector` by default and settable in the GUI's **Settings**; copy
 `services.example.json` to get started. The launcher neither reads that file nor
 needs to: nothing about a run changed.
 

@@ -22,7 +22,7 @@ os.environ["XDG_DATA_HOME"] = os.path.join(_SANDBOX, "data")
 
 # And the home directory itself. The two above cover everything Qt resolves, but
 # not everything the application does: services.json defaults to
-# ``~/ChromeMultiSession`` and gets there through os.path.expanduser, which reads
+# ``~/QAVector`` and gets there through os.path.expanduser, which reads
 # $HOME and has never heard of XDG. Without this the suite loads - and any test
 # that reaches Save *writes* - the developer's own live services file. That is not
 # a hypothetical: it is how a run came back with somebody's real projects in it.
