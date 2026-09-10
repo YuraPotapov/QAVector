@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-11
+
 ### Added
 - **Run in the background: RUN ▾ → *In Background*.** A scenario made only of service
   steps and `assert_host_up` — a backend restarted, waited for, checked — no longer
