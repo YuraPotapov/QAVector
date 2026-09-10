@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **The GUI draws its own title bar.** The desktop's frame — GNOME's grey band
+  reading "chrome-multi-session — GUI" in the system font — is replaced by one in
+  the design: the mark, the name and the version on the icon's slate, with the
+  window controls beside them. It moves, maximizes on a double click and resizes
+  from every edge, all handed to the window manager so tiling and snapping keep
+  working. Only the head changes; the menus and everything under them are as
+  before. `CMS_SYSTEM_FRAME=1` keeps the desktop's frame.
+
 ## [0.14.4] - 2026-09-09
 
 ### Fixed

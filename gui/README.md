@@ -65,6 +65,19 @@ is hidden either way: the plain wording says what the control does, not less.
 keeping a list of which pages care. The Command page is exempt: it *is* the
 command line, and a flag there is the subject rather than the jargon.
 
+## The title bar
+
+The desktop's own frame is switched off and the window draws its head itself:
+the mark, the name and the version on the icon's slate, and minimize /
+maximize / close. It behaves like the frame it replaces — drag anywhere on it to
+move, double-click to maximize, resize from any edge or corner — and the move
+and the resize are handed to the window manager, so edge tiling and snapping
+still work. Nothing under it changes: the menus and the rest of the window are
+the same layout, moved down by the bar's height.
+
+`CMS_SYSTEM_FRAME=1` keeps the desktop's frame instead, for a tiling window
+manager or any desktop that will not take a move from the application.
+
 ## The sidebar
 
 `Ctrl+B`, *View → Collapse sidebar*, or the handle at the top of the rail itself.

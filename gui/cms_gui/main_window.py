@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QInputDialog, QLab
 
 from . import (commands, core as core_mod, history as history_mod, icon, icons,
                launch as launch_mod, load as load_mod,
-               logsourcesfile as lsf, theme, widgets)
+               logsourcesfile as lsf, theme, titlebar, widgets)
 from .loader import LoaderThread
 from . import version as gui_version
 from .runner import LauncherProcess, RunState
@@ -159,6 +159,10 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_ui()
         self._connect_process()
+        # The desktop's title bar, replaced by one in the design. Nothing under
+        # it is rebuilt - see titlebar.py, which also says how to keep the
+        # desktop's own.
+        self.frame = titlebar.install(self) if titlebar.wanted() else None
 
         self.set_developer_mode(self.settings.developer_mode)
         self.set_sidebar_collapsed(self.settings.sidebar_collapsed)

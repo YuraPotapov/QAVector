@@ -31,6 +31,20 @@ ACCENT_RAMP = {100: "#eef6ff", 200: "#d6ebff", 300: "#b5d9fd", 400: "#94bce3",
 DIVIDER = "#cfcfd0"
 DIVIDER_STRONG = "#a8a8ab"
 
+# --- title bar --------------------------------------------------------------
+# The head of the window, drawn in place of the desktop's (cms_gui/titlebar.py).
+# The icon's own ground rather than the page: it is the band that says which
+# tool this is, so it is the same slate in both themes - the brand, not a
+# surface - and set_dark_mode leaves it alone.
+TITLEBAR_BG = ACCENT_RAMP[900]
+TITLEBAR_TEXT = ACCENT_RAMP[100]
+TITLEBAR_MUTED = ACCENT_RAMP[500]
+TITLEBAR_HOVER = ACCENT_RAMP[800]
+TITLEBAR_PRESSED = ACCENT_RAMP[700]
+# The hairline round a frameless window, where the desktop's frame was. The
+# bar's own slate, so the head and the edge read as one frame.
+WINDOW_EDGE = TITLEBAR_BG
+
 # Status colours, reused by the run tree, the log pane and the tags.
 OK = ACCENT_RAMP[700]
 WARN = "#a8712a"
@@ -510,6 +524,17 @@ QSplitter::handle:vertical {{ height: 1px; }}
 
 QStatusBar {{ background: {n200}; border-top: 1px solid {divider}; }}
 QStatusBar::item {{ border: none; }}
+
+/* --- title bar ----------------------------------------------------------- */
+/* The window's own head, in place of the desktop's - see cms_gui/titlebar.py.
+   Everything in it names its own colours rather than taking the page's: it is
+   the one band that stays slate whichever theme the rest of the window is in. */
+QFrame[role="titlebar"] {{ background: {tb_bg}; border: none; }}
+QLabel[role="brand"] {{
+    font-family: {heading}; font-size: 13px; font-weight: 600;
+    letter-spacing: 1.6px; color: {tb_text};
+}}
+QLabel[role="brandtag"] {{ font-family: {mono}; font-size: 10px; color: {tb_muted}; }}
 """
 
 
@@ -526,6 +551,7 @@ def stylesheet():
         a600=ACCENT_RAMP[600], a700=ACCENT_RAMP[700], a800=ACCENT_RAMP[800],
         a900=ACCENT_RAMP[900],
         cell_v=CELL_INSET_V, cell_h=CELL_INSET_H,
+        tb_bg=TITLEBAR_BG, tb_text=TITLEBAR_TEXT, tb_muted=TITLEBAR_MUTED,
     )
 
 
