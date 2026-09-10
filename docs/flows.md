@@ -182,6 +182,22 @@ because a cold backend building its assets routinely needs more than the engine'
 30 s. `timeout:` overrides either. A wait that expires is a FAIL naming what it was still
 waiting for; a service step that cannot be carried out at all is an ERROR.
 
+### Running in the background
+
+A scenario made only of service steps and `assert_host_up` can run with **no browser at
+all**: RUN ▾ → **In Background** in the GUI, `--no-browser` on the command line. That is
+the six actions in the table above plus the HTTP probe, counted after `use:` blocks are
+expanded — `use: common.host_up` qualifies, `use: auth.login` does not. When anything
+selected needs a page, the entry is greyed out and its tooltip names the scenario and the
+page steps it takes; the launcher refuses such a run the same way, before it starts.
+
+Nothing else about the run changes. Each selected account is a session, as always; how
+many run at once, *All at once* and *Auto* — with the load governor raising and lowering
+it as the run goes — work exactly as they do with windows, and so do Stop, stopping one
+session, and the Run page. There are simply no windows: nothing to keep open, so the
+launcher exits when the run ends, and nothing to photograph, so a report is `result.json`
+plus any server log. It needs the GUI for the reason every service step does.
+
 ## Timeouts and retries
 
 One default: **30 000 ms**, set once on the page when the engine attaches. Any step

@@ -24,6 +24,78 @@ def _write(base, relpath, content):
         fh.write(textwrap.dedent(content))
 
 
+# --- browser_actions: what --no-browser may run ------------------------------
+def test_a_scenario_of_host_checks_needs_no_browser():
+    # demo_simple is `use: common.host_up` - an HTTP probe, reached through a
+    # block, which is exactly where a page step would hide.
+    assert compiler.browser_actions("demo_simple", FLOWS) == []
+
+
+def test_a_scenario_that_drives_a_page_names_what_it_does():
+    actions = compiler.browser_actions("demo_smoke", FLOWS)
+    assert "assert_exists" in actions           # its own step, not only its blocks'
+    assert actions == sorted(actions)
+    assert not set(actions) & compiler.NO_BROWSER
+
+
+def test_service_steps_and_their_checks_need_no_browser(tmp_path):
+    _write(tmp_path, "scenarios/restart.yaml", """
+        id: restart
+        name: Restart
+        tags: []
+        steps:
+          - service_restart: "Storefront/Web"
+          - wait_for_out: {target: "Storefront/Web", value: "running on .+:8069"}
+          - wait_for_service: "Storefront/Web"
+          - wait_for_criterion: {target: "Storefront/Web", value: "Started"}
+          - assert_host_up: "{{env.origin}}"
+    """)
+    # No run context either: a placeholder does not decide whether a page is needed.
+    assert compiler.browser_actions("restart", str(tmp_path)) == []
+
+
+def test_one_page_step_in_a_block_is_enough_to_need_a_browser(tmp_path):
+    _write(tmp_path, "nav/open.yaml", """
+        id: nav.open
+        name: Open
+        steps:
+          - goto: "{{env.origin}}"
+    """)
+    _write(tmp_path, "scenarios/s.yaml", """
+        id: s
+        name: S
+        tags: []
+        steps:
+          - service_start: "Storefront/Web"
+          - use: nav.open
+    """)
+    assert compiler.browser_actions("s", str(tmp_path)) == ["goto"]
+
+
+def test_browser_actions_still_refuses_a_cycle(tmp_path):
+    _write(tmp_path, "loop/one.yaml", """
+        id: loop.one
+        name: One
+        steps:
+          - use: loop.two
+    """)
+    _write(tmp_path, "loop/two.yaml", """
+        id: loop.two
+        name: Two
+        steps:
+          - use: loop.one
+    """)
+    _write(tmp_path, "scenarios/s.yaml", """
+        id: s
+        name: S
+        tags: []
+        steps:
+          - use: loop.one
+    """)
+    with pytest.raises(compiler.CompileError, match="cyclic"):
+        compiler.browser_actions("s", str(tmp_path))
+
+
 # --- parse_step: both YAML shapes -------------------------------------------
 def test_parse_shorthand_use():
     step = compiler.parse_step({"use": "auth.login"})

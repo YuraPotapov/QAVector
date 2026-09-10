@@ -583,7 +583,7 @@ def describe(config_path, flows_dir=None, sessions_dir=None, reports_dir=None,
     reported_flows_dir = flows_dir or runtime_paths.user_flows_dir()
     try:
         # Lazy: the loader needs pyyaml, which a plain launch never installs.
-        from engine import flowfile, loader
+        from engine import compiler, flowfile, loader
         skipped = loader._SKIP_TAGS
         for scenario_id in loader.discover_scenarios(flows_dir, include_templates=True):
             try:
@@ -595,13 +595,22 @@ def describe(config_path, flows_dir=None, sessions_dir=None, reports_dir=None,
             # Which tree it came from decides whether the editor may touch it:
             # anything bundled with the app is replaced on the next upgrade.
             writable = flowfile.is_writable(flow.source, flows_dir)
-            scenarios.append({"id": scenario_id, "name": flow.name,
-                              "description": flow.description, "tags": tags,
-                              "path": flow.source,
-                              "source": "user" if writable else "bundled",
-                              "writable": writable,
-                              # what --run-tests=all would actually run
-                              "in_all": not (set(tags) & skipped)})
+            row = {"id": scenario_id, "name": flow.name,
+                   "description": flow.description, "tags": tags,
+                   "path": flow.source,
+                   "source": "user" if writable else "bundled",
+                   "writable": writable,
+                   # what --run-tests=all would actually run
+                   "in_all": not (set(tags) & skipped)}
+            # What stands between it and --no-browser: the page steps it takes,
+            # its use: blocks included. [] means it can run with no browser. Left
+            # out when it cannot be worked out, which a front-end must read as
+            # "needs one" - a scenario nobody can vouch for is not browser-free.
+            try:
+                row["browser_actions"] = compiler.browser_actions(scenario_id, flows_dir)
+            except Exception:  # noqa: BLE001 - the compile error is the runner's to report
+                pass
+            scenarios.append(row)
         # The blocks a scenario reaches through `use:`. Not runnable on their own,
         # so they are not scenarios - but an editor showing `use: access.open_app`
         # with no way to open it is showing an alias with nothing behind it.
@@ -2546,6 +2555,33 @@ def keep_open_until_closed(procs):
         log.info("Done.")
 
 
+def _needing_a_browser(run_tests, users, flows_dir=None):
+    """``[(scenario id, [actions])]``: what stops this run going without a browser.
+
+    The scenarios are resolved the way the runner will resolve them - ``config`` is
+    the selected users' own lists, anything else is the --run-tests value - and each
+    is read with its use: blocks expanded. One that cannot be read at all is left
+    to the runner, which reports it as the compile error it is, exactly as it would
+    on a run with a browser.
+    """
+    from engine import compiler
+    from engine.runner import _resolve_scenarios
+    if run_tests == "config":
+        wanted = [test for user in users for test in user.tests]
+        scenario_ids = _resolve_scenarios(wanted, flows_dir)
+    else:
+        scenario_ids = _resolve_scenarios(run_tests, flows_dir)
+    refused = []
+    for scenario_id in scenario_ids:
+        try:
+            actions = compiler.browser_actions(scenario_id, flows_dir)
+        except Exception:  # noqa: BLE001 - see above: the runner reports it
+            continue
+        if actions:
+            refused.append((scenario_id, actions))
+    return refused
+
+
 def _print_help():
     """Print every command-line parameter with a one-line description and exit 0."""
     prog = os.path.basename(sys.argv[0])
@@ -2678,6 +2714,12 @@ Flow execution (require --run-tests):
   --close-after             Close the browser windows once the run finishes;
                             without it they stay open for inspection - which
                             also means every window is launched up front.
+  --no-browser              Run with no browser at all, for scenarios made only
+                            of service steps and assert_host_up (use: blocks
+                            included). Any other scenario is refused before the
+                            run starts. Sessions, --jobs and the load governor
+                            work as usual; the launcher exits when the run ends.
+                            Service steps need the GUI (--control=-).
 
 Reports (require --run-tests):
   --report-level=LIST       What artifacts to generate from the browser:
@@ -2722,6 +2764,7 @@ def main():
     jobs_given = False
     overlay_components = None  # None = no HUD; else list of --execution-overlay components
     close_after = False   # with --run-tests: close windows after the run (default: keep open)
+    no_browser = False    # --no-browser: service-only scenarios, no Chrome at all
     report_level = None   # raw --report-level value (None = flag absent -> default artifacts)
     report_always = False # --report-always: produce a full report on success too
     report_screen = None  # raw --report-screen value (None = flag absent -> default capture)
@@ -2761,6 +2804,11 @@ def main():
             # written), close every window automatically. Without it the windows stay
             # open for inspection. Ignored outside --run-tests (checked after the loop).
             close_after = True
+        elif arg == "--no-browser":
+            # Flow execution with no Chrome at all, for scenarios made only of
+            # service steps and assert_host_up. Checked after the loop: it needs
+            # --run-tests, and every scenario is vetted before anything runs.
+            no_browser = True
         elif arg.startswith("--extensions="):
             # Comma-separated friendly names (see KNOWN_EXTENSIONS) or raw Web Store
             # ids. Nothing is installed by default.
@@ -3031,6 +3079,24 @@ def main():
     if overlay_components and run_tests is None:
         sys.exit("--execution-overlay requires --run-tests (there is no flow "
                  "execution to visualize without it).")
+    if no_browser:
+        if recorder:
+            sys.exit("--no-browser cannot record: the recorder is used by clicking in "
+                     "a window, and this run opens none.")
+        if run_tests is None:
+            sys.exit("--no-browser requires --run-tests (it runs scenarios; without "
+                     "them there is nothing to do).")
+        if overlay_components:
+            log.warning("--execution-overlay does nothing with --no-browser: there is "
+                        "no page to draw it in. Running without it.")
+            overlay_components = None
+        if detach:
+            # Before the --server-log check below: a detach that is about to be
+            # ignored must not cost the run its server logs.
+            log.info("--detach does nothing with --no-browser: there are no windows "
+                     "to leave running.")
+            detach = False
+        extensions = []           # and no profile to install them into
     if server_log_given and detach:
         # --detach means this process goes away the moment the windows are up, and
         # the readers are its threads: there would be nothing left to stream into.
@@ -3093,6 +3159,10 @@ def main():
         if report_screen is not None and not report_config.screen_enabled:
             log.warning("--report-screen has no effect: 'screen' is not in --report-level, "
                         "so no screenshots will be captured.")
+        if no_browser and (report_screen is not None
+                           or (report_config.level or frozenset()) - {"result"}):
+            log.info("--no-browser: only result.json and server logs are written; "
+                     "screenshots, dom, console and url need a page.")
     # Resolve --env before the URL check: it names the environment to launch AND
     # supplies that environment's URL, so --url only has to be typed to override it.
     envs = environments_from_config(config_path, strict=(env_name is not None
@@ -3114,7 +3184,8 @@ def main():
                  "[--run-tests=all|ID,...] [--execution-overlay=all|tree,progress,status,logs] "
                  "[--report-level=console,dom,result,screen,url] [--report-always] "
                  "[--report-screen=start,each,finish] "
-                 "[--close-after] [--user=LOGIN --password=PASS] (--env=NAME | --url=URL | <URL>)   "
+                 "[--close-after] [--no-browser] [--user=LOGIN --password=PASS] "
+                 "(--env=NAME | --url=URL | <URL>)   "
                  "e.g. --env=dev, or --url=http://localhost:8069/web/login" % sys.argv[0])
     url = normalize_url(url)
     split = urlsplit(url)
@@ -3201,10 +3272,23 @@ def main():
                         "but run nothing.", ", ".join(without),
                         "they" if len(without) > 1 else "it")
 
+    # --no-browser runs only what never touches a page. Vetted here, before anything
+    # starts, so a scenario that clicks is named now rather than failing its first
+    # page step minutes into the run. The runner checks again after compiling, for
+    # a scenario edited in the meantime.
+    if no_browser:
+        refused = _needing_a_browser(run_tests, users, flows_dir)
+        if refused:
+            sys.exit("--no-browser runs only service steps and assert_host_up. These "
+                     "scenarios need a browser:\n%s"
+                     % "\n".join("  %s: %s" % (scenario_id, ", ".join(actions))
+                                 for scenario_id, actions in refused))
+
     # Everything above is argument/config validation, so it fails without needing a
-    # browser at all; only now does a missing Chrome become the problem.
-    chrome = find_chrome()
-    if not chrome:
+    # browser at all; only now does a missing Chrome become the problem - and not
+    # at all for a run that opens none.
+    chrome = None if no_browser else find_chrome()
+    if not chrome and not no_browser:
         sys.exit(chrome_missing_message())
 
     # Everything is resolved and valid from here on, so this event describes the
@@ -3284,7 +3368,9 @@ def main():
     # that returns memory. Only when the windows are going to be closed anyway -
     # without --close-after the user asked to keep them for inspection, and a
     # window closed the moment its scenarios end is not that.
-    staged = bool(run_tests) and not recorder and close_after
+    # Never with --no-browser: there is no window to open inside a slot, and the
+    # sessions are rationed by the same slots through the runner's other path.
+    staged = bool(run_tests) and not recorder and close_after and not no_browser
     for entry_prefix, cls, login, password, user_tests in users:
         # The profile folder is "<prefix>-<login>" (a single safe path segment),
         # keyed by prefix+login so each user/environment gets its own reused profile.
@@ -3292,6 +3378,14 @@ def main():
         session_dir = session_dir_for(session_prefix, entry_prefix, login)
         profile = os.path.join(sessions_dir, session_dir)
         session_envs[profile] = entry_prefix
+        if no_browser:
+            # Named exactly as a window's session is - the runner names a session
+            # by its profile folder - but nothing is created there and nothing
+            # opens. From here the session is the runner's, as any other.
+            sessions.append((cls, None, profile, login, origin, user_tests))
+            if log_hub is not None:
+                log_hub.add_session(os.path.basename(profile), entry_prefix)
+            continue
         os.makedirs(profile, exist_ok=True)
         set_profile_name(profile, "%s - %s" % (cls, login))
         clear_previous_tabs(profile)  # always start with one tab, keep the login
@@ -3357,7 +3451,9 @@ def main():
         except ImportError:
             pass                    # no engine installed: a plain launch, nothing to ask
 
-    if staged:
+    if no_browser:
+        log.info("%d session(s), no browser: nothing is opened.", len(sessions))
+    elif staged:
         log.info("%d session(s) prepared. Windows open as slots free, %s at a time; "
                  "each closes when its scenarios are done.", len(sessions),
                  {"all": "all", "auto": "as many as the machine allows"}.get(jobs, jobs))
@@ -3411,7 +3507,8 @@ def main():
                                                     extension_dirs=extension_dirs,
                                                     log_hub=log_hub,
                                                     session_envs=session_envs)
-                                       if staged else None)
+                                       if staged else None,
+                               browser=not no_browser)
         except KeyboardInterrupt:
             stopped = True
             raise
@@ -3430,7 +3527,9 @@ def main():
             # browsers open on a half-finished flow.
             if close_after or stopped:
                 close_all(procs)  # graceful teardown flushes each login session to disk
-        if close_after:
+        # With no browser there is nothing left to inspect, so the run ending is
+        # the launcher ending, whatever --close-after says.
+        if close_after or no_browser:
             _emit("launcher.exit", exit_code=rc)
             sys.exit(rc)
         # Default: reports/screenshots are done, but leave the windows open so the

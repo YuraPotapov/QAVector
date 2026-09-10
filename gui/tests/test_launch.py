@@ -457,3 +457,86 @@ def test_without_fire_and_forget_the_flag_is_built_as_usual():
     config["server_logs"] = {"mode": launch.LOGS_ALL, "names": []}
     config["sessions"] = dict(launch.DEFAULTS["sessions"], detach=False)
     assert "--server-log=all" in launch.argv(config)
+
+
+# ------------------------------------------------ running in the background
+
+def _background_inventory():
+    return core.Inventory({
+        "scenarios": [
+            {"id": "restart", "tags": ["services"], "in_all": True,
+             "browser_actions": []},
+            {"id": "host", "tags": ["services", "smoke"], "in_all": True,
+             "browser_actions": []},
+            {"id": "clicks", "tags": ["smoke"], "in_all": True,
+             "browser_actions": ["click", "fill"]},
+            {"id": "manual_clicks", "tags": ["manual"], "in_all": False,
+             "browser_actions": ["goto"]},
+            # Described by a core that predates the field.
+            {"id": "old_core", "tags": [], "in_all": True},
+        ],
+        "users": [{"login": "agent", "tests": ["restart"]},
+                  {"login": "manager", "tests": ["clicks", "tag:services"]}],
+    })
+
+
+def test_nothing_scripted_cannot_run_in_the_background():
+    assert launch.background_blockers("", _background_inventory()) == [
+        ("", "Nothing is scripted.")]
+
+
+def test_without_an_inventory_nothing_can_be_vouched_for():
+    blockers = launch.background_blockers("restart", None)
+    assert len(blockers) == 1 and blockers[0][0] == ""
+
+
+def test_service_only_scenarios_can_run_in_the_background():
+    inventory = _background_inventory()
+    assert launch.background_blockers("restart,host", inventory) == []
+    assert launch.background_blockers("tag:services", inventory) == []
+
+
+def test_a_scenario_that_drives_a_page_says_what_it_does():
+    inventory = _background_inventory()
+    assert launch.background_blockers("restart,clicks", inventory) == [
+        ("clicks", "click, fill")]
+    # A tag pulls in everything carrying it, the page steps included.
+    assert launch.background_blockers("tag:smoke", inventory) == [
+        ("clicks", "click, fill")]
+
+
+def test_all_means_what_the_core_would_run():
+    # manual_clicks is not in --run-tests=all, so it does not block; old_core is,
+    # and nobody can say it needs no browser.
+    ids = [sid for sid, _r in launch.background_blockers("all", _background_inventory())]
+    assert ids == ["clicks", "old_core"]
+
+
+def test_each_accounts_own_list_is_judged_for_the_accounts_launched():
+    inventory = _background_inventory()
+    assert launch.background_blockers("config", inventory, ["agent"]) == []
+    assert [sid for sid, _r in launch.background_blockers(
+        "config", inventory, ["agent", "manager"])] == ["clicks"]
+    # No list of accounts means every one of them.
+    assert launch.background_blockers("config", inventory) != []
+    assert launch.background_blockers("config", inventory, ["nobody"]) == [
+        ("", "No scenario matches.")]
+
+
+def test_what_the_inventory_cannot_vouch_for_blocks():
+    inventory = _background_inventory()
+    assert launch.background_blockers("ghost", inventory) == [
+        ("ghost", "not in the scenario list")]
+    assert launch.background_blockers("old_core", inventory) == [
+        ("old_core", "cannot tell whether it needs a browser")]
+
+
+def test_the_run_header_says_background_and_keeps_how_many_at_once():
+    config = _config(sessions=dict(launch.DEFAULTS["sessions"], jobs=2))
+    assert launch.sessions_label(config, background=True) == \
+        "2 at a time, in the background"
+    config = _config(sessions=dict(launch.DEFAULTS["sessions"], auto_jobs=True))
+    assert launch.sessions_label(config, background=True) == \
+        "as many as the machine allows, in the background"
+    assert launch.sessions_label(config) == \
+        "as many as the machine allows, windows stay open"

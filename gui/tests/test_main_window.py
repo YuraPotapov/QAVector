@@ -770,6 +770,96 @@ def test_a_chosen_account_replaces_the_configurations_own_filter(window, monkeyp
     assert "--recorder" in argv
 
 
+# ------------------------------------------------------ RUN ▾ -> In Background
+
+def test_run_offers_to_run_in_the_background(window):
+    assert [a.text() for a in window.run_menu.actions()] == ["In Background",
+                                                             "With Recorder"]
+
+
+def test_in_background_is_greyed_out_for_a_scenario_that_needs_a_browser(window,
+                                                                        monkeypatch):
+    window._run_source = "launch"
+    monkeypatch.setattr(window.launch, "background_blockers",
+                        lambda: [("simple_fine", "click, fill")])
+    window.run_menu.aboutToShow.emit()          # decided as the menu opens
+    assert not window.background_action.isEnabled()
+    assert "simple_fine: click, fill" in window.background_action.toolTip()
+
+
+def test_in_background_is_offered_for_service_steps_only(window, monkeypatch):
+    window._run_source = "launch"
+    monkeypatch.setattr(window.launch, "background_blockers", lambda: [])
+    window.run_menu.aboutToShow.emit()
+    assert window.background_action.isEnabled()
+
+
+def test_the_launch_pages_own_choice_decides_it(window):
+    from cms_gui import core as core_mod
+
+    window.launch.inventory = core_mod.Inventory({
+        "scenarios": [{"id": "restart", "tags": [], "in_all": True,
+                       "browser_actions": []},
+                      {"id": "clicks", "tags": [], "in_all": True,
+                       "browser_actions": ["click"]}],
+        "users": [], "envs": [], "blocks": [], "selectors": {}})
+    window._run_source = "launch"
+    try:
+        window.launch.set_state({"scenarios": {"mode": "pick", "selected": ["restart"]}})
+        assert window._update_background_action() == []
+        window.launch.set_state({"scenarios": {"mode": "pick",
+                                               "selected": ["restart", "clicks"]}})
+        assert window._update_background_action() == [("clicks", "click")]
+    finally:
+        window.launch.set_state({})             # the page persists what it shows
+
+
+def test_in_background_runs_the_same_command_with_no_browser(window, monkeypatch):
+    sent = {}
+    monkeypatch.setattr(window.process, "start",
+                        lambda argv, working_dir=None: sent.update(argv=argv) or True)
+    monkeypatch.setattr(window.core, "is_configured", lambda: True)
+    monkeypatch.setattr(window.core, "argv", lambda *a: list(a))
+    monkeypatch.setattr(window.launch, "argv",
+                        lambda: ["--run-tests=restart", "--jobs=auto", "--detach",
+                                 "--events=-"])
+    monkeypatch.setattr(window.launch, "problem_list", lambda: [])
+    monkeypatch.setattr(window.launch, "background_blockers", lambda: [])
+    window._run_source = "launch"
+    window.start_background_run()
+    argv = sent.get("argv", [])
+    assert argv[0] == "--no-browser"
+    # The sessions as configured: --jobs goes through untouched.
+    assert "--jobs=auto" in argv and "--detach" not in argv
+    assert "in the background" in window.run.meta.text()
+
+
+def test_a_stale_menu_cannot_start_a_run_the_launcher_would_refuse(window,
+                                                                  monkeypatch):
+    started = []
+    monkeypatch.setattr(window, "start_run", lambda **kw: started.append(kw))
+    monkeypatch.setattr(window.launch, "background_blockers",
+                        lambda: [("clicks", "click")])
+    window._run_source = "launch"
+    window.start_background_run()
+    assert started == []
+
+
+def test_a_background_run_is_run_again_in_the_background(window, monkeypatch):
+    started = []
+    monkeypatch.setattr(window, "start_run",
+                        lambda source=None, **kw: started.append((source, kw)))
+    entry = {"kind": history_mod.LAUNCH, "launch_config": launch.merged({}),
+             "argv": ["python3", "session_launcher.py", "--no-browser",
+                      "--run-tests=restart"]}
+    window.rerun_entry(entry)
+    assert started == [("launch", {"background": True})]
+    started.clear()
+    entry["argv"] = ["python3", "session_launcher.py", "--run-tests=restart"]
+    window.rerun_entry(entry)
+    assert started == [("launch", {"background": False})]
+
+
 def test_closing_with_no_run_asks_nothing(window, monkeypatch):
     asked = []
     monkeypatch.setattr(window, "_confirm_close_during_run",

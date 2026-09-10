@@ -46,6 +46,10 @@ SELECTOR_TARGET = SELECTOR_ONLY | SELECTOR_AND_VALUE
 TARGET_AND_VALUE = SELECTOR_AND_VALUE | SERVICE_TARGET_AND_VALUE
 KNOWN = (SELECTOR_ONLY | SELECTOR_AND_VALUE | VALUE_ONLY | URL_TARGET
          | SERVICE_TARGET | SERVICE_TARGET_AND_VALUE | {USE})
+# Actions a run with no browser can carry out (--no-browser): the service steps,
+# which the GUI performs, and the HTTP probe, which is urllib. Every other action
+# acts on a page.
+NO_BROWSER = SERVICE_TARGET | SERVICE_TARGET_AND_VALUE | {"assert_host_up"}
 
 
 def parse_step(raw, source=None):
@@ -168,6 +172,26 @@ def compile_plan(scenario_id, flows_dir=None, selectors=None, ctx=None):
     # No default of our own: None means "wherever the loader looks", which since
     # there can be more than one tree is a search path, not a directory.
     selectors = selectors or {}
+    return _expand(scenario_id, flows_dir,
+                   lambda step: _finalize(step, selectors, ctx))
+
+
+def browser_actions(scenario_id, flows_dir=None):
+    """The actions in ``scenario_id`` that need a browser, sorted; [] if none do.
+
+    Read after ``use:`` expansion, because a block is where a browser step hides:
+    ``use: common.host_up`` is an HTTP probe, ``use: auth.login`` drives a page.
+    Nothing is finalized - which element a step would click, or what
+    ``{{env.origin}}`` stands for, does not change whether it needs a page, and
+    substituting without a run context raises on every placeholder. A flow that is
+    not well formed raises :class:`CompileError`, as :func:`compile_plan` does.
+    """
+    steps, _root = _expand(scenario_id, flows_dir, lambda step: step)
+    return sorted({step.action for step in steps} - NO_BROWSER)
+
+
+def _expand(scenario_id, flows_dir, finish):
+    """``(steps, root)`` for ``scenario_id``, with ``finish`` applied to each leaf."""
     stack = []  # flow ids currently being expanded, for cycle detection
     steps = []
 
@@ -184,7 +208,7 @@ def compile_plan(scenario_id, flows_dir=None, selectors=None, ctx=None):
                 group.children.append(expand(step.target, child_id))
             else:
                 named_target = step.target        # friendly name, before CSS resolution
-                _finalize(step, selectors, ctx)
+                finish(step)
                 index = len(steps)
                 steps.append(step)
                 group.children.append(PlanNode(

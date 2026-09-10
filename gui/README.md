@@ -198,6 +198,12 @@ out loud rather than dropping them quietly. Anything genuinely technical (start
 address, profile prefix, log level, the three folders, the execution overlay)
 is folded away under *Advanced*.
 
+**RUN ▾ → In Background** runs the same launch with no browser at all, for
+scenarios made only of service steps and their checks. It is greyed out whenever
+something selected needs a page, and its tooltip says which scenario and which
+steps; sessions, how many run at once and *Auto* behave exactly as they do with
+windows.
+
 **Run** — one panel per window: state (launching → attached → running → pass /
 fail), the step tree (the very tree the in-page HUD draws - it arrives in the
 `flow.start` event), progress and the run summary. With `--server-log` on, each

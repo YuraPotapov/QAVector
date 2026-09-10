@@ -300,6 +300,56 @@ def notes(config, inventory=None):
     return result
 
 
+def background_blockers(run_tests, inventory, logins=None):
+    """What stops a run going in the background: ``[(scenario id, reason)]``.
+
+    Empty means nothing does: every scenario ``run_tests`` resolves to is made only
+    of steps that need no browser, which the core reports per scenario as
+    ``browser_actions`` in --describe. ``run_tests`` is the --run-tests value either
+    page builds; ``logins`` are the accounts whose own lists ``config`` means (None:
+    every account). Resolved the way the core resolves it, so the menu cannot offer
+    a run the launcher would refuse. A scenario this inventory cannot vouch for -
+    not in it, or described by a core too old to say - blocks as surely as one
+    that clicks. A reason with no scenario id is about the run as a whole.
+    """
+    value = str(run_tests or "").strip()
+    if not value:
+        return [("", "Nothing is scripted.")]
+    if not inventory:
+        return [("", "The launcher has not described its scenarios yet.")]
+    rows = {row.get("id"): row for row in inventory.scenarios}
+    if value == "all":
+        wanted = [sid for sid, row in rows.items() if row.get("in_all", True)]
+    else:
+        if value == "config":
+            chosen = None if logins is None else set(logins)
+            items = [test for user in inventory.users
+                     if chosen is None or user.get("login") in chosen
+                     for test in user.get("tests") or ()]
+        else:
+            items = [part.strip() for part in value.split(",") if part.strip()]
+        wanted = []
+        for item in items:
+            if item.startswith("tag:"):
+                tag = item[len("tag:"):]
+                wanted.extend(sid for sid, row in rows.items()
+                              if tag in (row.get("tags") or ()))
+            else:
+                wanted.append(item)
+    if not wanted:
+        return [("", "No scenario matches.")]
+    blockers = []
+    for scenario_id in dict.fromkeys(wanted):          # de-duplicated, in order
+        row = rows.get(scenario_id)
+        if row is None:
+            blockers.append((scenario_id, "not in the scenario list"))
+        elif not isinstance(row.get("browser_actions"), list):
+            blockers.append((scenario_id, "cannot tell whether it needs a browser"))
+        elif row["browser_actions"]:
+            blockers.append((scenario_id, ", ".join(row["browser_actions"])))
+    return blockers
+
+
 def selected_logins(config, inventory=None):
     """The logins this configuration would actually launch, in order.
 
@@ -361,14 +411,20 @@ def scenarios_label(config):
     return "%d scenarios" % len(chosen)
 
 
-def sessions_label(config):
+def sessions_label(config, background=False):
+    """How many run at once, and what becomes of the windows.
+
+    ``background`` is RUN's menu -> In Background: the sessions are the same, but there
+    are no windows to stay open or close.
+    """
     config = merged(config)
     sessions = config["sessions"]
     at_once = ("as many as the machine allows" if sessions["auto_jobs"] else
                "all at once" if sessions["all_at_once"] else
                "one at a time" if int(sessions["jobs"] or 1) == 1
                else "%d at a time" % int(sessions["jobs"]))
-    after = "windows stay open" if sessions["keep_open"] else "windows close after"
+    after = ("in the background" if background else
+             "windows stay open" if sessions["keep_open"] else "windows close after")
     return "%s, %s" % (at_once, after)
 
 
@@ -413,11 +469,11 @@ def summarise(config, inventory=None):
     return rows
 
 
-def describe_line(config, inventory=None):
+def describe_line(config, inventory=None, background=False):
     """One line for a history row."""
     config = merged(config)
     parts = [env_label(config, inventory), users_label(config, inventory),
-             scenarios_label(config), sessions_label(config)]
+             scenarios_label(config), sessions_label(config, background)]
     return " · ".join(p for p in parts if p)
 
 

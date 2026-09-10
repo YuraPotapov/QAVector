@@ -519,6 +519,178 @@ def test_stop_flag_makes_a_worker_skip_its_remaining_scenarios(monkeypatch, tmp_
     assert captured["run"].flows == []
 
 
+# ------------------------------------------------------- --no-browser sessions
+# A run with no browser is the same run: the same sessions, the same --jobs, the
+# same governor and the same Stop. Only the adapter differs, so these mirror the
+# window tests above with browser=False.
+
+def _refuse_attach(profile, name):
+    raise AssertionError("a run with no browser must never attach to one")
+
+
+def test_no_browser_never_attaches_and_every_session_gets_a_page_less_adapter(
+        monkeypatch, tmp_path):
+    seen = []
+    _parallel_harness(monkeypatch, tmp_path, lambda name: None)
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+
+    def fake_run_scenario(adapter, scenario_id, session_name, *a, **kw):
+        seen.append((session_name, type(adapter).__name__, kw.get("browser")))
+        return FlowResult(scenario=scenario_id, session=session_name, status=PASS)
+
+    monkeypatch.setattr(runner, "_run_scenario", fake_run_scenario)
+    rc = runner.run_scenarios(_sessions(("a", ("s",)), ("b", ("s",))), "config",
+                              reports_dir=str(tmp_path), jobs=2, browser=False)
+    assert rc == 0
+    assert sorted(seen) == [("a", "NoBrowserAdapter", False),
+                            ("b", "NoBrowserAdapter", False)]
+
+
+def test_no_browser_sessions_run_side_by_side_as_jobs_says(monkeypatch, tmp_path):
+    barrier = threading.Barrier(3, timeout=5)
+    captured = _parallel_harness(monkeypatch, tmp_path, lambda name: barrier.wait())
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+    runner.run_scenarios(_sessions(("a", ("s",)), ("b", ("s",)), ("c", ("s",))),
+                         "config", reports_dir=str(tmp_path), jobs=3, browser=False)
+    # All three were inside a scenario at once, and still reported in session order.
+    assert [f.session for f in captured["run"].flows] == ["a", "b", "c"]
+
+
+def test_no_browser_sessions_queue_beyond_jobs(monkeypatch, tmp_path):
+    live, peak, lock = [0], [0], threading.Lock()
+
+    def work(name):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.05)
+        with lock:
+            live[0] -= 1
+
+    captured = _parallel_harness(monkeypatch, tmp_path, work)
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+    runner.run_scenarios(_sessions(*[(n, ("s",)) for n in "abcde"]), "config",
+                         reports_dir=str(tmp_path), jobs=2, browser=False)
+    assert peak[0] <= 2
+    assert len(captured["run"].flows) == 5
+
+
+def test_no_browser_auto_is_governed_like_any_run(monkeypatch, tmp_path):
+    _parallel_harness(monkeypatch, tmp_path, lambda name: None)
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: 4)
+    started = []
+    monkeypatch.setattr(runner, "_governor", lambda *a, **k: started.append(k))
+    runner.run_scenarios(_sessions(("a", ("s",)), ("b", ("s",)), ("c", ("s",))),
+                         "config", reports_dir=str(tmp_path), jobs="auto", browser=False)
+    assert len(started) == 1
+    assert started[0]["unit"] == "sessions"
+
+
+def test_no_browser_auto_does_not_talk_about_windows(monkeypatch, tmp_path, caplog):
+    _parallel_harness(monkeypatch, tmp_path, lambda name: None)
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(runner, "_governor", lambda *a, **k: None)
+    with caplog.at_level("INFO", logger="flowengine"):
+        runner.run_scenarios(_sessions(("a", ("s",)), ("b", ("s",))), "config",
+                             reports_dir=str(tmp_path), jobs="auto", browser=False)
+    assert "Auto: starting at 2 parallel sessions" in caplog.text
+    assert "Windows were all opened" not in caplog.text
+
+
+def test_no_browser_sessions_stand_aside_between_scenarios_under_auto(monkeypatch,
+                                                                     tmp_path):
+    # What a lowered ceiling does to a session with no window: it waits at the
+    # next scenario boundary, as a session with a window it keeps open does.
+    _parallel_harness(monkeypatch, tmp_path, lambda name: None)
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+    monkeypatch.setattr(runner, "_governor", lambda *a, **k: None)
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: 4)
+    yielded = []
+
+    class Slots(runner.WindowSlots):
+        def yield_if_over(self):
+            yielded.append(True)
+            super().yield_if_over()
+
+    monkeypatch.setattr(runner, "WindowSlots", Slots)
+    runner.run_scenarios(_sessions(("a", ("s1", "s2")), ("b", ("s1", "s2"))), "config",
+                         reports_dir=str(tmp_path), jobs="auto", browser=False)
+    assert len(yielded) == 4            # before every scenario of every session
+
+
+def test_stopping_one_no_browser_session_leaves_the_others(monkeypatch, tmp_path):
+    ran = []
+
+    def work(name):
+        ran.append(name)
+        if name == "a":
+            runner.request_session_stop("a")
+
+    _parallel_harness(monkeypatch, tmp_path, work)
+    monkeypatch.setattr(runner, "_attach", _refuse_attach)
+    try:
+        runner.run_scenarios(_sessions(("a", ("s1", "s2")), ("b", ("s1", "s2"))),
+                             "config", reports_dir=str(tmp_path), jobs=1,
+                             browser=False)
+    finally:
+        with runner._stopped_lock:
+            runner._stopped_sessions.clear()
+    assert ran.count("a") == 1 and ran.count("b") == 2
+
+
+def _compiled(monkeypatch, steps):
+    from domain.plan import GROUP, PlanNode
+
+    monkeypatch.setattr(runner.compiler, "compile_plan",
+                        lambda *a, **k: (steps, PlanNode(id="0", label="s", kind=GROUP)))
+
+
+def test_a_page_step_under_no_browser_is_an_error_before_any_step(monkeypatch,
+                                                                  tmp_path):
+    # The launcher vetted the scenarios; this is the one edited since. Not even
+    # the service step ahead of the click may run - half a scenario is worse.
+    _compiled(monkeypatch, [Step("service_start", target="Storefront/Web"),
+                            Step("click", target=".x")])
+    ran = []
+    monkeypatch.setattr(runner, "_run_step", lambda *a, **k: ran.append(a))
+    result = runner._run_scenario(runner.NoBrowserAdapter(), "s", "dev-agent", None, {},
+                                  runner.RunContext(), str(tmp_path), browser=False)
+    assert result.status == ERROR
+    assert result.error == "needs a browser: click"
+    assert ran == []
+    assert os.listdir(result.artifacts_dir) == ["result.json"]
+
+
+def test_service_steps_run_with_no_browser_at_all(broker, monkeypatch, tmp_path):
+    _compiled(monkeypatch, [Step("service_restart", target="Storefront/Web"),
+                            Step("wait_for_service", target="Storefront/Web")])
+    result = runner._run_scenario(runner.NoBrowserAdapter(), "s", "dev-agent", None, {},
+                                  runner.RunContext(), str(tmp_path), browser=False)
+    assert result.status == PASS
+    assert [op for op, *_rest in broker.asked] == ["service_restart", "wait_for_service"]
+
+
+def test_a_report_with_no_browser_is_the_result_and_nothing_blank(tmp_path):
+    # Every diagnostic refuses, and the reporter skips what refuses - so a failure
+    # leaves result.json, not an empty screenshot and an empty DOM beside it.
+    reporter = runner.artifacts.Reporter(runner.artifacts.ReportConfig(), str(tmp_path),
+                                         runner.NoBrowserAdapter())
+    reporter.finalize(FlowResult(scenario="s", session="a", status=FAIL), failed=True)
+    assert os.listdir(str(tmp_path)) == ["result.json"]
+
+
+def test_every_page_operation_refuses_with_no_browser():
+    from adapters.nobrowser import NoBrowserError
+
+    adapter = runner.NoBrowserAdapter()
+    with pytest.raises(NoBrowserError, match="no browser: click"):
+        adapter.click(".x")
+    # The step fails as an ERROR with that reason, rather than on None.
+    result = runner._run_step(adapter, 0, Step("fill", target=".x", value="y"))
+    assert result.status == ERROR and "no browser" in result.message
+
 # --------------------------------------------------- per-step element marker
 
 class _MarkRecorder:

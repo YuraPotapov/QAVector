@@ -445,6 +445,12 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
   the Execution Overlay, if enabled); close them manually or with CTRL+C. The
   launcher still exits with the aggregate run result either way. Only valid together
   with `--run-tests`.
+- `--no-browser` — run the scenarios with no browser at all. Only for scenarios made
+  of service steps and `assert_host_up`, their `use:` blocks included; any other is
+  refused before the run starts, named with the page steps it takes. Sessions,
+  `--jobs` and the load governor work exactly as they do with windows, and the
+  launcher exits when the run ends. Service steps need the GUI, which is where this
+  is offered: RUN ▾ → *In Background*. Only valid together with `--run-tests`.
 - `--report-level=LIST` — which report artifacts to generate: `console`, `dom`,
   `result`, `screen`, `url`. Only the listed artifacts are produced, on success and
   on failure alike. Omit it to keep the default set (see below).

@@ -121,6 +121,20 @@ def _close_warning(windows):
             "and keeps its login. This can take a few seconds." % closes)
 
 
+def _background_tip(blockers):
+    """The In Background entry's tooltip: what it does, or what stands in its way."""
+    if not blockers:
+        return ("Run with no browser at all: the service steps and their checks, "
+                "with the same sessions, parallelism and Run page as ever.")
+    lines = ["Only scenarios made of service steps and assert_host_up run in the "
+             "background."]
+    for scenario, reason in blockers[:6]:
+        lines.append("%s: %s" % (scenario, reason) if scenario else reason)
+    if len(blockers) > 6:
+        lines.append("… and %d more" % (len(blockers) - 6))
+    return "\n".join(lines)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, splash=None, auto_launch=None, headless=False):
         super().__init__()
@@ -346,15 +360,24 @@ class MainWindow(QMainWindow):
         self.run_button.setProperty("hasmenu", "true")   # reserves the arrow's half
         self.run_button.clicked.connect(self.start_run)
         self.run_menu = QMenu(self.run_button)
-        # One entry, because there is only one thing to want: record. Whether
-        # that continues a scenario or starts a new one follows from what is
-        # selected, and is confirmed rather than guessed.
+        # The tooltips carry the reason an entry is greyed out, and a menu keeps
+        # its tooltips to itself unless told otherwise.
+        self.run_menu.setToolTipsVisible(True)
+        # The same launch with no browser at all. Offered only for scenarios that
+        # need none, which is decided as the menu opens, from what RUN would run
+        # at that moment - see _update_background_action.
+        self.background_action = QAction("In Background", self)
+        self.background_action.triggered.connect(self.start_background_run)
+        self.run_menu.addAction(self.background_action)
+        # Whether recording continues a scenario or starts a new one follows from
+        # what is selected, and is confirmed rather than guessed.
         self.record_action = QAction("With Recorder", self)
         self.record_action.setToolTip(
             "Open the windows with the Scenario Recorder shown in each of them. "
             "Continues the selected scenario if there is one.")
         self.record_action.triggered.connect(self.start_recording)
         self.run_menu.addAction(self.record_action)
+        self.run_menu.aboutToShow.connect(self._update_background_action)
         self.run_button.setMenu(self.run_menu)
         # Stop mirrors RUN: the button is the whole run, the arrow is the one
         # window you are actually looking at. Same shape, because "stop" reads as
@@ -1062,7 +1085,32 @@ class MainWindow(QMainWindow):
             return "cancel"
         return chosen
 
-    def start_run(self, source=None, recorder=False, only_login=None):
+    def _update_background_action(self):
+        """Offer In Background only for what can run with no browser, and say why not.
+
+        Asked as the menu opens rather than kept in step with every edit: it is
+        only read then, and what RUN would run depends on which page is current at
+        that moment. Returns the blockers, empty when there are none.
+        """
+        _source, page = self._run_page(None)
+        blockers = page.background_blockers()
+        self.background_action.setEnabled(not blockers)
+        self.background_action.setToolTip(_background_tip(blockers))
+        return blockers
+
+    def start_background_run(self):
+        """RUN's menu -> In Background: the same launch, with no browser at all.
+
+        Sessions, how many run at once and the load governor are exactly as the
+        page says; only the windows are missing. Checked again here rather than
+        trusted from when the menu opened, so a stale menu cannot start a run the
+        launcher would refuse.
+        """
+        if self._update_background_action():
+            return
+        self.start_run(background=True)
+
+    def start_run(self, source=None, recorder=False, only_login=None, background=False):
         if self.process.is_running():
             return
         if not self.core.is_configured():
@@ -1082,6 +1130,8 @@ class MainWindow(QMainWindow):
                                         % "\n- ".join(problems))
                 return
         args = page.argv()
+        if background:
+            args = commands.for_background(args)
         if recorder:
             args = commands.for_recording(args)
             if only_login:
@@ -1105,22 +1155,23 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self._stopping = False
         self._entry_id = self.history.begin(
-            *self._history_payload(source, page, args, argv))
+            *self._history_payload(source, page, args, argv, background))
         if recorder:
             self.run.run_started(
                 ("continuing %s · " % recorder if recorder is not True else "")
                 + "recorder · press Capture Step (or F2) in a window")
         elif source == "launch":
-            self.run.run_started("%s · events on stdout" % page.run_meta())
+            self.run.run_started("%s · events on stdout" % page.run_meta(background))
         else:
             state = page.state()
-            self.run.run_started("jobs=%s · %s · events on stdout"
-                                 % (state.get("--jobs") or "1",
+            self.run.run_started("%sjobs=%s · %s · events on stdout"
+                                 % ("in the background · " if background else "",
+                                    state.get("--jobs") or "1",
                                     state.get("--run-tests") or "(launch only)"))
         self.show_page("run")
         self.process.start(argv, working_dir=self.core.spawn_dir())
 
-    def _history_payload(self, source, page, args, argv):
+    def _history_payload(self, source, page, args, argv, background=False):
         """(kind, entry fields) for the run about to start.
 
         Both halves go in: what the user asked for, and the command it became.
@@ -1135,7 +1186,7 @@ class MainWindow(QMainWindow):
             config = page.state()
             return history_mod.LAUNCH, {
                 "argv": list(argv), "display_command": display,
-                "summary": page.describe_line(), "launch_config": config,
+                "summary": page.describe_line(background), "launch_config": config,
                 "command_state": launch_mod.to_command_state(config, self.inventory)}
         state = page.state()
         return history_mod.COMMAND, {
@@ -1300,7 +1351,9 @@ class MainWindow(QMainWindow):
 
     def rerun_entry(self, entry):
         source = self.restore_entry(entry)
-        self.start_run(source)
+        # Running in the background is part of what was asked for, even though no
+        # saved configuration keeps it - the command it became does.
+        self.start_run(source, background="--no-browser" in (entry.get("argv") or []))
 
     def _open_log(self, path):
         """Show an archived log on the Log page, where the filters are.

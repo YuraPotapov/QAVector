@@ -1764,3 +1764,85 @@ def test_detach_drops_the_server_log_rather_than_refusing_to_launch(launched,
         opened = launched(local_config, "--env=localhost", "--server-log", "--detach")
     assert len(opened) == 1
     assert "--detach" in caplog.text and "does nothing" in caplog.text
+
+
+# ============================================================ --no-browser
+
+_FIXTURE_FLOWS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "fixtures", "flows")
+
+
+def test_no_browser_needs_scenarios(monkeypatch, config):
+    message = _main(monkeypatch, config, "--env=dev", "--no-browser")
+    assert "--no-browser requires --run-tests" in message
+
+
+def test_no_browser_cannot_record(monkeypatch, config):
+    message = _main(monkeypatch, config, "--env=dev", "--recorder", "--no-browser")
+    assert "--no-browser cannot record" in message
+
+
+def test_no_browser_refuses_a_scenario_that_drives_a_page(monkeypatch, config):
+    # Named before anything starts, with what it does to a page - not discovered
+    # at its first click, minutes into the run.
+    message = _main(monkeypatch, config, "--env=dev", "--no-browser",
+                    "--flows-dir=" + _FIXTURE_FLOWS,
+                    "--run-tests=demo_smoke,demo_simple")
+    assert "need a browser" in message
+    assert "demo_smoke: " in message and "assert_exists" in message
+    assert "demo_simple" not in message        # the host check alone is fine
+
+
+def _run_without_browser(launched, monkeypatch, config, *args):
+    """main() with --no-browser; returns what run_scenarios was handed, and the exit."""
+    from engine import runner as engine_runner
+
+    captured = {}
+
+    def fake_run(sessions, which, **kwargs):
+        captured.update(kwargs, sessions=sessions, which=which)
+        return 0
+
+    monkeypatch.setattr(engine_runner, "run_scenarios", fake_run)
+    monkeypatch.setattr(sl, "find_chrome",
+                        lambda: pytest.fail("a run with no browser looked for Chrome"))
+    monkeypatch.setattr(sl.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("a run with no browser started one"))
+    with pytest.raises(SystemExit) as exc:
+        launched(config, "--url=http://localhost:8069", "--no-browser",
+                 "--flows-dir=" + _FIXTURE_FLOWS, "--run-tests=demo_simple", *args)
+    return captured, exc.value.code
+
+
+@pytest.mark.parametrize("jobs, expected", [("auto", "auto"), ("all", 3), ("2", 2)])
+def test_no_browser_runs_every_session_as_the_sessions_settings_say(
+        launched, monkeypatch, config, tmp_path, jobs, expected):
+    captured, code = _run_without_browser(launched, monkeypatch, config,
+                                          "--jobs=%s" % jobs)
+    assert code == 0                            # exits with the run, keeps nothing open
+    assert captured["browser"] is False
+    assert captured["windows"] is None          # no WindowSource: nothing to open
+    assert captured["jobs"] == expected         # --jobs exactly as for a run with windows
+    assert captured["which"] == ["demo_simple"]
+    sessions = captured["sessions"]
+    assert [s[3] for s in sessions] == ["admin", "role_division", "role_division"]
+    assert all(s[1] is None for s in sessions)  # no process behind any of them
+    assert not (tmp_path / "profiles").exists() # and no profile made for one
+
+
+def test_no_browser_drops_the_overlay_it_has_nowhere_to_draw(launched, monkeypatch,
+                                                             config, caplog):
+    with caplog.at_level("WARNING"):
+        captured, _code = _run_without_browser(launched, monkeypatch, config,
+                                               "--execution-overlay")
+    assert captured["overlay_components"] is None
+    assert "--execution-overlay does nothing with --no-browser" in caplog.text
+
+
+def test_describe_says_which_scenarios_can_run_without_a_browser(monkeypatch, config,
+                                                                 capsys):
+    payload, _code = _describe(monkeypatch, config, "--flows-dir=" + _FIXTURE_FLOWS,
+                               capsys=capsys)
+    by_id = {s["id"]: s for s in payload["scenarios"]}
+    assert by_id["demo_simple"]["browser_actions"] == []
+    assert "assert_exists" in by_id["demo_smoke"]["browser_actions"]

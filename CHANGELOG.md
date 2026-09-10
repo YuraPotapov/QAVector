@@ -16,6 +16,17 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Run in the background: RUN ▾ → *In Background*.** A scenario made only of service
+  steps and `assert_host_up` — a backend restarted, waited for, checked — no longer
+  needs a Chrome window to run in. This runs it with no browser at all: the Run page
+  shows every session and step as usual, and sessions, how many run at once and
+  *Auto*, with the load governor correcting it as the run goes, work exactly as they do
+  with windows. The entry is greyed out, naming the scenario and its page steps,
+  whenever anything selected needs a page, and the launcher refuses such a run too,
+  before it starts. On the command line it is `--no-browser`; `--describe` now says
+  per scenario which page steps it takes (`browser_actions`, `[]` for none).
+
 ## [0.14.5] - 2026-09-10
 
 ### Added

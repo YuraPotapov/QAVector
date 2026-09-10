@@ -111,6 +111,8 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              "--flows-dir",
              # RUN ▾ -> "With Recorder" adds this; it is a mode, not a form field.
              "--recorder",
+             # And RUN ▾ -> "In Background" adds this one, for the same reason.
+             "--no-browser",
              "--help", "-h", "--version", "-V")
 
 # One-shot commands offered in the Tools menu: (what it is called, what a
@@ -141,6 +143,19 @@ def for_recording(args):
     drop = {flag.name for flag in FLAGS if flag.needs_run_tests}
     drop.add("--run-tests")
     return [a for a in args if a.split("=", 1)[0] not in drop]
+
+
+def for_background(args):
+    """``args`` for RUN's menu -> In Background: the same run, with no browser at all.
+
+    ``--no-browser`` goes first, ahead of --events (which build_argv always puts
+    last). What only means something to a window comes out: ``--detach`` (there
+    is none to leave running), ``--execution-overlay`` (no page to draw it in) and
+    ``--report-screen`` (nothing to photograph). Everything else - --jobs above
+    all - is the run exactly as it was configured.
+    """
+    drop = {"--detach", "--execution-overlay", "--report-screen"}
+    return ["--no-browser"] + [a for a in args if a.split("=", 1)[0] not in drop]
 
 
 def flags_for(group):

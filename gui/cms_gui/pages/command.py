@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from .. import commands, icons, theme, widgets
+from .. import commands, icons, launch, theme, widgets
 
 
 class ScenarioPicker(QDialog):
@@ -234,6 +234,27 @@ class CommandPage(QWidget):
 
     def argv(self):
         return commands.build_argv(self.state())
+
+    def background_blockers(self):
+        """What stops this command running with no browser; [] if nothing.
+
+        ``config`` means each launched account's own list, so which accounts that
+        is has to be read off the form the way the launcher will read it.
+        """
+        state = self.state()
+        users = str(state.get("--filter-users") or "").strip()
+        if state.get("--user"):
+            logins = [state["--user"]]
+        elif users and users != "all":
+            logins = [login.strip() for login in users.split(",") if login.strip()]
+        elif self.inventory:
+            alias = state.get("--env") or ""
+            logins = self.inventory.logins(
+                self.inventory.env_value(alias) if alias else None)
+        else:
+            logins = None
+        return launch.background_blockers(state.get("--run-tests"), self.inventory,
+                                          logins)
 
     def _changed(self, *_args):
         if self._building:

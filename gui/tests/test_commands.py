@@ -206,3 +206,22 @@ def test_recording_still_gets_the_flows_dir_now_that_it_is_a_setting():
     # It used to be the one exception to the rule above. It is not in the
     # catalogue at all any more - Core.argv carries it - so nothing drops it.
     assert commands.for_recording(["--flows-dir=/tmp/flows"]) == ["--flows-dir=/tmp/flows"]
+
+
+# ------------------------------------------------ running in the background
+
+def test_background_is_the_same_run_with_no_browser():
+    args = ["--env=localhost", "--run-tests=restart", "--jobs=auto", "--detach",
+            "--execution-overlay=tree", "--report-level=result,screen",
+            "--report-screen=finish", "--events=-", "--control=-"]
+    kept = commands.for_background(args)
+    assert kept[0] == "--no-browser" and kept.count("--no-browser") == 1
+    # What only a window could use goes; the run as configured stays, --jobs
+    # above all, and the event stream is still last.
+    assert kept[1:] == ["--env=localhost", "--run-tests=restart", "--jobs=auto",
+                        "--report-level=result,screen", "--events=-", "--control=-"]
+
+
+def test_no_browser_is_a_mode_the_gui_adds_not_a_form_field():
+    assert "--no-browser" in commands.GUI_OWNED
+    assert "--no-browser" not in commands.BY_NAME

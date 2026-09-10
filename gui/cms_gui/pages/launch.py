@@ -685,15 +685,22 @@ class LaunchSessionsPage(QWidget):
     def problem_list(self):
         return launch.validate(self.state(), self.inventory)
 
-    def run_meta(self):
+    def run_meta(self, background=False):
         """One line for the Run page's header."""
         config = self.state()
         return " · ".join([launch.users_label(config, self.inventory),
                            launch.scenarios_label(config),
-                           launch.sessions_label(config)])
+                           launch.sessions_label(config, background)])
 
-    def describe_line(self):
-        return launch.describe_line(self.state(), self.inventory)
+    def describe_line(self, background=False):
+        return launch.describe_line(self.state(), self.inventory, background)
+
+    def background_blockers(self):
+        """What stops this configuration running with no browser; [] if nothing."""
+        config = self.state()
+        return launch.background_blockers(
+            launch.to_command_state(config, self.inventory)["--run-tests"],
+            self.inventory, launch.selected_logins(config, self.inventory))
 
     def summary_rows(self):
         return launch.summarise(self.state(), self.inventory)

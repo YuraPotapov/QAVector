@@ -18,6 +18,7 @@ import time
 import runtime_paths
 import system_load
 
+from adapters.nobrowser import NoBrowserAdapter
 from domain.result import FlowResult, RunResult, StepResult, PASS, FAIL, ERROR
 from engine import artifacts, assertions, compiler, events, loader, services
 from engine.context import RunContext
@@ -452,7 +453,7 @@ def _governor(slots, ceiling, stop_event, unit="windows"):
 
 def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
                   overlay_components=None, report=None, jobs=1, windows=None,
-                  server_logs=None):
+                  server_logs=None, browser=True):
     """Run ``which`` scenarios against every launched ``sessions`` entry.
 
     ``sessions`` is a list of ``(cls, proc, profile, login, origin[, tests])``
@@ -481,6 +482,11 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
     and the load governor is started. Without one (the tests, and any caller that
     hands over browsers it opened itself) every window is already resident, a
     ceiling can give nothing back, and no governor runs.
+
+    ``browser`` False (``--no-browser``) drives no page at all. Each session gets
+    an adapter that refuses every page operation, and a scenario with a step that
+    needs one is an ERROR before its first step. Nothing else changes: sessions,
+    ``jobs``, the governor and stopping work exactly as they do with a browser.
     """
     env = env or {}
     # flows_dir stays None when it was not given: the loader turns that into its
@@ -532,7 +538,8 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
         if slot_pool is None:
             return _run_one_session(session, session_name, scenarios, env, flows_dir,
                                     selectors, run_dir, overlay_components, report,
-                                    log_prefix=log_prefix, server_logs=server_logs)
+                                    log_prefix=log_prefix, server_logs=server_logs,
+                                    browser=browser)
         if not slot_pool.acquire():
             return []            # stopping: this session never started
         proc = None
@@ -541,12 +548,13 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
                 return _run_one_session(session, session_name, scenarios, env, flows_dir,
                                         selectors, run_dir, overlay_components, report,
                                         log_prefix=log_prefix, slots=yielding,
-                                        server_logs=server_logs)
+                                        server_logs=server_logs, browser=browser)
             proc = windows.open(session)
             opened = (session[0], proc) + tuple(session[2:])
             return _run_one_session(opened, session_name, scenarios, env, flows_dir,
                                     selectors, run_dir, overlay_components, report,
-                                    log_prefix=log_prefix, server_logs=server_logs)
+                                    log_prefix=log_prefix, server_logs=server_logs,
+                                    browser=browser)
         finally:
             # Close BEFORE releasing: the next window must not start while this
             # one is still flushing cookies, or the two overlap for the seconds
@@ -581,7 +589,9 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
             # failure than one that runs out of memory where the user can see it.
             log.info("Auto: starting at %d %s, adjusted as the machine allows.",
                      workers, "windows" if staged else "parallel sessions")
-            if not staged:
+            if not staged and browser:
+                # With no browser there are no windows to have opened, and no
+                # memory of theirs to wish back.
                 log.info("Windows were all opened up front, so this can free CPU "
                          "but not memory; --close-after lets it free both.")
             threading.Thread(target=_governor,
@@ -690,7 +700,7 @@ def _plan_sessions(sessions, per_session, shared, flows_dir, slots):
 
 def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors,
                      run_dir, overlay_components, report, log_prefix=None, slots=None,
-                     server_logs=None):
+                     server_logs=None, browser=True):
     """Drive ONE window: attach, run its scenarios, disconnect. Returns its results.
 
     Everything here - the CDP attach, every step, every screenshot and the
@@ -709,7 +719,7 @@ def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors
     try:
         return _drive_session(session, session_name, scenarios, env, flows_dir,
                               selectors, run_dir, overlay_components, report, results,
-                              slots, server_logs)
+                              slots, server_logs, browser)
     finally:
         if token is not None:
             _session_ctx.reset(token)
@@ -717,10 +727,12 @@ def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors
 
 def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
                    run_dir, overlay_components, report, results, slots=None,
-                   server_logs=None):
+                   server_logs=None, browser=True):
     cls, _proc, profile, login, origin = session[:5]
     log.info("--- session %s: %s ---", session_name, ", ".join(scenarios))
-    adapter = _attach(profile, session_name)
+    # No browser means nothing to attach to. The session is otherwise the same
+    # thing - announced, driven, stoppable - so the rest of this runs as is.
+    adapter = _attach(profile, session_name) if browser else NoBrowserAdapter()
     if adapter is None:
         events.emit("session.attach_failed", session=session_name, login=login,
                     profile=profile, scenarios=list(scenarios))
@@ -752,7 +764,8 @@ def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
                 slots.yield_if_over()
             results.append(
                 _run_scenario(adapter, scenario_id, session_name, flows_dir,
-                              selectors, ctx, run_dir, overlay, report, server_logs))
+                              selectors, ctx, run_dir, overlay, report, server_logs,
+                              browser=browser))
     finally:
         if bridge is not None:
             logging.getLogger("flowengine").removeHandler(bridge)
@@ -830,7 +843,7 @@ def wait_for_devtools(profile, timeout_s=DEVTOOLS_WAIT_S):
 
 
 def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx, run_dir,
-                  overlay=None, report=None, server_logs=None):
+                  overlay=None, report=None, server_logs=None, browser=True):
     overlay = overlay or NullOverlay()
     out_dir = artifacts.scenario_dir(run_dir, session_name, scenario_id)
     # Before the reporter, so the artifact's window can close over it: the backend
@@ -852,6 +865,18 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
         reporter.finalize_compile_error(result)
         log.error("[%s] compile failed: %s", scenario_id, exc)
         return result
+    if not browser:
+        # The launcher vetted every scenario before the run began; this is for one
+        # edited since. A page step here could only fail against no page, so the
+        # scenario is refused whole rather than run up to it.
+        needs = sorted({step.action for step in steps} - compiler.NO_BROWSER)
+        if needs:
+            result.status = ERROR
+            result.error = "needs a browser: %s" % ", ".join(needs)
+            result.duration_ms = (time.time() - started) * 1000
+            reporter.finalize_compile_error(result)
+            log.error("[%s] %s", scenario_id, result.error)
+            return result
 
     overlay.flow_start(plan, role=ctx.user.get("class"))
     reporter.capture_start()
