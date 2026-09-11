@@ -16,6 +16,24 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Launch Sessions → Choose scenarios has an *All / Selected* switch.** *Selected*
+  narrows the list to what is ticked, in the same place, so a long selection reads at
+  a glance without the page growing with it; *Clear all* unticks the lot. Both views
+  carry their counts.
+
+### Changed
+- **History filters by what happened** — result (passed, failed, stopped),
+  environment and period (today, the last 7 days) — instead of by the page a run came
+  from. With nothing picked, the details say so on their own ground rather than as an
+  empty heading beside a blank status pill, and the command line and its *Copy
+  command* button are gone from them.
+- **About describes QAVector as the application it is**: what it does, its version and
+  its Qt, rather than a front-end to a launcher with a version and a Python of its own.
+- **The *Developer mode* button is off the toolbar.** The mode itself is unchanged
+  and stays under View → Developer mode (Ctrl+Shift+D). Settings shows the core
+  script and interpreter only in developer mode; an installed build finds its own.
+
 ## [0.15.0] - 2026-09-11
 
 ### Added

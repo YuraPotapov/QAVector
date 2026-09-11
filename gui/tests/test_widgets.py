@@ -374,3 +374,89 @@ def test_two_counts_fit_what_the_longest_label_leaves_spare(qapp):
     # RAIL_SLACK past the widest label, plus the part of the entry's own right
     # padding that a label never draws in.
     assert pair <= 12 + widgets.BADGE_ENCROACH + 15
+
+
+# ---------------------------------------------------------------- check list
+
+def _scenarios(ticked=()):
+    checks = widgets.CheckList(selected_view=True)
+    checks.set_noun("scenarios")
+    for value in ("alpha", "beta", "gamma", "tag:smoke"):
+        checks.add(value, value)
+    checks.set_checked(ticked)
+    return checks
+
+
+def _visible(checks):
+    return [checks.list.item(i).data(0x0100) for i in range(checks.list.count())
+            if not checks.list.item(i).isHidden()]        # 0x0100: Qt.UserRole
+
+
+def test_the_selected_view_narrows_the_list_to_what_is_ticked(qapp):
+    """What is ticked, in the list's own place - however long the selection."""
+    checks = _scenarios(["beta", "tag:smoke"])
+    assert checks.view._buttons["All"].text() == "All 4"
+    assert checks.view._buttons["Selected"].text() == "Selected 2"
+    assert _visible(checks) == ["alpha", "beta", "gamma", "tag:smoke"]
+    checks.view.set_current("Selected")
+    assert _visible(checks) == ["beta", "tag:smoke"]
+    checks.view.set_current("All")
+    assert _visible(checks) == ["alpha", "beta", "gamma", "tag:smoke"]
+
+
+def test_unticking_under_selected_takes_the_row_away_at_once(qapp):
+    from PySide6.QtCore import Qt
+
+    checks = _scenarios(["alpha", "beta"])
+    seen = []
+    checks.changed.connect(lambda: seen.append(True))
+    checks.view.set_current("Selected")
+    checks.list.item(0).setCheckState(Qt.Unchecked)            # alpha
+    assert _visible(checks) == ["beta"]
+    assert checks.view._buttons["Selected"].text() == "Selected 1"
+    assert seen, "an untick is still a change to the selection"
+
+
+def test_the_search_and_the_view_narrow_together(qapp):
+    checks = _scenarios(["alpha", "beta", "tag:smoke"])
+    checks.view.set_current("Selected")
+    checks.search.setText("smoke")
+    assert _visible(checks) == ["tag:smoke"]
+    # Only what the search hides is counted as hidden by it.
+    assert checks.count.text() == "3 of 4 scenarios   ·   3 hidden by the search"
+    checks.search.setText("")
+    assert _visible(checks) == ["alpha", "beta", "tag:smoke"]
+    assert checks.count.text() == "3 of 4 scenarios"
+
+
+def test_clear_all_unticks_everything_and_then_has_nothing_to_do(qapp):
+    checks = _scenarios(["alpha", "gamma"])
+    seen = []
+    checks.changed.connect(lambda: seen.append(True))
+    assert checks.clear_button.isEnabled()
+    checks.clear_button.click()
+    assert checks.checked() == []
+    assert seen
+    assert not checks.clear_button.isEnabled()
+
+
+def test_an_empty_selected_view_says_why_it_is_empty(qapp):
+    checks = _scenarios()
+    checks.view.set_current("Selected")
+    assert _visible(checks) == []
+    assert not checks._empty.isHidden()
+    assert "Nothing selected yet" in checks._empty.text()
+    checks.set_checked(["gamma"])
+    assert checks._empty.isHidden()
+
+
+def test_a_list_without_the_view_behaves_as_it_always_did(qapp):
+    checks = widgets.CheckList()
+    assert checks.view is None and checks.clear_button is None
+    checks.add("a")
+    checks.add("b")
+    checks.set_checked(["a"])
+    assert _visible(checks) == ["a", "b"]           # ticked or not, all shown
+    checks.search.setText("b")
+    assert _visible(checks) == ["b"]
+    assert checks.count.text() == "1 of 2 selected   ·   1 hidden by the search"

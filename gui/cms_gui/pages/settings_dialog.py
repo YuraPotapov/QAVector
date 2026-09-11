@@ -27,10 +27,13 @@ class SettingsDialog(QDialog):
         column = QVBoxLayout(self)
         column.setContentsMargins(24, 20, 24, 18)
         column.setSpacing(6)
+        developer = bool(settings.developer_mode)
         column.addWidget(widgets.heading("Settings", "h2"))
         column.addWidget(widgets.lede(
             "Stored by the GUI. It never imports the core - it spawns the launcher "
-            "through this interpreter, so the two environments stay independent."))
+            "through this interpreter, so the two environments stay independent."
+            if developer else
+            "Where QAVector finds its accounts, scenarios, services and log sources."))
         column.addSpacing(12)
 
         detected_script, detected_python = core_mod.autodetect()
@@ -38,9 +41,10 @@ class SettingsDialog(QDialog):
         self.script = QLineEdit(current_script)
         self.script.setProperty("mono", True)
         self.script.setPlaceholderText("path to session_launcher.py")
-        column.addWidget(widgets.field("Core script",
-                                       widgets.row(self.script,
-                                                   self._browse_button(self._pick_script))))
+        script_field = widgets.field("Core script",
+                                     widgets.row(self.script,
+                                                 self._browse_button(self._pick_script)))
+        column.addWidget(script_field)
 
         # An installed build's core is an executable, so there is no interpreter to
         # choose - leave the field empty and say why rather than offering a Python
@@ -55,11 +59,20 @@ class SettingsDialog(QDialog):
         self.interpreter_browse = self._browse_button(self._pick_interpreter)
         self.interpreter.setEnabled(not packaged)
         self.interpreter_browse.setEnabled(not packaged)
-        column.addWidget(widgets.field(
+        interpreter_field = widgets.field(
             "Interpreter", widgets.row(self.interpreter, self.interpreter_browse),
             "Only used for a session_launcher.py; a packaged core runs itself. "
             "The core's own .venv is detected automatically when gui/ sits inside "
-            "the core checkout."))
+            "the core checkout.")
+        column.addWidget(interpreter_field)
+
+        # Which core runs, and through what, is a developer's question - an
+        # installed build finds its own. Hidden rather than dropped, though: a
+        # saved path wins over detection (core.Core), so a build pointed at a
+        # checkout once would otherwise have no way back from the UI.
+        self.core_fields = (script_field, interpreter_field)
+        for box in self.core_fields:
+            box.setVisible(developer)
 
         self.config = QLineEdit(settings.config)
         self.config.setProperty("mono", True)

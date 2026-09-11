@@ -369,13 +369,17 @@ def test_the_cli_facing_toolbar_button_follows_the_mode(window):
     assert not window.copy_button.isHidden()
 
 
-def test_the_mode_is_readable_from_the_button_itself(window):
+def test_the_mode_button_is_out_of_sight_but_still_follows_the_mode(window):
+    # The mode lives under View -> Developer mode now. The button is kept, and
+    # kept in step, so it never says something stale if it comes back.
+    assert window.developer_button.isHidden()
     assert "off" in window.developer_button.text()
     assert not window.developer_button.isChecked()
     window.set_developer_mode(True)
     assert "on" in window.developer_button.text()
     assert window.developer_button.isChecked()
     assert window.developer_button.property("variant") == "primary"
+    assert window.developer_button.isHidden()
 
 
 def test_the_menu_item_and_the_button_stay_in_step(window):
@@ -551,16 +555,18 @@ def test_the_history_page_shows_runs_from_both_pages(window, qapp):
     page = window.history_page
     assert page.table.rowCount() == 2
 
-    page.filter.set_current("Command")
+    # Filtered by where it ran, not by which page started it - both kinds answer.
+    combo = page.environment_filter
+    combo.setCurrentIndex(combo.findData("staging"))
     assert page.table.rowCount() == 1
     assert page.table.item(0, 2).text() == "staging"
     assert page.table.item(0, 4).text() == "all"
 
-    page.filter.set_current("Launch Sessions")
+    combo.setCurrentIndex(combo.findData("localhost:8069"))
     assert page.table.rowCount() == 1
     assert "localhost:8069" in page.table.item(0, 2).text()
 
-    page.filter.set_current("All")
+    combo.setCurrentIndex(0)                    # All environments
     assert page.table.rowCount() == 2
 
 

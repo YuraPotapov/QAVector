@@ -30,7 +30,7 @@ Two consequences worth knowing:
 
 * **The environments stay separate.** The GUI's venv needs PySide6 and nothing
   else; the core's needs playwright and cryptography. On Windows they are often
-  not even the same Python. Settings → *Interpreter* is the join.
+  not even the same Python. Settings → *Interpreter* (shown in developer mode) is the join.
 * **The CLI and the GUI can never disagree.** There is no second copy of the
   config format, the scenario list or the flag rules. A flag added to the core
   shows up here after one line in `cms_gui/commands.py` - and a test fails if
@@ -40,8 +40,8 @@ Two consequences worth knowing:
 
 ## Two levels, one toggle
 
-**Developer mode**, top right next to Settings, switches between them without a
-restart:
+**Developer mode** (View → *Developer mode*, or `Ctrl+Shift+D`) switches between
+them without a restart:
 
 |  | regular | developer |
 | --- | --- | --- |
@@ -49,10 +49,11 @@ restart:
 | Command | hidden | yes |
 | *Copy command* in the toolbar | hidden | yes |
 | the generated command line under the Launch summary | hidden | yes |
+| *Core script* and *Interpreter* in Settings | hidden | yes |
 | flag names in the pages and menus | plain wording | the flag |
 
 Launch Sessions is never hidden: it is the primary interface in one mode and
-still the quicker one in the other. `Ctrl+Shift+D` toggles; the toolbar's RUN
+still the quicker one in the other. The toolbar's RUN
 acts on whichever of the two launching pages you were last in.
 
 That last row is the same decision as the others. `--flows-dir` is noise to
@@ -247,7 +248,8 @@ came from and changing one thing. A Launch Sessions entry restores its
 configuration; a Command entry restores its form (and turns developer mode on, so
 there is somewhere to put it). Each entry also links the reports the run wrote and
 a copy of its log, archived at the end of the run because the next run clears the
-Log page.
+Log page. The table filters by how a run ended, where it ran and when (today, the
+last 7 days).
 
 ## Where the GUI keeps its own things
 

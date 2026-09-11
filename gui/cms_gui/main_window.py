@@ -13,7 +13,6 @@ than in either page, so neither page has to know the other exists.
 
 import logging
 import os
-import platform
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
@@ -400,13 +399,15 @@ class MainWindow(QMainWindow):
         self.refresh_button = icons.button(QPushButton("Refresh"), "refresh")
         self.refresh_button.clicked.connect(self.refresh_inventory)
         self.describe_label = widgets.mono("")
-        # A checkable button rather than a menu item alone: which mode you are in
-        # decides what the whole window offers, so it has to be readable at a
-        # glance instead of being remembered.
+        # Out of sight: which level the window is at is not something an everyday
+        # user needs to read or flip, and the mode is still one keystroke away -
+        # View -> Developer mode, Ctrl+Shift+D. The button is kept, and kept in
+        # step by set_developer_mode, so it can come back by removing one line.
         self.developer_button = QPushButton("")
         self.developer_button.setCheckable(True)
         self.developer_button.setCursor(Qt.PointingHandCursor)
         self.developer_button.toggled.connect(self.set_developer_mode)
+        self.developer_button.setVisible(False)
         settings_button = icons.button(QPushButton("Settings"), "settings")
         settings_button.clicked.connect(self.open_settings)
         bar_layout.addWidget(widgets.row(
@@ -1384,46 +1385,20 @@ class MainWindow(QMainWindow):
         self.status_config.setToolTip(path or "")
 
     def about(self):
-        """Who both halves are, and where the core half was found.
+        """What the application is, and which version of it this is.
 
-        The GUI and the core are separate processes and can be separate builds -
-        a checkout of one against an installed copy of the other is a normal
-        thing to be running - so About names both versions rather than one, and
-        says which file the core one came from.
+        One application with one version: how it is split into processes inside
+        is its own business, and not what someone opening About is asking.
         """
         QMessageBox.about(self, "QAVector", self.about_text())
 
     def about_text(self):
         return ("QAVector - Explore. Build. Verify.\n\n"
-                "A front-end for session_launcher.py.\n\n"
-                "The GUI never imports the core: it spawns the launcher through "
-                "the configured interpreter, reads --describe for what exists, "
-                "and follows --events=- for what happens.\n\n"
-                "GUI: %s\ncore: %s\nfrom: %s\n\nPySide6: %s\nPython: %s"
-                % (gui_version(), self._core_version(),
-                   self.core.script or "no core configured", _pyside_version(),
-                   platform.python_version()))
-
-    def _core_version(self):
-        """What the core answers when asked what it is.
-
-        --describe carries it, so normally this costs nothing. Before the first
-        describe - or after one that failed - the core is asked directly rather
-        than reporting "not detected" for a launcher that is sitting right there
-        and working.
-        """
-        if self.inventory.version:
-            return self.inventory.version
-        try:
-            banner = self.core.version()
-        except Exception:
-            return "not detected"
-        # --version prints "qavector <number>"; --describe carries
-        # the number alone. Say the same thing either way.
-        parts = (banner or "").split(None, 1)
-        if len(parts) == 2 and not parts[0][:1].isdigit():
-            return parts[1]
-        return banner or "not detected"
+                "A desktop application for testing web applications end to end. "
+                "It signs your accounts in, each in its own browser session, runs "
+                "recorded scenarios across them, starts and watches the services "
+                "they depend on, and keeps a report of every run.\n\n"
+                "Version: %s\nQt (PySide6): %s" % (gui_version(), _pyside_version()))
 
     def _confirm_close_during_run(self):
         """Ask before closing on top of a live run. True means go ahead.

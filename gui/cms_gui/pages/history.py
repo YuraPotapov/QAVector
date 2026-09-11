@@ -6,17 +6,19 @@ but "run again" - either straight away, or after opening it back up in the page
 that produced it and changing one thing.
 
 Both kinds live in the same table because the question a user asks is "what did
-I run on Tuesday", not "which interface did I use". What differs is where an
-entry goes back to: a Launch Sessions entry restores its configuration, a
-Command entry restores its form.
+I run on Tuesday", not "which interface did I use" - which is also why the
+filters are about what happened (how it ended, where, and when) rather than
+about which page it came from. What differs is where an entry goes back to: a
+Launch Sessions entry restores its configuration, a Command entry its form.
 """
 
+import datetime
 import os
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QHeaderView, QLabel, QMessageBox, QPushButton,
-                               QSplitter, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QMessageBox,
+                               QPushButton, QSplitter, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import commands, history as history_mod, icons, launch, theme, widgets
 
@@ -29,7 +31,22 @@ STATUS_VARIANTS = {history_mod.OK: "accent", history_mod.FAILED: "bad",
 STATUS_COLORS = {history_mod.OK: theme.OK, history_mod.FAILED: theme.BAD,
                  history_mod.STOPPED: theme.WARN, history_mod.ERROR: theme.BAD,
                  history_mod.RUNNING: theme.ACCENT}
-FILTERS = ["All", "Launch Sessions", "Command"]
+
+RESULTS = ["All", "Passed", "Failed", "Stopped"]
+#: The statuses each Result choice keeps. Failed takes error too: read from the
+#: list both mean "this did not pass", and the row itself says which it was. A
+#: run still in flight has no result yet, so only All shows it.
+RESULT_STATUSES = {"Passed": {history_mod.OK},
+                   "Failed": {history_mod.FAILED, history_mod.ERROR},
+                   "Stopped": {history_mod.STOPPED}}
+
+PERIODS = ["All time", "Today", "7 days"]
+#: How far back each Period reaches, in days; Today is the calendar day.
+PERIOD_DAYS = {"Today": 0, "7 days": 7}
+
+ALL_ENVIRONMENTS = "All environments"
+#: A run that was not pointed at one environment - the launcher's "all of them".
+EVERY_ENVIRONMENT = "Every environment"
 
 
 class HistoryPage(QWidget):
@@ -50,16 +67,22 @@ class HistoryPage(QWidget):
         column.setSpacing(6)
         column.addWidget(widgets.heading("History"))
         column.addWidget(widgets.lede(
-            "Every run this GUI started, from either page. Pick one to see what it "
-            "was asked to do, open what it produced, or run it again."))
+            "Every run started from here. Pick one to see what it was asked to do, "
+            "open what it produced, or run it again."))
         column.addSpacing(12)
 
-        self.filter = widgets.Segmented(FILTERS, "All")
-        self.filter.changed.connect(lambda _v: self.refresh())
+        self.result_filter = widgets.Segmented(RESULTS, "All")
+        self.result_filter.changed.connect(lambda _v: self.refresh())
+        self.environment_filter = QComboBox()
+        self.environment_filter.addItem(ALL_ENVIRONMENTS, None)
+        self.environment_filter.currentIndexChanged.connect(lambda _i: self.refresh())
+        self.period_filter = widgets.Segmented(PERIODS, "All time")
+        self.period_filter.changed.connect(lambda _v: self.refresh())
         self.count = widgets.mono("")
         clear = QPushButton("Clear history")
         clear.clicked.connect(self.clear_history)
-        column.addWidget(widgets.row(self.filter, None, self.count, clear))
+        column.addWidget(widgets.row(self.result_filter, 12, self.environment_filter,
+                                     12, self.period_filter, None, self.count, clear))
         column.addSpacing(8)
 
         splitter = QSplitter(Qt.Vertical)
@@ -89,24 +112,36 @@ class HistoryPage(QWidget):
 
     def _detail_panel(self):
         panel = widgets.BlueprintPanel()
-        self.detail_title = widgets.heading("Nothing selected", "h2")
+        self.detail_stack = QStackedWidget()
+
+        # Nothing selected is a state, not a run with its text missing, so it is
+        # said on its own ground. It used to be a heading beside the status pill
+        # left blank - and an empty bordered pill reads as a disabled checkbox.
+        empty = QWidget()
+        empty_column = QVBoxLayout(empty)
+        empty_column.setContentsMargins(0, 0, 0, 0)
+        self.empty_state = widgets.empty_zone(
+            "No run selected",
+            "Pick a run above to see what it was asked to do, open its log or "
+            "artifacts, or run it again.")
+        empty_column.addWidget(self.empty_state)
+        empty_column.addStretch(1)
+        self.detail_stack.addWidget(empty)
+
+        details = QWidget()
+        detail_column = QVBoxLayout(details)
+        detail_column.setContentsMargins(0, 0, 0, 0)
+        detail_column.setSpacing(6)
+        self.detail_title = widgets.heading("", "h2")
         self.status_tag = widgets.Tag("", "neutral")
-        panel.layout().addWidget(widgets.row(self.detail_title, self.status_tag, None))
+        detail_column.addWidget(widgets.row(self.detail_title, self.status_tag, None))
 
         self.detail = QLabel("")
         self.detail.setWordWrap(True)
         self.detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.detail.setStyleSheet("font-size: 12px; color: %s;" % theme.NEUTRAL[800])
-        panel.layout().addWidget(self.detail)
-
-        panel.layout().addWidget(widgets.kicker("command"))
-        self.command_line = QLabel("")
-        self.command_line.setWordWrap(True)
-        self.command_line.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.command_line.setStyleSheet("font-family: %s; font-size: 11px; color: %s;"
-                                        % (theme.MONO_CSS, theme.ACCENT_RAMP[800]))
-        panel.layout().addWidget(self.command_line)
-        panel.layout().addStretch(1)
+        detail_column.addWidget(self.detail)
+        detail_column.addStretch(1)
 
         self.rerun_button = icons.button(QPushButton("Run again"), "run")
         self.rerun_button.setProperty("variant", "primary")
@@ -117,32 +152,58 @@ class HistoryPage(QWidget):
         self.log_button.clicked.connect(self.open_log)
         self.artifacts_button = icons.button(QPushButton("Open artifacts"), "artifacts")
         self.artifacts_button.clicked.connect(self.open_artifacts)
-        self.copy_button = icons.button(QPushButton("Copy command"), "copy")
-        self.copy_button.clicked.connect(self.copy_command)
         self.delete_button = QPushButton("Delete")
         self.delete_button.clicked.connect(self.delete_selected)
-        panel.layout().addWidget(widgets.row(
+        detail_column.addWidget(widgets.row(
             self.rerun_button, self.restore_button, widgets.vline(),
-            self.log_button, self.artifacts_button, self.copy_button, None,
-            self.delete_button))
+            self.log_button, self.artifacts_button, None, self.delete_button))
+        self.detail_stack.addWidget(details)
+
+        panel.layout().addWidget(self.detail_stack)
         self._enable_actions(None)
         return panel
 
     # -- data -----------------------------------------------------------------
+    def filters(self):
+        """``(result, environment, period)`` as chosen; environment None is any."""
+        return (self.result_filter.current(), self.environment_filter.currentData(),
+                self.period_filter.current())
+
     def refresh(self):
         chosen = self.selected_entry()
-        kind = {"Launch Sessions": history_mod.LAUNCH,
-                "Command": history_mod.COMMAND}.get(self.filter.current())
-        self._rows = self.history.entries(kind)
+        recorded = self.history.entries()
+        self._fill_environments(recorded)
+        result, environment, period = self.filters()
+        now = datetime.datetime.now()
+        self._rows = [entry for entry in recorded
+                      if matches(entry, result, environment, period, now)]
         self.table.setRowCount(len(self._rows))
         for index, entry in enumerate(self._rows):
             self._fill_row(index, entry)
         self.table.resizeColumnsToContents()
-        total = len(self.history.entries())
-        self.count.setText("%d shown of %d recorded" % (len(self._rows), total))
+        self.count.setText("%d shown of %d recorded" % (len(self._rows), len(recorded)))
         if chosen is not None:
             self._select_id(chosen.get("id"))
         self._selection_changed()
+
+    def _fill_environments(self, entries):
+        """Offer the environments the record actually has, keeping the choice.
+
+        Read off the entries rather than the inventory: a run against an
+        environment since removed from users.json is still history, and one the
+        record has never seen would only ever filter down to nothing. A choice
+        whose last entry was deleted falls back to All.
+        """
+        combo = self.environment_filter
+        current = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(ALL_ENVIRONMENTS, None)
+        for alias in sorted({entry_environment(entry) for entry in entries}):
+            combo.addItem(alias or EVERY_ENVIRONMENT, alias)
+        index = combo.findData(current) if current is not None else 0
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(False)
 
     def _fill_row(self, index, entry):
         status = entry.get("status", "")
@@ -186,11 +247,9 @@ class HistoryPage(QWidget):
         entry = self.selected_entry()
         self._enable_actions(entry)
         if entry is None:
-            self.detail_title.setText("Nothing selected")
-            self.status_tag.set("", "neutral")
-            self.detail.setText("")
-            self.command_line.setText("")
+            self.detail_stack.setCurrentIndex(0)
             return
+        self.detail_stack.setCurrentIndex(1)
         self.detail_title.setText("%s · %s" % (
             KIND_LABELS.get(entry.get("kind"), "Run"), entry.get("started_at", "")))
         status = entry.get("status", "")
@@ -198,16 +257,13 @@ class HistoryPage(QWidget):
                             STATUS_VARIANTS.get(status, "neutral"))
         self.detail.setText("\n".join("%s: %s" % (label, value)
                                       for label, value in detail_rows(entry)))
-        self.command_line.setText(entry.get("display_command")
-                                  or " ".join(entry.get("argv") or []))
         self.restore_button.setText(
             "Open in Launch Sessions" if entry.get("kind") == history_mod.LAUNCH
             else "Open in Command")
 
     def _enable_actions(self, entry):
         has = entry is not None
-        for button in (self.rerun_button, self.restore_button, self.copy_button,
-                       self.delete_button):
+        for button in (self.rerun_button, self.restore_button, self.delete_button):
             button.setEnabled(has)
         log = (entry or {}).get("log_file") or ""
         run_dir = (entry or {}).get("run_dir") or ""
@@ -235,17 +291,6 @@ class HistoryPage(QWidget):
         if entry and entry.get("run_dir"):
             self.open_artifacts_requested.emit(entry["run_dir"])
 
-    def copy_command(self):
-        entry = self.selected_entry()
-        if entry is None:
-            return
-        from PySide6.QtWidgets import QApplication
-        QApplication.clipboard().setText(self.command_line.text())
-        icons.button(self.copy_button, "pass", "Copied")
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(1400, lambda: icons.button(
-            self.copy_button, "copy", "Copy command"))
-
     def delete_selected(self):
         entry = self.selected_entry()
         if entry is None:
@@ -262,6 +307,45 @@ class HistoryPage(QWidget):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer == QMessageBox.Yes:
             self.history.clear()
+
+
+# -- filtering ----------------------------------------------------------------
+def entry_environment(entry):
+    """The environment alias a run was pointed at; "" for every environment."""
+    if entry.get("kind") == history_mod.LAUNCH:
+        return (entry.get("launch_config") or {}).get("environment") or ""
+    return (entry.get("command_state") or {}).get("--env") or ""
+
+
+def matches(entry, result="All", environment=None, period="All time", now=None):
+    """Whether ``entry`` passes the page's three filters.
+
+    ``result`` and ``period`` are the choices as labelled (see RESULTS and
+    PERIODS); ``environment`` is an alias, "" meaning a run against every
+    environment, and None meaning any at all.
+    """
+    statuses = RESULT_STATUSES.get(result)
+    if statuses is not None and entry.get("status") not in statuses:
+        return False
+    if environment is not None and entry_environment(entry) != environment:
+        return False
+    days = PERIOD_DAYS.get(period)
+    if days is not None:
+        started = _started(entry)
+        if started is None:
+            return False
+        now = now or datetime.datetime.now()
+        if days == 0:
+            return started.date() == now.date()
+        return started >= now - datetime.timedelta(days=days)
+    return True
+
+
+def _started(entry):
+    try:
+        return datetime.datetime.fromisoformat(entry.get("started_at") or "")
+    except (TypeError, ValueError):
+        return None
 
 
 # -- how an entry reads -------------------------------------------------------

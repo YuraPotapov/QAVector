@@ -307,6 +307,12 @@ class Segmented(QWidget):
         if notify:
             self.changed.emit(option)
 
+    def set_text(self, option, text):
+        """Relabel ``option``'s button - a count on it, say - keeping its key."""
+        button = self._buttons.get(option)
+        if button is not None:
+            button.setText(text)
+
     def current(self):
         return self._current
 
@@ -448,15 +454,31 @@ class CheckList(QWidget):
     of these, and there may be thirty of them" - so they are all the same widget.
     The search box hides rows rather than removing them, so a ticked row that
     scrolls out of the filter is still part of the selection.
+
+    ``selected_view`` adds an *All / Selected* switch, for a list long enough that
+    what is ticked gets lost in it. Selected narrows the same rows to the ticked
+    ones, in the same place - so the page does not grow with the selection,
+    whether that is three rows or sixty - and *Clear all* unticks the lot.
     """
 
     changed = Signal()
 
-    def __init__(self, searchable=True, placeholder="Search…", parent=None):
+    def __init__(self, searchable=True, placeholder="Search…", selected_view=False,
+                 parent=None):
         super().__init__(parent)
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
+        self._needle = ""
+
+        self.view = None
+        self.clear_button = None
+        if selected_view:
+            self.view = Segmented([VIEW_ALL, VIEW_SELECTED], VIEW_ALL)
+            self.view.changed.connect(lambda _v: self._apply_visibility())
+            self.clear_button = QPushButton("Clear all")
+            self.clear_button.clicked.connect(lambda: self.set_all(False))
+            column.addWidget(row(self.view, None, self.clear_button))
 
         self.search = QLineEdit()
         self.search.setPlaceholderText(placeholder)
@@ -476,6 +498,10 @@ class CheckList(QWidget):
         column.addWidget(self.count)
         self._quiet = False
         self._noun = "selected"
+        # Only where Selected can empty the list: an empty Selected is a state to
+        # explain ("nothing ticked yet"), not a list that failed to fill.
+        self._empty = empty_note(self.list, "") if selected_view else None
+        self._update_count()
 
     # -- contents -------------------------------------------------------------
     def set_noun(self, noun):
@@ -508,6 +534,8 @@ class CheckList(QWidget):
         self._quiet = True
         self.list.addItem(item)
         self._quiet = False
+        if self.view is not None:
+            item.setHidden(self._should_hide(item))
         self._update_count()
         return item
 
@@ -528,7 +556,7 @@ class CheckList(QWidget):
             item.setCheckState(Qt.Checked if item.data(Qt.UserRole) in wanted
                                else Qt.Unchecked)
         self._quiet = False
-        self._update_count()
+        self._apply_visibility()
         if notify:
             self.changed.emit()
 
@@ -539,29 +567,66 @@ class CheckList(QWidget):
             if item.flags() & Qt.ItemIsEnabled:
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         self._quiet = False
-        self._update_count()
+        self._apply_visibility()
         self.changed.emit()
 
     # -- filtering ------------------------------------------------------------
     def set_filter(self, text):
-        needle = (text or "").strip().lower()
+        self._needle = (text or "").strip().lower()
+        self._apply_visibility()
+
+    def selected_only(self):
+        """Whether the Selected view is on (never, without ``selected_view``)."""
+        return self.view is not None and self.view.current() == VIEW_SELECTED
+
+    def _searched_out(self, item):
+        return bool(self._needle) and self._needle not in item.text().lower()
+
+    def _should_hide(self, item):
+        return self._searched_out(item) or (self.selected_only()
+                                            and item.checkState() != Qt.Checked)
+
+    def _apply_visibility(self):
         for index in range(self.list.count()):
             item = self.list.item(index)
-            item.setHidden(bool(needle) and needle not in item.text().lower())
+            item.setHidden(self._should_hide(item))
         self._update_count()
 
-    def _on_item_changed(self, _item):
+    def _on_item_changed(self, item):
+        # Unticked under Selected, a row goes at once: that view is "what is
+        # ticked", and a row left behind would say otherwise.
+        if self.view is not None:
+            item.setHidden(self._should_hide(item))
         self._update_count()
         if not self._quiet:
             self.changed.emit()
 
     def _update_count(self):
         total = self.list.count()
-        hidden = sum(1 for i in range(total) if self.list.item(i).isHidden())
-        text = "%d of %d %s" % (len(self.checked()), total, self._noun)
-        if hidden:
-            text += "   ·   %d hidden by the search" % hidden
+        ticked = len(self.checked())
+        searched = sum(1 for i in range(total) if self._searched_out(self.list.item(i)))
+        text = "%d of %d %s" % (ticked, total, self._noun)
+        if searched:
+            text += "   ·   %d hidden by the search" % searched
         self.count.setText(text)
+        if self.view is not None:
+            self.view.set_text(VIEW_ALL, "All %d" % total)
+            self.view.set_text(VIEW_SELECTED, "Selected %d" % ticked)
+            self.clear_button.setEnabled(ticked > 0)
+        if self._empty is not None:
+            # Hiding a row is not a change to the model, so the note is told.
+            if self.selected_only() and not ticked:
+                self._empty.say_filtered("Nothing selected yet - tick %s under All."
+                                         % self._noun)
+            elif self._needle:
+                self._empty.say_filtered("Nothing here matches the search.")
+            else:
+                self._empty.say_filtered("")
+
+
+#: The two views a :class:`CheckList` with ``selected_view`` switches between.
+VIEW_ALL = "All"
+VIEW_SELECTED = "Selected"
 
 
 class Disclosure(QWidget):

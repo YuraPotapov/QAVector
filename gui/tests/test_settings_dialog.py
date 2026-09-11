@@ -78,3 +78,35 @@ def test_the_setting_is_what_ends_up_on_the_command_line(qapp, tmp_path):
     assert "--flows-dir=%s" % (tmp_path / "flows") in core.argv("--describe")
     assert "--flows-dir=%s" % (tmp_path / "flows") in core.argv("--flow-save=alpha")
     assert isinstance(core, core_mod.Core)
+
+
+def test_which_core_runs_is_only_on_show_in_developer_mode(qapp):
+    """An installed build finds its own core; only a developer points it elsewhere."""
+    settings = Settings()
+    settings.developer_mode = False
+    try:
+        # Held in a name: a dialog nobody holds is collected at once, and its
+        # fields go with it before they can be looked at.
+        regular = SettingsDialog(settings)
+        assert all(box.isHidden() for box in regular.core_fields)
+        settings.developer_mode = True
+        developer = SettingsDialog(settings)
+        assert not any(box.isHidden() for box in developer.core_fields)
+    finally:
+        settings.developer_mode = False
+
+
+def test_hidden_core_fields_are_still_saved(dialog, tmp_path):
+    """Hidden is not dropped: a saved core path wins over detection, so it has to
+    keep round-tripping - or a build once pointed at a checkout could never be
+    pointed back."""
+    dialog, settings = dialog
+    script = tmp_path / "session_launcher.py"
+    script.write_text("")
+    assert all(box.isHidden() for box in dialog.core_fields)
+    dialog.script.setText(str(script))
+    dialog.apply()
+    try:
+        assert settings.core_script == str(script)
+    finally:
+        settings.core_script = ""

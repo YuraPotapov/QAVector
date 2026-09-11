@@ -416,7 +416,8 @@ class LaunchSessionsPage(QWidget):
         self.scenario_mode.button(0).setChecked(True)
         self.scenario_mode.idToggled.connect(self._scenario_mode_changed)
 
-        self.scenario_list = widgets.CheckList(placeholder="Search scenarios and tags…")
+        self.scenario_list = widgets.CheckList(placeholder="Search scenarios and tags…",
+                                               selected_view=True)
         self.scenario_list.set_noun("scenarios")
         self.scenario_list.changed.connect(self._changed)
         panel.layout().addWidget(self.scenario_list, 1)
