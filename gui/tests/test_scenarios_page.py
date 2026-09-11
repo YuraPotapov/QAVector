@@ -199,6 +199,40 @@ def test_going_back_to_the_saved_value_settles_it_again(page):
     assert not page.is_dirty()
 
 
+def test_the_inputs_in_a_step_row_sit_inside_it(page, qapp):
+    """The action box and the editor a cell opens into both fit their row.
+
+    A row sized for text left both 3px down and hanging over the gridline
+    beneath: the view insets a widget in a cell by the item padding on both
+    sides (theme.CELL_INSET_V), and neither will draw shorter than its minimum.
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    page.core = FakeCore({"alpha": _flow("alpha", steps=[
+        {"action": "click", "target": "first"},
+        {"action": "click", "target": "second"}])})
+    page.set_inventory(_inventory(_row("alpha")))
+    page.open("alpha")
+    page.resize(1200, 800)
+    page.show()
+    qapp.processEvents()
+    table = page.steps
+
+    def centred(cell, box):
+        above, below = box.top() - cell.top(), cell.bottom() - box.bottom()
+        return cell.contains(box) and abs(above - below) <= 1
+
+    for row in range(table.rowCount()):
+        cell = table.visualRect(table.model().index(row, 0))
+        assert centred(cell, table.cellWidget(row, 0).geometry()), row
+
+    table.editItem(table.item(1, 1))
+    qapp.processEvents()
+    editor = table.viewport().findChild(QLineEdit)
+    assert editor is not None
+    assert centred(table.visualRect(table.model().index(1, 1)), editor.geometry())
+
+
 def test_adding_and_moving_steps(page):
     page.core = FakeCore({"alpha": _flow("alpha", steps=[
         {"action": "click", "target": "first"},

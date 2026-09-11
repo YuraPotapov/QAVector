@@ -276,6 +276,7 @@ class ScenariosPage(QWidget):
                                   self.open_target_button, None))
 
         self.steps = QTableWidget(0, len(STEP_HEADERS))
+        self._editor_height = None        # measured once, see _fit_step_rows
         self.steps.setHorizontalHeaderLabels(STEP_HEADERS)
         self.steps.verticalHeader().setVisible(False)
         self.steps.setSelectionBehavior(QTableWidget.SelectRows)
@@ -580,11 +581,33 @@ class ScenariosPage(QWidget):
         combo.setFont(theme.mono_font(9))
         combo.currentTextChanged.connect(self._changed)
         self.steps.setCellWidget(index, 0, combo)
+        self._fit_step_rows(combo)
         for column, value in ((1, step.get("target")), (2, step.get("value")),
                               (3, step.get("timeout"))):
             item = QTableWidgetItem("" if value is None else str(value))
             item.setFont(theme.mono_font(9))
             self.steps.setItem(index, column, item)
+
+    def _fit_step_rows(self, combo):
+        """Make every step row tall enough for the inputs that sit in it.
+
+        Two of them: the action box, and the line edit a cell turns into when it
+        is edited. The view insets both by the item padding above and below
+        (theme.CELL_INSET_V), and neither draws shorter than its own minimum - so
+        a row sized for text left both 3px down and hanging over the gridline
+        beneath. The Services and Environments tables measure the same way;
+        measured rather than written down, since the stylesheet decides.
+        """
+        combo.ensurePolished()
+        if self._editor_height is None:
+            probe = QLineEdit()
+            probe.setFont(theme.mono_font(9))
+            probe.ensurePolished()
+            self._editor_height = probe.minimumSizeHint().height()
+            probe.deleteLater()
+        tallest = max(combo.minimumSizeHint().height(), self._editor_height)
+        self.steps.verticalHeader().setDefaultSectionSize(
+            tallest + 2 * theme.CELL_INSET_V)
 
     def _set_read_only(self, read_only):
         for widget in (self.name_edit, self.tags_edit):

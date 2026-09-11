@@ -16,6 +16,14 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Fixed
+- **The inputs in a scenario's steps sat off their row.** The action box on every
+  step, and the field a cell turns into when you edit it, were drawn 3px low and
+  hung over the line beneath: the rows were sized for text, and the table insets
+  anything placed in a cell. The rows are now as tall as those inputs need, so both
+  sit centred between their lines, as they already did in the Services and
+  Environments tables.
+
 ## [0.15.1] - 2026-09-11
 
 ### Added
