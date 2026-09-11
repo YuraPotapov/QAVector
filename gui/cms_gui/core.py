@@ -57,7 +57,7 @@ INSTALL_CONFIG_KEY = "data_dir"
 
 #: The user's own folder: where an installed core keeps users.json, profiles and
 #: reports, and where services.json and logsources.json default to in any build.
-#: Named for the project; the name it had before 0.15.0 is still read wherever
+#: Named for the project; its name from before the rename is still read wherever
 #: that folder has not been moved yet (see cms_gui.migrate).
 USER_DIR_NAME = "QAVector"
 LEGACY_USER_DIR_NAME = "ChromeMultiSession"

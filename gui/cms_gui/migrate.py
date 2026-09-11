@@ -1,6 +1,6 @@
 """The one-time move from the project's old name to QAVector.
 
-Until 0.15.0 the project was chrome-multi-session, and three things on disk
+Until the rename the project was chrome-multi-session, and three things on disk
 carried that name:
 
 * ``~/ChromeMultiSession`` - the user's own folder: services.json,

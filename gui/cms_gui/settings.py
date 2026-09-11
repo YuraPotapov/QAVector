@@ -11,7 +11,7 @@ from PySide6.QtCore import QSettings
 
 ORG = "qavector"
 APP = "gui"
-#: Where the settings were kept before 0.15.0, when QAVector was
+#: Where the settings were kept before the rename, when QAVector was
 #: chrome-multi-session. Copied into ORG once, at startup - see migrate.
 LEGACY_ORG = "chrome-multi-session"
 

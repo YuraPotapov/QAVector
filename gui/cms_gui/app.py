@@ -90,8 +90,9 @@ def main(argv=None):
     app = QApplication(argv)
     app.setApplicationName("QAVector")
     app.setOrganizationName("qavector")
-    # Before anything opens a setting or the data directory: the first start of
-    # 0.15.0 moves chrome-multi-session's folders and settings to QAVector's.
+    # Before anything opens a setting or the data directory: the first start
+    # after the rename moves chrome-multi-session's folders and settings to
+    # QAVector's.
     migrate.run()
     # Fusion is the one style that looks the same on all three platforms, which
     # is what makes a single stylesheet enough to carry the design - plus the
