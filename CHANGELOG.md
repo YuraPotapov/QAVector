@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-09-11
+
 ### Fixed
 - **The inputs in a scenario's steps sat off their row.** The action box on every
   step, and the field a cell turns into when you edit it, were drawn 3px low and
