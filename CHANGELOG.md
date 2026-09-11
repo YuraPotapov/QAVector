@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-11
+
 ### Added
 - **Launch Sessions → Choose scenarios has an *All / Selected* switch.** *Selected*
   narrows the list to what is ticked, in the same place, so a long selection reads at
