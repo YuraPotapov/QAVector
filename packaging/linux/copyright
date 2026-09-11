@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: qavector
-Source: https://github.com/YuraPotapov/chrome-multi-session
+Source: https://github.com/YuraPotapov/QAVector
 
 Files: *
 Copyright: Yurii Potapov
