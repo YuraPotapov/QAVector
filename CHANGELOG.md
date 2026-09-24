@@ -16,6 +16,21 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-09-24
+
+### Fixed
+- **Running one step refused because a later step had changed.** Run step
+  borrows every other step's last result so the graph stays filled in, and a
+  step edited since - even one far after the selection that it never reads -
+  made the whole run refuse with "Saved settings for ... changed". Only a
+  changed step the selection depends on refuses now; a later one is left out.
+- **Running one step mixed its new answer with the last run's.** Results after
+  the selected step were lent from the last run, though they were made from
+  what the step said then; a step that runs every time and has an `if:` then
+  started at once on those old answers - before the selected step had run -
+  and failed reading its outputs. Nothing after the selection is lent now,
+  and such a step is left out of the run rather than started early.
+
 ## [0.16.3] - 2026-09-24
 
 ### Added
