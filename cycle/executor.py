@@ -318,6 +318,13 @@ def _borrow(run, cycle, only, reuse, registry=None):
     earlier = (reuse.steps if reuse is not None else {}) or {}
     fresh = _must_run(cycle, registry)
     current_definitions = checkpoints.signatures(cycle, run.variables, registry)
+    # What the selection actually reads. Anything else is borrowed only so the
+    # record shows the last known state of the whole cycle.
+    feeding = model.upstream(cycle, wanted)
+    # What the selection feeds. An earlier result there was made from inputs
+    # this run is about to replace - the last run's task, say, where this one
+    # may take another - so lending it would pair new answers with old ones.
+    fed = model.downstream(cycle, wanted) - set(wanted)
     if reuse is not None:
         run.revisions = copy.deepcopy(reuse.revisions)
         run.revision_inputs = copy.deepcopy(reuse.revision_inputs)
@@ -326,12 +333,15 @@ def _borrow(run, cycle, only, reuse, registry=None):
     for step in cycle.steps:
         if step.id in wanted:
             continue
-        if step.id in fresh:
+        if step.id in fresh and step.id not in fed:
             # Left pending on purpose, so the scheduler runs it in order with
-            # everything else that has to be decided again this time.
+            # everything else that has to be decided again this time. Not when
+            # it comes after the selection, though: "run this step" is not
+            # "and everything after it", and such a step would start on the
+            # last run's answers before the selection had produced new ones.
             continue
         was = earlier.get(step.id)
-        if was is not None and was.status not in LENDABLE:
+        if was is not None and (was.status not in LENDABLE or step.id in fed):
             was = None
         step_run = run.steps[step.id]
         if was is None:
@@ -346,9 +356,19 @@ def _borrow(run, cycle, only, reuse, registry=None):
             filled.append(step_run)
             continue
         if was.definition_digest and was.definition_digest != current_definitions[step.id]:
-            raise checkpoints.CheckpointError(
-                "Saved settings for %s changed. Select that node explicitly to rerun it; "
-                "its paid result was preserved." % step.id)
+            if step.id in feeding:
+                raise checkpoints.CheckpointError(
+                    "Saved settings for %s changed. Select that node explicitly to rerun "
+                    "it; its paid result was preserved." % step.id)
+            # Not read by anything this run does, so a result made under other
+            # settings is simply not shown as this run's - rather than refusing
+            # to run a step that never looks at it.
+            step_run.status = SKIPPED
+            step_run.message = ("not part of this run; its last result was made "
+                                "with settings that have since changed")
+            step_run.ended_at = time.time()
+            filled.append(step_run)
+            continue
         step_run.status = was.status
         step_run.source_run = was.source_run or reuse.id
         step_run.definition_digest = was.definition_digest

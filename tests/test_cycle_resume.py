@@ -516,3 +516,64 @@ else:
     imported, = [one for one in records if one["steps"]["paid"].get("source_run")]
     assert imported["steps"]["paid"]["source_run"] == folder.name
     assert counter.read_text() == "called\ncalled\n"
+
+
+# ------------------------------------ running one step while others have changed
+def test_a_changed_step_after_the_selection_does_not_block_running_it(tmp_path):
+    """Running the first step only must not refuse because a later step - one it
+    never reads - was edited since the last run. That later result is simply
+    not shown as this run's."""
+    first = Plugin(lambda c, s: registry.succeeded(key="QA-2"))
+    later = Plugin(lambda c, s: registry.succeeded())
+    cycle = workflow(node("first"), node("later", needs=["first"]))
+    plugins = Plugins(first=first, later=later)
+    previous = run(cycle, plugins, tmp_path)
+    cycle.step("later").settings["prompt"] = "reworded"
+
+    partial = executor.run_cycle(cycle, str(tmp_path / "partial"), registry=plugins,
+                                 only={"first"}, reuse=previous)
+
+    assert partial.ok
+    assert partial.steps["first"].outputs["key"] == "QA-2"
+    assert partial.steps["later"].status == "skipped"
+    assert later.calls == ["later"], "the later step is not run again"
+
+
+def test_nothing_after_the_selection_is_lent_from_the_last_run(tmp_path):
+    """A result that came after the selected step was made from what that step
+    said last time; this run may say something else, so pairing the two would
+    mix one run's task with another's answers."""
+    first = Plugin(lambda c, s: registry.succeeded(key="QA-1"))
+    later = Plugin(lambda c, s: registry.succeeded(saw=s.settings["key"]))
+    cycle = workflow(node("first"),
+                     node("later", needs=["first"],
+                          **{"with": {"key": "${steps.first.outputs.key}"}}))
+    plugins = Plugins(first=first, later=later)
+    previous = run(cycle, plugins, tmp_path)
+    first.action = lambda c, s: registry.succeeded(key="QA-2")
+
+    partial = executor.run_cycle(cycle, str(tmp_path / "partial"), registry=plugins,
+                                 only={"first"}, reuse=previous)
+
+    assert partial.steps["first"].outputs["key"] == "QA-2"
+    assert partial.steps["later"].status == "skipped"
+    assert "saw" not in (partial.steps["later"].outputs or {})
+
+
+def test_a_step_that_must_run_every_time_waits_if_it_comes_after_the_selection(tmp_path):
+    """Such a step with an `if:` used to start at once on the last run's answers
+    - before the step somebody asked for had run - and fail reading it."""
+    first = Plugin(lambda c, s: registry.succeeded(key="QA-2"))
+    gate = Plugin(lambda c, s: registry.succeeded(), reusable=False)
+    note = Plugin(lambda c, s: registry.succeeded(saw=s.settings["key"]))
+    cycle = workflow(node("first"), node("gate", needs=["first"]),
+                     node("note", needs=["gate"], **{"if": "${steps.gate.status} != 'x'",
+                                                   "with": {"key": "${steps.first.outputs.key}"}}))
+    plugins = Plugins(first=first, gate=gate, note=note)
+    previous = run(cycle, plugins, tmp_path)
+
+    partial = executor.run_cycle(cycle, str(tmp_path / "partial"), registry=plugins,
+                                 only={"first"}, reuse=previous)
+
+    assert partial.ok, [(k, v.status, v.message) for k, v in partial.steps.items()]
+    assert partial.steps["note"].status == "skipped"
