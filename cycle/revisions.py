@@ -30,7 +30,30 @@ def targets(cycle, gate_id, target_id):
     return path | {gate_id}
 
 
-def settings(step, run, scope):
+#: Steps that read a task and could hold the work to it. A person's answer at
+#: an approval reaches every one of them after the plan it revised.
+AGENTS = ("agent.review", "agent.edit", "agent.implement")
+
+DECIDED = (
+    "\n\nA person answered this plan's approval with the decisions in "
+    "inputs.person_decided. Where they differ from the task above, they replace "
+    "it: build and judge against the task as those decisions changed it, and do "
+    "not report following them as a deviation from the task. Anything they do "
+    "not mention still stands as written.")
+
+
+def decided_after(cycle, run):
+    """Every step downstream of a plan a person sent back - which is every step
+    that must treat that person's answer as part of the task."""
+    later = set()
+    for one in run.revisions:
+        target = one.get("target")
+        if target and cycle.step(target) is not None:
+            later |= model.downstream(cycle, {target}) - {target}
+    return later
+
+
+def settings(step, run, scope, cycle=None):
     resolved = variables.resolve(step.settings, scope)
     feedback = run.revision_inputs.get(step.id)
     if feedback:
@@ -40,6 +63,15 @@ def settings(step, run, scope):
             "\n\nRevise the previous plan using inputs.user_revision. Address the person's "
             "feedback and preserve prior agreed requirements. Return the complete updated "
             "plan in the required review format, explaining anything that remains unresolved.")
+    elif (cycle is not None and run.revisions and step.plugin in AGENTS
+          and step.id in decided_after(cycle, run)):
+        # Only the revised step used to hear the answer. A reviewer after it
+        # read the task alone and refused the plan for following the person;
+        # the acceptance would have refused the work for the same reason.
+        resolved = copy.deepcopy(resolved)
+        resolved["inputs"] = dict(resolved.get("inputs") or {}, person_decided=[
+            one["feedback"] for one in run.revisions if one.get("feedback")])
+        resolved["task"] = str(resolved.get("task") or "") + DECIDED
     return resolved
 
 

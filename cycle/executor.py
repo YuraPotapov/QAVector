@@ -829,7 +829,8 @@ class _Scheduler(object):
             if previous.status != SUCCESS or not previous.input_digest:
                 continue
             try:
-                settings = revisions.settings(self.steps[name], self.run, self._scope())
+                settings = revisions.settings(self.steps[name], self.run, self._scope(),
+                                              self.cycle)
             except variables.ResolveError as exc:
                 return FAILED, "Saved inputs for %s are unavailable: %s" % (name, exc)
             if checkpoints.digest(settings) != previous.input_digest:
@@ -881,7 +882,7 @@ class _Scheduler(object):
         self.inflight[step.id] = (token, self.deadlines[step.id])
 
         try:
-            settings = revisions.settings(step, self.run, self._scope())
+            settings = revisions.settings(step, self.run, self._scope(), self.cycle)
         except variables.ResolveError as exc:
             self.inflight.pop(step.id, None)
             self._resolve(step, FAILED, str(exc))

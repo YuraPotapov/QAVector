@@ -13,6 +13,7 @@ from domain.cycle import Artifact, PENDING, RUNNING, SUCCESS
 class Services:
     def __init__(self):
         self.calls = []
+        self.asked = []
         self.charged = []
         self.written = []
         outer = self
@@ -22,6 +23,7 @@ class Services:
 
             def execute(self, context, step):
                 outer.calls.append(step.id)
+                outer.asked.append((step.id, step.settings))
                 call = Operation(context, step, "review", step.settings)
                 answer = call.cached()
                 if answer is None:
@@ -182,3 +184,33 @@ def test_revision_target_must_be_an_upstream_review():
     cycle = workflow()
     cycle.step("approve").settings["revision_step"] = "write"
     assert any("agent.review" in message for message in model.problems(cycle))
+
+
+def test_every_agent_after_the_revised_plan_hears_what_the_person_decided(tmp_path, monkeypatch):
+    """Only the revised step used to get the answer. The review after it read
+    the task alone, so a plan that followed the person was refused for
+    changing the requirement "without any recorded authority"."""
+    services, cycle = Services(), workflow()
+    answers(monkeypatch, feedbacks=("Measure against the price before the discount",))
+    result = executor.run_cycle(cycle, str(tmp_path / "run"), registry=services)
+    assert result.ok, result.message
+
+    reviews = [settings for name, settings in services.asked if name == "review"]
+    assert "person_decided" not in reviews[0]["inputs"], "nobody had answered yet"
+    assert reviews[1]["inputs"]["person_decided"] == [
+        "Measure against the price before the discount"]
+    assert "they replace it" in reviews[1]["task"]
+
+    plans = [settings for name, settings in services.asked if name == "plan"]
+    assert "person_decided" not in plans[1]["inputs"], "the revised step has its own"
+    assert plans[1]["inputs"]["user_revision"]["feedback"].startswith("Measure")
+
+
+def test_a_step_before_the_revised_plan_is_not_told():
+    from cycle import revisions
+    from domain.cycle import CycleRun
+
+    cycle = workflow()
+    run = CycleRun(id="r", cycle_id="demo")
+    run.revisions = [{"target": "plan", "feedback": "Use the other formula"}]
+    assert revisions.decided_after(cycle, run) == {"review", "approve", "write"}
