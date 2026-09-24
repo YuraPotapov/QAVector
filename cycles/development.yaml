@@ -257,6 +257,11 @@ steps:
         Keep it to what the task asks for. Say plainly in the summary when the
         task is too vague to act on, and what you would have to ask.
 
+        The risk is never lower than the highest severity among the
+        packages, and a requirement somebody still has to confirm makes it
+        at least medium - a person deciding whether to start reads the risk
+        first.
+
       scope: true
   - id: business
     plugin: agent.review
@@ -292,6 +297,15 @@ steps:
         the task or the rules plainly require one of those, that is an issue
         with medium severity. If it is only a sensible extra, leave it: the
         person who approves the plan sees that list and decides.
+
+        One exception: a requirement that goes against plain business sense
+        or arithmetic - a figure that misstates what the customer gets, a
+        price that loses money on every sale, a calculation that cannot be
+        right - is an issue with medium severity even when the task asks for
+        it in so many words, and even when somebody is said to have agreed
+        to it. Say what is wrong with it and what a person has to decide. Do
+        not rewrite the requirement yourself; make sure a person looks at it
+        before work starts.
 
   - id: plan_is_sound
     plugin: check.gate
