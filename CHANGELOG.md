@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-24
+
 ### Added
 - **A review can judge how hard the task is.** `assess: complexity` on an
   `agent.review` step adds a `complexity` - `low`, `medium`, `high`, `xhigh` or
