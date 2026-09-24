@@ -162,7 +162,7 @@ steps:
       expect_tree: "${steps.impl.outputs.tree}"
       author_name: QAVector
       author_email: cycle@example.invalid
-      message: "${steps.plan.outputs.summary}"
+      message: "${steps.todo.outputs.key}: ${steps.todo.outputs.title}\n\n${steps.plan.outputs.summary}\n"
 
   - id: report
     plugin: report.html

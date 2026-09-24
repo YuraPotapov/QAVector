@@ -474,8 +474,12 @@ steps:
       expect_tree: "${steps.implement.outputs.tree}"
       author_name: QAVector
       author_email: cycle@example.invalid
+      # The task's own title is the subject; the plan that was carried out is
+      # the body. The plan summary alone is a paragraph, not a subject line.
       message: |
-        ${steps.todo.outputs.key}: ${steps.plan.outputs.summary}
+        ${steps.todo.outputs.key}: ${steps.todo.outputs.title}
+
+        ${steps.plan.outputs.summary}
 
   # -- write down what happened -----------------------------------------------
   - id: record

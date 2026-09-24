@@ -387,6 +387,15 @@ def test_the_commit_carries_the_trailer_a_rerun_recognises(approved):
     assert "QAVector-Operation:" in world.message()
 
 
+def test_the_commit_subject_is_the_task_and_the_plan_is_its_body(approved):
+    """The subject was once the plan's whole summary - a paragraph on one line,
+    opening with whatever the plan said about itself."""
+    world, _first, _again = approved
+    subject, blank, body = world.message().partition("\n")
+    assert subject == "QA-7: Greet the nameless"
+    assert blank and body.strip(), "the plan is kept, in the body"
+
+
 def test_it_commits_the_work_and_not_the_leavings(approved):
     """The checks run in the checkout and leave build artefacts behind. What
     is committed should be the change, not what running the tests produced."""
@@ -789,6 +798,8 @@ def test_the_variant_still_commits_the_tree_that_passed(already_started):
     assert verified and verified == committed
     assert committed == already_started.tree_of(
         _outputs(steps, "commit")["commit"])
+    assert already_started.message().partition("\n")[0] == \
+        "QA-7: Greet the nameless"
 
 
 def test_a_refusal_in_the_variant_leaves_the_board_alone_too(already_started):

@@ -318,7 +318,7 @@ steps:
       directory: ${vars.project_dir}
       expect_tree: ${steps.implement.outputs.tree}
       expect_branch: ${steps.todo.outputs.key}
-      message: "${steps.todo.outputs.key}: ${steps.settle.outputs.summary}\n"
+      message: "${steps.todo.outputs.key}: ${steps.todo.outputs.title}\n\n${steps.settle.outputs.summary}\n"
     on_failure: continue
   - id: record
     plugin: memory.remember
