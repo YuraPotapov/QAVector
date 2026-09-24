@@ -709,3 +709,67 @@ def test_the_effort_goes_on_the_first_line_of_a_longer_message():
 
     assert with_effort("failed\n- one\n- two", "") == \
         "failed - at the CLI's default effort\n- one\n- two"
+
+
+# --------------------------------------------- naming what the work leaves out
+def test_a_review_asked_for_scope_must_name_what_it_leaves_out():
+    with pytest.raises(ValueError, match="out_of_scope"):
+        validate_review(dict(REVIEW), scope=True)
+    with pytest.raises(ValueError, match="out_of_scope"):
+        validate_review(dict(REVIEW, out_of_scope=["fine", ""]), scope=True)
+    left = ["Non-text codes raise AttributeError today."]
+    assert validate_review(dict(REVIEW, out_of_scope=left), scope=True)[
+        "out_of_scope"] == left
+    assert validate_review(dict(REVIEW, out_of_scope=[]), scope=True)[
+        "out_of_scope"] == [], "an empty list is an answer: nothing left out"
+
+
+def test_an_out_of_scope_list_nobody_asked_for_is_dropped():
+    assert "out_of_scope" not in validate_review(dict(REVIEW, out_of_scope=["x"]))
+
+
+def test_the_prompt_asks_for_scope_only_when_the_step_does():
+    assert '"out_of_scope"' not in _claude_cli_prompt("Plan it", {}, [], "")
+    asked = _claude_cli_prompt("Plan it", {}, [], "", scope=True)
+    assert '"out_of_scope": [' in asked and "decides whether the line is" in asked
+
+
+@_posix_only
+def test_what_a_plan_leaves_out_comes_back_counted(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20260924-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    left = ["Whitespace around a code is not stripped.",
+            "A code cannot be removed once applied."]
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=_replying(tmp_path, dict(_REVIEW, out_of_scope=left)),
+                           scope=True))
+
+    assert result.ok, result.message
+    assert result.outputs["out_of_scope"] == left
+    assert result.outputs["out_of_scope_count"] == 2
+    assert "2 left out of scope" in result.message
+
+
+def test_a_review_without_scope_counts_nothing_left_out(context, monkeypatch):
+    def worker(_ctx, _step, argv, *_args, **_kwargs):
+        Path(argv[-1]).write_text(json.dumps(REVIEW))
+        return registry.succeeded()
+
+    monkeypatch.setattr("cycle.plugins.agent.run_process", worker)
+    result = AgentReview().execute(context, review_step())
+    assert result.outputs["out_of_scope_count"] == 0
+    assert "out_of_scope" not in result.outputs
+
+
+def test_the_worker_carries_scope_to_its_prompt():
+    from cycle.plugins.agent_worker import prompt_for
+
+    base = {"task": "Plan it", "inputs": {}, "files": []}
+    assert "out_of_scope" not in prompt_for(base)
+    assert "out_of_scope" in prompt_for(dict(base, scope=True))

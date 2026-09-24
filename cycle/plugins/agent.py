@@ -28,7 +28,8 @@ from cycle import registry
 from cycle.plugins import agent_cli, agent_run
 from cycle.operations import Operation, result_document, result_from_document
 from cycle.plugins._process import run_process
-from cycle.plugins.agent_worker import COMPLEXITY_GUIDE, extract_json, validate_review
+from cycle.plugins.agent_worker import (COMPLEXITY_GUIDE, SCOPE_GUIDE, extract_json,
+                                        validate_review)
 from cycle.registry import (CyclePlugin, PluginMetadata, action, field,
                             output)
 from domain.cycle import Artifact
@@ -95,6 +96,11 @@ class AgentReview(CyclePlugin):
                        "effort scale (low to max), and publishes it as "
                        "`complexity` - so a later agent step can take "
                        "effort: ${steps.<id>.outputs.complexity}."),
+            field("scope", "Name what is left out", "check", default=False,
+                  hint="Also asks for everything the task leaves unsaid that "
+                       "the work deliberately does not handle, published as "
+                       "`out_of_scope` - for the person who approves the plan "
+                       "to see where the line was drawn."),
         ),
         outputs=(
             output("summary", "string"), output("issues", "array"),
@@ -109,6 +115,11 @@ class AgentReview(CyclePlugin):
             output("complexity", "string",
                    "How hard the task is, as an effort level - only when the "
                    "step sets assess: complexity."),
+            output("out_of_scope", "array",
+                   "What the work deliberately leaves out, one sentence each - "
+                   "only when the step sets scope."),
+            output("out_of_scope_count", "number",
+                   "How many things it leaves out; 0 without scope."),
             output("effort", "string",
                    "The effort level claude_cli ran at; empty for the CLI's "
                    "own default or a worker framework."),
@@ -254,6 +265,7 @@ class AgentReview(CyclePlugin):
             "inputs": self.setting(step.settings, "inputs", {}), "files": files,
             "max_iterations": int(self.setting(step.settings, "max_iterations", 12)),
             "assess": self.setting(step.settings, "assess", ""),
+            "scope": _scoped(self, step),
         }
         interpreter = os.path.expanduser(self.setting(step.settings, "python"))
         # Explicit relative interpreter paths are relative to the run workspace;
@@ -295,15 +307,15 @@ class AgentReview(CyclePlugin):
             if len(raw.encode("utf-8")) > RESULT_BYTES:
                 raise ValueError("review exceeds the 2 MiB limit")
             review = validate_review(json.loads(raw),
-                                     request["assess"] == "complexity")
+                                     request["assess"] == "complexity",
+                                     request["scope"])
         except (OSError, ValueError, TypeError) as exc:
             result.status = "failed"
             result.message = "Agent did not return a valid review: %s" % exc
             return result
         report_path = os.path.join(directory, "review.json")
         operation.store.write(report_path, review)
-        result.outputs = dict(review, report_path=context.relative(report_path),
-                              **counts(review))
+        result.outputs = _review_outputs(review, context.relative(report_path))
         result.artifacts.append(Artifact("json", context.relative(report_path), step.id,
                                          name="review", bytes=os.path.getsize(report_path)))
         result.message = "%s review: %s" % (request["framework"], _said(review))
@@ -335,10 +347,11 @@ def _claude_cli_method(self, context, step):
         return registry.failed("Cannot prepare agent files: %s" % exc)
 
     assess = self.setting(step.settings, "assess", "") == "complexity"
+    scope = _scoped(self, step)
     prompt = _claude_cli_prompt(
         str(self.setting(step.settings, "task") or ""),
         self.setting(step.settings, "inputs", {}), files, repository,
-        complexity=assess)
+        complexity=assess, scope=scope)
 
     directory = context.step_dir(step.id)
     # The prompt is on the command line and can be long, so it is kept out of
@@ -359,7 +372,7 @@ def _claude_cli_method(self, context, step):
         return result
 
     try:
-        review = validate_review(extract_json(reply.text), assess)
+        review = validate_review(extract_json(reply.text), assess, scope)
     except (ValueError, TypeError) as exc:
         result.status = "failed"
         result.message = "Agent did not return a valid review: %s" % exc
@@ -369,8 +382,7 @@ def _claude_cli_method(self, context, step):
     with open(report_path, "w", encoding="utf-8") as handle:
         json.dump(review, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
-    result.outputs = dict(review, report_path=context.relative(report_path),
-                          **counts(review))
+    result.outputs = _review_outputs(review, context.relative(report_path))
     if reply.cost is not None:
         result.outputs["cost_usd"] = reply.cost
     result.artifacts.append(Artifact("json", context.relative(report_path), step.id,
@@ -403,15 +415,35 @@ def counts(review):
                                   and one.get("severity") in BLOCKING)}
 
 
+def _review_outputs(review, report):
+    """What a review step publishes: the answer, its counts, where it is.
+
+    ``out_of_scope_count`` for the reason the counts exist: a gate may want to
+    ask whether the plan left anything out, and cannot measure the list.
+    """
+    return dict(review, report_path=report,
+                out_of_scope_count=len(review.get("out_of_scope") or []),
+                **counts(review))
+
+
+def _scoped(plugin, step):
+    """Whether the step asked for what it leaves out. A check box may arrive as
+    a bool, or as text from a cycle file written by hand."""
+    value = plugin.setting(step.settings, "scope", False)
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
 def _said(review):
     """The one line a review step reports: risk, issues, and a judged level."""
     line = "%s risk, %d issue(s)" % (review["risk"], len(review["issues"]))
     if review.get("complexity"):
         line += ", %s complexity" % review["complexity"]
+    if "out_of_scope" in review:
+        line += ", %d left out of scope" % len(review["out_of_scope"])
     return line
 
 
-def _claude_cli_prompt(task, inputs, files, repository, complexity=False):
+def _claude_cli_prompt(task, inputs, files, repository, complexity=False, scope=False):
     """The whole request, as one prompt.
 
     Written out rather than handed over as attachments because the CLI takes a
@@ -448,10 +480,14 @@ else - no prose before it, no code fence around it:
 }
 
 Every field is required. Use an empty list when you found nothing.""" % (
-        ',\n  "complexity": "low" | "medium" | "high" | "xhigh" | "max"'
-        if complexity else "")]
+        (',\n  "complexity": "low" | "medium" | "high" | "xhigh" | "max"'
+         if complexity else "")
+        + (',\n  "out_of_scope": ["what is left out, one sentence each"]'
+           if scope else ""))]
     if complexity:
         parts += ["", COMPLEXITY_GUIDE]
+    if scope:
+        parts += ["", SCOPE_GUIDE]
     return "\n".join(parts)
 
 
