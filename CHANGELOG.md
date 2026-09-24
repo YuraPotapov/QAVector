@@ -16,6 +16,24 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-09-24
+
+### Added
+- **`min_effort` on every agent step** - a floor under Effort. With Effort
+  taken from a review's judgement, a task judged easy is still reviewed at no
+  less than the floor; the step says when it raised the level ("at medium
+  effort (raised from low)").
+
+### Fixed
+- **The development cycles' code review never saw the change.** It was told
+  to read `git diff` and has no shell, so it compared files against what the
+  plan said they would be. A new `diff` step captures the change - files git
+  does not track yet included, nothing staged - and the review and the
+  acceptance are given it.
+- **A commit's body began with the settle step's remark about itself**
+  ("Unchanged. DEMO-2 is clear enough..."). The settled plan is now only the
+  plan, written to stand as the body of the commit that carries it out.
+
 ## [0.16.2] - 2026-09-24
 
 ### Added
