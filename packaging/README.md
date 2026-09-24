@@ -180,9 +180,12 @@ launches nothing. So the package suggests `google-chrome-stable` and says nothin
 else; `find_chrome()` prefers a binary that actually answers `--version`, and both
 `postinst` and the GUI's first `--describe` tell the user how to install one.
 
-**Sizes.** ~170 MB per bundle unpacked, ~96 MB compressed. Qt and the Node driver
-are the whole of it; the exclusion list in `gui.spec` already drops WebEngine, QML,
-3D and multimedia.
+**Sizes.** The GUI now bundles Qt WebEngine for styled HTML artifact previews,
+including its renderer process and resources. Qt Quick Widgets prepares the
+window's graphics composition before it appears, so opening the first HTML
+report does not recreate the window. Earlier bundle size estimates predate
+these additions. The exclusion list in `gui.spec` still drops unused Quick
+Controls, 3D and multimedia modules.
 
 ## Building for Windows
 

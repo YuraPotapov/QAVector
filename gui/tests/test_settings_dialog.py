@@ -12,7 +12,24 @@ def dialog(qapp):
     settings = Settings()
     # Leave nothing behind from a previous test's run.
     settings.flows_path = ""
+    settings.cycle_secrets_path = ""
+    settings.cycle_memory_path = ""
     return SettingsDialog(settings), settings
+
+
+def test_where_the_cycle_secrets_go_is_remembered(dialog):
+    dialog, settings = dialog
+    dialog.cycle_secrets.setText("  /data/secrets.json  ")
+    dialog.apply()
+    assert settings.cycle_secrets_path == "/data/secrets.json"
+
+
+def test_a_blank_secrets_field_says_where_they_would_go(dialog):
+    """Blank is not an answer to "where are my credentials kept"."""
+    dialog, _settings = dialog
+    where = dialog.cycle_secrets.placeholderText()
+    assert where.endswith("cyclesecrets.json")
+    assert "cycles" not in where.split("/")       # never among the cycle files
 
 
 def test_the_scenarios_folder_is_remembered(dialog):
@@ -110,3 +127,71 @@ def test_hidden_core_fields_are_still_saved(dialog, tmp_path):
         assert settings.core_script == str(script)
     finally:
         settings.core_script = ""
+
+
+def test_where_the_cycle_memory_goes_is_remembered(dialog):
+    dialog, settings = dialog
+    dialog.cycle_memory.setText("  /data/memory.json  ")
+    dialog.apply()
+    assert settings.cycle_memory_path == "/data/memory.json"
+
+
+def test_the_two_cycle_stores_are_separate_fields(dialog):
+    """Secrets are hidden because reading them is the harm; memory is meant to
+    be read. One box for both would put the wrong policy on one of them."""
+    dialog, _settings = dialog
+    assert dialog.cycle_memory.placeholderText().endswith("cyclememory.json")
+    assert dialog.cycle_secrets.placeholderText().endswith("cyclesecrets.json")
+
+
+# ------------------------------------------------------- fitting on a screen
+# Ten paths, each with a note under it, is taller than a laptop screen - and a
+# dialog cannot grow past one, so Qt used to squeeze the notes below the height
+# their wrapped text needs until each ran into the field under it.
+def test_the_form_scrolls_when_there_is_not_room_for_all_of_it(dialog, qapp):
+    dialog, _settings = dialog
+    dialog.resize(620, 320)
+    dialog.show()
+    qapp.processEvents()
+    try:
+        assert dialog._scroll.widget().height() > dialog._scroll.viewport().height()
+        assert dialog._scroll.verticalScrollBar().maximum() > 0
+    finally:
+        dialog.close()
+
+
+def test_save_is_reachable_however_short_the_screen(dialog, qapp):
+    """It is outside the scroll, so it cannot be the thing that is cut off."""
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    dialog, _settings = dialog
+    dialog.resize(620, 320)
+    dialog.show()
+    qapp.processEvents()
+    try:
+        buttons = dialog.findChild(QDialogButtonBox)
+        assert buttons is not None
+        assert not dialog._scroll.isAncestorOf(buttons)
+        top_left = buttons.mapTo(dialog, buttons.rect().topLeft())
+        assert top_left.y() + buttons.height() <= dialog.height()
+    finally:
+        dialog.close()
+
+
+def test_a_hint_is_given_the_height_its_own_text_needs(dialog, qapp):
+    """The squeeze was what made two of them overlap: a word-wrapped label
+    compressed below its wrapped height draws over the field beneath it."""
+    from PySide6.QtWidgets import QLabel
+
+    dialog, _settings = dialog
+    dialog.resize(620, 320)
+    dialog.show()
+    qapp.processEvents()
+    try:
+        hints = [one for one in dialog._body.findChildren(QLabel)
+                 if one.wordWrap() and len(one.text()) > 80]
+        assert hints
+        for hint in hints:
+            assert hint.height() >= hint.heightForWidth(hint.width())
+    finally:
+        dialog.close()

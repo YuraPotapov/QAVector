@@ -163,7 +163,7 @@ def test_a_save_that_cannot_be_written_is_reported_not_raised(window, monkeypatc
     monkeypatch.setattr("cms_gui.pages.serverlogwindow.QFileDialog.getSaveFileName",
                         lambda *a, **k: ("/proc/nope/out.log", ""))
     shown = {}
-    monkeypatch.setattr("cms_gui.pages.serverlogwindow.QMessageBox.warning",
+    monkeypatch.setattr("cms_gui.widgets.warn",
                         lambda *a, **k: shown.setdefault("said", a[-1]))
     window._save()
     assert shown                                   # and no exception escaped

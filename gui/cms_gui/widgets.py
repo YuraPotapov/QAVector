@@ -8,11 +8,15 @@ layout rather than as widget configuration.
 
 import itertools
 import os
+import weakref
 
-from PySide6.QtCore import QEvent, QRectF, Qt, Signal
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, Signal
+from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
+                               QApplication, QComboBox, QDialog,
+                               QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QSizePolicy, QSpinBox, QToolButton,
+                               QPlainTextEdit, QPushButton, QSizePolicy,
+                               QSpinBox, QSplitter, QToolButton,
                                QVBoxLayout, QWidget)
 
 from . import icons, theme
@@ -979,3 +983,508 @@ def row(*widgets, spacing=8, stretch_last=False):
     if stretch_last and line.count():
         line.setStretch(line.count() - 1, 1)
     return box
+
+
+def dress(window, title="", resizable=True, minimizable=False):
+    """Put the application's own title bar on a window. Returns its frame.
+
+    Every window that is not the main one kept the desktop's frame, so the
+    application ended at the top of each of them and the operating system
+    started - which is the one part of a window somebody looks at to know what
+    they are in. One call rather than ten copies of it, because the tenth copy
+    is the one that gets forgotten.
+
+    **Resizable by default, and that is not a preference.** Taking the
+    desktop's frame off takes its resize handles with it, so every window
+    dressed without them silently loses something it had - and a form whose
+    field is too small to read what is in it is a form somebody cannot use.
+    Only a dialog that never had a frame to begin with says no.
+
+    ``minimizable`` adds minimize and maximize, for the windows somebody
+    *works* in - a console filling with output, a log being read - rather than
+    fills in and closes.
+    """
+    from . import titlebar
+
+    if not titlebar.wanted():
+        return None
+    return titlebar.install(
+        window, title=title or window.windowTitle(),
+        controls=titlebar.CONTROLS if minimizable else ("close",),
+        grips=resizable)
+
+
+class Message(QDialog):
+    """Something said to somebody, in the application's own clothes.
+
+    ``QMessageBox`` is not styled by the stylesheet - it draws its own icon,
+    asks the platform for its buttons and keeps the desktop's frame - so on
+    every page it arrived looking like every other application on the machine
+    and none of this one. Built out of the same widgets as everything else, a
+    dialog picks the theme up for nothing, dark mode included, and wears the
+    title bar the main window wears.
+
+    Three parts, and the middle one is why this is a class rather than a
+    one-line wrapper: what happened, the **consequence** in smaller type under
+    it, and the answers. A dialog that only says "are you sure" tells somebody
+    nothing they did not know when they pressed the button.
+
+    ``refuse`` is what makes it a question. Left empty there is one button and
+    this is a notice; given, there are two and the answer means something.
+
+    ``output`` is for the dialogs that carry what a command printed: a
+    read-only mono box that scrolls, rather than a label, because somebody
+    reading a traceback wants to select a line out of it. ``choices`` is for
+    the rare case with more than two answers - "continue this one", "start a
+    new one", "cancel" is three, and folding it into a yes/no would lose the
+    middle one.
+    """
+
+    #: kind -> the colour of the rule down the left of the text. Named, and
+    #: read at build time from theme, so dark mode moves them with everything
+    #: else. A plain notice has no rule: most of what this shows is ordinary.
+    RULES = {"warn": "WARN", "error": "BAD", "ok": "OK"}
+
+    #: How thick that rule is, and how far the text sits off it.
+    RULE = 3
+    RULE_GAP = 12
+
+    #: How much of a command's output is shown before the box starts to
+    #: scroll. Tall enough for a traceback to be read rather than guessed at.
+    OUTPUT_HEIGHT = 260
+
+    def __init__(self, parent, title, message, detail="", kind="",
+                 agree="OK", refuse="", output="", choices=()):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.frame = dress(self, title, resizable=False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+
+        said = QVBoxLayout()
+        said.setContentsMargins(0, 0, 0, 0)
+        said.setSpacing(8)
+        self.message = QLabel(message)
+        self.message.setWordWrap(True)
+        self.message.setStyleSheet("font-size: 14px; font-weight: 600;")
+        said.addWidget(self.message)
+        self.detail = None
+        if detail:
+            self.detail = QLabel(detail)
+            self.detail.setWordWrap(True)
+            self.detail.setStyleSheet("color: %s;" % theme.NEUTRAL[700])
+            said.addWidget(self.detail)
+
+        colour = self.RULES.get(kind)
+        if colour:
+            rule = QFrame()
+            rule.setFixedWidth(self.RULE)
+            rule.setStyleSheet("background: %s;" % getattr(theme, colour))
+            beside = QHBoxLayout()
+            beside.setContentsMargins(0, 0, 0, 0)
+            beside.setSpacing(self.RULE_GAP)
+            beside.addWidget(rule)
+            beside.addLayout(said, 1)
+            layout.addLayout(beside)
+        else:
+            layout.addLayout(said)
+
+        self.output = None
+        if output:
+            self.output = QPlainTextEdit(output)
+            self.output.setReadOnly(True)
+            self.output.setFont(theme.mono_font())
+            self.output.setMaximumHeight(self.OUTPUT_HEIGHT)
+            layout.addWidget(self.output, 1)
+
+        #: Which of ``choices`` was pressed, or "" - the agree button counts
+        #: as its own label, so one reading answers both shapes.
+        self.chosen = ""
+        self.choice_buttons = []
+        for label in choices:
+            button = QPushButton(label)
+            button.setProperty("variant", "ghost")
+            button.clicked.connect(
+                lambda _checked=False, text=label: self._choose(text))
+            self.choice_buttons.append(button)
+
+        self.refuse_button = None
+        if refuse:
+            self.refuse_button = QPushButton(refuse)
+            self.refuse_button.setProperty("variant", "ghost")
+            self.refuse_button.clicked.connect(self.reject)
+        self.agree_button = QPushButton(agree)
+        self.agree_button.setProperty("variant", "primary")
+        self.agree_button.clicked.connect(self.accept)
+        self.agree_button.setDefault(True)
+        self.agree_button.clicked.connect(
+            lambda: setattr(self, "chosen", agree))
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        if self.refuse_button is not None:
+            buttons.addWidget(self.refuse_button)
+        for button in self.choice_buttons:
+            buttons.addWidget(button)
+        buttons.addWidget(self.agree_button)
+        layout.addLayout(buttons)
+
+    def _choose(self, label):
+        self.chosen = label
+        self.accept()
+
+
+def confirm(parent, title, question, detail="", agree="Yes", refuse="Cancel",
+            kind=""):
+    """Ask, and say whether they agreed."""
+    return _shown(Message(parent, title, question, detail, kind, agree, refuse))
+
+
+def warn(parent, title, message, detail=""):
+    """Something went wrong, and there is one thing to say about it.
+
+    Named for the call it replaces - ``QMessageBox.warning`` - so converting a
+    page was a change of name and nothing else. Sixty-odd of these were spread
+    over eleven files; rewriting each one's arguments as well would have been
+    sixty chances to change what a page says by accident.
+    """
+    return _shown(Message(parent, title, message, detail, "error"))
+
+
+def note(parent, title, message, detail=""):
+    """Something worth saying that is not a problem."""
+    return _shown(Message(parent, title, message, detail))
+
+
+def choose(parent, title, message, detail="", choices=(), agree="OK",
+           refuse="Cancel", kind=""):
+    """More than two answers. Returns the label pressed, or "" for none.
+
+    The label rather than an index, because a caller comparing against the
+    words it wrote down cannot get the order wrong the day a third answer is
+    added in the middle.
+    """
+    dialog = Message(parent, title, message, detail, kind, agree, refuse,
+                     choices=choices)
+    try:
+        return dialog.chosen if dialog.exec() == QDialog.Accepted else ""
+    finally:
+        dialog.deleteLater()
+
+
+def output(parent, title, message, text="", kind=""):
+    """What a command printed, in a box somebody can select a line out of."""
+    return _shown(Message(parent, title, message, "", kind, output=text))
+
+
+def _shown(dialog):
+    try:
+        return dialog.exec() == QDialog.Accepted
+    finally:
+        dialog.deleteLater()
+
+
+class NoWheelSteal(QObject):
+    """Stops a scroll wheel changing the value of a dropdown or a spin box.
+
+    Qt's default is that the wheel moves a combo box's selection whenever the
+    pointer is over it. On a form inside a scroll area that is a trap: somebody
+    scrolls the page, the pointer happens to pass over a dropdown, and the
+    value changes underneath them - silently, without a click, and often
+    without being noticed until something runs with the wrong setting.
+
+    So the wheel never changes one of these. The event is not simply eaten,
+    though: it is handed to whatever the widget is scrolling **inside**, so the
+    page still moves. Eating it would trade a silent wrong value for a page
+    that mysteriously refuses to scroll over half its own controls.
+
+    Installed on the controls and their editors. The application style attaches
+    it when polishing new widgets, so dialogs created later are covered too.
+    An application-wide Python event filter crashes PySide6 when WebEngine
+    delivers events for its private QObjects, before eventFilter is even called.
+    """
+
+    #: The widgets whose value a stray wheel must not change.
+    WATCHED = (QComboBox, QAbstractSpinBox)
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._watched = weakref.WeakSet()
+
+    def watch(self, widget):
+        """Called for existing controls, and by the style as new ones appear."""
+        if isinstance(widget, self.WATCHED):
+            targets = [widget] + widget.findChildren(QLineEdit)
+        elif isinstance(widget, QLineEdit) and _guarded(widget) is not None:
+            targets = [widget]
+        else:
+            return
+        for target in targets:
+            if target not in self._watched:
+                target.installEventFilter(self)
+                self._watched.add(target)
+
+    def stop(self):
+        """Detach without retaining the controls or their containing windows."""
+        for widget in list(self._watched):
+            try:
+                widget.removeEventFilter(self)
+            except RuntimeError:       # Qt may already have deleted the widget
+                pass
+        self._watched.clear()
+        app = self.parent()
+        if getattr(app, "_no_wheel_steal", None) is self:
+            app._no_wheel_steal = None
+        self.deleteLater()
+
+    def eventFilter(self, watched, event):
+        if event.type() != QEvent.Wheel:
+            return False
+        guarded = _guarded(watched)
+        if guarded is None:
+            return False
+        if _list_of(guarded) is watched:
+            return False          # the open list itself: scrolling it is right
+        area = _scroller(guarded)
+        if area is not None:
+            QApplication.sendEvent(area.viewport(), event)
+        return True
+
+
+def _guarded(widget):
+    """The dropdown or spin box this event is really about, or None.
+
+    Walked up from whatever received it rather than tested directly, because
+    the wheel does not always land on the control itself: an editable combo
+    box and every spin box are made of child widgets, and a wheel over the
+    line edit inside one is a wheel over the control as far as anybody using
+    it is concerned.
+    """
+    while widget is not None:
+        if isinstance(widget, NoWheelSteal.WATCHED):
+            return widget
+        if not isinstance(widget, QWidget):
+            return None
+        widget = widget.parentWidget()
+    return None
+
+
+def _list_of(box):
+    """The list a dropdown opens, if it has one and it is showing."""
+    view = getattr(box, "view", None)
+    return view() if callable(view) else None
+
+
+def _scroller(widget):
+    """The nearest ancestor that scrolls, or None."""
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QAbstractScrollArea):
+            return parent
+        parent = parent.parentWidget()
+    return None
+
+
+def stop_wheel_stealing(app):
+    """Guard existing controls; the application style guards new ones on polish."""
+    previous = getattr(app, "_no_wheel_steal", None)
+    if previous is not None:
+        previous.stop()
+    filter_ = NoWheelSteal(app)
+    app._no_wheel_steal = filter_
+    for widget in app.allWidgets():
+        filter_.watch(widget)
+    return filter_
+
+
+# -- a splitter that says where a panel went ------------------------------------
+#: How thick the mark over a folded panel is, in px. Thick on purpose: the
+#: ordinary handle is a hairline, and a panel dragged shut behind a hairline is
+#: a panel nobody can find again.
+FOLD_MARK = 4
+
+#: How much of its edge the mark covers, centred on it. Half, so the marks of
+#: two panels folded at one corner stay apart instead of meeting in an L.
+FOLD_SPAN = 0.5
+
+#: What a folded panel comes back at when it was never seen open.
+FOLD_RESTORE = 240
+
+
+class _FoldMark(QWidget):
+    """The bold line over a folded panel's edge. Clicking it opens the panel."""
+
+    clicked = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("A panel is folded away here. Click to show it.")
+
+    def paintEvent(self, _event):
+        from PySide6.QtGui import QColor, QPainter
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        # Read at paint time: theme.set_dark_mode rewrites the palette in
+        # place, and a colour captured when the mark was made would be stale.
+        painter.setBrush(QColor(theme.ACCENT))
+        radius = min(self.width(), self.height()) / 2.0
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class FoldingSplitter(QSplitter):
+    """A splitter whose panels can be dragged shut without being lost.
+
+    Dragging a panel all the way closed is how a splitter hides one, and the
+    only trace left is its handle - a one-pixel divider indistinguishable from
+    the border of whatever sits beside it. So a folded panel gets a bold line
+    in the accent colour along the edge it went into, and clicking the line
+    brings the panel back at the size it last had.
+
+    The line is a widget laid over the splitter rather than a restyled handle:
+    every handle of a splitter shares one width, so a handle cannot be thick
+    for the folded panel and a hairline for the open one beside it.
+    """
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self._marks = {}                 # panel index -> _FoldMark
+        self._open_sizes = {}            # panel index -> last size seen open
+        self._store = None               # (settings, key) - see remember_in
+        self.splitterMoved.connect(lambda *_args: self._moved())
+
+    def remember_in(self, settings, key):
+        """Keep how this splitter is left - folds included - across restarts.
+
+        Restores what ``settings`` holds under ``key`` now, and writes it back
+        whenever a person moves a handle or opens a folded panel. Only those:
+        the sizes a layout pass happens to produce are not a choice anybody
+        made. A stored state for a different number of panels is ignored - it
+        belongs to an older version of the page.
+        """
+        self._store = (settings, key)
+        try:
+            state = settings.splitter(key) or {}
+        except Exception:                # noqa: BLE001 - a view preference
+            state = {}
+        sizes = state.get("sizes") or []
+        if (len(sizes) == self.count() and all(isinstance(one, int) and one >= 0
+                                               for one in sizes) and any(sizes)):
+            for index, size in enumerate(state.get("open") or []):
+                if isinstance(size, int) and size > 0 and index < self.count():
+                    self._open_sizes[index] = size
+            self.setSizes(sizes)
+
+    def _moved(self):
+        self._refresh()
+        self._save()
+
+    def _save(self):
+        if self._store is None:
+            return
+        settings, key = self._store
+        try:
+            settings.save_splitter(key, {
+                "sizes": self.sizes(),
+                "open": [self._open_sizes.get(index, 0)
+                         for index in range(self.count())]})
+        except Exception:                # noqa: BLE001 - a view preference
+            pass
+
+    def folded(self):
+        """Which panels are folded shut, by index."""
+        return [index for index, size in enumerate(self.sizes())
+                if size == 0 and self.widget(index) is not None
+                and not self.widget(index).isHidden()]
+
+    def unfold(self, index):
+        """Open a folded panel again, taking the room from its widest sibling."""
+        sizes = self.sizes()
+        if not 0 <= index < len(sizes) or sizes[index]:
+            return
+        want = self._open_sizes.get(index) or FOLD_RESTORE
+        donor = max((one for one in range(len(sizes)) if one != index),
+                    key=lambda one: sizes[one], default=None)
+        if donor is None:
+            return
+        give = min(want, max(sizes[donor] - FOLD_RESTORE // 2, 0)) or want // 2
+        sizes[index], sizes[donor] = give, max(sizes[donor] - give, 0)
+        self.setSizes(sizes)
+        self._refresh()
+        self._save()
+
+    def childEvent(self, event):
+        """Keep the marks out of the panels.
+
+        A splitter makes every child widget it is given into another panel,
+        so a mark parented here would become a fourth pane of zero width -
+        folded, and so given a mark of its own.
+        """
+        if isinstance(event.child(), _FoldMark):
+            return
+        super().childEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh()
+
+    def setSizes(self, sizes):
+        super().setSizes(sizes)
+        self._refresh()
+
+    def _refresh(self):
+        sizes = self.sizes()
+        for index, size in enumerate(sizes):
+            if size:
+                self._open_sizes[index] = size
+        folded = set(self.folded())
+        for index in list(self._marks):
+            if index not in folded:
+                self._marks[index].hide()
+        horizontal = self.orientation() == Qt.Horizontal
+        for index in folded:
+            mark = self._marks.get(index)
+            if mark is None:
+                # Built without a parent and handed over once it is whole, so
+                # childEvent can tell what it is - see there.
+                mark = self._marks[index] = _FoldMark(None)
+                mark.setParent(self)
+                mark.clicked.connect(lambda one=index: self.unfold(one))
+            # Along the edge the panel was pushed against: the start for the
+            # first panel, the far end for the last, its own handle otherwise.
+            extent = self.width() if horizontal else self.height()
+            if index == 0:
+                edge = 0
+            elif index == self.count() - 1:
+                edge = extent - FOLD_MARK
+            else:
+                area = self.handle(index).geometry()
+                edge = area.left() if horizontal else area.top()
+            edge = max(0, min(edge, extent - FOLD_MARK))
+            across = self.height() if horizontal else self.width()
+            length = max(int(across * FOLD_SPAN), FOLD_MARK)
+            start = (across - length) // 2
+            if horizontal:
+                mark.setGeometry(edge, start, FOLD_MARK, length)
+            else:
+                mark.setGeometry(start, edge, length, FOLD_MARK)
+            mark.show()
+            mark.raise_()
+

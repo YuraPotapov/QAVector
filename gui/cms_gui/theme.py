@@ -13,7 +13,7 @@ import os
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFontDatabase, QPainter, QPen
-from PySide6.QtWidgets import QProxyStyle, QStyle, QStyleFactory
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle, QStyleFactory, QWidget
 
 # --- palette (from the design system's OKLCH ramps) -------------------------
 BG = "#f2f2f3"
@@ -27,6 +27,16 @@ NEUTRAL = {100: "#f5f5f8", 200: "#e7e7ea", 300: "#d4d4d7", 400: "#b7b7ba",
 ACCENT_RAMP = {100: "#eef6ff", 200: "#d6ebff", 300: "#b5d9fd", 400: "#94bce3",
                500: "#749dc4", 600: "#597ea3", 700: "#416180", 800: "#2c455d",
                900: "#1d2d3d"}
+
+#: The node canvas and the grid it is ruled with. See set_dark_mode.
+CANVAS_BG = "#e4e6ea"
+#: Two weights, because that is what makes ruled paper readable rather than a
+#: flat texture: the fine line is barely there, and the heavier one every fifth
+#: square is what an eye measures a distance against. Both sit close to
+#: CANVAS_BG on purpose - paper the graph stands on, not a pattern competing
+#: with it.
+CANVAS_GRID = "#dcdee3"
+CANVAS_GRID_MAJOR = "#cfd2d8"
 
 DIVIDER = "#cfcfd0"
 DIVIDER_STRONG = "#a8a8ab"
@@ -51,6 +61,34 @@ WARN = "#a8712a"
 BAD = "#a33a2e"
 BAD_TINT = "#f7e7e5"
 
+# --- what a cycle step is ----------------------------------------------------
+# Keyed by the family of the plugin - the part of its id before the dot. A wash
+# behind the node, never a signal.
+#
+# **Deliberately none of OK, WARN or BAD.** Those three say what *happened* to a
+# step, on the stripe down its left edge, and a body that also spoke in red and
+# green would give the canvas two meanings for one colour: a node tinted green
+# for "this is the commit" reads as one that has already succeeded, before the
+# run has even started.
+#
+# So these are washes - enough hue to group a graph at a glance, far too little
+# to be mistaken for a verdict. Colour is never the only channel either: the
+# plugin's id is written on every node in mono, which is what somebody who
+# cannot tell two of these apart reads instead. A family with no entry gets the
+# ordinary node background, which is the right answer for a plugin nobody has
+# chosen a colour for yet.
+PLUGIN_TINT = {
+    "agent": "#efe9fb",        # it thinks, it takes minutes, it costs money
+    "git": "#e4eefb",          # the repository
+    "jira": "#e3f1f0",         # somebody else's system, across the network
+    "memory": "#f6efe3",       # what is carried between runs
+    "service": "#e9eaf7",      # something started and left running
+    "scenario": "#f7eaf2",     # the browser
+    "report": "#edeef1",       # what is written out at the end
+    "check": "#f4f0e2",        # a decision - these two are the gates
+    "approval": "#f4f0e2",
+}
+
 # --- log levels --------------------------------------------------------------
 # A backend log is read by scanning, so severity has to be legible at a glance
 # without reading the word. Its own ramp rather than OK/WARN/BAD: those are
@@ -73,7 +111,8 @@ LOG_CRITICAL_BG = "#f7ddda"
 def set_dark_mode(enabled: bool):
     global BG, SURFACE, TEXT, ACCENT, NEUTRAL, ACCENT_RAMP, DIVIDER, DIVIDER_STRONG, OK, WARN, BAD, BAD_TINT
     global LOG_LEVEL, LOG_CRITICAL_BG
-    
+    global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
+
     if enabled:
         BG = "#1a1b1e"
         SURFACE = "#25262b"
@@ -89,6 +128,31 @@ def set_dark_mode(enabled: bool):
         }
         
         BAD_TINT = "#4a2522" # Darker wash behind red marks
+
+        # The same nine families, as inks for a dark ground rather than washes
+        # for paper. The light values are pale tints and would be blinding
+        # panels here; these sit a shade above NEUTRAL[100] with the hue kept,
+        # so a node still reads as a node first and a family second.
+        PLUGIN_TINT = {
+            "agent": "#332f43",
+            "git": "#26313f",
+            "jira": "#23383a",
+            "memory": "#3a332a",
+            "service": "#2c2e44",
+            "scenario": "#3d2c38",
+            "report": "#2e2f33",
+            "check": "#38352a",
+            "approval": "#38352a",
+        }
+
+        # The node canvas. A surface of its own, cooler and a shade deeper than
+        # the panels around it, so the graph reads as a place you are looking
+        # into rather than as more page. The dots are the grid it is ruled
+        # with - barely there at rest, and the only thing that shows the
+        # surface moving when you drag an empty part of it.
+        CANVAS_BG = "#151619"
+        CANVAS_GRID = "#1d1f23"
+        CANVAS_GRID_MAJOR = "#26282e"
 
         # Lifted off the near-black background: the light-theme values are dark
         # inks meant for paper, and on #1a1b1e they read as barely-there smudges.
@@ -114,6 +178,24 @@ def set_dark_mode(enabled: bool):
         }
         
         BAD_TINT = "#f7e7e5"
+
+        PLUGIN_TINT = {
+            "agent": "#efe9fb",
+            "git": "#e4eefb",
+            "jira": "#e3f1f0",
+            "memory": "#f6efe3",
+            "service": "#e9eaf7",
+            "scenario": "#f7eaf2",
+            "report": "#edeef1",
+            "check": "#f4f0e2",
+            "approval": "#f4f0e2",
+        }
+
+        # See the dark branch. Cooler and a shade deeper than SURFACE, which
+        # is what makes the nodes sitting on it look lit rather than flat.
+        CANVAS_BG = "#e4e6ea"
+        CANVAS_GRID = "#dcdee3"
+        CANVAS_GRID_MAJOR = "#cfd2d8"
 
         LOG_LEVEL = {
             "DEBUG": "#8a8a8d",
@@ -474,6 +556,28 @@ QHeaderView::section {{
 }}
 QTableCornerButton::section {{ background: {n200}; border: none; }}
 
+/* --- tabs ---------------------------------------------------------------- */
+/* Qt's own tabs are shaded lozenges with a raised border, which is a heavier
+   piece of furniture than anything else on these pages and reads as a different
+   application. These are the same idea a nav rail already uses: a strip of
+   words with a rule under it, and the live one marked by a bar in the accent
+   rather than by a box around it. The selected tab's label carries the page's
+   own ink so it reads as a heading for what is below, which is what it is. */
+QTabWidget::pane {{
+    border: none; border-top: 1px solid {divider}; top: -1px;
+}}
+QTabBar {{ qproperty-drawBase: 0; background: transparent; }}
+QTabBar::tab {{
+    background: transparent; color: {n600};
+    font-family: {heading}; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.6px;
+    padding: 6px 12px; margin: 0 2px 0 0;
+    border: none; border-bottom: 2px solid transparent;
+}}
+QTabBar::tab:hover {{ color: {text}; background: {n200}; }}
+QTabBar::tab:selected {{ color: {text}; border-bottom-color: {accent}; }}
+QTabBar::tab:disabled {{ color: {n400}; }}
+
 /* --- containers ---------------------------------------------------------- */
 QFrame[role="panel"] {{ background: transparent; border: 1px solid {divider}; }}
 /* A panel for something that is always there, as against the ones a person
@@ -636,6 +740,14 @@ class IndicatorStyle(QProxyStyle):
     what makes a single stylesheet enough to carry the design; this wraps it so
     the two primitives the sheet cannot reach are ours as well.
     """
+
+    def polish(self, target):
+        result = super().polish(target)
+        if isinstance(target, QWidget):
+            guard = getattr(QApplication.instance(), "_no_wheel_steal", None)
+            if guard is not None:
+                guard.watch(target)
+        return result
 
     def drawPrimitive(self, element, option, painter, widget=None):
         if element in (QStyle.PE_IndicatorCheckBox,

@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from . import icon, migrate, theme
+from . import icon, migrate, theme, widgets
 from .settings import Settings
 from .main_window import MainWindow
 
@@ -87,6 +87,7 @@ def _claim_windows_identity():
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
     _claim_windows_identity()
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(argv)
     app.setApplicationName("QAVector")
     app.setOrganizationName("qavector")
@@ -98,6 +99,9 @@ def main(argv=None):
     # is what makes a single stylesheet enough to carry the design - plus the
     # indicators, which are painted because a stylesheet cannot draw them.
     app.setStyle(theme.app_style())
+    # The style attaches wheel guards to controls as they are polished. Keep
+    # Python event filters off the application's internal WebEngine objects.
+    widgets.stop_wheel_stealing(app)
     theme.load_fonts()
     
     settings = Settings()

@@ -30,6 +30,22 @@ LOG_LINE = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2})\s+(?P<level>[A-Z]+)\s+"
 # model for as long as the window is open.
 SERVER_LOG_LINES = 2000
 
+# Output lines kept per cycle step. Lower than the server's, because a cycle
+# keeps one of these per step rather than per window, and every one of them is
+# also on disk under the run's own directory - this is what the page shows, not
+# the record.
+CYCLE_LOG_LINES = 500
+
+#: And for the run as a whole. Larger than one step's cap because it holds every
+#: step's output interleaved, and a run of a dozen steps would otherwise show
+#: only the last one to have said anything.
+CYCLE_RUN_LOG_LINES = 4000
+
+#: How many stages are kept, per step and for the run. A stage is a row
+#: somebody reads rather than a line of output, so far fewer are worth holding
+#: than log lines - and an agent that ran away would otherwise fill the panel.
+CYCLE_STAGES = 400
+
 # A session in one of these has a window on screen that Stop can still act on.
 # "stopping" is deliberately not among them: it has been told to go, and both
 # the Stop menu and the rail's count are about what is still there to stop.
@@ -220,9 +236,18 @@ class RunState(QObject):
     changed = Signal()
     run_dir_known = Signal(str)
     artifacts_written = Signal(dict)
+    #: A cycle run announced itself, with the graph its page should draw.
+    cycle_graph_known = Signal(dict)
+    #: One step of a cycle changed. Carries the step id, so the page repaints
+    #: one node instead of re-reading the whole model.
+    cycle_step_changed = Signal(str)
+    #: The cycle run found out what it works on, or said how it began. The
+    #: page's Subjects tab repaints on it; nothing else has to.
+    cycle_subject_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.reset_cycle()
         self.reset()
 
     def reset(self):
@@ -238,6 +263,29 @@ class RunState(QObject):
         # Only --jobs=auto reports one: with a fixed number there is nothing to
         # watch, because nothing moves it.
         self.workers = None       # {"limit", "ceiling", "unit", "why"}
+        # Deliberately NOT self.cycle. A scenario run calls this too, and
+        # wiping the cycle record there left the Cycles page with a coloured
+        # graph beside an empty Output and Stages - a run half forgotten.
+        # A cycle is forgotten by reset_cycle, which only a cycle run calls,
+        # and _on_cycle_run_start replaces the record wholesale anyway.
+        self.changed.emit()
+
+    def reset_cycle(self):
+        """Forget the cycle run. Its own call, because its own lifetime.
+
+        The cycle a page is showing outlives any number of scenario runs - it
+        is what the last cycle run did, and nothing about starting a browser
+        session makes that untrue.
+        """
+        #: A cycle run, when this run is one. None for an ordinary scenario run,
+        #: so a page can tell the two apart by asking rather than by guessing
+        #: from which fields happen to be filled in.
+        self.cycle = None         # see _on_cycle_run_start for its shape
+        #: Whether a cycle is going *now*. Separate from ``started`` and
+        #: ``flows_finished``, which belong to the scenario run: with one flag
+        #: for both, starting a scenario lit the Cycles page's Stop button for
+        #: a cycle that had finished an hour ago.
+        self.cycle_running = False
         self.changed.emit()
 
     # -- ingestion ------------------------------------------------------------
@@ -288,6 +336,225 @@ class RunState(QObject):
                                 event.get("login"))
         session["pid"] = event.get("pid")
         session["state"] = "launched"
+
+    # -- cycles ---------------------------------------------------------------
+    # Found by the dispatch above with no change to it: "cycle.step.end" becomes
+    # "_on_cycle_step_end". A kind this version does not know is simply ignored,
+    # so a newer core talking to an older GUI loses a detail rather than a run.
+    #
+    # A cycle has no sessions - its steps are not windows - so none of these
+    # touch ``self.sessions``. They keep one dict, and the page redraws from it.
+
+    def _on_cycle_run_start(self, event, _name):
+        self.started = True
+        self.cycle_running = True
+        graph = event.get("graph") or {}
+        self.cycle = {
+            "run_id": event.get("run_id", ""),
+            "cycle": event.get("cycle", ""),
+            "name": event.get("name", ""),
+            "workspace": event.get("workspace", ""),
+            "jobs": event.get("jobs"),
+            "variables": dict(event.get("variables") or {}),
+            "graph": graph,
+            "status": "running",
+            # step id -> what is known about it now. Seeded from the graph so
+            # every node has a record before anything has run, which is what
+            # lets a page render the whole cycle on the first event.
+            "steps": {node.get("id"): {"status": "pending", "plugin":
+                                       node.get("plugin", ""), "attempt": 0,
+                                       "duration_ms": 0, "message": "",
+                                       "outputs": {}, "artifacts": [],
+                                       "log": [], "stages": []}
+                      for node in (graph.get("nodes") or [])},
+            # Everything every step said, in the order it was said, as
+            # (step id, stream, line). A cycle runs several steps at once and
+            # the interesting thing is usually what the run as a whole is
+            # doing; one step's output is the narrower view, not the only one.
+            "log": [],
+            # And the stages of every step that has any, as (step id, stage).
+            # Most plugins emit none; an agent emits one per turn.
+            "stages": [],
+            # What the run works on, once it has found out - see
+            # _on_cycle_subject. Empty until then, and for a cycle that
+            # declares none.
+            "subject": {},
+            # How it began: fresh, a resume, a partial run - and what it kept
+            # and will do again. See _on_cycle_run_mode.
+            "mode": {},
+            # Every time a person sent the plan back, in order.
+            "revisions": [],
+        }
+        self.cycle_graph_known.emit(graph)
+
+    def _on_cycle_run_mode(self, event, _name):
+        if self.cycle is None:
+            return
+        self.cycle["mode"] = {
+            "mode": event.get("mode", ""),
+            "resume_count": event.get("resume_count", 0),
+            "source_run": event.get("source_run", ""),
+            "kept": list(event.get("kept") or []),
+            "rerun": [dict(one) for one in event.get("rerun") or []
+                      if isinstance(one, dict)]}
+        self.cycle_subject_changed.emit()
+
+    def _on_cycle_subject(self, event, _name):
+        if self.cycle is None:
+            return
+        self.cycle["subject"] = dict(event.get("subject") or {})
+        self.cycle_subject_changed.emit()
+
+    def _on_cycle_revision(self, event, _name):
+        if self.cycle is None:
+            return
+        self.cycle.setdefault("revisions", []).append({
+            "number": event.get("number", 0), "gate": event.get("gate", ""),
+            "target": event.get("target", ""),
+            "feedback": event.get("feedback", ""), "who": event.get("who", ""),
+            "steps": list(event.get("steps") or [])})
+        self.cycle_subject_changed.emit()
+
+    def _cycle_step(self, step_id):
+        """The record for one step, made if the graph did not mention it."""
+        if self.cycle is None or not step_id:
+            return None
+        return self.cycle["steps"].setdefault(
+            step_id, {"status": "pending", "plugin": "", "attempt": 0,
+                      "duration_ms": 0, "message": "", "outputs": {},
+                      "artifacts": [], "log": [], "stages": []})
+
+    def _on_cycle_step_start(self, event, _name):
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step["status"] = "running"
+        step["attempt"] = event.get("attempt", 1)
+        step["plugin"] = event.get("plugin") or step["plugin"]
+        self.cycle_step_changed.emit(event.get("step", ""))
+
+    def _on_cycle_step_end(self, event, _name):
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step["status"] = event.get("status", "")
+        step["duration_ms"] = event.get("duration_ms", 0)
+        step["attempt"] = event.get("attempts", step["attempt"])
+        step["message"] = event.get("message", "")
+        step["outputs"] = dict(event.get("outputs") or {})
+        self.cycle_step_changed.emit(event.get("step", ""))
+
+    def _on_cycle_step_retry(self, event, _name):
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step["attempt"] = event.get("attempt", step["attempt"])
+        self.cycle_step_changed.emit(event.get("step", ""))
+
+    def _on_cycle_step_waiting(self, event, _name):
+        """The step is not finished and asked to be come back to.
+
+        Not an end: the status is kept as waiting and the record is not closed,
+        because the step is still the run's business. What it produced while
+        looking is kept too - a plugin that found nothing ready may still have
+        learned something worth reading.
+        """
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step["status"] = "waiting"
+        step["message"] = event.get("message", "")
+        step["resume_in_ms"] = event.get("resume_in_ms", 0)
+        step["outputs"] = dict(event.get("outputs") or {})
+        self.cycle_step_changed.emit(event.get("step", ""))
+
+    def _on_cycle_step_skipped(self, event, _name):
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step["status"] = event.get("status", "skipped")
+        step["message"] = event.get("reason", "")
+        self.cycle_step_changed.emit(event.get("step", ""))
+
+    def _on_cycle_step_log(self, event, _name):
+        """One batch of a step's output. Capped, like the server log is."""
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        stream = event.get("stream", "out")
+        step_id = event.get("step", "")
+        for line in event.get("lines") or []:
+            step["log"].append((stream, line))
+            self.cycle["log"].append((step_id, stream, line))
+        del step["log"][:-CYCLE_LOG_LINES]
+        del self.cycle["log"][:-CYCLE_RUN_LOG_LINES]
+        self.cycle_step_changed.emit(step_id)
+
+    def _on_cycle_step_stage(self, event, _name):
+        """One stage of a step's inner work - what an agent is doing now.
+
+        Kept apart from the log because it is not output: these are rows to
+        read, not text a process printed. A plugin that emits none simply has
+        an empty list, which is what every plugin but the agent has.
+        """
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step_id = event.get("step", "")
+        stage = {"kind": event.get("phase", ""), "title": event.get("title", ""),
+                 "detail": event.get("detail", ""),
+                 "status": event.get("status", "done"),
+                 # Whatever structure this row has beyond its text - a parsed
+                 # review, today. Absent for every other stage.
+                 "body": dict(event.get("body") or {})}
+        step["stages"].append(stage)
+        del step["stages"][:-CYCLE_STAGES]
+        self.cycle["stages"].append((step_id, stage))
+        del self.cycle["stages"][:-CYCLE_STAGES]
+        self.cycle_step_changed.emit(step_id)
+
+    def _on_cycle_artifact(self, event, _name):
+        step = self._cycle_step(event.get("step"))
+        if step is None:
+            return
+        step["artifacts"].append({"name": event.get("name", ""),
+                                  "path": event.get("path", ""),
+                                  "type": event.get("type", ""),
+                                  "bytes": event.get("bytes", 0)})
+        self.cycle_step_changed.emit(event.get("step", ""))
+
+    def _on_cycle_run_end(self, event, _name):
+        self.cycle_running = False
+        if self.cycle is None:
+            return
+        self.cycle["status"] = event.get("status", "")
+        self.cycle["message"] = event.get("message", "")
+        self.cycle["duration_ms"] = event.get("duration_ms", 0)
+        self.cycle["passed"] = event.get("passed", 0)
+        self.cycle["failed"] = event.get("failed", 0)
+        self.cycle["skipped"] = event.get("skipped", 0)
+        self.exit_code = event.get("exit_code", self.exit_code)
+        self.flows_finished = True
+        self.cycle_subject_changed.emit()
+
+    def cycle_interrupted(self):
+        """The cycle stopped without saying so - the core died, or the app did.
+
+        Not :meth:`reset_cycle`: what the run managed to do is still the answer
+        to "what happened", and throwing it away because the process went is
+        how a reader loses the very record they came back for. Only the claim
+        that it is still going is withdrawn, and the steps that were mid-flight
+        are marked stopped rather than left spinning forever.
+        """
+        self.cycle_running = False
+        if self.cycle is None:
+            return
+        if self.cycle.get("status") == "running":
+            self.cycle["status"] = "interrupted"
+        for step in (self.cycle.get("steps") or {}).values():
+            if step.get("status") in ("running", "waiting"):
+                step["status"] = "cancelled"
+        self.changed.emit()
 
     def _on_serverlog_lines(self, event, name):
         """One batch of backend log lines, already filtered to this window.

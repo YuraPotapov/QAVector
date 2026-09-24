@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
-                               QLineEdit, QMenu, QMessageBox, QPushButton, QRadioButton,
+                               QLineEdit, QMenu, QPushButton, QRadioButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from .. import icons, launch, load as load_mod, store, theme, widgets
@@ -45,6 +45,7 @@ class DesktopLinkDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Configure Desktop Link")
         self.resize(int(parent.width() * 0.5), self.height())
+        self.frame = widgets.dress(self)
         layout = QVBoxLayout(self)
 
         grid = QGridLayout()
@@ -1132,7 +1133,7 @@ class LaunchSessionsPage(QWidget):
     def rename_configuration(self):
         old = self._current_config_name()
         if not old:
-            QMessageBox.information(self, "Rename",
+            widgets.note(self, "Rename",
                                     "Save this configuration first.")
             return
         new, ok = QInputDialog.getText(self, "Rename configuration",
@@ -1230,11 +1231,10 @@ Icon={custom_icon}
             if not path:
                 path = self._desktop_link_path(name)
             if path and os.path.exists(path):
-                answer = QMessageBox.question(
-                    self, "Remove Desktop Link",
-                    "Are you sure you want to remove the desktop link?",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if answer != QMessageBox.Yes:
+                if not widgets.confirm(
+                        self, "Remove Desktop Link",
+                        "Remove the desktop link?", agree="Remove",
+                        kind="warn"):
                     self.desktop_link.setChecked(True)
                     return
                 os.remove(path)
@@ -1247,11 +1247,10 @@ Icon={custom_icon}
         name = self._current_config_name()
         if not name:
             return
-        answer = QMessageBox.question(
-            self, "Delete configuration",
-            "Delete \"%s\"? The current settings stay as they are." % name,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not widgets.confirm(
+                self, "Delete configuration", "Delete \"%s\"?" % name,
+                "The current settings stay as they are.",
+                agree="Delete", kind="warn"):
             return
             
         path = self._desktop_link_path(name)

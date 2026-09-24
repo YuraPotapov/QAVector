@@ -292,9 +292,9 @@ def test_saving_a_bundled_scenario_does_nothing(page):
 
 
 def test_a_refused_save_leaves_the_editor_alone(page, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
-    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(widgets, "warn", lambda *a, **k: None)
     page.core = FakeCore({"alpha": _flow("alpha")})
     page.core.save_result = {"ok": False, "id": "alpha",
                              "problems": ["unknown action 'wat'"]}
@@ -311,7 +311,7 @@ def test_saving_settles_the_page(page, monkeypatch):
     The page re-selects the row it just wrote, and re-selecting used to run
     straight into "discard your changes?" - immediately after saving them.
     """
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
     def refuse(*_a, **_k):
         raise AssertionError("asked to discard changes right after saving them")
@@ -320,7 +320,7 @@ def test_saving_settles_the_page(page, monkeypatch):
     page.set_inventory(_inventory(_row("alpha")))
     page.open("alpha")
     page.name_edit.setText("Renamed")
-    monkeypatch.setattr(QMessageBox, "question", refuse)
+    monkeypatch.setattr(widgets, "confirm", refuse)
     page.save()
     assert not page.is_dirty()
     assert page.save_button.property("dirty") == "false"
@@ -377,16 +377,16 @@ def test_duplicating_sends_the_text_of_the_original(page, monkeypatch):
 
 
 def test_deleting_asks_first(page, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    monkeypatch.setattr(widgets, "confirm", lambda *a, **k: False)
     page.core = FakeCore({"alpha": _flow("alpha")})
     page.set_inventory(_inventory(_row("alpha")))
     page.open("alpha")
     page.delete_scenario()
     assert page.core.deleted == []
 
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    monkeypatch.setattr(widgets, "confirm", lambda *a, **k: True)
     page.delete_scenario()
     assert page.core.deleted == ["alpha"]
 

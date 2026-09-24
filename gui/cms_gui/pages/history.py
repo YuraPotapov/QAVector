@@ -16,8 +16,7 @@ import datetime
 import os
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QMessageBox,
-                               QPushButton, QSplitter, QStackedWidget, QTableWidget,
+from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QPushButton, QSplitter, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import commands, history as history_mod, icons, launch, theme, widgets
@@ -146,7 +145,11 @@ class HistoryPage(QWidget):
         self.rerun_button = icons.button(QPushButton("Run again"), "run")
         self.rerun_button.setProperty("variant", "primary")
         self.rerun_button.clicked.connect(self.rerun_selected)
-        self.restore_button = QPushButton("Open in page")
+        # Only ever "Open in Launch Sessions": restoring a run into the Command
+        # page was an affordance for reading the command line, and a cycle or a
+        # scenario run put there is not a thing anybody wanted to look at. Run
+        # again does what that button was really being used for.
+        self.restore_button = QPushButton("Open in Launch Sessions")
         self.restore_button.clicked.connect(self.restore_selected)
         self.log_button = icons.button(QPushButton("Open log"), "log")
         self.log_button.clicked.connect(self.open_log)
@@ -257,9 +260,7 @@ class HistoryPage(QWidget):
                             STATUS_VARIANTS.get(status, "neutral"))
         self.detail.setText("\n".join("%s: %s" % (label, value)
                                       for label, value in detail_rows(entry)))
-        self.restore_button.setText(
-            "Open in Launch Sessions" if entry.get("kind") == history_mod.LAUNCH
-            else "Open in Command")
+        self.restore_button.setVisible(entry.get("kind") == history_mod.LAUNCH)
 
     def _enable_actions(self, entry):
         has = entry is not None
@@ -300,12 +301,11 @@ class HistoryPage(QWidget):
     def clear_history(self):
         if not self.history.entries():
             return
-        answer = QMessageBox.question(
-            self, "Clear history",
-            "Delete every recorded run and its saved log?\n\n"
-            "Reports the launcher wrote to disk are not touched.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer == QMessageBox.Yes:
+        if widgets.confirm(
+                self, "Clear history",
+                "Delete every recorded run and its saved log?",
+                "Reports the launcher wrote to disk are not touched.",
+                agree="Clear", kind="warn"):
             self.history.clear()
 
 

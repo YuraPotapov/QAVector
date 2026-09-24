@@ -236,7 +236,11 @@ keep arriving while you read an old log, and starting a run brings the page back
 the live one.
 
 **Artifacts** — a run's `reports/<timestamp>/` tree, with inline previews for JSON,
-text and screenshots, and each file's write time. During a run it fills in as the
+text, styled HTML and screenshots, and each file's write time. HTML opens as a
+formatted page, with a *Preview / Source* selector for inspecting its source.
+Local artifact links select the file in the tree; web links open in the browser.
+The preview loads local styles and images, with scripts and remote resources
+disabled. During a run it fills in as the
 files land; between runs *Run* picks any recorded run whose reports still exist,
 newest first, or any folder you point it at. It reopens on whichever run you were
 last looking at.

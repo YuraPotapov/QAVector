@@ -12,7 +12,7 @@ from PySide6.QtCore import (Property, QEasingCurve, QPropertyAnimation, Qt,
                             QTimer, Signal)
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
-                               QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from .. import icons, theme, widgets
@@ -385,7 +385,7 @@ class SessionPanel(widgets.BlueprintPanel):
                 fh.write("\n".join("[%s] %s" % (line["log"], line["text"])
                                    for line in self._visible_server_lines()))
         except OSError as exc:
-            QMessageBox.warning(self, "Save server log", str(exc))
+            widgets.warn(self, "Save server log", str(exc))
 
     def update_from(self, session):
         self.name.setText(session["name"])

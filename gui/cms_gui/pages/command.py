@@ -25,6 +25,7 @@ class ScenarioPicker(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Choose scenarios")
         self.resize(620, 560)
+        self.frame = widgets.dress(self)
         chosen = {part.strip() for part in current.split(",") if part.strip()}
 
         column = QVBoxLayout(self)

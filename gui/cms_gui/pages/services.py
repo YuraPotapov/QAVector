@@ -52,7 +52,7 @@ from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QHeaderView, QLabel,
-                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit,
+                               QLineEdit, QMenu, QPlainTextEdit,
                                QPushButton, QScrollArea, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -1079,6 +1079,7 @@ class ConsoleWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("%s · %s" % (service.project, service.name))
         self.resize(880, 520)
+        self.frame = widgets.dress(self, minimizable=True)
         self._service = service
 
         column = QVBoxLayout(self)
@@ -1799,12 +1800,12 @@ class ServicesPage(QWidget):
         """Never write over a change somebody else made while this was open."""
         if known is None or read(path) == known:
             return True
-        return QMessageBox.question(
+        return widgets.confirm(
             self, "File changed on disk",
-            "%s changed since it was loaded here.\n\nOverwrite it with what is on "
-            "screen?" % path,
-            QMessageBox.Save | QMessageBox.Cancel,
-            QMessageBox.Cancel) == QMessageBox.Save
+            "Overwrite %s with what is on screen?" % path,
+            "It changed since it was loaded here, so whatever was written "
+            "meanwhile is what would be lost.",
+            agree="Overwrite", kind="warn")
 
     # -- rendering ------------------------------------------------------------
     def _rebuild(self):
@@ -1925,11 +1926,10 @@ class ServicesPage(QWidget):
         """True when it is all right to walk away. Asks only if there is a reason."""
         if not self._dirty:
             return True
-        return QMessageBox.question(
+        return widgets.confirm(
             self, "Unsaved changes",
-            "Services & Logs has changes that are not saved.\n\nDiscard them?",
-            QMessageBox.Discard | QMessageBox.Cancel,
-            QMessageBox.Cancel) == QMessageBox.Discard
+            "Discard the changes to Services & Logs?",
+            "They have not been saved.", agree="Discard", kind="warn")
 
     def _rebuild_connections(self):
         table = self.connections
@@ -2069,11 +2069,11 @@ class ServicesPage(QWidget):
         if running:
             extra += ("\n\n%d service(s) are running and will be stopped."
                       % len(running))
-        if QMessageBox.question(
+        if not widgets.confirm(
                 self, "Delete project",
-                "Remove the project %r and its %d service(s)?%s"
-                % (name or "(unnamed)", len(project.runners), extra),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                "Remove the project %r and its %d service(s)?"
+                % (name or "(unnamed)", len(project.runners)),
+                extra.strip(), agree="Delete", kind="warn"):
             return
         for row in logs:
             row.project = ""
@@ -2135,12 +2135,11 @@ class ServicesPage(QWidget):
         if not affected:
             self._show_ok(nothing.format(where=where))
             return False
-        return QMessageBox.question(
+        return widgets.confirm(
             self, "%s all services" % verb.capitalize(),
             question.format(where=where, affected=affected, running=running,
                             total=total),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No) == QMessageBox.Yes
+            agree=verb.capitalize())
 
     # -- runners --------------------------------------------------------------
     def add_runner(self, project_name, runner_type):
@@ -2205,10 +2204,10 @@ class ServicesPage(QWidget):
             note = ("\n\nIt is running. It will be stopped." if service.detained()
                     else "\n\nIt is running, and was set to keep running on its "
                          "own - deleting the row does not stop it.")
-        if QMessageBox.question(
-                self, "Delete service", "Remove %r from %r?%s"
-                % (row.name or "(unnamed)", project_name, note),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if not widgets.confirm(
+                self, "Delete service",
+                "Remove %r from %r?" % (row.name or "(unnamed)", project_name),
+                note.strip(), agree="Delete", kind="warn"):
             return
         project.runners.remove(row)
         for other in project.runners:
@@ -2293,10 +2292,10 @@ class ServicesPage(QWidget):
         extra = ("\n\n%d log(s) use it: %s. They will have no connection until you "
                  "point them somewhere else." % (len(used), ", ".join(used))
                  if used else "")
-        if QMessageBox.question(
+        if not widgets.confirm(
                 self, "Delete connection",
-                "Remove connection %r?%s" % (row.name or "(unnamed)", extra),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                "Remove connection %r?" % (row.name or "(unnamed)"),
+                extra.strip(), agree="Delete", kind="warn"):
             return
         del self._connections[index]
         self._rebuild()
@@ -2345,9 +2344,10 @@ class ServicesPage(QWidget):
     def delete_log(self, row):
         if row not in self._logs:
             return
-        if QMessageBox.question(
-                self, "Delete log", "Remove log %r?" % (row.name or "(unnamed)"),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if not widgets.confirm(
+                self, "Delete log",
+                "Remove log %r?" % (row.name or "(unnamed)"),
+                agree="Delete", kind="warn"):
             return
         self._logs.remove(row)
         self._rebuild()

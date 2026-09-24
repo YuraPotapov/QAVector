@@ -5,6 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from cms_gui import runner as runner_mod
 from cms_gui.runner import (LIVE_STATES, SERVER_LOG_LINES, LauncherProcess,
                             RunState, parse_log_line)
 
@@ -273,7 +274,7 @@ def test_a_scenario_is_filed_under_its_id_and_timed_by_the_launcher(qapp):
           {"kind": "session.start", "session": "s",
            "scenarios": ["claim75_dashboard_backend"]},
           {"kind": "flow.start", "session": "s", "id": "claim75_dashboard_backend",
-           "scenario": "CLAIM-75 - backend tests", "tree": TREE, "steps": 2,
+           "scenario": "DEMO-75 - backend tests", "tree": TREE, "steps": 2,
            "ts": 1000.0},
           {"kind": "step.end", "session": "s", "index": 0, "status": "pass"},
           {"kind": "flow.end", "session": "s", "status": "pass", "passed": 2,
@@ -281,7 +282,7 @@ def test_a_scenario_is_filed_under_its_id_and_timed_by_the_launcher(qapp):
     runs = state.sessions["s"]["runs"]
     assert list(runs) == ["claim75_dashboard_backend"]
     run = runs["claim75_dashboard_backend"]
-    assert run["scenario"] == "CLAIM-75 - backend tests"      # still shown by name
+    assert run["scenario"] == "DEMO-75 - backend tests"      # still shown by name
     assert run["steps"][0]["status"] == "pass" and run["status"] == "pass"
     assert (run["started"], run["ended"]) == (1000.0, 1072.5)
 
@@ -414,3 +415,347 @@ def test_a_run_without_server_logs_has_an_empty_box():
     state.handle({"kind": "window.launched", "session": "dev-agent", "login": "a"})
     assert list(state.sessions["dev-agent"]["server"]) == []
     assert state.sessions["dev-agent"]["server_logs"] == []
+
+
+# --------------------------------------------------------------------- cycles
+# A cycle's events reach RunState through the same getattr dispatch every other
+# kind uses, so what is worth checking is the model they build - and that an
+# unknown one is still a no-op, which is what keeps an older GUI usable against
+# a newer core.
+
+def _diamond():
+    return {"id": "demo", "name": "Demo cycle",
+            "nodes": [{"id": "a", "plugin": "command.shell", "layer": 0,
+                       "row": 0},
+                      {"id": "b", "plugin": "report.json", "layer": 1,
+                       "row": 0}],
+            "edges": [{"from": "a", "to": "b", "kind": "dependency"}]}
+
+
+def _started(state):
+    state.handle({"kind": "cycle.run.start", "run_id": "20260917-000000-demo",
+                  "cycle": "demo", "name": "Demo cycle",
+                  "workspace": "/runs/demo", "jobs": 4,
+                  "variables": {"branch": "main"}, "graph": _diamond()})
+    return state
+
+
+def test_a_run_that_is_not_a_cycle_leaves_the_cycle_empty():
+    """So a page can ask rather than guess from which fields are filled in."""
+    state = RunState()
+    state.handle({"kind": "launcher.start"})
+    assert state.cycle is None
+
+
+def test_a_cycle_run_announces_itself_with_its_graph():
+    state = _started(RunState())
+    assert state.cycle["cycle"] == "demo"
+    assert state.cycle["name"] == "Demo cycle"
+    assert state.cycle["workspace"] == "/runs/demo"
+    assert state.cycle["jobs"] == 4
+    assert state.cycle["variables"] == {"branch": "main"}
+    assert state.cycle["graph"] == _diamond()
+
+
+def test_the_graph_is_handed_on_so_a_page_can_draw_it():
+    state = RunState()
+    seen = []
+    state.cycle_graph_known.connect(seen.append)
+    _started(state)
+    assert seen == [_diamond()]
+
+
+def test_every_step_has_a_record_before_anything_has_run():
+    """Which is what lets a page render the whole cycle on the first event."""
+    state = _started(RunState())
+    assert sorted(state.cycle["steps"]) == ["a", "b"]
+    assert all(one["status"] == "pending" for one in state.cycle["steps"].values())
+    assert state.cycle["steps"]["a"]["plugin"] == "command.shell"
+
+
+def test_a_step_starting_and_ending_is_written_down():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.start", "step": "a",
+                  "plugin": "command.shell", "attempt": 1})
+    assert state.cycle["steps"]["a"]["status"] == "running"
+
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success",
+                  "duration_ms": 1200, "attempts": 2, "message": "exited 0",
+                  "outputs": {"exit_code": 0}})
+    step = state.cycle["steps"]["a"]
+    assert step["status"] == "success"
+    assert step["duration_ms"] == 1200
+    assert step["attempt"] == 2
+    assert step["message"] == "exited 0"
+    assert step["outputs"] == {"exit_code": 0}
+
+
+def test_a_page_is_told_which_step_changed():
+    """So it repaints one node rather than re-reading the whole model."""
+    state = _started(RunState())
+    seen = []
+    state.cycle_step_changed.connect(seen.append)
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success"})
+    assert seen == ["a"]
+
+
+def test_a_skipped_step_keeps_the_reason_it_was_skipped():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.skipped", "step": "b",
+                  "status": "skipped", "reason": "a failed"})
+    assert state.cycle["steps"]["b"]["status"] == "skipped"
+    assert state.cycle["steps"]["b"]["message"] == "a failed"
+
+
+def test_a_retry_moves_the_attempt_count():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.retry", "step": "a", "attempt": 3})
+    assert state.cycle["steps"]["a"]["attempt"] == 3
+
+
+def test_a_waiting_step_is_held_open_rather_than_closed():
+    """It asked to be come back to, so it is still the run's business."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.waiting", "step": "a",
+                  "resume_in_ms": 600000, "message": "waiting 10m",
+                  "outputs": {"until": "2026-09-21 09:00:00"}})
+
+    step = state.cycle["steps"]["a"]
+    assert step["status"] == "waiting"
+    assert step["message"] == "waiting 10m"
+    assert step["resume_in_ms"] == 600000
+    assert step["outputs"]["until"] == "2026-09-21 09:00:00"
+
+
+def test_waiting_is_not_a_retry_in_the_model_either():
+    """A reader who cannot tell the two apart sees a healthy cycle as one
+    failing over and over."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.waiting", "step": "a",
+                  "resume_in_ms": 1000, "message": "not yet"})
+    assert state.cycle["steps"]["a"]["attempt"] == 0
+
+
+def test_a_step_that_waited_and_then_finished_reads_as_finished():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.waiting", "step": "a",
+                  "resume_in_ms": 1000, "message": "not yet"})
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success",
+                  "duration_ms": 3000, "attempts": 2, "message": "waited 1s"})
+
+    assert state.cycle["steps"]["a"]["status"] == "success"
+
+
+def test_a_step_s_output_is_kept_with_which_stream_it_came_from():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.log", "step": "a", "stream": "out",
+                  "lines": ["one", "two"]})
+    state.handle({"kind": "cycle.step.log", "step": "a", "stream": "err",
+                  "lines": ["bad"]})
+    assert state.cycle["steps"]["a"]["log"] == [("out", "one"), ("out", "two"),
+                                                ("err", "bad")]
+
+
+def test_a_chatty_step_cannot_grow_the_model_without_bound():
+    state = _started(RunState())
+    for index in range(runner_mod.CYCLE_LOG_LINES * 2):
+        state.handle({"kind": "cycle.step.log", "step": "a", "stream": "out",
+                      "lines": ["line %d" % index]})
+    log = state.cycle["steps"]["a"]["log"]
+    assert len(log) == runner_mod.CYCLE_LOG_LINES
+    assert log[-1] == ("out", "line %d" % (runner_mod.CYCLE_LOG_LINES * 2 - 1))
+
+
+def test_the_run_keeps_its_own_log_of_every_step_in_the_order_they_spoke():
+    """A cycle runs several steps at once, so "what is happening" is the run's
+    output interleaved - not whichever step somebody happened to click."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.log", "step": "a", "stream": "out",
+                  "lines": ["from a"]})
+    state.handle({"kind": "cycle.step.log", "step": "b", "stream": "out",
+                  "lines": ["from b"]})
+    state.handle({"kind": "cycle.step.log", "step": "a", "stream": "err",
+                  "lines": ["a again"]})
+    assert state.cycle["log"] == [("a", "out", "from a"),
+                                  ("b", "out", "from b"),
+                                  ("a", "err", "a again")]
+
+
+def test_the_run_wide_log_is_capped_too():
+    state = _started(RunState())
+    for index in range(runner_mod.CYCLE_RUN_LOG_LINES + 50):
+        state.handle({"kind": "cycle.step.log", "step": "a", "stream": "out",
+                      "lines": ["line %d" % index]})
+    assert len(state.cycle["log"]) == runner_mod.CYCLE_RUN_LOG_LINES
+
+
+# ------------------------------------------------------------------- stages
+def test_a_stage_is_filed_under_its_step_and_on_the_run():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.stage", "step": "a", "phase": "thinking",
+                  "title": "Thinking", "detail": "weighing it",
+                  "status": "done"})
+    assert state.cycle["steps"]["a"]["stages"] == [
+        {"kind": "thinking", "title": "Thinking", "detail": "weighing it",
+         "status": "done", "body": {}}]
+    assert state.cycle["stages"][0][0] == "a"
+
+
+def test_a_stage_s_kind_arrives_under_a_name_the_envelope_cannot_take():
+    """Every event carries "kind" as its own type. A stage sent under that name
+    would be overwritten by "cycle.step.stage" and lose what it was."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.stage", "step": "a", "phase": "tool",
+                  "title": "Read main.py"})
+    assert state.cycle["steps"]["a"]["stages"][0]["kind"] == "tool"
+
+
+def test_a_stage_reaches_the_page_as_a_change_to_its_step():
+    state = _started(RunState())
+    seen = []
+    state.cycle_step_changed.connect(seen.append)
+    state.handle({"kind": "cycle.step.stage", "step": "a", "title": "Thinking"})
+    assert seen == ["a"]
+
+
+def test_a_step_that_emits_no_stage_simply_has_none():
+    """Which is every plugin but the agent, and must not look like a fault."""
+    state = _started(RunState())
+    assert state.cycle["steps"]["a"]["stages"] == []
+
+
+def test_an_agent_that_ran_away_cannot_grow_the_model_without_bound():
+    state = _started(RunState())
+    for index in range(runner_mod.CYCLE_STAGES + 20):
+        state.handle({"kind": "cycle.step.stage", "step": "a",
+                      "title": "turn %d" % index})
+    assert len(state.cycle["steps"]["a"]["stages"]) == runner_mod.CYCLE_STAGES
+    assert len(state.cycle["stages"]) == runner_mod.CYCLE_STAGES
+
+
+def test_a_stage_for_a_step_the_graph_never_mentioned_is_still_kept():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.stage", "step": "ghost",
+                  "title": "Thinking"})
+    assert state.cycle["steps"]["ghost"]["stages"][0]["title"] == "Thinking"
+
+
+def test_an_artifact_is_filed_under_the_step_that_made_it():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.artifact", "step": "a", "name": "stdout",
+                  "path": "steps/a/stdout.log", "type": "log", "bytes": 42})
+    assert state.cycle["steps"]["a"]["artifacts"] == [
+        {"name": "stdout", "path": "steps/a/stdout.log", "type": "log",
+         "bytes": 42}]
+
+
+def test_the_end_of_a_run_is_recorded_with_its_tally():
+    state = _started(RunState())
+    state.handle({"kind": "cycle.run.end", "status": "failed", "exit_code": 1,
+                  "duration_ms": 5000, "passed": 1, "failed": 1, "skipped": 0,
+                  "message": "a failed"})
+    assert state.cycle["status"] == "failed"
+    assert state.cycle["passed"] == 1
+    assert state.exit_code == 1
+    assert state.flows_finished is True
+
+
+def test_an_event_about_a_step_the_graph_never_mentioned_is_kept_anyway():
+    """A cycle can be edited between a run starting and somebody reading it."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.end", "step": "surprise",
+                  "status": "success"})
+    assert state.cycle["steps"]["surprise"]["status"] == "success"
+
+
+def test_a_cycle_event_before_a_run_started_is_a_no_op():
+    state = RunState()
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success"})
+    assert state.cycle is None
+
+
+def test_a_cycle_kind_this_version_does_not_know_is_ignored():
+    """A newer core talking to an older GUI loses a detail, not a run."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.something.new", "step": "a"})
+    assert state.cycle["steps"]["a"]["status"] == "pending"
+
+
+def test_resetting_a_scenario_run_leaves_the_cycle_alone():
+    """reset() is what starting a *scenario* run calls. Forgetting the cycle
+    there left the Cycles page with a coloured graph beside an empty panel."""
+    state = _started(RunState())
+    state.reset()
+    assert state.cycle is not None
+
+
+def test_forgetting_the_cycle_is_its_own_call():
+    state = _started(RunState())
+    state.reset_cycle()
+    assert state.cycle is None
+    assert not state.cycle_running
+
+
+def test_a_cycle_is_live_only_between_its_own_start_and_end():
+    state = RunState()
+    assert not state.cycle_running
+    state = _started(state)
+    assert state.cycle_running
+    state.handle({"kind": "cycle.run.end", "status": "success", "exit_code": 0})
+    assert not state.cycle_running
+
+
+def test_a_core_that_went_without_saying_so_stops_the_cycle():
+    """No cycle.run.end ever arrives when the process is killed. The record is
+    kept - it is what happened - but nothing still claims to be running."""
+    state = _started(RunState())
+    state.handle({"kind": "cycle.step.start", "step": "a", "plugin": "x"})
+    state.cycle_interrupted()
+    assert not state.cycle_running
+    assert state.cycle["status"] == "interrupted"
+    assert state.cycle["steps"]["a"]["status"] == "cancelled"
+
+
+# ------------------------------------------------------------ what a run is on
+def _cycle_started():
+    from cms_gui.runner import RunState
+    state = RunState()
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "dev",
+                  "graph": {"nodes": [{"id": "todo"}]}})
+    return state
+
+
+def test_a_cycle_run_learns_its_subject():
+    state = _cycle_started()
+    heard = []
+    state.cycle_subject_changed.connect(lambda: heard.append(True))
+    state.handle({"kind": "cycle.subject", "run_id": "r",
+                  "subject": {"kind": "task", "key": "QA-1", "step": "todo"}})
+    assert state.cycle["subject"]["key"] == "QA-1"
+    assert heard == [True]
+
+
+def test_a_cycle_run_says_how_it_began():
+    state = _cycle_started()
+    state.handle({"kind": "cycle.run.mode", "run_id": "r", "mode": "resume",
+                  "resume_count": 2, "kept": ["todo"],
+                  "rerun": [{"step": "work", "reason": "failed last time"}]})
+    assert state.cycle["mode"]["mode"] == "resume"
+    assert state.cycle["mode"]["rerun"][0]["reason"] == "failed last time"
+
+
+def test_every_revision_round_is_kept():
+    state = _cycle_started()
+    for number in (1, 2):
+        state.handle({"kind": "cycle.revision", "run_id": "r", "number": number,
+                      "feedback": "again", "steps": ["plan"]})
+    assert [one["number"] for one in state.cycle["revisions"]] == [1, 2]
+
+
+def test_a_new_run_starts_with_no_subject():
+    state = _cycle_started()
+    state.handle({"kind": "cycle.subject", "run_id": "r",
+                  "subject": {"kind": "task", "key": "QA-1"}})
+    state.handle({"kind": "cycle.run.start", "run_id": "r2", "cycle": "dev",
+                  "graph": {}})
+    assert state.cycle["subject"] == {} and state.cycle["mode"] == {}

@@ -9,7 +9,7 @@ auto-login extension to seed.
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QTableWidget,
+                               QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import theme, usersfile, widgets
@@ -95,12 +95,12 @@ class CredentialsPage(QWidget):
             return
         current = usersfile.fingerprint(self._path)
         if self._fingerprint is not None and current != self._fingerprint:
-            answer = QMessageBox.question(
-                self, "File changed on disk",
-                "%s changed since it was loaded here.\n\nOverwrite it with what is "
-                "on screen?" % self._path,
-                QMessageBox.Save | QMessageBox.Cancel, QMessageBox.Cancel)
-            if answer != QMessageBox.Save:
+            if not widgets.confirm(
+                    self, "File changed on disk",
+                    "Overwrite %s with what is on screen?" % self._path,
+                    "It changed since it was loaded here, so whatever was "
+                    "written meanwhile is what would be lost.",
+                    agree="Overwrite", kind="warn"):
                 return
         try:
             usersfile.save(self._path, self._rows)
@@ -135,12 +135,12 @@ class CredentialsPage(QWidget):
         if not (0 <= index < len(self._rows)):
             return
         row = self._rows[index]
-        answer = QMessageBox.question(
-            self, "Delete row",
-            "Remove %s / %s from users.json?\n\nThe profile folder it used stays on "
-            "disk." % (row.env or "(no env)", row.login or "(no login)"),
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not widgets.confirm(
+                self, "Delete row",
+                "Remove %s / %s from users.json?"
+                % (row.env or "(no env)", row.login or "(no login)"),
+                "The profile folder it used stays on disk.",
+                agree="Delete", kind="warn"):
             return
         del self._rows[index]
         self._revealed.discard(index)

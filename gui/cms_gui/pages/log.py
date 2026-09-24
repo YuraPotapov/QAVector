@@ -16,7 +16,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+                               QLineEdit, QPlainTextEdit, QPushButton,
                                QVBoxLayout, QWidget)
 
 from .. import history as history_mod, theme, widgets
@@ -154,7 +154,7 @@ class LogPage(QWidget):
         """Load an archived log and render it as if it had just arrived."""
         records = _read_archive(path)
         if records is None:
-            QMessageBox.warning(self, "Log", "Cannot read %s." % path)
+            widgets.warn(self, "Log", "Cannot read %s." % path)
             self.show_live()
             return False
         self._showing = path
@@ -309,7 +309,7 @@ class LogPage(QWidget):
         if not path:
             return
         if not self.write_to(path):
-            QMessageBox.warning(self, "Save log", "Could not write %s." % path)
+            widgets.warn(self, "Save log", "Could not write %s." % path)
 
 
 def _read_archive(path):

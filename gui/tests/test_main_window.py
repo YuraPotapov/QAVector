@@ -40,6 +40,30 @@ def _visible(window, key):
     return not window._nav_buttons[key].isHidden()
 
 
+def test_cycle_resume_passes_the_exact_displayed_run_id(window, monkeypatch):
+    sent = []
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+    monkeypatch.setattr(window.process, "start", lambda argv, **kw: sent.append(argv))
+    monkeypatch.setattr(window.core, "is_configured", lambda: True)
+    monkeypatch.setattr(window.core, "argv", lambda *args: list(args))
+    window.start_cycle_run("demo", "resume", "20260923-184505-demo")
+    assert "--cycle-resume=20260923-184505-demo" in sent[0]
+    assert not any(arg.startswith("--cycle-from=") for arg in sent[0])
+
+
+@pytest.mark.parametrize("mode", ["only", "from"])
+def test_cycle_partial_run_pins_the_displayed_source(window, monkeypatch, mode):
+    sent = []
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+    monkeypatch.setattr(window.process, "start", lambda argv, **kw: sent.append(argv))
+    monkeypatch.setattr(window.core, "is_configured", lambda: True)
+    monkeypatch.setattr(window.core, "argv", lambda *args: list(args))
+    window.run_state.cycle = {"cycle": "demo", "run_id": "saved-demo"}
+    window.start_cycle_run("demo", mode, "implement")
+    assert "--cycle-%s=implement" % mode in sent[0]
+    assert "--cycle-reuse=saved-demo" in sent[0]
+
+
 def _menu_labels(window, title):
     """Every entry in one of the menu bar's menus, ampersands stripped."""
     for action in window.menuBar().actions():
@@ -73,8 +97,8 @@ def _divider_breaks(window, qapp):
 
 def test_the_navigation_has_both_groups_in_the_intended_order(window):
     assert [key for key, _l, _g in main_window_mod.CONFIGURE] == [
-        "environments", "credentials", "logsources", "scenarios", "commands",
-        "launch"]
+        "environments", "credentials", "logsources", "scenarios", "cycles",
+        "commands", "launch"]
     assert [key for key, _l, _g in main_window_mod.OBSERVE] == [
         "run", "log", "artifacts", "history"]
 
@@ -362,13 +386,6 @@ def test_the_wording_reaches_the_pages_not_just_the_menus(window):
     assert "--" not in text_of(window.environments)
 
 
-def test_the_cli_facing_toolbar_button_follows_the_mode(window):
-    # "Copy command" has nothing to offer someone who never sees a command.
-    assert window.copy_button.isHidden()
-    window.set_developer_mode(True)
-    assert not window.copy_button.isHidden()
-
-
 def test_the_mode_button_is_out_of_sight_but_still_follows_the_mode(window):
     # The mode lives under View -> Developer mode now. The button is kept, and
     # kept in step, so it never says something stale if it comes back.
@@ -615,9 +632,9 @@ def _scenario_row(flow_id, writable=True):
 
 
 def test_with_nothing_selected_a_recording_is_new_and_asks_nothing(window, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
-    monkeypatch.setattr(QMessageBox, "exec",
+    monkeypatch.setattr(widgets, "choose",
                         lambda *a, **k: pytest.fail("asked when there was nothing to ask"))
     _inventory_with(window, _scenario_row("mine"))
     assert window.recordable_scenario() == ""
@@ -654,56 +671,48 @@ def test_two_chosen_scenarios_are_ambiguous_so_neither_is_used(window):
 
 def test_a_selected_scenario_is_confirmed_before_being_added_to(window, monkeypatch):
     """Appending to a scenario and replacing one look identical until too late."""
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
     _inventory_with(window, _scenario_row("mine"))
     window.scenarios.current = {"id": "mine", "writable": True}
 
     seen = {}
 
-    def answer(box):
-        seen["text"] = box.text()
-        # The default is the safe one: adding to what is there. Clicking the
-        # button itself is what sets clickedButton(), which is what is read.
-        chosen = box.defaultButton()
-        seen["default"] = chosen.text()
-        chosen.click()
-        return 0
+    def answer(_parent, _title, message, detail="", choices=(), agree="OK",
+               **_kwargs):
+        # The default is the safe one: adding to what is there.
+        seen.update(message=message, agree=agree, choices=tuple(choices))
+        return agree
 
-    monkeypatch.setattr(QMessageBox, "exec", answer)
+    monkeypatch.setattr(widgets, "choose", answer)
     assert window.ask_recording_target() == ("continue", "mine")
-    assert "mine" in seen["text"]
-    assert "mine" in seen["default"]
+    assert "mine" in seen["message"]
+    assert "mine" in seen["agree"], "the safe answer names the scenario"
 
 
 def test_start_new_is_offered_even_when_something_is_selected(window, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
     _inventory_with(window, _scenario_row("mine"))
     window.scenarios.current = {"id": "mine", "writable": True}
 
-    def choose_new(box):
-        for button in box.buttons():
-            if button.text() == "Start new":
-                button.click()
-                return 0
-        pytest.fail("no way to start a new scenario")
+    def choose_new(_parent, _title, _message, _detail="", choices=(), **_kw):
+        if "Start new" not in choices:
+            pytest.fail("no way to start a new scenario")
+        return "Start new"
 
-    monkeypatch.setattr(QMessageBox, "exec", choose_new)
+    monkeypatch.setattr(widgets, "choose", choose_new)
     assert window.ask_recording_target() == ("new", "")
 
 
 def test_cancelling_records_nothing(window, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
     _inventory_with(window, _scenario_row("mine"))
     window.scenarios.current = {"id": "mine", "writable": True}
 
-    def cancel(box):
-        box.button(QMessageBox.Cancel).click()
-        return 0
-
-    monkeypatch.setattr(QMessageBox, "exec", cancel)
+    # Nothing pressed: `choose` answers with "" and nothing is recorded.
+    monkeypatch.setattr(widgets, "choose", lambda *a, **k: "")
     assert window.ask_recording_target()[0] == "cancel"
 
     started = []
@@ -1031,7 +1040,7 @@ def test_closing_with_nothing_running_asks_nothing(window, monkeypatch):
     def refuse(*_args, **_kwargs):
         raise AssertionError("nothing is running; there is nothing to confirm")
 
-    monkeypatch.setattr("cms_gui.pages.services.QMessageBox.question", refuse)
+    monkeypatch.setattr("cms_gui.widgets.confirm", refuse)
     assert window.services.detained() == []
     assert window._confirm_close_with_services() is True
 
@@ -1044,7 +1053,7 @@ def test_closing_on_top_of_a_service_names_it_and_can_be_called_off(window,
     if this window goes first, an attached child is simply left behind. So the
     confirmation is the mechanism, not a courtesy.
     """
-    from PySide6.QtWidgets import QMessageBox
+    from cms_gui import widgets
 
     class _Doomed:
         project, name = "Claim", "Odoo Local"
@@ -1052,13 +1061,11 @@ def test_closing_on_top_of_a_service_names_it_and_can_be_called_off(window,
     monkeypatch.setattr(window.services, "detained", lambda: [_Doomed()])
     seen = {}
 
-    def exec_(self):
-        seen["text"] = self.text() + " " + self.informativeText()
-        self.setClickedButton = None
-        return QMessageBox.RejectRole
+    def refuse(_parent, _title, message, detail="", **_kwargs):
+        seen["text"] = message + " " + detail
+        return False
 
-    monkeypatch.setattr(QMessageBox, "exec", exec_, raising=False)
-    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: None)
+    monkeypatch.setattr(widgets, "confirm", refuse)
     assert window._confirm_close_with_services() is False
     assert "1 service(s) stop" in seen["text"]
     assert "Claim · Odoo Local" in seen["text"]

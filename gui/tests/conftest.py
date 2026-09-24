@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # No display on CI (or in a terminal session): render to nothing at all.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if os.environ["QT_QPA_PLATFORM"] == "offscreen":
+    os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 # Pages persist as they are edited - the Command form to QSettings, the history
 # and saved configurations to the data directory - so instantiating one in a test
@@ -148,10 +150,13 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture(scope="session")
 def qapp():
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
     from cms_gui import theme
 
+    if QApplication.instance() is None:
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication.instance() or QApplication([])
     # Same two lines as app.main(). Without them a widget renders in Fusion's own
     # colours, so anything asserting on what the design paints - a primary
@@ -160,3 +165,25 @@ def qapp():
     theme.load_fonts()
     app.setStyleSheet(theme.stylesheet())
     yield app
+
+
+@pytest.fixture(autouse=True)
+def no_waiting_dialogs(monkeypatch):
+    """No test may open a dialog that waits for a person.
+
+    Every message, warning and confirmation in the application goes through
+    ``widgets.Message``, so one patch here covers all of them - and a test that
+    forgets to think about a dialog fails on its assertion rather than hanging
+    the suite until the timeout, which is what used to happen and is much
+    harder to read.
+
+    Accepted by default, so a confirmation reads as "yes" and the test gets on
+    with whatever it is actually about. A test that cares which answer was
+    given patches the wrapper it expects to be called - see the ones that do.
+    """
+    from PySide6.QtWidgets import QDialog
+
+    from cms_gui import widgets
+
+    monkeypatch.setattr(widgets.Message, "exec",
+                        lambda self: QDialog.Accepted, raising=False)

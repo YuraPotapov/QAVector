@@ -3,18 +3,51 @@
 This is the whole configuration surface of the GUI. Everything else it knows
 comes from the core itself, which is why the dialog's own feedback is simply
 "can I run --describe against this, and what did it say?".
+
+**The form scrolls.** Ten paths, each with a note under it saying what happens
+when it is left blank, is taller than a laptop screen - and a dialog cannot
+grow past the screen, so Qt squeezed the notes instead, below the height their
+wrapped text needs, until each ran into the field under it and the last of them
+was cut off with no way to reach it. The body scrolls and the buttons stay
+outside it, the way ``logsources.RowDialog`` does, so Save is always reachable.
 """
 
 import os
 import sys
 
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout)
+                               QLineEdit, QPushButton, QScrollArea, QVBoxLayout,
+                               QWidget)
 
 from .. import core as core_mod
 from .. import logsourcesfile as lsf
+from .. import cycleprojectsfile as cpf
 from .. import servicesfile as sf
 from .. import theme, widgets
+
+
+#: The core's own name for the store, repeated rather than imported: the GUI
+#: depends on PySide6 and nothing else, and this is only ever a placeholder and
+#: a file dialog's suggestion. The core resolves the real path itself when the
+#: box is left empty.
+SECRETS_NAME = "cyclesecrets.json"
+MEMORY_NAME = "cyclememory.json"
+
+#: What the footer and the window's own chrome take, so the first size asked
+#: for is the form's height plus the things around it rather than the form's
+#: alone. Measured rather than derived: the footer is not laid out yet when the
+#: dialog first sizes itself.
+FOOTER_HEIGHT = 130
+
+
+def _default_secrets_path():
+    """Where the core will put the store when nobody has said otherwise."""
+    return os.path.join(os.path.dirname(sf.default_path()), SECRETS_NAME)
+
+
+def _default_memory_path():
+    return os.path.join(os.path.dirname(sf.default_path()), MEMORY_NAME)
 
 
 class SettingsDialog(QDialog):
@@ -22,11 +55,26 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Settings")
+        self.frame = widgets.dress(self)
         self.setMinimumWidth(620)
+        self._settled = False
 
-        column = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self._body = QWidget()
+        column = QVBoxLayout(self._body)
         column.setContentsMargins(24, 20, 24, 18)
         column.setSpacing(6)
+        self.column = column
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(self._body)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.NoFrame)
+        # Never sideways: a hint is word-wrapped, so a horizontal bar would
+        # only ever mean the form had been made too narrow to read.
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self._scroll, 1)
         developer = bool(settings.developer_mode)
         column.addWidget(widgets.heading("Settings", "h2"))
         column.addWidget(widgets.lede(
@@ -113,6 +161,22 @@ class SettingsDialog(QDialog):
             "copy them across before pointing this at an empty one. Passed to "
             "every command as --flows-dir."))
 
+        # Wanted for a sharper reason than the scenarios one. In a source
+        # checkout the core's default is the checkout, so the cycles somebody
+        # edits are the template files that ship with the application - and
+        # saving one writes their own Jira instance and work email into a file
+        # that is committed.
+        self.cycles = QLineEdit(settings.cycles_path)
+        self.cycles.setProperty("mono", True)
+        self.cycles.setPlaceholderText("the core's own cycles directory")
+        column.addWidget(widgets.field(
+            "Cycles", widgets.row(self.cycles,
+                                  self._browse_button(self._pick_cycles)),
+            "The folder your cycles are read from and written to. Blank uses "
+            "the core's default, which in a source checkout is the checkout "
+            "itself - so editing a cycle there changes a file that ships with "
+            "the application. Passed to every command as --cycles-dir."))
+
         # The GUI's own, and the launcher has never heard of it - so where this
         # one goes really is nobody else's business.
         self.services = QLineEdit(settings.services_path)
@@ -125,20 +189,67 @@ class SettingsDialog(QDialog):
             "your own directory - never inside a checkout. The launcher neither "
             "reads this file nor needs to."))
 
-        column.addSpacing(10)
+        # Its own file rather than a corner of the one above: a project on the
+        # Cycles page can have half a dozen cycles and no services at all.
+        self.cycle_projects = QLineEdit(settings.cycle_projects_path)
+        self.cycle_projects.setProperty("mono", True)
+        self.cycle_projects.setPlaceholderText(cpf.default_path())
+        column.addWidget(widgets.field(
+            "Cycle projects",
+            widgets.row(self.cycle_projects,
+                        self._browse_button(self._pick_cycle_projects)),
+            "The projects the Cycles page groups by. Separate from the services "
+            "above on purpose - a project can have cycles and no services. "
+            "Which cycles belong to one is written in each cycle, not here."))
+
+        # The values of secret variables, kept out of the cycle files because
+        # those are committed and shipped inside the build.
+        self.cycle_secrets = QLineEdit(settings.cycle_secrets_path)
+        self.cycle_secrets.setProperty("mono", True)
+        self.cycle_secrets.setPlaceholderText(_default_secrets_path())
+        column.addWidget(widgets.field(
+            "Cycle secrets",
+            widgets.row(self.cycle_secrets,
+                        self._browse_button(self._pick_cycle_secrets)),
+            "The values of variables a cycle marks secret, encrypted, with the "
+            "key beside them. Never inside a cycle file: those are committed "
+            "and shipped, so anything written there travels to everyone."))
+
+        # What the project remembers between runs: which tasks were done, how
+        # much budget each has used, who is working on one right now.
+        self.cycle_memory = QLineEdit(settings.cycle_memory_path)
+        self.cycle_memory.setProperty("mono", True)
+        self.cycle_memory.setPlaceholderText(_default_memory_path())
+        column.addWidget(widgets.field(
+            "Cycle memory",
+            widgets.row(self.cycle_memory,
+                        self._browse_button(self._pick_cycle_memory)),
+            "What cycles remember between runs, so a task already done is not "
+            "done again. Plain JSON on purpose - it is meant to be readable "
+            "when you want to know why a run skipped something."))
+
+        column.addStretch(1)
+
+        # Outside the scroll: testing the connection and saving are what the
+        # dialog is for, and a form long enough to scroll is exactly the one
+        # whose Save would otherwise be below the bottom edge.
+        footer = QWidget()
+        bottom = QVBoxLayout(footer)
+        bottom.setContentsMargins(24, 8, 24, 14)
+        bottom.setSpacing(8)
         test = QPushButton("Test connection")
         test.clicked.connect(self._test)
         self.result = QLabel("")
         self.result.setWordWrap(True)
-        column.addWidget(widgets.row(test, None))
-        column.addWidget(self.result)
+        bottom.addWidget(widgets.row(test, None))
+        bottom.addWidget(self.result)
 
-        column.addSpacing(10)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         buttons.button(QDialogButtonBox.Save).setProperty("variant", "primary")
-        column.addWidget(buttons)
+        bottom.addWidget(buttons)
+        outer.addWidget(footer)
         self._fit()
 
     def _fit(self):
@@ -147,13 +258,42 @@ class SettingsDialog(QDialog):
         A dialog is given whatever height its first layout pass settles on, and
         anything past that is silently clipped - which with this many fields is
         the last one's hint, then the last field, then Save. Capped at the
-        screen, because a form taller than the display cannot be completed.
+        screen: a form taller than the display now scrolls rather than being
+        squeezed, which is what the cap used to cost.
         """
-        self.adjustSize()
         screen = self.screen() or QApplication.primaryScreen()
         available = screen.availableGeometry().height() if screen else 900
-        self.resize(max(620, self.width()),
-                    min(self.sizeHint().height() + 8, int(available * 0.9)))
+        wanted = self._body.sizeHint().height() + FOOTER_HEIGHT
+        self.resize(max(620, self.width()), min(wanted, int(available * 0.9)))
+
+    def showEvent(self, event):
+        """Take back whatever the form did not need, once it has real geometry.
+
+        Every hint under a field is a word-wrapped QLabel, and one of those
+        reports a sizeHint for a width it has not been given - always more lines
+        than it will actually take. ``_fit`` can only add those up, so without
+        this the dialog opens with a band of nothing under its last field.
+        """
+        super().showEvent(event)
+        if not self._settled:
+            self._settled = True
+            QTimer.singleShot(0, self._settle)
+
+    def _settle(self):
+        """Shrink to what is actually laid out. Never grows, never scrolls away."""
+        content = 0
+        for index in range(self.column.count()):
+            widget = self.column.itemAt(index).widget()
+            if widget is not None and widget.isVisible():
+                content = max(content, widget.geometry().bottom() + 1)
+        if content <= 0:
+            return
+        slack = self._body.height() - (content
+                                       + self.column.contentsMargins().bottom())
+        # At the screen cap the body is already scrolling and there is no slack
+        # to take; a couple of pixels is rounding, not a band.
+        if slack > 2:
+            self.resize(self.width(), self.height() - slack)
 
     def _browse_button(self, slot):
         button = QPushButton("Browse…")
@@ -189,6 +329,33 @@ class SettingsDialog(QDialog):
                                  save=True)
         if path:
             self.services.setText(path)
+
+    def _pick_cycle_projects(self):
+        path = widgets.pick_path(self, cpf.FILE_NAME,
+                                 self.cycle_projects.text() or cpf.default_path(),
+                                 save=True)
+        if path:
+            self.cycle_projects.setText(path)
+
+    def _pick_cycle_secrets(self):
+        path = widgets.pick_path(self, SECRETS_NAME,
+                                 self.cycle_secrets.text() or _default_secrets_path(),
+                                 save=True)
+        if path:
+            self.cycle_secrets.setText(path)
+
+    def _pick_cycle_memory(self):
+        path = widgets.pick_path(self, MEMORY_NAME,
+                                 self.cycle_memory.text() or _default_memory_path(),
+                                 save=True)
+        if path:
+            self.cycle_memory.setText(path)
+
+    def _pick_cycles(self):
+        path = widgets.pick_path(self, "Cycles folder",
+                                 self.cycles.text() or "~", directory=True)
+        if path:
+            self.cycles.setText(path)
 
     def _pick_flows(self):
         path = widgets.pick_path(self, "Scenarios folder",
@@ -245,12 +412,17 @@ class SettingsDialog(QDialog):
                              self.interpreter.text().strip(),
                              self.config.text().strip(),
                              self.log_sources.text().strip(),
-                             self.flows.text().strip())
+                             self.flows.text().strip(),
+                             cycles_dir=self.cycles.text().strip())
 
     def apply(self):
         self.settings.core_script = self.script.text().strip()
         self.settings.interpreter = self.interpreter.text().strip()
         self.settings.config = self.config.text().strip()
         self.settings.services_path = self.services.text().strip()
+        self.settings.cycle_projects_path = self.cycle_projects.text().strip()
+        self.settings.cycle_secrets_path = self.cycle_secrets.text().strip()
+        self.settings.cycle_memory_path = self.cycle_memory.text().strip()
         self.settings.log_sources_path = self.log_sources.text().strip()
         self.settings.flows_path = self.flows.text().strip()
+        self.settings.cycles_path = self.cycles.text().strip()

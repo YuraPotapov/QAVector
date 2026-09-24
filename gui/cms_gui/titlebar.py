@@ -62,6 +62,10 @@ EDGE = 1
 
 NAME = "QAVECTOR"
 
+#: The window controls, in the order they are drawn. A dialog usually wants
+#: only the last of them.
+CONTROLS = ("minimize", "maximize", "close")
+
 
 def wanted(environ=None):
     """Whether to draw this bar rather than keep the desktop's frame."""
@@ -69,9 +73,16 @@ def wanted(environ=None):
     return value.strip().lower() in ("", "0", "false", "no", "off")
 
 
-def install(window):
-    """Take the desktop's frame off ``window`` and put this one on. Call once."""
-    return Frame(window)
+def install(window, title="", controls=CONTROLS, grips=True):
+    """Take the desktop's frame off ``window`` and put this one on. Call once.
+
+    The defaults are the main window's: the brand, and all three controls.
+    A dialog passes its own ``title`` and usually only ``("close",)`` - a
+    confirmation has nothing to minimize to and no second size worth having -
+    and ``grips=False``, because a box with two buttons in it does not want a
+    resize handle on every edge.
+    """
+    return Frame(window, title=title, controls=controls, grips=grips)
 
 
 class WindowButton(QAbstractButton):
@@ -153,27 +164,33 @@ class TitleBar(QFrame):
     knows this one.
     """
 
-    def __init__(self, window):
+    def __init__(self, window, title="", controls=CONTROLS):
         super().__init__(window)
         self.setProperty("role", "titlebar")
         self._press = None          # where a drag began, until it is handed on
         self._origin = None         # where the window was when it did
         self._dragging = False
+        self._controls = tuple(controls)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 0, 0, 0)
         row.setSpacing(0)
         mark = QLabel()
         mark.setPixmap(icon.app_icon().pixmap(MARK, MARK))
-        self.name = QLabel(NAME)
+        # A dialog says what it is; the main window says what the application
+        # is. Same bar, same mark, and the one line of text that is useful in
+        # each case - "QAVECTOR" and a version on a confirmation would be telling
+        # somebody which application they are already looking at.
+        self.name = QLabel(title or NAME)
         self.name.setProperty("role", "brand")
-        self.version = QLabel(gui_version())
-        self.version.setProperty("role", "brandtag")
         row.addWidget(mark)
         row.addSpacing(10)
         row.addWidget(self.name)
-        row.addSpacing(10)
-        row.addWidget(self.version)
+        if not title:
+            self.version = QLabel(gui_version())
+            self.version.setProperty("role", "brandtag")
+            row.addSpacing(10)
+            row.addWidget(self.version)
         row.addStretch(1)
 
         self.minimize_button = WindowButton("minimize", self)
@@ -182,10 +199,17 @@ class TitleBar(QFrame):
         self.maximize_button.clicked.connect(self.toggle_maximized)
         self.close_button = WindowButton("close", self)
         self.close_button.clicked.connect(lambda: self.window().close())
-        for button in (self.minimize_button, self.maximize_button, self.close_button):
-            row.addWidget(button)
+        for kind, button in (("minimize", self.minimize_button),
+                             ("maximize", self.maximize_button),
+                             ("close", self.close_button)):
+            if kind in self._controls:
+                row.addWidget(button)
+            else:
+                button.hide()
 
     def toggle_maximized(self):
+        if "maximize" not in self._controls:
+            return                  # nor by double-clicking the bar
         window = self.window()
         if window.isMaximized():
             window.showNormal()
@@ -334,14 +358,30 @@ class Frame(QObject):
     have to know it is wearing one.
     """
 
-    def __init__(self, window):
+    def __init__(self, window, title="", controls=CONTROLS, grips=True):
         super().__init__(window)
-        self.window = window
-        self.bar = TitleBar(window)
-        self.grips = [Grip(window, edges) for edges in GRIP_EDGES]
+        self.bar = TitleBar(window, title=title, controls=controls)
+        self.grips = ([Grip(window, edges) for edges in GRIP_EDGES]
+                      if grips else [])
         window.setWindowFlag(Qt.FramelessWindowHint, True)
         window.installEventFilter(self)
         self.sync()
+
+    @property
+    def window(self):
+        """The window this is fitted to, read from Qt rather than held.
+
+        Deliberately not stored. A frame that kept a reference to its window,
+        while the window kept one to its frame, made a reference cycle between
+        two QObjects - and Python collecting both at once destroys them in an
+        order nobody decides, which is a segfault rather than an error. One
+        frame on a window that lives for the whole process never collects and
+        never showed it; a frame on every dialog does.
+
+        None once the window has gone, so anything still being delivered to
+        this filter on the way down finds nothing rather than a dangling one.
+        """
+        return self.parent()
 
     def framed(self):
         """Whether there is an edge to draw and to resize by: not when maximized."""
@@ -363,7 +403,10 @@ class Frame(QObject):
             grip.raise_()
 
     def eventFilter(self, watched, event):
-        if watched is self.window and event.type() in (
+        window = self.window
+        if window is None:
+            return False
+        if watched is window and event.type() in (
                 QEvent.Resize, QEvent.WindowStateChange, QEvent.Show):
             self.sync()
         return False

@@ -237,3 +237,85 @@ def test_keeping_the_desktops_frame_leaves_the_window_as_it_was(qapp, monkeypatc
     finally:
         win.history.clear()
         dispose(win)
+
+
+# ------------------------------------------------- a frame on every window
+# The main window's frame is made once and lives for the process. A frame on
+# every dialog is made and destroyed all day, which is a different problem.
+def test_a_frame_does_not_hold_its_window(qapp):
+    """A frame that kept a reference to its window, while the window kept one
+    to its frame, made a reference cycle between two QObjects - and Python
+    collecting both at once destroys them in an order nobody decides, which is
+    a segfault rather than an error."""
+    from PySide6.QtWidgets import QDialog
+
+    dialog = QDialog()
+    frame = titlebar.install(dialog, title="Edit", controls=("close",),
+                             grips=False)
+    try:
+        assert "window" not in frame.__dict__, "read from Qt, never stored"
+        assert frame.window is dialog
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_dialog_and_its_frame_can_be_collected(qapp):
+    """The crash this prevents showed up as a segfault on the *next* dialog
+    rather than on the one that went, which is why it is worth a test of its
+    own rather than being left to whichever suite trips over it."""
+    import gc
+
+    from PySide6.QtWidgets import QDialog
+
+    for _ in range(5):
+        dialog = QDialog()
+        dialog.frame = titlebar.install(dialog, title="Edit",
+                                        controls=("close",), grips=False)
+        dialog.close()
+        del dialog
+        gc.collect()
+
+
+def test_a_frame_whose_window_has_gone_answers_nothing(qapp):
+    """A window being torn down still delivers events to its filters."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QDialog
+
+    dialog = QDialog()
+    frame = titlebar.install(dialog, title="Edit", controls=("close",),
+                             grips=False)
+    frame.setParent(None)
+
+    assert frame.window is None
+    assert frame.eventFilter(dialog, QEvent(QEvent.Show)) is False
+
+
+def test_a_dialog_gets_the_controls_it_was_given(qapp):
+    from PySide6.QtWidgets import QDialog
+
+    dialog = QDialog()
+    frame = titlebar.install(dialog, title="Edit row", controls=("close",),
+                             grips=False)
+    try:
+        assert frame.bar.name.text() == "Edit row"
+        assert frame.grips == []
+        assert not frame.bar.minimize_button.isVisibleTo(frame.bar)
+        assert not frame.bar.maximize_button.isVisibleTo(frame.bar)
+        assert frame.bar.close_button.isVisibleTo(frame.bar)
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_bar_with_no_maximize_does_not_maximize_on_a_double_click(qapp):
+    """The gesture is part of the bar, so taking the button away has to take
+    the gesture with it - or a form somebody double-clicked fills the screen."""
+    from PySide6.QtWidgets import QDialog
+
+    dialog = QDialog()
+    frame = titlebar.install(dialog, title="Edit", controls=("close",),
+                             grips=False)
+    try:
+        frame.bar.toggle_maximized()
+        assert not dialog.isMaximized()
+    finally:
+        dialog.deleteLater()

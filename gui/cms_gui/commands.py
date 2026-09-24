@@ -109,6 +109,41 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # became Settings -> Scenarios; two places to say it meant the page
              # could be editing one tree while a run read another.
              "--flows-dir",
+             # The Cycles page's editing surface, exactly as --flow-* is the
+             # Scenarios page's: read, write, delete, import.
+             "--cycle-show", "--cycle-save", "--cycle-delete", "--cycle-import",
+             "--cycle-list",
+             # And running one. Not a form field: a cycle run is a cycle, picked
+             # on the page that draws it, plus the variables that cycle declares
+             # - which a generic list of flags has no way to know the names of.
+             # The page builds the command; the Command page builds launches.
+             "--cycle-run", "--cycle-jobs", "--cycle-var",
+             # And running part of one: the two chevrons beside Run, which act
+             # on the step selected on the canvas. Naming a step by hand on a
+             # command line would mean knowing the graph without seeing it.
+             "--cycle-only", "--cycle-from", "--cycle-resume", "--cycle-reuse",
+             # Where the cycles tree is, for the reason --flows-dir is here: the
+             # page edits it and a run reads it, so two places to say it would
+             # mean editing one tree while a run read another.
+             "--cycles-dir",
+             # The two stores a cycle run reads, and the commands that edit
+             # them. Here for the same reason --cycles-dir is: Settings says
+             # where each file lives and the page edits it through these, so a
+             # second place to name the file would mean the page editing one
+             # store while a run read another. A secret is doubly not a form
+             # field - a value typed into a command line is a value in `ps`.
+             "--cycle-secrets-file", "--cycle-secret-set",
+             "--cycle-secret-list", "--cycle-secret-delete",
+             "--cycle-secret-copy",
+             "--cycle-memory-file", "--cycle-memory-list",
+             "--cycle-memory-show", "--cycle-memory-forget",
+             # The Inspector's Setup section: a plugin declares what it can be
+             # asked outside a run, and the page renders and calls it. Nobody
+             # composes one of these by hand.
+             "--cycle-plugin-action",
+             # The Subjects sidebar lists a cycle's sessions and deletes one;
+             # both act on a row the page shows, not on anything typed.
+             "--cycle-sessions", "--cycle-session-delete",
              # RUN ▾ -> "With Recorder" adds this; it is a mode, not a form field.
              "--recorder",
              # And RUN ▾ -> "In Background" adds this one, for the same reason.
@@ -217,7 +252,11 @@ def parse_help_flags(help_text):
             continue
         for token in stripped.split():
             if token.startswith("--"):
-                name = token.split("=")[0].rstrip(",")
+                # "--flag[=VALUE]" is how --help writes an optional value, so
+                # the bracket goes with the value rather than with the name.
+                # Without this the test looked for a flag called
+                # "--cycle-memory-list[" and reported the real one as missing.
+                name = token.split("=")[0].split("[")[0].rstrip(",")
                 if len(name) > 2:
                     found.add(name)
                 break

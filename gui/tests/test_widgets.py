@@ -460,3 +460,350 @@ def test_a_list_without_the_view_behaves_as_it_always_did(qapp):
     checks.search.setText("b")
     assert _visible(checks) == ["b"]
     assert checks.count.text() == "1 of 2 selected   ·   1 hidden by the search"
+
+
+# ------------------------------------------------------- asking in our clothes
+# QMessageBox is not styled by the stylesheet - it draws its own icon and asks
+# the platform for its buttons, so it arrives as every other application on the
+# machine and none of this one.
+def test_a_confirmation_is_built_from_the_same_widgets_as_everything_else(qapp):
+    dialog = widgets.Message(None, "Run", "Run all 23 steps?", "It may hurt.",
+                             agree="Yes", refuse="Cancel")
+    try:
+        assert dialog.agree_button.text() == "Yes"
+        assert dialog.refuse_button.text() == "Cancel"
+        assert dialog.agree_button.property("variant") == "primary", \
+            "the one they came to press"
+        assert dialog.refuse_button.property("variant") == "ghost"
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_notice_has_one_button_because_there_is_nothing_to_decide(qapp):
+    dialog = widgets.Message(None, "Projects", "Could not read the file.")
+    try:
+        assert dialog.refuse_button is None
+        assert dialog.agree_button.text() == "OK"
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_warning_is_ruled_and_a_plain_notice_is_not(qapp):
+    """Most of what this shows is ordinary, so the mark is for the part that
+    is not - and it is a rule rather than a picture, because a stylesheet can
+    colour a rule and cannot draw a picture."""
+    warned = widgets.Message(None, "Run", "It failed.", kind="error")
+    plain = widgets.Message(None, "Run", "It finished.")
+    try:
+        assert widgets.Message.RULES["error"] == "BAD"
+        assert _rules(warned) == 1
+        assert _rules(plain) == 0
+    finally:
+        warned.deleteLater()
+        plain.deleteLater()
+
+
+def _rules(dialog):
+    from PySide6.QtWidgets import QFrame
+
+    return len([one for one in dialog.findChildren(QFrame)
+                if one.width() == widgets.Message.RULE
+                or one.minimumWidth() == widgets.Message.RULE])
+
+
+def test_it_shows_the_question_and_the_consequence_apart(qapp):
+    """Two labels, not one paragraph: the question is answered in a second,
+    the consequence is what somebody reads if they hesitate."""
+    dialog = widgets.Message(None, "Run", "Run all 23 steps?",
+                             "This can change files on your machine.")
+    try:
+        assert dialog.message.text() == "Run all 23 steps?"
+        assert dialog.detail.text() == "This can change files on your machine."
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_confirmation_with_nothing_to_warn_about_shows_no_note(qapp):
+    """Counted off the dialog's own layout: the title bar has labels of its
+    own - the mark and the name - and they are not the question."""
+    with_note = widgets.Message(None, "Delete", "Delete it?", "It is final.")
+    without = widgets.Message(None, "Delete", "Delete it?")
+    try:
+        assert with_note.detail is not None
+        assert without.detail is None
+    finally:
+        with_note.deleteLater()
+        without.deleteLater()
+
+
+def test_the_answers_can_be_named_after_what_they_do(qapp):
+    """"Run" beats "Yes": somebody reading only the buttons still knows."""
+    from PySide6.QtWidgets import QPushButton
+
+    dialog = widgets.Message(None, "Run", "Run it?", agree="Run",
+                             refuse="Leave it")
+    try:
+        assert sorted(one.text() for one
+                      in dialog.findChildren(QPushButton)) == ["Leave it",
+                                                               "Run"]
+    finally:
+        dialog.deleteLater()
+
+
+def test_it_is_modal_because_it_is_a_question(qapp):
+    dialog = widgets.Message(None, "Run", "Run it?")
+    try:
+        assert dialog.isModal()
+    finally:
+        dialog.deleteLater()
+
+
+# -------------------------------------------------- the wheel and a dropdown
+# Qt's default is that the wheel moves a combo box's selection whenever the
+# pointer is over it. On a form inside a scroll area that is a trap: somebody
+# scrolls the page, the pointer passes over a dropdown, and the value changes
+# underneath them - silently, and often unnoticed until something runs wrong.
+def _wheel():
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    return QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, -120),
+                       QPoint(0, -120), Qt.NoButton, Qt.NoModifier,
+                       Qt.NoScrollPhase, False)
+
+
+def test_the_wheel_does_not_change_a_dropdown(qapp):
+    from PySide6.QtWidgets import QComboBox, QScrollArea, QWidget
+
+    area = QScrollArea()
+    inner = QWidget()
+    area.setWidget(inner)
+    box = QComboBox(inner)
+    box.addItems(["one", "two", "three"])
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        before = box.currentIndex()
+        qapp.sendEvent(box, _wheel())
+        assert box.currentIndex() == before
+    finally:
+        filter_.stop()
+        area.deleteLater()
+
+
+def test_the_wheel_does_not_change_a_spin_box_either(qapp):
+    from PySide6.QtWidgets import QSpinBox
+
+    box = QSpinBox()
+    box.setRange(0, 10)
+    box.setValue(5)
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        qapp.sendEvent(box, _wheel())
+        assert box.value() == 5
+    finally:
+        filter_.stop()
+        box.deleteLater()
+
+
+def test_the_page_under_it_still_scrolls(qapp):
+    """Eating the event would trade a silent wrong value for a page that
+    mysteriously refuses to scroll over half its own controls."""
+    from PySide6.QtWidgets import QComboBox, QScrollArea, QWidget
+
+    area = QScrollArea()
+    inner = QWidget()
+    inner.setFixedHeight(2000)
+    area.setWidget(inner)
+    area.setFixedHeight(200)
+    box = QComboBox(inner)
+    box.addItems(["one", "two", "three"])
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        before = area.verticalScrollBar().value()
+        qapp.sendEvent(box, _wheel())
+        assert area.verticalScrollBar().value() != before
+    finally:
+        filter_.stop()
+        area.deleteLater()
+
+
+def test_anything_that_is_not_one_of_those_is_left_alone(qapp):
+    from PySide6.QtWidgets import QScrollArea
+
+    area = QScrollArea()
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        assert filter_.eventFilter(area, _wheel()) is False
+    finally:
+        filter_.stop()
+        area.deleteLater()
+
+
+# ------------------------------------------------------ and it wears our frame
+def test_a_confirmation_wears_the_application_s_own_title_bar(qapp):
+    from cms_gui import titlebar
+
+    if not titlebar.wanted():
+        import pytest
+        pytest.skip("the desktop's frame was asked for")
+
+    dialog = widgets.Message(None, "Run", "Run it?")
+    try:
+        assert dialog.frame is not None
+        assert dialog.frame.bar.name.text() == "Run", "its own name, not the brand"
+        assert dialog.frame.grips == [], "a two-button box is not resizable"
+        assert not dialog.frame.bar.minimize_button.isVisibleTo(dialog.frame.bar)
+        assert dialog.frame.bar.close_button.isVisibleTo(dialog.frame.bar)
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_dressed_window_can_still_be_resized(qapp):
+    """Taking the desktop's frame off takes its resize handles with it, so a
+    window dressed without them silently loses something it had - and a form
+    whose field is too small to read what is in it cannot be used."""
+    from PySide6.QtWidgets import QDialog
+
+    dialog = QDialog()
+    dialog.setWindowTitle("Edit service")
+    frame = widgets.dress(dialog)
+    try:
+        assert frame.grips, "a window that had a frame keeps its handles"
+    finally:
+        dialog.deleteLater()
+
+
+def test_only_a_window_that_never_had_a_frame_gives_that_up(qapp):
+    message = widgets.Message(None, "Run", "Run it?")
+    try:
+        assert message.frame.grips == []
+    finally:
+        message.deleteLater()
+
+
+def test_a_window_somebody_works_in_gets_all_three_controls(qapp):
+    """A console filling with output is minimized and maximized; a form is
+    filled in and closed."""
+    from PySide6.QtWidgets import QDialog
+
+    worked_in = QDialog()
+    worked_in.setWindowTitle("Console")
+    form = QDialog()
+    form.setWindowTitle("Edit service")
+    try:
+        assert widgets.dress(worked_in, minimizable=True).bar._controls == \
+            ("minimize", "maximize", "close")
+        assert widgets.dress(form).bar._controls == ("close",)
+    finally:
+        worked_in.deleteLater()
+        form.deleteLater()
+
+
+def test_the_title_comes_from_the_window_when_none_is_given(qapp):
+    from PySide6.QtWidgets import QDialog
+
+    dialog = QDialog()
+    dialog.setWindowTitle("Edit service")
+    try:
+        assert widgets.dress(dialog).bar.name.text() == "Edit service"
+    finally:
+        dialog.deleteLater()
+
+
+def test_the_wheel_over_an_editable_dropdown_s_own_field_is_caught_too(qapp):
+    """An editable combo box is made of child widgets, and a wheel over the
+    line edit inside one is a wheel over the control as far as anybody using
+    it is concerned. Testing only the box itself missed this entirely."""
+    from PySide6.QtWidgets import QComboBox
+
+    box = QComboBox()
+    box.setEditable(True)
+    box.addItems(["one", "two", "three"])
+    box.setCurrentIndex(1)
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        qapp.sendEvent(box.lineEdit(), _wheel())
+        assert box.currentIndex() == 1
+    finally:
+        filter_.stop()
+        box.deleteLater()
+
+
+def test_the_wheel_inside_a_spin_box_s_own_field_is_caught_too(qapp):
+    from PySide6.QtWidgets import QLineEdit, QSpinBox
+
+    box = QSpinBox()
+    box.setRange(0, 10)
+    box.setValue(5)
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        inner = box.findChild(QLineEdit)
+        qapp.sendEvent(inner or box, _wheel())
+        assert box.value() == 5
+    finally:
+        filter_.stop()
+        box.deleteLater()
+
+
+def test_the_open_list_still_scrolls(qapp):
+    """The whole point of a long dropdown is getting down it."""
+    from PySide6.QtWidgets import QComboBox
+
+    box = QComboBox()
+    box.addItems([str(n) for n in range(50)])
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    try:
+        assert filter_.eventFilter(box.view(), _wheel()) is False
+    finally:
+        filter_.stop()
+        box.deleteLater()
+
+
+def test_a_dropdown_on_a_real_dialog_of_this_application_is_guarded(qapp):
+    """Synthetic widgets prove the filter; this proves it reaches the ones
+    somebody actually meets."""
+    from PySide6.QtWidgets import QComboBox
+
+    from cms_gui.pages.logsources import ConnectionDialog
+
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    dialog = ConnectionDialog()
+    dialog.ensurePolished()
+    try:
+        box = dialog.findChild(QComboBox)
+        assert box is not None and box.count() > 1
+        before = box.currentIndex()
+        qapp.sendEvent(box, _wheel())
+        assert box.currentIndex() == before
+    finally:
+        filter_.stop()
+        dialog.deleteLater()
+
+
+def test_new_controls_and_replaced_editors_are_guarded_when_shown(qapp, dispose):
+    from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QSpinBox, QVBoxLayout
+
+    filter_ = widgets.stop_wheel_stealing(qapp)
+    dialog = QDialog()
+    layout = QVBoxLayout(dialog)
+    combo = QComboBox()
+    combo.addItems(["one", "two", "three"])
+    combo.setCurrentIndex(1)
+    spin = QSpinBox()
+    spin.setRange(0, 10)
+    spin.setValue(5)
+    layout.addWidget(combo)
+    layout.addWidget(spin)
+    dialog.show()
+    try:
+        # Editors can be added or replaced after their parent was polished.
+        combo.setEditable(True)
+        spin.setLineEdit(QLineEdit())
+        qapp.processEvents()
+        qapp.sendEvent(combo.lineEdit(), _wheel())
+        qapp.sendEvent(spin.lineEdit(), _wheel())
+        assert combo.currentIndex() == 1
+        assert spin.value() == 5
+    finally:
+        filter_.stop()
+        dispose(dialog)

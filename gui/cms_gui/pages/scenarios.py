@@ -24,7 +24,7 @@ import os
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHeaderView, QInputDialog,
-                               QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+                               QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QSplitter, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
@@ -543,7 +543,7 @@ class ScenariosPage(QWidget):
         try:
             payload = self.core.flow_show(flow_id)
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, "Scenarios", str(exc))
+            widgets.warn(self, "Scenarios", str(exc))
             return
         self.current = payload
         self._building = True
@@ -725,7 +725,7 @@ class ScenariosPage(QWidget):
                     self.selector_table.selectRow(row)
                     break
             return
-        QMessageBox.information(
+        widgets.note(
             self, "Open target",
             "\"%s\" is not a name in selectors.yaml, so it is used as a raw "
             "selector exactly as written." % target)
@@ -788,12 +788,11 @@ class ScenariosPage(QWidget):
     def _confirm_discard(self):
         if not self._dirty or self.current is None:
             return True
-        answer = QMessageBox.question(
+        return widgets.confirm(
             self, "Unsaved changes",
-            "\"%s\" has changes that are not saved. Discard them?"
+            "Discard the changes to \"%s\"?"
             % (self.current["id"] if self.current else ""),
-            QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel)
-        return answer == QMessageBox.Discard
+            "They have not been saved.", agree="Discard", kind="warn")
 
     def _update_buttons(self):
         writable = bool(self.current and self.current.get("writable"))
@@ -854,10 +853,10 @@ class ScenariosPage(QWidget):
         try:
             result = self.core.flow_save(flow_id, document)
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, "Scenarios", str(exc))
+            widgets.warn(self, "Scenarios", str(exc))
             return
         if not result.get("ok"):
-            QMessageBox.warning(self, "Scenarios",
+            widgets.warn(self, "Scenarios",
                                 "\n".join(result.get("problems")
                                           or ["could not write the scenario"]))
             return
@@ -883,18 +882,17 @@ class ScenariosPage(QWidget):
         if not self.current or not self.current.get("writable"):
             return
         flow_id = self.current["id"]
-        answer = QMessageBox.question(
-            self, "Delete scenario", "Delete \"%s\"? The file is removed." % flow_id,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not widgets.confirm(
+                self, "Delete scenario", "Delete \"%s\"?" % flow_id,
+                "The file is removed.", agree="Delete", kind="warn"):
             return
         try:
             result = self.core.flow_delete(flow_id)
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, "Scenarios", str(exc))
+            widgets.warn(self, "Scenarios", str(exc))
             return
         if not result.get("ok"):
-            QMessageBox.warning(self, "Scenarios", "\n".join(result["problems"]))
+            widgets.warn(self, "Scenarios", "\n".join(result["problems"]))
             return
         self.current = None
         self._baseline = None
@@ -911,10 +909,10 @@ class ScenariosPage(QWidget):
         try:
             result = self.core.flow_import(path)
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, "Scenarios", str(exc))
+            widgets.warn(self, "Scenarios", str(exc))
             return
         if not result.get("ok"):
-            QMessageBox.warning(self, "Import failed",
+            widgets.warn(self, "Import failed",
                                 "\n".join(result.get("problems") or []))
             return
         self.status.setText("imported %s" % result.get("id", ""))
@@ -930,7 +928,7 @@ class ScenariosPage(QWidget):
         if not path:
             return
         if not self.write_to(path):
-            QMessageBox.warning(self, "Export failed", "Could not write %s." % path)
+            widgets.warn(self, "Export failed", "Could not write %s." % path)
             return
         self.status.setText("exported to %s" % path)
         unresolved = self.current.get("unresolved") or {}
@@ -938,7 +936,7 @@ class ScenariosPage(QWidget):
         # not - say so now rather than letting it fail wherever it lands.
         depends = list(unresolved.get("use") or []) + list(unresolved.get("selectors") or [])
         if depends:
-            QMessageBox.information(
+            widgets.note(
                 self, "Exported",
                 "%s was written.\n\nIt refers to things this tree does not have, "
                 "so wherever it goes needs them too:\n\n- %s"
@@ -991,7 +989,7 @@ class ScenariosPage(QWidget):
         try:
             payload = self.core.selectors_show()
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, "Selectors", str(exc))
+            widgets.warn(self, "Selectors", str(exc))
             return
         self._building = True
         try:
@@ -1018,7 +1016,7 @@ class ScenariosPage(QWidget):
         try:
             result = self.core.selectors_save(self.selector_yaml.toPlainText())
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, "Selectors", str(exc))
+            widgets.warn(self, "Selectors", str(exc))
             return
         if not result.get("ok"):
             self.selector_problems.setText("\n".join(result.get("problems") or []))

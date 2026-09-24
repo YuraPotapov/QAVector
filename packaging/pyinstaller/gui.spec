@@ -5,9 +5,8 @@ Produces ``qavector-gui`` as a onedir bundle. It ships no core: the
 GUI finds the core executable next to it at runtime (cms_gui.core.frozen_core),
 which keeps the process boundary the front-end is built around.
 
-Most of this file is the exclusion list. A full PySide6 install is ~650 MB
-because it carries WebEngine, QML, 3D and multimedia; this GUI uses QtCore,
-QtGui and QtWidgets and nothing else, so all of that is dropped.
+The GUI uses QtCore, QtGui, QtWidgets, QtQuickWidgets and WebEngine for HTML
+artifact previews. Unused 3D and multimedia modules are excluded below.
 """
 
 import os
@@ -16,13 +15,12 @@ ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 GUI = os.path.join(ROOT, "gui")
 
 # Verified against every `from PySide6.X import` in gui/cms_gui: the front-end
-# touches QtCore, QtGui and QtWidgets only. QtDBus, QtNetwork, QtSvg and QtOpenGL
-# are deliberately *not* here - the xcb platform plugin loads them, and dropping
-# them leaves an app that builds cleanly and then cannot open a window.
+# needs WebEngineCore and WebEngineWidgets for HTML previews and QuickWidgets
+# to prepare the window's composition before the first preview. Their hooks
+# collect the renderer, resources and dependencies, including Quick and QML.
 excludes = [
-    "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
-    "PySide6.QtWebChannel", "PySide6.QtWebSockets", "PySide6.QtWebView",
-    "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQuick3D",
+    "PySide6.QtWebEngineQuick", "PySide6.QtWebSockets", "PySide6.QtWebView",
+    "PySide6.QtQuick3D",
     "PySide6.QtQuickControls2", "PySide6.QtQuickTest",
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.Qt3DInput",
     "PySide6.Qt3DLogic", "PySide6.Qt3DAnimation", "PySide6.Qt3DExtras",

@@ -35,8 +35,7 @@ import os
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QLabel, QLineEdit, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea,
+                               QDialogButtonBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
 from .. import logsourcesfile as lsf
@@ -78,6 +77,7 @@ class RowDialog(QDialog):
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.frame = widgets.dress(self)
         self.setMinimumWidth(580)
         self._settled = False
 
@@ -505,6 +505,7 @@ class LogViewerDialog(QDialog):
         self._lines = list(result.get("lines") or [])
         self.setWindowTitle("%s - %s" % (name, "whole log" if whole else "tail"))
         self.resize(1000, 620)
+        self.frame = widgets.dress(self, minimizable=True)
 
         column = QVBoxLayout(self)
         column.setContentsMargins(20, 16, 20, 14)
@@ -566,4 +567,4 @@ class LogViewerDialog(QDialog):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(self._visible()))
         except OSError as exc:
-            QMessageBox.warning(self, "Save log", str(exc))
+            widgets.warn(self, "Save log", str(exc))

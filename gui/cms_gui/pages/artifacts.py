@@ -18,6 +18,7 @@ import time
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
                                QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
 from .. import history as history_mod, icons, theme, widgets
 
 TEXT_SUFFIXES = (".json", ".log", ".txt", ".html", ".yaml", ".yml", ".md", ".csv")
+HTML_SUFFIXES = (".html", ".htm")
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 PREVIEW_LIMIT = 400_000     # bytes of a text file worth putting on screen
 
@@ -42,6 +44,14 @@ class ArtifactsPage(QWidget):
         self._run_dir = ""          # the live run's directory, when there is one
         self._shown_dir = ""        # what the tree is showing
         self._loading = False
+        self.html = None             # start WebEngine only when opening HTML
+        # Reserve Qt Quick composition before the main window is shown. The
+        # WebEngine view creates its own Quick widget only when first loaded;
+        # adding that to a visible raster window destroys and recreates the
+        # native window. This empty, hidden surface avoids that transition
+        # without starting Chromium or reading an artifact during startup.
+        self._html_surface = QQuickWidget(self)
+        self._html_surface.hide()
 
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
@@ -104,6 +114,12 @@ class ArtifactsPage(QWidget):
         path_row.setContentsMargins(0, 0, 0, 0)
         path_row.setSpacing(8)
         path_row.addWidget(self.path_label, 1)
+        self.preview_mode = QComboBox()
+        self.preview_mode.addItems(["Preview", "Source"])
+        self.preview_mode.setToolTip("Show the HTML page or its source")
+        self.preview_mode.setVisible(False)
+        self.preview_mode.currentIndexChanged.connect(self._preview_selected)
+        path_row.addWidget(self.preview_mode)
         path_row.addWidget(self.open_file)
         path_layout.addLayout(path_row)
         right_layout.addWidget(path_bar)
@@ -122,6 +138,7 @@ class ArtifactsPage(QWidget):
         self.image_area.setWidget(self.image)
         self.image_area.setVisible(False)
         right_layout.addWidget(self.image_area, 1)
+        self._preview_layout = right_layout
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -285,10 +302,18 @@ class ArtifactsPage(QWidget):
         path = self._selected_path()
         self.path_label.setText(path)
         self.open_file.setEnabled(bool(path))
+        suffix = os.path.splitext(path)[1].lower()
+        is_html = bool(path and not os.path.isdir(path) and suffix in HTML_SUFFIXES)
+        self.preview_mode.setVisible(is_html)
+        if self.html is not None:
+            self.html.stop()
+            self.html.setVisible(False)
         if not path or os.path.isdir(path):
             self._show_text("" if not path else "Directory")
             return
-        suffix = os.path.splitext(path)[1].lower()
+        if is_html and self.preview_mode.currentIndex() == 0:
+            self._show_html(path)
+            return
         if suffix in IMAGE_SUFFIXES:
             pixmap = QPixmap(path)
             if not pixmap.isNull():
@@ -297,7 +322,7 @@ class ArtifactsPage(QWidget):
                 self.image.setPixmap(pixmap.scaled(
                     1200, 900, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 return
-        if suffix in TEXT_SUFFIXES:
+        if suffix in TEXT_SUFFIXES or is_html:
             try:
                 size = os.path.getsize(path)
                 with open(path, encoding="utf-8", errors="replace") as fh:
@@ -317,9 +342,26 @@ class ArtifactsPage(QWidget):
         self._show_text("(no preview for %s — use Open in OS)" % (suffix or "this file"))
 
     def _show_text(self, body):
+        if self.html is not None:
+            self.html.setVisible(False)
         self.image_area.setVisible(False)
         self.text.setVisible(True)
         self.text.setPlainText(body)
+
+    def _show_html(self, path):
+        if not os.path.isfile(path):
+            self._show_text("Cannot read: file no longer exists")
+            return
+        if self.html is None:
+            from ..htmlpreview import HtmlPreview
+
+            self.html = HtmlPreview(self)
+            self.html.local_file_requested.connect(self._select_path, Qt.QueuedConnection)
+            self._preview_layout.addWidget(self.html, 1)
+        self.text.setVisible(False)
+        self.image_area.setVisible(False)
+        self.html.setVisible(True)
+        self.html.load_file(path, self._shown_dir)
 
     # -- opening --------------------------------------------------------------
     def _open_selected(self):

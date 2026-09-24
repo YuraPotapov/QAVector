@@ -22,6 +22,9 @@ from . import store
 
 LAUNCH = "launch"
 COMMAND = "command"
+#: A cycle run. A third kind rather than a second record, so History lists all
+#: three the same way and "what ran here yesterday" has one answer.
+CYCLE = "cycle"
 
 # Terminal statuses, plus the one an entry wears while its run is in flight. A
 # run that never reached a terminal state (the GUI was killed mid-run) keeps
@@ -96,6 +99,21 @@ class History(QObject):
         self._evict()
         self._flush()
         return entry["id"]
+
+    def note(self, entry_id, **fields):
+        """Record something about a run that is still going. Unknown ids ignored.
+
+        Not :meth:`finish`: that stamps the entry as over and works out how
+        long it took, so using it for "here is where this run is writing its
+        files" would close an entry for a run still in progress and leave it
+        with a duration measured to the wrong moment.
+        """
+        entry = self.entry(entry_id)
+        if entry is None:
+            return None
+        entry.update(fields)
+        self._flush()
+        return entry
 
     def finish(self, entry_id, **fields):
         """Close an entry with how the run ended. Unknown ids are ignored."""
@@ -191,9 +209,13 @@ def entry_label(entry):
     today = datetime.date.today().isoformat()
     if when.startswith(today):
         when = when[len(today):].strip()
-    kind = "Launch" if entry.get("kind") == LAUNCH else "Command"
+    kind = {LAUNCH: "Launch", CYCLE: "Cycle"}.get(entry.get("kind"), "Command")
     if entry.get("kind") == LAUNCH:
         where = launch.env_label(entry.get("launch_config") or {}).split(" (")[0]
+    elif entry.get("kind") == CYCLE:
+        # Which cycle ran. Called "Command" with an environment it never had,
+        # a cycle run was the one kind of entry the list could not name.
+        where = (entry.get("config") or {}).get("cycle") or ""
     else:
         where = (entry.get("command_state") or {}).get("--env") or "all envs"
     status = STATUS_LABELS.get(entry.get("status", ""), entry.get("status", ""))

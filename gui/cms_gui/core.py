@@ -240,7 +240,9 @@ class Core:
     """
 
     def __init__(self, script=None, interpreter=None, config=None,
-                 log_sources=None, flows_dir=None):
+                 log_sources=None, flows_dir=None, cycles_dir=None,
+                 secrets_path="",
+                 memory_path=""):
         auto_script, auto_python = autodetect()
         self.script = script or auto_script
         if not needs_interpreter(self.script):
@@ -265,6 +267,27 @@ class Core:
         # too. That is the deliberate reading of the setting - "my scenarios come
         # from here" - rather than a layer over what ships with the application.
         self.flows_dir = flows_dir or ""
+        self.cycles_dir = cycles_dir or ""
+        # Where the values of cycles' secret variables are kept. Not in argv()
+        # with the three above, because it means nothing to --describe or to a
+        # scenario run: only the secret commands and --cycle-run pass it, and
+        # they ask for it through secrets_flag().
+        self.secrets_path = secrets_path or ""
+        # And the same for what the project remembers. Not in argv() either:
+        # it means nothing to --describe or to a scenario run.
+        self.memory_path = memory_path or ""
+
+    def memory_flag(self):
+        """``--cycle-memory-file=`` as a list, empty when nobody has set one."""
+        return ["--cycle-memory-file=" + self.memory_path] if self.memory_path else []
+
+    def secrets_flag(self):
+        """``--cycle-secrets-file=`` as a list, empty when nobody has set one.
+
+        A list so a caller can splat it into an argv without a conditional, the
+        way ``argv()`` treats the other paths.
+        """
+        return ["--cycle-secrets-file=" + self.secrets_path] if self.secrets_path else []
 
     @property
     def legacy_log_sources(self):
@@ -334,6 +357,8 @@ class Core:
             command.append("--log-sources=" + self.log_sources)
         if self.flows_dir:
             command.append("--flows-dir=" + self.flows_dir)
+        if self.cycles_dir:
+            command.append("--cycles-dir=" + self.cycles_dir)
         command.extend(a for a in args if a)
         return command
 
@@ -411,6 +436,123 @@ class Core:
 
     def flow_import(self, path):
         return self._flow_json("--flow-import=" + path)
+
+    # -- cycle files ----------------------------------------------------------
+    # The same five, one level up. A cycle file is YAML too, so it stays the
+    # core's business for the same reason a scenario does, and these go through
+    # ``_flow_json`` unchanged - it is already general ("run a command, require
+    # JSON, a non-zero exit is not an error", which is exactly right here too).
+
+    def cycle_list(self):
+        """Every cycle: its name, how many steps, and anything wrong with it."""
+        return self._flow_json("--cycle-list")
+
+    def cycle_show(self, cycle_id):
+        """One cycle: its text, the graph its steps make, and its problems."""
+        return self._flow_json("--cycle-show=" + cycle_id)
+
+    def cycle_save(self, cycle_id, document):
+        """Write a cycle from ``document`` ({"yaml": ...} or the document itself)."""
+        return self._with_document("--cycle-save=" + cycle_id, document,
+                                   prefix="cms-cycle-")
+
+    def cycle_delete(self, cycle_id):
+        return self._flow_json("--cycle-delete=" + cycle_id)
+
+    def cycle_import(self, path):
+        return self._flow_json("--cycle-import=" + path)
+
+    def _with_document(self, command, document, prefix="cms-doc-", extra=()):
+        """Run ``command`` with ``document`` in a --from= file, then clean up.
+
+        A temp file rather than stdin so the same call can be run by hand from a
+        shell when something looks wrong - which is why ``flow_save`` does it,
+        and there is no reason for the two to differ.
+        """
+        handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json",
+                                             prefix=prefix, delete=False)
+        try:
+            with handle:
+                json.dump(document, handle, ensure_ascii=False, default=str)
+            return self._flow_json(command, "--from=" + handle.name, *extra)
+        finally:
+            try:
+                os.unlink(handle.name)
+            except OSError:
+                pass
+
+    # -- secret variables -----------------------------------------------------
+    # Never a value in either direction that does not have to be one: listing
+    # asks only which names are set, and setting sends the value in a --from
+    # file, because argv is visible to every process on the machine through ps.
+
+    def cycle_secrets(self, cycle_id):
+        """Which of a cycle's secret variables have a value. Names only."""
+        return self._flow_json("--cycle-secret-list=" + cycle_id,
+                               *self.secrets_flag())
+
+    def cycle_secret_set(self, cycle_id, name, value):
+        """Set one secret. An empty value clears it."""
+        return self._with_document(
+            "--cycle-secret-set=%s:%s" % (cycle_id, name), {"value": value},
+            prefix="cms-secret-", extra=self.secrets_flag())
+
+    def cycle_secret_delete(self, cycle_id, name=None):
+        """Forget one secret, or every secret of one cycle."""
+        target = "%s:%s" % (cycle_id, name) if name else cycle_id
+        return self._flow_json("--cycle-secret-delete=" + target,
+                               *self.secrets_flag())
+
+    # -- what the project remembers -------------------------------------------
+    # Plain JSON, unlike the secrets store, so these exist to answer a question
+    # rather than to protect anything.
+
+    def cycle_memory(self, prefix=""):
+        """Every key the store holds, or every key under a prefix."""
+        return self._flow_json("--cycle-memory-list=" + prefix,
+                               *self.memory_flag())
+
+    def cycle_memory_show(self, key):
+        """One record: what is remembered, when, and who holds it."""
+        return self._flow_json("--cycle-memory-show=" + key,
+                               *self.memory_flag())
+
+    def cycle_memory_forget(self, key):
+        """Forget one record. A record that is wrong is worse than none."""
+        return self._flow_json("--cycle-memory-forget=" + key,
+                               *self.memory_flag())
+
+    # -- sessions: every run of one cycle on one subject ----------------------
+    # The memory flag goes with both: a session shows what its subject's
+    # record holds, and deleting one forgets that record.
+
+    def cycle_sessions(self, cycle_id=""):
+        """Every session, the most recently active first."""
+        return self._flow_json("--cycle-sessions=" + cycle_id,
+                               *self.memory_flag())
+
+    def cycle_session_delete(self, session_id):
+        """Delete one session's runs, index rows and memory record."""
+        return self._flow_json("--cycle-session-delete=" + session_id,
+                               *self.memory_flag())
+
+    def cycle_plugin_action(self, plugin_id, action_key, settings=None):
+        """Ask a plugin something outside a run - is it signed in, is it ready.
+
+        The GUI knows nothing about what any action means. A plugin declares
+        what it can be asked (``cycle_plugins[].actions`` in --describe), this
+        sends the question through, and the answer is rendered as it comes:
+        ``{ok, summary, detail, argv}``. A plugin added to the core gets its
+        setup offered in the Inspector without a line changing here - which is
+        the whole reason it is not a row in Settings.
+        """
+        target = "--cycle-plugin-action=%s:%s" % (plugin_id, action_key)
+        try:
+            return self._with_document(target, settings or {},
+                                       prefix="cms-plugin-action-")
+        except CoreError as exc:
+            return {"ok": False, "summary": "Cannot ask the plugin",
+                    "detail": str(exc), "argv": [], "problems": [str(exc)]}
 
     def server_log_show(self, name, lines=None):
         """Read one configured backend log through the launcher.
@@ -566,6 +708,31 @@ class Inventory:
         """
         value = self.payload.get("flow_actions")
         return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def cycles(self):
+        """Every cycle on the machine, enough of each to list it.
+
+        Empty against a core that predates cycles, which is what makes the page
+        say "this core has no cycles" rather than break.
+        """
+        return list(self.payload.get("cycles", []))
+
+    @property
+    def cycle_plugins(self):
+        """What a cycle step may be, and what each one takes and produces.
+
+        The same bargain ``flow_actions`` makes: the core publishes it, the
+        Inspector builds itself from it, and the two cannot drift.
+        """
+        return list(self.payload.get("cycle_plugins", []))
+
+    def cycle_plugin(self, plugin_id):
+        """One plugin's metadata, or ``{}``."""
+        for entry in self.cycle_plugins:
+            if entry.get("id") == plugin_id:
+                return entry
+        return {}
 
     def scenario(self, flow_id):
         """One scenario's row from --describe, or {}."""

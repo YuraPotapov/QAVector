@@ -243,3 +243,224 @@ def test_the_launchers_own_location_is_computable_without_asking_it(tmp_path):
     script.write_text("")
     core = core_mod.Core(str(script), "python3")
     assert core.legacy_log_sources == str(tmp_path / "logsources.json")
+
+
+# --------------------------------------------------------------------- cycles
+# The cycle commands go through the same _flow_json as the scenario ones, so
+# what is worth checking is the argv each builds and that the Inventory reads
+# what --describe carries. The core's own behaviour is covered in its checkout.
+
+class _Recorder(core_mod.Core):
+    """A Core that records the argv instead of running anything."""
+
+    def __init__(self, answer=None, secrets_path="", memory_path=""):
+        core_mod.Core.__init__(self, "/x/session_launcher.py", "/usr/bin/python3",
+                               secrets_path=secrets_path,
+                               memory_path=memory_path)
+        self.calls = []
+        self.answer = answer if answer is not None else {"ok": True}
+
+    def run(self, *args, timeout=60):
+        self.calls.append(list(args))
+        import json
+        return 0, json.dumps(self.answer), ""
+
+
+def test_listing_cycles_asks_for_the_list():
+    core = _Recorder({"cycles": []})
+    assert core.cycle_list() == {"cycles": [], "problems": []}
+    assert core.calls == [["--cycle-list"]]
+
+
+def test_showing_one_names_it_on_the_command_line():
+    core = _Recorder({"id": "demo"})
+    core.cycle_show("demo")
+    assert core.calls == [["--cycle-show=demo"]]
+
+
+def test_deleting_and_importing_name_what_they_act_on():
+    core = _Recorder()
+    core.cycle_delete("demo")
+    core.cycle_import("/tmp/thing.yaml")
+    assert core.calls == [["--cycle-delete=demo"],
+                          ["--cycle-import=/tmp/thing.yaml"]]
+
+
+def test_saving_hands_the_document_over_in_a_file(tmp_path):
+    """A temp file rather than stdin, so the same call can be run from a shell."""
+    core = _Recorder()
+    core.cycle_save("demo", {"yaml": "id: demo\n"})
+
+    argv = core.calls[0]
+    assert argv[0] == "--cycle-save=demo"
+    assert argv[1].startswith("--from=")
+
+
+def test_the_document_file_is_cleaned_up_afterwards():
+    import os
+
+    written = {}
+
+    class Peeking(_Recorder):
+        def run(self, *args, timeout=60):
+            for arg in args:
+                if arg.startswith("--from="):
+                    path = arg.split("=", 1)[1]
+                    written["path"] = path
+                    written["text"] = open(path, encoding="utf-8").read()
+            return _Recorder.run(self, *args, timeout=timeout)
+
+    core = Peeking()
+    core.cycle_save("demo", {"yaml": "id: demo\n"})
+
+    assert "id: demo" in written["text"]
+    assert not os.path.exists(written["path"])
+
+
+def test_a_cycle_that_does_not_hold_is_a_payload_not_an_exception():
+    """Which is the most useful thing these commands say."""
+    core = _Recorder({"ok": False, "id": "demo",
+                      "problems": ["b: needs 'ghost'"]})
+    payload = core.cycle_save("demo", {"yaml": "x"})
+    assert payload["ok"] is False
+    assert payload["problems"] == ["b: needs 'ghost'"]
+
+
+# --------------------------------------------------------------------- secrets
+def test_listing_secrets_asks_for_names_and_nothing_else():
+    core = _Recorder({"ok": True, "secrets": ["token"]})
+    assert core.cycle_secrets("nightly")["secrets"] == ["token"]
+    assert core.calls == [["--cycle-secret-list=nightly"]]
+
+
+def test_a_secret_s_value_never_appears_on_the_command_line():
+    """ps shows argv to every user on the machine, and history keeps it."""
+    written = {}
+
+    class Peeking(_Recorder):
+        def run(self, *args, timeout=60):
+            for arg in args:
+                if arg.startswith("--from="):
+                    written["text"] = open(arg.split("=", 1)[1],
+                                           encoding="utf-8").read()
+            return _Recorder.run(self, *args, timeout=timeout)
+
+    core = Peeking()
+    core.cycle_secret_set("nightly", "token", "ghp_example")
+
+    argv = core.calls[0]
+    assert argv[0] == "--cycle-secret-set=nightly:token"
+    assert not any("ghp_example" in arg for arg in argv)
+    assert "ghp_example" in written["text"]
+
+
+def test_deleting_names_one_secret_or_the_whole_cycle():
+    core = _Recorder()
+    core.cycle_secret_delete("nightly", "token")
+    core.cycle_secret_delete("nightly")
+    assert core.calls == [["--cycle-secret-delete=nightly:token"],
+                          ["--cycle-secret-delete=nightly"]]
+
+
+def test_the_configured_store_travels_with_every_secret_command():
+    core = _Recorder({"ok": True}, secrets_path="/data/secrets.json")
+    core.cycle_secrets("nightly")
+    assert core.calls[0] == ["--cycle-secret-list=nightly",
+                             "--cycle-secrets-file=/data/secrets.json"]
+
+
+def test_no_configured_store_sends_no_flag_and_lets_the_core_decide():
+    core = _Recorder({"ok": True})
+    core.cycle_secrets("nightly")
+    assert core.calls[0] == ["--cycle-secret-list=nightly"]
+    assert core.secrets_flag() == []
+
+
+def test_the_store_is_not_named_on_commands_it_means_nothing_to():
+    """--describe and a scenario run have no business knowing where it is."""
+    core = _Recorder({"ok": True}, secrets_path="/data/secrets.json")
+    assert "--cycle-secrets-file=/data/secrets.json" not in core.argv("--describe")
+
+
+# ---------------------------------------------------------------------- memory
+def test_reading_what_is_remembered_asks_for_the_keys():
+    core = _Recorder({"ok": True, "keys": ["QA-1"]})
+    assert core.cycle_memory()["keys"] == ["QA-1"]
+    assert core.calls == [["--cycle-memory-list="]]
+
+
+def test_a_prefix_narrows_the_listing():
+    core = _Recorder({"ok": True, "keys": []})
+    core.cycle_memory("web/")
+    assert core.calls == [["--cycle-memory-list=web/"]]
+
+
+def test_showing_and_forgetting_name_what_they_act_on():
+    core = _Recorder()
+    core.cycle_memory_show("QA-1")
+    core.cycle_memory_forget("QA-1")
+    assert core.calls == [["--cycle-memory-show=QA-1"],
+                          ["--cycle-memory-forget=QA-1"]]
+
+
+# -------------------------------------------------------------------- sessions
+def test_listing_sessions_asks_for_every_cycle_s():
+    core = _Recorder({"ok": True, "sessions": []})
+    assert core.cycle_sessions()["sessions"] == []
+    assert core.calls == [["--cycle-sessions="]]
+
+
+def test_deleting_a_session_names_it_and_brings_the_memory_store():
+    """Deleting one forgets its subject's record, so the store has to be the one in use."""
+    core = _Recorder({"ok": True}, memory_path="/data/memory.json")
+    core.cycle_session_delete("dev:QA-1")
+    assert core.calls == [["--cycle-session-delete=dev:QA-1",
+                           "--cycle-memory-file=/data/memory.json"]]
+
+
+def test_the_configured_store_travels_with_every_memory_command():
+    core = _Recorder({"ok": True}, memory_path="/data/memory.json")
+    core.cycle_memory_show("QA-1")
+    assert core.calls[0] == ["--cycle-memory-show=QA-1",
+                             "--cycle-memory-file=/data/memory.json"]
+
+
+def test_no_configured_store_sends_no_flag():
+    core = _Recorder({"ok": True})
+    assert core.memory_flag() == []
+
+
+def test_the_two_stores_are_named_by_two_different_flags():
+    """Memory is readable and secrets are not; conflating them would put what
+    a cycle remembers behind encryption it does not need."""
+    core = _Recorder({"ok": True}, secrets_path="/s.json",
+                     memory_path="/m.json")
+    assert core.secrets_flag() == ["--cycle-secrets-file=/s.json"]
+    assert core.memory_flag() == ["--cycle-memory-file=/m.json"]
+
+
+# ------------------------------------------------------------------- inventory
+def test_the_inventory_carries_the_cycles_and_the_plugins():
+    inventory = core_mod.Inventory({
+        "cycles": [{"id": "nightly", "name": "Nightly"}],
+        "cycle_plugins": [{"id": "command.shell", "name": "Shell Command"}]})
+
+    assert [row["id"] for row in inventory.cycles] == ["nightly"]
+    assert [one["id"] for one in inventory.cycle_plugins] == ["command.shell"]
+
+
+def test_one_plugin_can_be_asked_for_by_id():
+    inventory = core_mod.Inventory({
+        "cycle_plugins": [{"id": "command.shell", "summary": "Run a command."}]})
+    assert inventory.cycle_plugin("command.shell")["summary"] == "Run a command."
+
+
+def test_asking_for_a_plugin_that_is_not_there_gives_an_empty_answer():
+    assert core_mod.Inventory({}).cycle_plugin("nope") == {}
+
+
+def test_a_core_that_predates_cycles_reads_as_having_none():
+    """Which is what makes the page say so rather than break."""
+    inventory = core_mod.Inventory({"users": [], "envs": []})
+    assert inventory.cycles == []
+    assert inventory.cycle_plugins == []

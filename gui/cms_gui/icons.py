@@ -72,6 +72,28 @@ def _run(painter, ink):
                                    QPointF(6.75, 19.5)]))
 
 
+def _run_step(painter, ink):
+    """One chevron: run this step and nothing else.
+
+    A chevron rather than the play triangle, because it is not the same act -
+    the triangle starts the cycle, and these two start a part of it. Outlined
+    rather than filled, for the same reason: the weight says which of them is
+    the ordinary thing to press.
+    """
+    _stroke(painter, ink)
+    painter.drawPolyline(QPolygonF([QPointF(9, 5), QPointF(16, 12),
+                                    QPointF(9, 19)]))
+
+
+def _run_from(painter, ink):
+    """Two chevrons: this step and everything that waits on it."""
+    _stroke(painter, ink)
+    painter.drawPolyline(QPolygonF([QPointF(5, 5), QPointF(12, 12),
+                                    QPointF(5, 19)]))
+    painter.drawPolyline(QPolygonF([QPointF(12, 5), QPointF(19, 12),
+                                    QPointF(12, 19)]))
+
+
 def _stop(painter, ink):
     _fill(painter, ink)
     painter.drawRect(QRectF(6, 6, 12, 12))
@@ -159,6 +181,26 @@ def _scenarios(painter, ink):
     for y in (6.0, 12.0, 18.0):
         painter.drawPolygon(QPolygonF([QPointF(3.5, y - 2.75), QPointF(7.5, y),
                                        QPointF(3.5, y + 2.75)]))
+
+
+def _cycles(painter, ink):
+    """Three nodes and the branch between them: a cycle is a graph, not a list.
+
+    Deliberately not a circular arrow, which is what "cycle" suggests and what
+    this is not - nothing here repeats. It is one node that leads to two, which
+    is the smallest picture of the thing the page actually draws, and it reads
+    as a different idea to the list-with-markers that Scenarios wears.
+    """
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(8.5, 12), QPointF(13, 12))
+    painter.drawLine(QPointF(13, 12), QPointF(13, 6.5))
+    painter.drawLine(QPointF(13, 12), QPointF(13, 17.5))
+    painter.drawLine(QPointF(13, 6.5), QPointF(15.5, 6.5))
+    painter.drawLine(QPointF(13, 17.5), QPointF(15.5, 17.5))
+    _fill(painter, ink)
+    painter.drawRect(QRectF(3.5, 9.5, 5, 5))
+    painter.drawRect(QRectF(15.5, 4, 5, 5))
+    painter.drawRect(QRectF(15.5, 15, 5, 5))
 
 
 def _history(painter, ink):
@@ -294,10 +336,27 @@ def _minus(painter, ink):
     painter.drawLine(QPointF(5.5, 12), QPointF(18.5, 12))
 
 
+def _delete(painter, ink):
+    """A bin: a lid with a handle over an open-topped can."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(4.5, 6.5), QPointF(19.5, 6.5))
+    painter.drawLine(QPointF(9.5, 6.5), QPointF(9.5, 3.5))
+    painter.drawLine(QPointF(9.5, 3.5), QPointF(14.5, 3.5))
+    painter.drawLine(QPointF(14.5, 3.5), QPointF(14.5, 6.5))
+    path = QPainterPath()
+    path.moveTo(6.5, 6.5)
+    path.lineTo(7.5, 20.5)
+    path.lineTo(16.5, 20.5)
+    path.lineTo(17.5, 6.5)
+    painter.drawPath(path)
+
+
 #: name -> drawing. The names are the ones the interface already asked for, so
 #: every call site reads the same as it did before the marks were characters.
 DRAWINGS = {
     "run": _run,
+    "run-step": _run_step,
+    "run-from": _run_from,
     "stop": _stop,
     "copy": _copy,
     "refresh": _refresh,
@@ -307,6 +366,7 @@ DRAWINGS = {
     "command": _command,
     "launch": _launch,
     "scenarios": _scenarios,
+    "cycles": _cycles,
     "history": _history,
     "developer": _developer,
     "log": _log,
@@ -329,6 +389,7 @@ DRAWINGS = {
     "expand": _chevron_right,
     "plus": _plus,
     "minus": _minus,
+    "delete": _delete,
 }
 
 _cache = {}

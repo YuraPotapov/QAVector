@@ -63,6 +63,56 @@ class Settings:
         self._qs.setValue("services/path", value or "")
 
     @property
+    def cycle_projects_path(self):
+        """Where cycleprojects.json lives; empty means the default beside it.
+
+        The Cycles section's own list of projects, and its own file rather than
+        a corner of services.json: a project can have cycles and no services at
+        all. Like services.json it is the GUI's alone, so where it goes is
+        nobody else's business - and it has a default worth overriding for the
+        same reason, since a source checkout would otherwise put it among the
+        code.
+        """
+        return self._qs.value("cycles/projects_path", "", str)
+
+    @cycle_projects_path.setter
+    def cycle_projects_path(self, value):
+        self._qs.setValue("cycles/projects_path", value or "")
+
+    @property
+    def cycle_secrets_path(self):
+        """Where the encrypted store of secret variables lives.
+
+        Its own file, beside the user's data and never in the checkout, for the
+        reason ``users.json`` is: a cycle file is committed and shipped inside
+        the build, so a value written there travels to everyone who clones the
+        project. The path is here so it can point at a private volume, and it
+        travels to the core on every call (``--cycle-secrets-file``) rather than
+        each side guessing - the same bargain ``flows_path`` makes.
+        """
+        return self._qs.value("cycles/secrets_path", "", str)
+
+    @cycle_secrets_path.setter
+    def cycle_secrets_path(self, value):
+        self._qs.setValue("cycles/secrets_path", value or "")
+
+    @property
+    def cycle_memory_path(self):
+        """Where what the project remembers between runs is kept.
+
+        Its own file rather than a corner of the secrets one, and plain JSON
+        rather than encrypted: secrets are hidden because reading them is the
+        harm, while "why did it skip that task" is a question somebody will
+        ask and the answer being readable is worth more than a confidentiality
+        this does not need.
+        """
+        return self._qs.value("cycles/memory_path", "", str)
+
+    @cycle_memory_path.setter
+    def cycle_memory_path(self, value):
+        self._qs.setValue("cycles/memory_path", value or "")
+
+    @property
     def flows_path(self):
         """Where the scenarios tree lives; empty means the core's own default.
 
@@ -78,6 +128,23 @@ class Settings:
     @flows_path.setter
     def flows_path(self, value):
         self._qs.setValue("flows/path", value or "")
+
+    @property
+    def cycles_path(self):
+        """Where the cycles tree lives; empty means the core's own default.
+
+        The same bargain as :attr:`flows_path`, and wanted for a sharper
+        reason. In a source checkout the core's default *is* the checkout, so
+        the cycles a person edits are the template files that ship with the
+        application - and saving one writes their own Jira instance and work
+        email into a file that is committed. Pointing this somewhere of their
+        own is what keeps the two apart.
+        """
+        return self._qs.value("cycles/path", "", str)
+
+    @cycles_path.setter
+    def cycles_path(self, value):
+        self._qs.setValue("cycles/path", value or "")
 
     @property
     def log_sources_path(self):
@@ -160,6 +227,19 @@ class Settings:
 
     def save_folds(self, page, states):
         self._qs.setValue("folds/" + page, json.dumps(states, sort_keys=True))
+
+    def splitter(self, key):
+        """How one splitter was last left: {"sizes": [...], "open": [...]}.
+
+        ``open`` is what each panel measured the last time it was open, so a
+        panel folded shut before the window closed still comes back at its own
+        size rather than a guess. A view preference like :meth:`folds`, and
+        for the same reason kept here rather than in any document.
+        """
+        return self._json("splitters/" + key, {})
+
+    def save_splitter(self, key, state):
+        self._qs.setValue("splitters/" + key, json.dumps(state, sort_keys=True))
 
     @property
     def always_on_top(self):

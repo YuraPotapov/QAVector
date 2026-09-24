@@ -18,12 +18,14 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QInputDialog, QLabel,
                                QMainWindow, QMenu,
-                               QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
+                               QPushButton, QSizePolicy, QStackedWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
-from . import (commands, core as core_mod, history as history_mod, icon, icons,
+from . import (commands, core as core_mod, cyclereplay,
+               history as history_mod, icon, icons,
                launch as launch_mod, load as load_mod,
                logsourcesfile as lsf, theme, titlebar, widgets)
+from .askbridge import AskBridge
 from .loader import LoaderThread
 from . import version as gui_version
 from .runner import LauncherProcess, RunState
@@ -32,6 +34,7 @@ from .settings import Settings
 from .pages.artifacts import ArtifactsPage
 from .pages.command import CommandPage
 from .pages.credentials import CredentialsPage
+from .pages.cycles import CyclesPage
 from .pages.services import ServicesPage
 from .pages.environments import EnvironmentsPage
 from .pages.history import HistoryPage
@@ -46,6 +49,7 @@ CONFIGURE = [("environments", "Environments", "environments"),
              ("credentials", "Credentials", "credentials"),
              ("logsources", "Services & Logs", "services"),
              ("scenarios", "Scenarios", "scenarios"),
+             ("cycles", "Cycles", "cycles"),
              ("commands", "Command", "command"),
              ("launch", "Launch Sessions", "launch")]
 OBSERVE = [("run", "Run", "run"), ("log", "Log", "log"),
@@ -147,7 +151,10 @@ class MainWindow(QMainWindow):
 
         self.settings = Settings()
         self.core = core_mod.Core(self.settings.core_script, self.settings.interpreter,
-                                  self.settings.config, flows_dir=self.settings.flows_path)
+                                  self.settings.config, flows_dir=self.settings.flows_path,
+                                  cycles_dir=self.settings.cycles_path,
+                                  secrets_path=self.settings.cycle_secrets_path,
+                                  memory_path=self.settings.cycle_memory_path)
         self._aim_log_sources()
         self.inventory = core_mod.Inventory()
         self.run_state = RunState(self)
@@ -211,6 +218,10 @@ class MainWindow(QMainWindow):
         # the launcher's stdin to answer on, and this is where both exist.
         self.service_bridge = ServiceBridge(self.services.supervisor,
                                             self.process.send_command, self)
+        # The same pipe again, carrying a question for the person at the screen
+        # rather than one for a service. It needs nothing but somewhere to
+        # answer on and a window to belong to.
+        self.ask_bridge = AskBridge(self.process.send_command, self)
 
         self.workers_label = QLabel("")
         self.workers_label.setStyleSheet("padding: 0 10px;")
@@ -394,8 +405,6 @@ class MainWindow(QMainWindow):
         # is running, and stale entries would offer to stop what is already gone.
         self.stop_menu.aboutToShow.connect(self._fill_stop_menu)
         self.stop_button.setMenu(self.stop_menu)
-        self.copy_button = icons.button(QPushButton("Copy command"), "copy")
-        self.copy_button.clicked.connect(lambda: self.command.copy_command())
         self.refresh_button = icons.button(QPushButton("Refresh"), "refresh")
         self.refresh_button.clicked.connect(self.refresh_inventory)
         self.describe_label = widgets.mono("")
@@ -411,7 +420,7 @@ class MainWindow(QMainWindow):
         settings_button = icons.button(QPushButton("Settings"), "settings")
         settings_button.clicked.connect(self.open_settings)
         bar_layout.addWidget(widgets.row(
-            self.run_button, self.stop_button, widgets.vline(), self.copy_button,
+            self.run_button, self.stop_button, widgets.vline(),
             self.refresh_button, None, self.describe_label, widgets.vline(),
             self.developer_button, settings_button))
         column.addWidget(bar)
@@ -514,6 +523,10 @@ class MainWindow(QMainWindow):
         self.services = ServicesPage(self.settings)
         self.services.set_core(self.core)
         self.scenarios = ScenariosPage(self.settings)
+        self.cycles = CyclesPage(self.settings)
+        self.cycles.set_run_state(self.run_state)
+        self.cycles.cycle_opened.connect(self._restore_selected_cycle)
+        self.cycles.session_opened.connect(self._open_cycle_run)
         self.command = CommandPage(self.settings)
         self.launch = LaunchSessionsPage(self.settings)
         self.run = RunPage(self.run_state)
@@ -527,6 +540,7 @@ class MainWindow(QMainWindow):
         self._pages = {"environments": self.environments, "credentials": self.credentials,
                        "logsources": self.services,
                        "scenarios": self.scenarios,
+                       "cycles": self.cycles,
                        "commands": self.command, "launch": self.launch,
                        "run": self.run, "log": self.log,
                        "artifacts": self.artifacts, "history": self.history_page}
@@ -545,8 +559,18 @@ class MainWindow(QMainWindow):
         # Writing a scenario changes what --run-tests can run, so the inventory
         # every other page reads has to be re-read.
         self.scenarios.saved.connect(self.refresh_inventory)
+        # A cycle names the scenarios and services it runs, so
+        # writing one changes nothing else - but the inventory is
+        # what its own list is built from.
+        self.cycles.saved.connect(self.refresh_inventory)
+        self.cycles.run_requested.connect(self.start_cycle_run)
+        self.cycles.stop_requested.connect(self.stop_run)
         self.environments.directories_changed.connect(self._directories_changed)
         self.run_state.run_dir_known.connect(self.artifacts.set_run_dir)
+        # Recorded the moment the run says where it is writing, not only when
+        # it ends: a run the application was killed during is exactly the one
+        # somebody wants back, and it never reaches _close_entry.
+        self.run_state.run_dir_known.connect(self._note_run_dir)
         self.run_state.artifacts_written.connect(self.artifacts.note_artifacts)
         self.history_page.rerun_requested.connect(self.rerun_entry)
         self.history_page.restore_requested.connect(self.restore_entry)
@@ -814,7 +838,6 @@ class MainWindow(QMainWindow):
         self.developer_button.style().polish(self.developer_button)
 
         self._apply_nav_visibility()
-        self.copy_button.setVisible(enabled)
         # The wording is part of the mode: a flag name is noise on one level and
         # the whole answer on the other. Every page that says anything in both
         # registers gets told, rather than this window knowing which they are.
@@ -859,6 +882,7 @@ class MainWindow(QMainWindow):
         self.launch.set_core(self.core)
         # Scenarios reads and writes files through the core too, not just runs it.
         self.scenarios.set_core(self.core)
+        self.cycles.set_core(self.core)
         
         def _splash_msg(text):
             """Progress, for the splash only.
@@ -883,7 +907,7 @@ class MainWindow(QMainWindow):
                 logging.error("Cannot read the core: %s", exc)
                 QApplication.quit()
                 return
-            QMessageBox.warning(self, "Cannot read the core",
+            widgets.warn(self, "Cannot read the core",
                                 "%s\n\nCheck Settings -> Core script / Interpreter."
                                 % exc)
                                 
@@ -901,6 +925,13 @@ class MainWindow(QMainWindow):
             
             _splash_msg("Populating scenarios...")
             self.scenarios.set_inventory(self.inventory)
+            
+            _splash_msg("Populating cycles...")
+            # The projects file is the Cycles page's own - the launcher has
+            # never heard of it - so the path comes from Settings here rather
+            # than travelling with every call the way --flows-dir does.
+            self.cycles.set_projects_path(self.settings.cycle_projects_path)
+            self.cycles.set_inventory(self.inventory)
             
             _splash_msg("Loading credentials...")
             self.credentials.load(self.inventory.config_path or self.core.config_path)
@@ -934,6 +965,11 @@ class MainWindow(QMainWindow):
             else:
                 self._finish_splash()
                 
+            # The last cycle run, put back on its page. After the inventory,
+            # because it opens a cycle; through the event loop, because a file
+            # read and a --cycle-show are no reason to hold up the splash.
+            QTimer.singleShot(0, self._restore_last_cycle)
+
             if self._auto_launch:
                 self.show_page("launch")
                 self.launch._reload_configs(select=self._auto_launch)
@@ -946,6 +982,41 @@ class MainWindow(QMainWindow):
         self.loader_thread.error.connect(_on_error)
         self.loader_thread.finished_inventory.connect(_on_finished)
         self.loader_thread.start()
+
+    def _restore_selected_cycle(self, cycle_id):
+        if not self.process.is_running():
+            cyclereplay.restore_cycle(self.history, self.run_state, cycle_id)
+
+    def _open_cycle_run(self, cycle_id, run_dir):
+        """Put one earlier run on the Cycles page - a session picked on the right.
+
+        Replayed first and opened after, the way _restore_last_cycle does it:
+        opening a cycle paints whatever the model holds, so the model has to
+        hold the run before the canvas asks.
+        """
+        if self.process.is_running() or not run_dir:
+            return
+        if cyclereplay.restore(run_dir, self.run_state):
+            self.cycles.open(cycle_id)
+
+    def _restore_last_cycle(self):
+        """Bring the last cycle run back onto the Cycles page.
+
+        Everything a cycle reported used to live only in memory, so closing the
+        window lost the graph's colours, the output and the stages of a run
+        that may have taken an hour. The run's own directory has all of it -
+        see cyclereplay - and reading it back is the difference between coming
+        back to yesterday's run and coming back to a blank page.
+
+        A run started in the meantime wins: this is a courtesy to somebody who
+        has just opened the window, not something that may overwrite what they
+        are actually watching.
+        """
+        if self.process.is_running():
+            return
+        cycle_id = cyclereplay.restore_last(self.history, self.run_state)
+        if cycle_id:
+            self.cycles.open(cycle_id)
 
     def _warn_about_chrome(self):
         """Say so, once, when the core cannot find a browser to launch.
@@ -962,7 +1033,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_chrome_warned", False):
             return
         self._chrome_warned = True
-        QMessageBox.warning(self, "Google Chrome is required", problem)
+        widgets.warn(self, "Google Chrome is required", problem)
 
     def open_settings(self):
         dialog = SettingsDialog(self.settings, self)
@@ -972,27 +1043,27 @@ class MainWindow(QMainWindow):
             dialog.apply()
             self.core = core_mod.Core(self.settings.core_script,
                                       self.settings.interpreter, self.settings.config,
-                                      flows_dir=self.settings.flows_path)
+                                      flows_dir=self.settings.flows_path,
+                                      cycles_dir=self.settings.cycles_path,
+                                      secrets_path=self.settings.cycle_secrets_path,
+                                  memory_path=self.settings.cycle_memory_path)
             self._aim_log_sources()
             self.refresh_inventory()
 
     def one_shot(self, title, args):
         """Run a command that just prints something, and show what it printed."""
         if not self.core.is_configured():
-            QMessageBox.information(self, title, "Configure the core first "
+            widgets.note(self, title, "Configure the core first "
                                                  "(Settings -> Core script).")
             return
         try:
             code, out, err = self.core.run(*args)
         except core_mod.CoreError as exc:
-            QMessageBox.warning(self, title, str(exc))
+            widgets.warn(self, title, str(exc))
             return
-        box = QMessageBox(self)
-        box.setWindowTitle("%s (exit %d)" % (title, code))
-        box.setText(title)
-        box.setDetailedText((out or "") + ("\n" + err if err else ""))
-        box.setStyleSheet("QLabel { font-family: %s; }" % theme.MONO_CSS)
-        box.exec()
+        widgets.output(self, "%s (exit %d)" % (title, code), title,
+                       (out or "") + ("\n" + err if err else ""),
+                       kind="" if code == 0 else "error")
         if args == ["--init-users-json"]:
             self.refresh_inventory()
 
@@ -1028,22 +1099,15 @@ class MainWindow(QMainWindow):
         scenario = self.recordable_scenario()
         if not scenario:
             return "new", ""
-        box = QMessageBox(self)
-        box.setWindowTitle("Record")
-        box.setIcon(QMessageBox.Question)
-        box.setText("\"%s\" is selected." % scenario)
-        box.setInformativeText(
+        keep = "Continue \"%s\"" % scenario
+        answer = widgets.choose(
+            self, "Record", "\"%s\" is selected." % scenario,
             "Continue recording into it - its steps are loaded and what you "
-            "capture is added to them - or start a new scenario?")
-        keep = box.addButton("Continue \"%s\"" % scenario, QMessageBox.AcceptRole)
-        fresh = box.addButton("Start new", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(keep)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is keep:
+            "capture is added to them - or start a new scenario?",
+            choices=("Start new",), agree=keep)
+        if answer == keep:
             return "continue", scenario
-        if clicked is fresh:
+        if answer == "Start new":
             return "new", ""
         return "cancel", ""
 
@@ -1115,7 +1179,7 @@ class MainWindow(QMainWindow):
         if self.process.is_running():
             return
         if not self.core.is_configured():
-            QMessageBox.information(self, "Run", "Configure the core first "
+            widgets.note(self, "Run", "Configure the core first "
                                                  "(Settings -> Core script).")
             return
         source, page = self._run_page(source)
@@ -1126,7 +1190,7 @@ class MainWindow(QMainWindow):
                     logging.error("Cannot launch, problems: %s", problems)
                     QApplication.quit()
                     return
-                QMessageBox.information(self, "Launch Sessions",
+                widgets.note(self, "Launch Sessions",
                                         "Fix this first:\n\n- %s"
                                         % "\n- ".join(problems))
                 return
@@ -1150,7 +1214,7 @@ class MainWindow(QMainWindow):
                 logging.error("CoreError: %s", exc)
                 QApplication.quit()
                 return
-            QMessageBox.warning(self, "Run", str(exc))
+            widgets.warn(self, "Run", str(exc))
             return
         self.run_state.reset()
         self.log.clear()
@@ -1230,6 +1294,64 @@ class MainWindow(QMainWindow):
         self.run_state.mark_stopping(name)
         self.status_right.setText("stopping %s — the others carry on" % name)
 
+    def start_cycle_run(self, cycle_id, how="", step=""):
+        """Run one cycle. Modelled on start_run, and deliberately separate.
+
+        A scenario run is assembled from a page's form; a cycle run is one id
+        and the flags the core needs to report it. Folding the two together
+        would mean a page-shaped branch inside start_run for something that
+        shares only its guards.
+
+        It stays on the Cycles page rather than switching to Run: the canvas
+        already on screen *is* the run view, and sending somebody to a second
+        picture of it would be the one thing this feature is meant not to do.
+
+        ``how`` and ``step`` run part of it: "only" for that step by itself,
+        "from" for it and everything that waits on it. Whichever steps are left
+        out the core takes from the displayed run (or the latest if none is
+        displayed), so what they
+        produced is still in scope. How that is spelled on a command line is
+        settled here, because this is where every other flag is spelled too.
+        """
+        if not cycle_id or self.process.is_running():
+            return
+        if not self.core.is_configured():
+            widgets.note(self, "Run", "Configure the core first "
+                                                 "(Settings -> Core script).")
+            return
+        args = (["--cycle-run=" + cycle_id, "--events=-", "--control=-"]
+                + self.core.secrets_flag() + self.core.memory_flag())
+        if how == "resume" and step:
+            args.append("--cycle-resume=" + step)
+        elif how and step:
+            args.append("--cycle-%s=%s" % ("only" if how == "only" else "from",
+                                           step))
+            displayed = self.run_state.cycle or {}
+            if displayed.get("cycle") == cycle_id and displayed.get("run_id"):
+                args.append("--cycle-reuse=" + displayed["run_id"])
+        try:
+            argv = self.core.argv(*args)
+        except core_mod.CoreError as exc:
+            widgets.warn(self, "Run", str(exc))
+            return
+
+        self.run_state.reset()
+        # The cycle record has its own lifetime - a scenario run no longer
+        # clears it - so the one place that starts a cycle says so.
+        if how != "resume":
+            self.run_state.reset_cycle()
+        self.log.clear()
+        self._stopping = False
+        self._entry_id = self.history.begin(history_mod.CYCLE, {
+            "summary": cycle_id,
+            "argv": argv,
+            "display_command": self.core.display_argv(*args),
+            "config": {"cycle": cycle_id},
+        })
+        self.run.run_started("cycle %s · events on stdout" % cycle_id)
+        self.show_page("cycles")
+        self.process.start(argv, working_dir=self.core.spawn_dir())
+
     def stop_run(self):
         if not self.process.is_running():
             return
@@ -1239,10 +1361,8 @@ class MainWindow(QMainWindow):
         if window_count > 0:
             msg += f"\nThis will close {window_count} window{'s' if window_count != 1 else ''}."
             
-        reply = QMessageBox.question(self, "Confirm Stop", msg,
-                                     QMessageBox.Yes | QMessageBox.No,
-                                     QMessageBox.No)
-        if reply != QMessageBox.Yes:
+        if not widgets.confirm(self, "Confirm Stop", msg, agree="Stop",
+                               kind="warn"):
             return
             
         self._stopping = True
@@ -1262,6 +1382,13 @@ class MainWindow(QMainWindow):
             # nothing else here is interested in it.
             self.service_bridge.handle(event)
             return
+        if kind in ("cycle.ask", "cycle.ask.withdrawn"):
+            # A step is blocked on a person answering this. Handled here rather
+            # than on the cycle page for the same reason a service request is:
+            # nothing else is interested, and the answer goes back on the
+            # launcher's stdin, which lives here.
+            self.ask_bridge.handle(event)
+            return
         if kind == "window.launched":
             self._keep_on_top()
         elif kind == "run.finished":
@@ -1276,12 +1403,21 @@ class MainWindow(QMainWindow):
         # scenarios live rather than in the run view.
         if str(event.get("kind", "")).startswith("recorder."):
             self.scenarios.handle_recorder_event(event)
+        # A cycle draws itself on its own page, on the same canvas it was read
+        # into - there is no second view of a run to keep in step with it.
+        elif str(event.get("kind", "")).startswith("cycle."):
+            self.cycles.handle_event(event)
 
     def _on_finished(self, code):
         self._set_running(False)
         # Nothing left to answer: the timers would otherwise outlive the run and
         # write into a launcher that has gone.
         self.service_bridge.cancel_all()
+        self.ask_bridge.cancel_all()
+        # A core that went without sending cycle.run.end - killed, crashed -
+        # would otherwise leave the Cycles page offering Stop for a run that
+        # is not there, and steps spinning forever.
+        self.run_state.cycle_interrupted()
         self.run.run_finished(code)
         self.status_right.setText("finished (exit %d)" % code)
         if self.run_state.run_dir:
@@ -1298,7 +1434,12 @@ class MainWindow(QMainWindow):
             logging.error("Run failed: %s", message)
             QApplication.quit()
             return
-        QMessageBox.warning(self, "Run", message)
+        widgets.warn(self, "Run", message)
+
+    def _note_run_dir(self, where):
+        """Write the run's directory into its history entry as soon as it is known."""
+        if self._entry_id is not None and where:
+            self.history.note(self._entry_id, run_dir=where)
 
     def _close_entry(self, status, exit_code=None, summary_suffix=""):
         """Record how the run ended, and keep a copy of its log.
@@ -1390,7 +1531,7 @@ class MainWindow(QMainWindow):
         One application with one version: how it is split into processes inside
         is its own business, and not what someone opening About is asking.
         """
-        QMessageBox.about(self, "QAVector", self.about_text())
+        widgets.note(self, "About QAVector", "QAVector", self.about_text())
 
     def about_text(self):
         return ("QAVector - Explore. Build. Verify.\n\n"
@@ -1409,16 +1550,9 @@ class MainWindow(QMainWindow):
         windows still up and their logins unflushed.
         """
         windows = len(self.run_state.sessions)
-        box = QMessageBox(self)
-        box.setWindowTitle("A run is in progress")
-        box.setIcon(QMessageBox.Warning)
-        box.setText("Autotests are still running.")
-        box.setInformativeText(_close_warning(windows))
-        stop = box.addButton("Stop all and close", QMessageBox.AcceptRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
-        box.setDefaultButton(stop)
-        box.exec()
-        return box.clickedButton() is stop
+        return widgets.confirm(
+            self, "A run is in progress", "Autotests are still running.",
+            _close_warning(windows), agree="Stop all and close", kind="warn")
 
     def _aim_log_sources(self):
         """Tell the core which logsources.json is in force.
@@ -1450,19 +1584,13 @@ class MainWindow(QMainWindow):
         names = ", ".join("%s · %s" % (s.project, s.name) for s in doomed[:6])
         if len(doomed) > 6:
             names += ", and %d more" % (len(doomed) - 6)
-        box = QMessageBox(self)
-        box.setWindowTitle("Services are running")
-        box.setIcon(QMessageBox.Warning)
-        box.setText("%d service(s) stop when this window closes." % len(doomed))
-        box.setInformativeText(
+        return widgets.confirm(
+            self, "Services are running",
+            "%d service(s) stop when this window closes." % len(doomed),
             "%s\n\nThey were not set to detach, so they cannot keep running "
             "without this application. Tick \"Detach allowed\" on a service to "
-            "let it stay up." % names)
-        stop = box.addButton("Stop them and close", QMessageBox.AcceptRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
-        box.setDefaultButton(stop)
-        box.exec()
-        return box.clickedButton() is stop
+            "let it stay up." % names,
+            agree="Stop them and close", kind="warn")
 
     def _update_services(self, *_args):
         """The footer's line about services: `app server: running`.

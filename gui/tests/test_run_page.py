@@ -32,12 +32,12 @@ def _texts(panel):
 def test_each_scenario_shows_how_long_it_took(qapp):
     panel = SessionPanel()
     runs = {"claim75_dashboard_backend": {
-        "scenario": "CLAIM-75 - backend tests", "status": "pass", "tree": {},
+        "scenario": "DEMO-75 - backend tests", "status": "pass", "tree": {},
         "steps": {}, "total": 14, "done": 14, "started": 1000.0, "ended": 1072.0}}
     panel.update_from(_session(runs, ["claim75_dashboard_backend"]))
     texts = _texts(panel)
     assert "1 min 12 s" in texts
-    assert any(t.startswith("CLAIM-75 - backend tests") for t in texts)
+    assert any(t.startswith("DEMO-75 - backend tests") for t in texts)
     # Done under its name, and not listed a second time by id as still to come.
     assert not any("claim75_dashboard_backend" in t for t in texts)
 

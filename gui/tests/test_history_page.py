@@ -69,6 +69,23 @@ def test_the_details_carry_no_command_line_and_nothing_to_copy_it(page, record):
                for label in page.findChildren(QLabel))
 
 
+def test_only_a_launch_can_be_opened_in_the_page_that_made_it(page, record):
+    """Restoring a run into the Command page was an affordance for reading the
+    command line. A cycle or a scenario run put there is not a thing anybody
+    wanted to look at, and Run again does what it was being used for."""
+    _add(record, kind=history_mod.LAUNCH)
+    page.table.selectRow(0)
+    assert not page.restore_button.isHidden()
+    assert page.restore_button.text() == "Open in Launch Sessions"
+
+    record.clear()
+    page.refresh()
+    _add(record, kind=history_mod.CYCLE)
+    page.refresh()
+    page.table.selectRow(0)
+    assert page.restore_button.isHidden()
+
+
 # -- filters ------------------------------------------------------------------
 def test_the_result_filter_keeps_what_ended_that_way(page, record):
     ids = {status: _add(record, status=status)

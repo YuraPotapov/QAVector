@@ -18,7 +18,7 @@ import html
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QLabel,
-                               QLineEdit, QMessageBox, QPlainTextEdit,
+                               QLineEdit, QPlainTextEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
 from .. import theme, widgets
@@ -72,6 +72,7 @@ class ServerLogWindow(QWidget):
         # this to its lifetime, and the panel is rebuilt as a run goes on.
         super().__init__(None)
         self.setWindowTitle("Server log - %s" % session_name)
+        self.frame = widgets.dress(self, minimizable=True)
         self.setWindowFlag(Qt.Window, True)
         self.resize(1180, 760)
         self._session_name = session_name
@@ -180,4 +181,4 @@ class ServerLogWindow(QWidget):
                 fh.write("\n".join("[%s] %s" % (line["log"], line["text"])
                                    for line in self.visible_lines()))
         except OSError as exc:
-            QMessageBox.warning(self, "Save server log", str(exc))
+            widgets.warn(self, "Save server log", str(exc))

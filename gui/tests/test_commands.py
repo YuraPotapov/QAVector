@@ -75,6 +75,17 @@ Options:
     assert commands.parse_help_flags(help_text) == {"--env", "--detach", "--version"}
 
 
+def test_an_optional_value_is_not_part_of_the_flag_s_name():
+    """`--flag[=VALUE]` is how --help writes one. Reading the bracket into the
+    name made the sync check below look for a flag nobody has, and report the
+    real one as missing."""
+    help_text = """
+Options:
+  --cycle-memory-list[=P]   What the project remembers.
+"""
+    assert commands.parse_help_flags(help_text) == {"--cycle-memory-list"}
+
+
 # --------------------------------------------------------------- the sync check
 
 def _core():

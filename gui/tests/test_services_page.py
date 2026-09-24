@@ -97,15 +97,22 @@ def _accept(monkeypatch, fill):
     monkeypatch.setattr(QDialog, "exec", exec_, raising=False)
 
 
-def _answer_question(monkeypatch, answer=None, record=None):
-    from PySide6.QtWidgets import QMessageBox
+def _answer_question(monkeypatch, answer=True, record=None):
+    """Answer every confirmation the page raises, and optionally note it.
 
-    def question(_parent, _title, text, *_args, **_kwargs):
+    A bool, because that is what `widgets.confirm` returns. It used to be one
+    of QMessageBox's enum members, and the day those stopped being the answer
+    every "No" read as True - they are non-zero - so a test that meant to
+    refuse quietly agreed instead.
+    """
+    def question(_parent, _title, text, detail="", *_args, **_kwargs):
         if record is not None:
-            record["text"] = text
-        return QMessageBox.Yes if answer is None else answer
+            # Both halves: these tests ask "does the dialog say this", and a
+            # dialog says its question and its consequence alike.
+            record["text"] = "%s\n%s" % (text, detail)
+        return answer
 
-    monkeypatch.setattr("cms_gui.pages.services.QMessageBox.question", question)
+    monkeypatch.setattr("cms_gui.widgets.confirm", question)
 
 
 # --------------------------------------------------------------- the overview
@@ -218,8 +225,7 @@ def test_deleting_a_stack_keeps_its_logs_and_says_so(page, monkeypatch):
 
 
 def test_a_stack_can_be_left_alone_at_the_confirmation(page, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-    _answer_question(monkeypatch, answer=QMessageBox.No)
+    _answer_question(monkeypatch, answer=False)
     page.delete_project("Claim")
     assert [p.name for p in page.rows()[2]] == ["Claim"]
 
@@ -530,14 +536,13 @@ def test_reloading_a_fixed_file_clears_the_complaint(qapp, tmp_path):
 
 
 def test_a_change_made_on_disk_is_not_overwritten_without_asking(page, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     asked = {}
 
     def question(_parent, title, text, *_args, **_kwargs):
         asked["title"] = title
-        return QMessageBox.Cancel
+        return False
 
-    monkeypatch.setattr("cms_gui.pages.services.QMessageBox.question", question)
+    monkeypatch.setattr("cms_gui.widgets.confirm", question)
     page._log_fingerprint = ("stale",)
     page.save()
     assert asked["title"] == "File changed on disk"
@@ -756,18 +761,17 @@ def test_walking_away_from_an_untouched_page_asks_nothing(page, monkeypatch):
     def refuse(*_args, **_kwargs):
         raise AssertionError("nothing was changed; there is nothing to discard")
 
-    monkeypatch.setattr("cms_gui.pages.services.QMessageBox.question", refuse)
+    monkeypatch.setattr("cms_gui.widgets.confirm", refuse)
     assert page.confirm_discard() is True
 
 
 def test_walking_away_from_an_edit_asks_first(page, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     asked = {}
     _accept(monkeypatch, lambda d: d.name.setText("Helpdesk") or True)
     page.add_project()
-    _answer_question(monkeypatch, answer=QMessageBox.Cancel, record=asked)
+    _answer_question(monkeypatch, answer=False, record=asked)
     assert page.confirm_discard() is False
-    assert "not saved" in asked["text"]
+    assert "have not been saved" in asked["text"]
 
 
 # ------------------------------------------------------------ empty projects
@@ -1529,13 +1533,12 @@ def test_a_project_wide_button_names_the_project_it_would_take(page, monkeypatch
 
 
 def test_saying_no_leaves_everything_alone(page, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     acted = []
     for verb in ("start_all", "stop_all", "restart_all"):
         monkeypatch.setattr(page.supervisor, verb,
                             lambda project=None, names=None, v=verb: acted.append(v))
     monkeypatch.setattr(page.supervisor, "counts", lambda project=None: (1, 2))
-    _answer_question(monkeypatch, answer=QMessageBox.No)
+    _answer_question(monkeypatch, answer=False)
     page.start_all_button.click()
     page.stop_all_button.click()
     for button, _verb in page._blocks["Claim"]._service_buttons:
@@ -1547,7 +1550,7 @@ def test_a_selection_is_acted_on_without_being_asked_about(page, monkeypatch):
     def refuse(*_args, **_kwargs):
         raise AssertionError("a button that named a count asked anyway")
 
-    monkeypatch.setattr("cms_gui.pages.services.QMessageBox.question", refuse)
+    monkeypatch.setattr("cms_gui.widgets.confirm", refuse)
     acted = []
     monkeypatch.setattr(page.supervisor, "restart_all",
                         lambda project=None, names=None: acted.append(names))
@@ -1561,7 +1564,7 @@ def test_nothing_to_do_is_said_rather_than_asked(page, monkeypatch):
     def refuse(*_args, **_kwargs):
         raise AssertionError("asked about an action that would touch nothing")
 
-    monkeypatch.setattr("cms_gui.pages.services.QMessageBox.question", refuse)
+    monkeypatch.setattr("cms_gui.widgets.confirm", refuse)
     # Nothing is running, so there is nothing for Stop All to stop.
     page.stop_all_button.click()
     assert "No service on this page is running." in page.status.text()
