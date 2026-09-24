@@ -16,6 +16,16 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.6] - 2026-09-24
+
+### Changed
+- **QAVector has its own icon.** The three offset browser windows were the
+  mark of chrome-multi-session, which QAVector has long outgrown. The icon is
+  now three steps converging on a checked verdict - what a cycle does - with a
+  simpler drawing of one step and the verdict for 16 and 20 pixels. It is
+  rendered from SVG files in the GUI's assets rather than painted in code, so
+  changing it is replacing a file; the old windows artwork is kept there too.
+
 ## [0.16.5] - 2026-09-24
 
 ### Changed
