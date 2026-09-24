@@ -109,6 +109,9 @@ class AgentReview(CyclePlugin):
             output("complexity", "string",
                    "How hard the task is, as an effort level - only when the "
                    "step sets assess: complexity."),
+            output("effort", "string",
+                   "The effort level claude_cli ran at; empty for the CLI's "
+                   "own default or a worker framework."),
             output("report_path", "string", "Structured review JSON in the step directory."),
             output("cost_usd", "number", "What the review cost, when the backend says."),
         ),
@@ -372,7 +375,10 @@ def _claude_cli_method(self, context, step):
         result.outputs["cost_usd"] = reply.cost
     result.artifacts.append(Artifact("json", context.relative(report_path), step.id,
                                      name="review", bytes=os.path.getsize(report_path)))
-    result.message = "claude_cli review: %s" % _said(review)
+    effort = self.setting(step.settings, "effort", "") or ""
+    result.outputs["effort"] = effort
+    result.message = agent_run.with_effort("claude_cli review: %s" % _said(review),
+                                           effort)
     return result
 
 

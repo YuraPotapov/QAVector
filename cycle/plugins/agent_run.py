@@ -56,6 +56,22 @@ ACCEPT_EDITS = "acceptEdits"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
+def at_effort(effort):
+    """How a step says the level it ran at, for the first line of its message.
+
+    Said by the step because nothing else will: the CLI does not report the
+    level back, and a level taken from ``${...}`` - a review's judgement of
+    the task - is otherwise visible nowhere in the run.
+    """
+    return ("at %s effort" % effort) if effort else "at the CLI's default effort"
+
+
+def with_effort(message, effort):
+    """``message`` with the effort added to its first line."""
+    first, newline, rest = str(message or "").partition("\n")
+    return "%s - %s%s%s" % (first, at_effort(effort), newline, rest)
+
+
 class Reply(object):
     """One run of the CLI: what it wrote, what it said, and what it cost.
 

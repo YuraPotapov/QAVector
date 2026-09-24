@@ -293,13 +293,16 @@ def _runs(tmp_path):
 
 def test_the_review_thinks_as_hard_as_the_work_it_is_judging(tmp_path, work):
     """A reviewer asked to think less than the writer did is not a check on it."""
-    work(bodies=["print('ok')"], review=True, reviews=[REVIEW_OK],
-         effort="high")
+    result, _project, _recorder = work(bodies=["print('ok')"], review=True, reviews=[REVIEW_OK],
+                                       effort="high")
 
     runs = _runs(tmp_path)
     assert [one["reviewing"] for one in runs] == [False, True]
     for one in runs:
         assert one["argv"][one["argv"].index("--effort") + 1] == "high"
+    # And it says so: the CLI never reports the level back.
+    assert result.outputs["effort"] == "high"
+    assert result.message.splitlines()[0].endswith(" - at high effort")
 
 
 def test_no_effort_level_leaves_the_cli_to_its_own_configuration(tmp_path, work):

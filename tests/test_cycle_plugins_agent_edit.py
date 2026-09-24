@@ -153,7 +153,7 @@ def test_what_it_said_it_did_is_an_output_a_later_step_can_read(edit):
 
 def test_the_message_says_how_much_changed(edit):
     result, _argv, _repository, _recorder = edit()
-    assert result.message == "agent.edit: 2 files changed"
+    assert result.message == "agent.edit: 2 files changed - at the CLI's default effort"
 
 
 def test_one_file_is_not_called_files(edit):
@@ -164,7 +164,7 @@ say({"type": "assistant", "message": {"content": [
 say({"type": "result", "subtype": "success", "is_error": False, "result": "ok"})
 """
     result, _argv, _repository, _recorder = edit(body)
-    assert result.message == "agent.edit: 1 file changed"
+    assert result.message == "agent.edit: 1 file changed - at the CLI's default effort"
 
 
 def test_its_turns_are_shown_as_stages_like_a_review_s_are(edit):
@@ -252,3 +252,12 @@ def test_it_offers_the_same_sign_in_as_the_review_does():
 
 def test_its_metadata_survives_the_wire():
     json.dumps(registry.get("agent.edit").metadata.to_dict())
+
+
+def test_the_effort_it_ran_at_is_said_and_published(edit):
+    """The CLI never reports the level back, and one taken from a review's
+    judgement is otherwise visible nowhere in the run."""
+    result, argv, _repository, _recorder = edit(effort="low")
+    assert argv[argv.index("--effort") + 1] == "low"
+    assert result.message.endswith(" - at low effort")
+    assert result.outputs["effort"] == "low"

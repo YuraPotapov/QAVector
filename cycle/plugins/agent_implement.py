@@ -133,6 +133,9 @@ class AgentImplement(CyclePlugin):
                    "The check that was still failing when the budget ran out."),
             output("findings", "list", "What the review still objected to."),
             output("cost_usd", "number", "What every attempt cost together."),
+            output("effort", "text",
+                   "The effort level every attempt and its review ran at; "
+                   "empty for the CLI's own default."),
             output("report_path", "text", "The whole record, as JSON on disk."),
         ),
         # The same sign-in the other agent steps offer, and the same CLI.
@@ -420,12 +423,14 @@ class AgentImplement(CyclePlugin):
                        checked=bool(self._checks(step)))
         if cost:
             outputs["cost_usd"] = round(cost, 4)
+        effort = self.setting(step.settings, "effort", "") or ""
+        outputs["effort"] = effort
         return registry.PluginResult(
             "success" if verified else "failed", outputs=outputs,
             artifacts=[Artifact("json", context.relative(path), step.id,
                                 name="implement",
                                 bytes=os.path.getsize(path))],
-            message=message)
+            message=agent_run.with_effort(message, effort))
 
     def _checks(self, step):
         return [one.strip() for one

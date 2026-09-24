@@ -79,6 +79,8 @@ class AgentEdit(CyclePlugin):
             output("changed", "number", "How many distinct files it changed."),
             output("summary", "text", "What the agent said it did."),
             output("cost_usd", "number", "What the run cost, when the CLI says."),
+            output("effort", "text",
+                   "The effort level it ran at; empty for the CLI's own default."),
             output("stdout_path", "text", "The whole event stream, on disk."),
         ),
         # The same two the review offers, and for the same reason: signing in
@@ -165,8 +167,10 @@ class AgentEdit(CyclePlugin):
         result.outputs["summary"] = reply.text
         if reply.cost is not None:
             result.outputs["cost_usd"] = reply.cost
-        result.message = "agent.edit: %d file%s changed" % (
-            len(reply.written), "" if len(reply.written) == 1 else "s")
+        effort = self.setting(step.settings, "effort", "") or ""
+        result.outputs["effort"] = effort
+        result.message = agent_run.with_effort("agent.edit: %d file%s changed" % (
+            len(reply.written), "" if len(reply.written) == 1 else "s"), effort)
         return result
 
 

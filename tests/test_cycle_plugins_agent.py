@@ -684,3 +684,28 @@ def test_a_later_step_may_take_its_effort_from_the_judgement(plugin):
     assert not any("ffort" in one for one in found), found
     found = registry.get(plugin).problems(dict(settings, effort="huge"))
     assert any("ffort" in one for one in found), found
+
+
+@_posix_only
+def test_a_review_says_the_effort_it_ran_at(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20260924-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=_replying(tmp_path, _REVIEW), effort="xhigh"))
+
+    assert result.ok, result.message
+    assert result.outputs["effort"] == "xhigh"
+    assert result.message.endswith(" - at xhigh effort")
+
+
+def test_the_effort_goes_on_the_first_line_of_a_longer_message():
+    from cycle.plugins.agent_run import with_effort
+
+    assert with_effort("failed\n- one\n- two", "") == \
+        "failed - at the CLI's default effort\n- one\n- two"
