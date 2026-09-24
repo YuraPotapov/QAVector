@@ -242,7 +242,7 @@ class Core:
     def __init__(self, script=None, interpreter=None, config=None,
                  log_sources=None, flows_dir=None, cycles_dir=None,
                  secrets_path="",
-                 memory_path=""):
+                 memory_path="", runs_path=""):
         auto_script, auto_python = autodetect()
         self.script = script or auto_script
         if not needs_interpreter(self.script):
@@ -276,10 +276,16 @@ class Core:
         # And the same for what the project remembers. Not in argv() either:
         # it means nothing to --describe or to a scenario run.
         self.memory_path = memory_path or ""
+        # Where runs go. With the memory flag wherever that goes: a session is
+        # read from the runs, so listing or deleting one with the runs somewhere
+        # else would see nothing.
+        self.runs_path = runs_path or ""
 
     def memory_flag(self):
-        """``--cycle-memory-file=`` as a list, empty when nobody has set one."""
-        return ["--cycle-memory-file=" + self.memory_path] if self.memory_path else []
+        """``--cycle-memory-file=`` - and ``--cycle-runs-dir=`` - as a list,
+        each only when somebody has set it."""
+        return ((["--cycle-memory-file=" + self.memory_path] if self.memory_path else [])
+                + (["--cycle-runs-dir=" + self.runs_path] if self.runs_path else []))
 
     def secrets_flag(self):
         """``--cycle-secrets-file=`` as a list, empty when nobody has set one.

@@ -33,8 +33,9 @@ reports/
 # One directory per cycle run: its record, its logs, whatever its steps wrote.
 # Same reasoning as reports/ - it is the output of running the thing, not the
 # thing. In a source checkout the data root IS the checkout, so without this
-# every run would show up as something to commit.
-cycle-runs/
+# every run would show up as something to commit. No trailing slash: a
+# checkout whose runs were moved keeps a link here, and a link is not a folder.
+cycle-runs
 
 # The values of cycles' secret variables, and the key that decrypts them. A
 # cycle file declares only that a variable is secret; the value lives here, and

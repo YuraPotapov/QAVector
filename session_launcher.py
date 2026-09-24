@@ -1512,7 +1512,7 @@ def _bad_option_message(arg, config_path):
                "--cycle-secret-copy",
                "--cycle-secret-delete", "--cycle-secrets-file",
                "--cycle-memory-show", "--cycle-memory-forget",
-               "--cycle-memory-file"):
+               "--cycle-memory-file", "--cycle-runs-dir"):
         return "%s needs a value: %s=VALUE (note the '=', not a space)." % (arg, arg)
     return ("Unknown option %r. Run --help for the full list." % arg)
 
@@ -3248,6 +3248,9 @@ write a report. The steps that do not depend on each other run at the same time.
                             not do it again.
   --cycle-memory-file=PATH  Where the store lives (default: beside the rest of
                             the user data). Plain JSON, meant to be readable.
+  --cycle-runs-dir=PATH     Where cycle runs are written and read back - by a
+                            run, a resume and the session list alike (default:
+                            cycle-runs under the user data).
 
   --cycle-sessions[=ID]     What the cycles have been working on: every run of
                             one cycle on one subject, grouped, newest first.
@@ -3600,6 +3603,8 @@ def main():
                                if "=" in arg else "")
         elif arg.startswith("--cycle-session-delete="):
             session_command = ("delete", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-runs-dir="):
+            runtime_paths.set_cycle_runs_dir(arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-memory-file="):
             memory_file = os.path.abspath(os.path.expanduser(
                 arg.split("=", 1)[1].strip()))

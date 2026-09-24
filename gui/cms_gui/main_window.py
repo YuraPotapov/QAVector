@@ -154,7 +154,8 @@ class MainWindow(QMainWindow):
                                   self.settings.config, flows_dir=self.settings.flows_path,
                                   cycles_dir=self.settings.cycles_path,
                                   secrets_path=self.settings.cycle_secrets_path,
-                                  memory_path=self.settings.cycle_memory_path)
+                                  memory_path=self.settings.cycle_memory_path,
+                                  runs_path=self.settings.cycle_runs_path)
         self._aim_log_sources()
         self.inventory = core_mod.Inventory()
         self.run_state = RunState(self)
@@ -1046,7 +1047,8 @@ class MainWindow(QMainWindow):
                                       flows_dir=self.settings.flows_path,
                                       cycles_dir=self.settings.cycles_path,
                                       secrets_path=self.settings.cycle_secrets_path,
-                                  memory_path=self.settings.cycle_memory_path)
+                                      memory_path=self.settings.cycle_memory_path,
+                                      runs_path=self.settings.cycle_runs_path)
             self._aim_log_sources()
             self.refresh_inventory()
 

@@ -419,3 +419,17 @@ def test_a_failed_run_got_to_its_first_failure_not_to_its_report(tmp_path):
     execute(cycle, plugins, root / "20260924-100000-demo",
             records.Persister(root=str(root)))
     assert records.index(str(root))[0]["reached"] == "work"
+
+
+def test_runs_kept_elsewhere_are_found_where_the_flag_says(tmp_path):
+    """A front-end that keeps runs outside the data root names the folder on
+    every call; a session list read from the default would see none of them."""
+    root = str(tmp_path / "elsewhere")
+    _index(root, [_row(root, "r1", key="K-1")])
+
+    code, listed = _launcher(tmp_path, "--cycle-sessions=demo")
+    assert code == 0 and listed["sessions"] == []
+
+    code, listed = _launcher(tmp_path, "--cycle-sessions=demo",
+                             "--cycle-runs-dir=" + root)
+    assert code == 0 and [one["id"] for one in listed["sessions"]] == ["demo:K-1"]

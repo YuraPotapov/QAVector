@@ -352,3 +352,13 @@ def test_the_frozen_health_check_names_what_is_wrong():
     assert check_frozen.problems(
         dict(healthy, warnings=["playwright unavailable"]), "1.2.3") == \
         ["playwright unavailable"]
+
+
+def test_cycle_runs_can_be_sent_elsewhere_and_back(tmp_path):
+    default = rp.cycle_runs_dir()
+    try:
+        rp.set_cycle_runs_dir(str(tmp_path / "runs"))
+        assert rp.cycle_runs_dir() == str(tmp_path / "runs")
+    finally:
+        rp.set_cycle_runs_dir("")
+    assert rp.cycle_runs_dir() == default

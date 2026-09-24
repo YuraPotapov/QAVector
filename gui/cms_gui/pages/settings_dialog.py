@@ -33,6 +33,7 @@ from .. import theme, widgets
 #: box is left empty.
 SECRETS_NAME = "cyclesecrets.json"
 MEMORY_NAME = "cyclememory.json"
+RUNS_NAME = "cycle-runs"
 
 #: What the footer and the window's own chrome take, so the first size asked
 #: for is the form's height plus the things around it rather than the form's
@@ -48,6 +49,10 @@ def _default_secrets_path():
 
 def _default_memory_path():
     return os.path.join(os.path.dirname(sf.default_path()), MEMORY_NAME)
+
+
+def _default_runs_path():
+    return os.path.join(os.path.dirname(sf.default_path()), RUNS_NAME)
 
 
 class SettingsDialog(QDialog):
@@ -228,6 +233,22 @@ class SettingsDialog(QDialog):
             "done again. Plain JSON on purpose - it is meant to be readable "
             "when you want to know why a run skipped something."))
 
+        # Where each run's record, logs and artifacts go - and where Resume and
+        # the Subjects list read them back from.
+        self.cycle_runs = QLineEdit(settings.cycle_runs_path)
+        self.cycle_runs.setProperty("mono", True)
+        # Not a path: blank means the core's own data folder, which for a core
+        # run from a source checkout is the checkout - a path here would be a
+        # guess that is wrong in exactly that case.
+        self.cycle_runs.setPlaceholderText("cycle-runs in the core's data folder")
+        column.addWidget(widgets.field(
+            "Cycle runs",
+            widgets.row(self.cycle_runs,
+                        self._browse_button(self._pick_cycle_runs)),
+            "One folder per cycle run: its record, logs and what its steps "
+            "wrote. Resume and the Subjects list read from here, so runs left "
+            "in another folder stop showing when this changes."))
+
         column.addStretch(1)
 
         # Outside the scroll: testing the connection and saving are what the
@@ -351,6 +372,13 @@ class SettingsDialog(QDialog):
         if path:
             self.cycle_memory.setText(path)
 
+    def _pick_cycle_runs(self):
+        path = widgets.pick_path(self, "Cycle runs folder",
+                                 self.cycle_runs.text() or _default_runs_path(),
+                                 directory=True)
+        if path:
+            self.cycle_runs.setText(path)
+
     def _pick_cycles(self):
         path = widgets.pick_path(self, "Cycles folder",
                                  self.cycles.text() or "~", directory=True)
@@ -423,6 +451,7 @@ class SettingsDialog(QDialog):
         self.settings.cycle_projects_path = self.cycle_projects.text().strip()
         self.settings.cycle_secrets_path = self.cycle_secrets.text().strip()
         self.settings.cycle_memory_path = self.cycle_memory.text().strip()
+        self.settings.cycle_runs_path = self.cycle_runs.text().strip()
         self.settings.log_sources_path = self.log_sources.text().strip()
         self.settings.flows_path = self.flows.text().strip()
         self.settings.cycles_path = self.cycles.text().strip()

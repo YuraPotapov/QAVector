@@ -253,10 +253,10 @@ def test_the_launchers_own_location_is_computable_without_asking_it(tmp_path):
 class _Recorder(core_mod.Core):
     """A Core that records the argv instead of running anything."""
 
-    def __init__(self, answer=None, secrets_path="", memory_path=""):
+    def __init__(self, answer=None, secrets_path="", memory_path="", runs_path=""):
         core_mod.Core.__init__(self, "/x/session_launcher.py", "/usr/bin/python3",
                                secrets_path=secrets_path,
-                               memory_path=memory_path)
+                               memory_path=memory_path, runs_path=runs_path)
         self.calls = []
         self.answer = answer if answer is not None else {"ok": True}
 
@@ -464,3 +464,13 @@ def test_a_core_that_predates_cycles_reads_as_having_none():
     inventory = core_mod.Inventory({"users": [], "envs": []})
     assert inventory.cycles == []
     assert inventory.cycle_plugins == []
+
+
+def test_the_runs_folder_goes_wherever_the_memory_store_does():
+    """Sessions are read from the runs, so a list or a delete sent without the
+    folder the runs were written to would find nothing."""
+    core = _Recorder({"ok": True}, memory_path="/m.json", runs_path="/runs")
+    assert core.memory_flag() == ["--cycle-memory-file=/m.json",
+                                  "--cycle-runs-dir=/runs"]
+    core.cycle_sessions("dev")
+    assert "--cycle-runs-dir=/runs" in core.calls[-1]

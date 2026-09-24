@@ -113,6 +113,19 @@ class Settings:
         self._qs.setValue("cycles/memory_path", value or "")
 
     @property
+    def cycle_runs_path(self):
+        """Where cycle runs are written, and read back by resume and sessions.
+
+        Empty leaves it to the core: cycle-runs under its data root, which for a
+        core run from a source checkout is the checkout itself.
+        """
+        return self._qs.value("cycles/runs_path", "", str)
+
+    @cycle_runs_path.setter
+    def cycle_runs_path(self, value):
+        self._qs.setValue("cycles/runs_path", value or "")
+
+    @property
     def flows_path(self):
         """Where the scenarios tree lives; empty means the core's own default.
 

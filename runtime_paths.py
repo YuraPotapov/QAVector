@@ -279,6 +279,22 @@ def cycles_dir():
     return user_cycles_dir()
 
 
+#: Set by ``--cycle-runs-dir``; "" means the default under the data root.
+_cycle_runs_override = ""
+
+
+def set_cycle_runs_dir(path):
+    """Put every cycle run of this process under ``path``; "" restores the default.
+
+    Process-wide rather than threaded through each caller, because a run, its
+    resume, the session list and the index all have to agree on one directory -
+    a list read from one place while runs were written to another would show
+    nothing and delete nothing.
+    """
+    global _cycle_runs_override
+    _cycle_runs_override = os.path.abspath(os.path.expanduser(path)) if path else ""
+
+
 def cycle_runs_dir():
     """One directory per cycle run: its metadata, logs, artifacts and reports.
 
@@ -287,7 +303,7 @@ def cycle_runs_dir():
     scenarios, the services it started, the commands it ran - and mixing the
     two would make both harder to clean up and neither easy to read.
     """
-    return os.path.join(user_data_root(), "cycle-runs")
+    return _cycle_runs_override or os.path.join(user_data_root(), "cycle-runs")
 
 
 def extensions_dir():

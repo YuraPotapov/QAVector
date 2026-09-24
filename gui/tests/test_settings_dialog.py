@@ -14,6 +14,7 @@ def dialog(qapp):
     settings.flows_path = ""
     settings.cycle_secrets_path = ""
     settings.cycle_memory_path = ""
+    settings.cycle_runs_path = ""
     return SettingsDialog(settings), settings
 
 
@@ -134,6 +135,20 @@ def test_where_the_cycle_memory_goes_is_remembered(dialog):
     dialog.cycle_memory.setText("  /data/memory.json  ")
     dialog.apply()
     assert settings.cycle_memory_path == "/data/memory.json"
+
+
+def test_where_cycle_runs_go_is_remembered(dialog):
+    dialog, settings = dialog
+    dialog.cycle_runs.setText("  /data/runs  ")
+    dialog.apply()
+    assert settings.cycle_runs_path == "/data/runs"
+
+
+def test_a_blank_runs_field_does_not_guess_a_path(dialog):
+    """Blank is the core's own data folder - the checkout, for a core run from
+    one - so a path in the placeholder would be wrong in exactly that case."""
+    dialog, _settings = dialog
+    assert "core's data folder" in dialog.cycle_runs.placeholderText()
 
 
 def test_the_two_cycle_stores_are_separate_fields(dialog):
