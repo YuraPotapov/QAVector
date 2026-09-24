@@ -16,6 +16,689 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-24
+
+### Added
+- **Cycles say what they work on.** A cycle may declare `subject:` - a kind, a
+  `${...}` key such as the Jira task a step took, a title, the memory record
+  that holds its state, and a `pin` variable that fixes it. Runs record it and
+  announce it (`cycle.subject`), and runs of one cycle on one subject form a
+  session.
+- **A Subjects list on the Cycles page**, to the right of the canvas: one row
+  per session with where it got to, what the cycle remembers about it and every
+  run on it. Click a row to put its latest run back on the canvas, where Resume,
+  Run step and Run from here act on it; the bin deletes the session's runs and
+  memory record (never a branch or an issue). `--cycle-sessions` and
+  `--cycle-session-delete` do the same from a terminal.
+- **Every run says how it began** (`cycle.run.mode`): fresh, resumed or
+  partial, what it kept and what it does again and why. Plan revisions are
+  announced as `cycle.revision`.
+- `jira.issues` takes `issue` - exactly one issue, bypassing the queue - and
+  returns the first issue's `title` beside its `key`.
+- **A panel dragged shut on the Cycles page leaves a bold line** where it went;
+  clicking the line opens it again.
+
+- Approval gates can return human feedback to a configured planning step with
+  **Send for revision**. The bounded review path runs again and asks for approval
+  on the revised plan. Feedback, prior plans and operation receipts persist;
+  journaled checkpoint resets recover without restarting the whole cycle.
+- Cycle **Resume** continues an exact saved execution with durable per-node
+  receipts, definition/input fingerprints, artifact checks, an exclusive run
+  lock and continuation history. Completed paid nodes remain completed when a
+  later file writer fails. Agent adapters retain service responses before
+  writing reports; an uncertain provider outcome stops instead of silently
+  paying again. The main **Run** button becomes **Resume** after a stop or
+  failure; **Hard Run** in its dropdown explicitly starts fresh. The CLI accepts
+  `--cycle-resume=RUN_ID`; older runs can still use explicit partial execution.
+- The agent steps say how hard the model should think. `agent.review`,
+  `agent.edit` and `agent.implement` take `effort` — `low`, `medium`, `high`,
+  `xhigh` or `max` — and pass it to the Claude Code CLI as `--effort`. Left
+  blank, which is the default and what every existing cycle does, the CLI uses
+  whatever it is configured to use. A level the CLI does not know is refused
+  before the step starts rather than left to the binary, which warns and
+  quietly runs at its default; the level belongs to the `claude_cli` backend,
+  and CrewAI or AutoGen say so instead of ignoring it. In `agent.implement` it
+  covers every attempt and the review that signs them off, so the reviewer is
+  never asked to think less than the writer did.
+- **The last cycle run is still there after a restart.** Everything a cycle
+  reported lived only in memory, so closing the window lost the graph's
+  colours, the output and the stages of a run that may have taken an hour. The
+  core now writes every event it sends into the run's own directory as
+  `logs/cycle.jsonl` — the file `cycle/workspace.py` has always documented —
+  and the application replays it on the way up. A run the application was
+  killed during comes back marked interrupted rather than claiming to be going.
+- `jira.issues` downloads the pictures on the issues it read and says where
+  they landed. Each issue carries an `attachments` list, and the step publishes
+  `attachments`, `images` (the downloaded pictures' paths, to hand to a step
+  that can look at them) and `attachment_count`. `attachments: images | all |
+  none` chooses what is fetched and `attachment_bytes` caps the step's whole
+  download. A file that was not fetched is still listed with the URL it is at,
+  and one that could not be fetched costs that file rather than the issue. An
+  image in a description now reads as `[image: name]` instead of vanishing.
+- `jira.html` shows the pictures themselves, where the description put them,
+  captioned with the file each came from. Every attachment the body did not
+  show — one nothing refers to, one that is not a picture, one past the
+  budget — is listed under the description. Pictures are embedded as `data:`
+  URIs, so the page is still one file that loads nothing remote.
+- A plugin can say its result belongs to the run that produced it
+  (`PluginMetadata.reusable`, published by `--describe`). `approval.gate` is
+  the case it exists for.
+- Artifacts renders HTML reports directly with their CSS, with a Preview/Source
+  selector. Links to neighboring artifacts select them in the tree; web links
+  open in the browser. Report scripts and remote resources are disabled.
+- Jira issue steps also write `jira.html` beside the unchanged `jira.json`:
+  a standalone reading copy with formatted descriptions and comments, using
+  the original Jira document structure without additional API requests.
+- Development cycle (In Progress) prepares the exact Jira task branch from a
+  freshly fetched base branch, reusing local or remote task branches and merging
+  the current base before planning. Git commit refuses to stage or commit on a
+  branch that differs from the task key.
+- `git.prepare_branch` takes `offline`: with it set, a remote that cannot be
+  reached no longer stops the step. It says so in the step's output, prepares
+  the branch from the last fetched base or the local base branch, and reports
+  which one through the new `offline` and `base_ref` outputs. The In Progress
+  cycle sets it; everything else that stops the step still does.
+- `memory.recall` takes `default`: what `value` is on a key nothing has written
+  to yet. Without it a counter read before its first write compares as "not
+  numbers", which is what a budget gate needs in order to read as unspent.
+- A gate's row in Stages says what it decided: a verdict in words, then every
+  check on its own line with a pass or fail mark beside it and the values that
+  were actually compared. Rows are headed by what a step is called rather than
+  by its id. Numbers are shown as numbers and an empty value is named.
+- The canvas remembers where a cycle was being looked at from. Zoom and pan are
+  written down about a second after the last change, per cycle, beside the node
+  positions in `cyclelayout.json`, and restored when the cycle is opened. Fit
+  and Arrange forget them again.
+
+- **An agent step no longer needs an API key.** Reviewing code with an agent used
+  to mean opening a web console, making a key, and working out where to export it
+  so the right process would see it - a developer's errand standing between
+  opening the application and having an agent read a failing test. `agent.review`
+  now defaults to a backend that runs the Claude Code CLI, which signs in through
+  a browser (`claude auth login`) and keeps the credentials to itself. No token
+  passes through this application: nothing reads one, stores one or writes one
+  down, so a cycle file that uses it carries no secret and is safe to commit. The
+  CrewAI and AutoGen backends are unchanged and still take a key.
+
+- **A plugin can say how it is set up, and the Inspector offers it.** Selecting a
+  step shows a **Setup** section with whatever that plugin declares it can be
+  asked outside a run - for `agent.review`, whether it is signed in and a button
+  that signs in. The page has no idea what any of it means: a plugin declares
+  `metadata.actions`, `--describe` publishes them, and the Inspector renders what
+  it finds. Setting a plugin up therefore belongs to the plugin rather than to a
+  row in Settings, which is what lets a plugin added later bring its own setup
+  with it. `--cycle-plugin-action=PLUGIN:ACTION` is the same thing from a
+  terminal.
+
+- `git.checkout` cycle plugin: clone a repository into the run workspace, select
+  a branch/tag or commit, optionally initialize submodules, and publish the
+  checkout path and commit with per-command logs.
+- `agent.review` cycle plugin: optional CrewAI and Microsoft AutoGen workers
+  with configurable models, repository reading tools, structured findings and
+  a JSON review artifact. Framework dependencies use a separate Python
+  environment; cancellation and timeouts use the existing cycle controls.
+- A Git-to-agent review example and framework setup guide in `docs/cycle-agents.md`.
+
+- **Cycles: a new section that runs services, scenarios, commands and reports as
+  one graph.** Until now every one of those was started by hand from its own page,
+  and "bring up Postgres, bring up Odoo, wait for it, run the smoke suite, collect
+  a report" was a thing you did in order, watching. A cycle is that written down
+  once — as a graph rather than a list, because the interesting part is which steps
+  wait for which. **Steps that do not depend on each other run at the same time**,
+  so two suites against one server take as long as the slower of them rather than
+  both. Write one in `cycles/`, open it on the new Cycles page, and press Run; see
+  `docs/cycles.md`.
+
+- **`jira.transition`: move an issue along its workflow.** `jira.issues` reads
+  and says so in its first line, which is what lets a cycle point it at a
+  production instance without thinking; this writes, so it is a separate plugin
+  and the cycle file says which. The transition is **named, never guessed** — a
+  workflow is the project's own, and a name that is not on offer is refused with
+  the names that were, rather than becoming a 400. `lands_in` says where the
+  move should end up, which is what makes a re-run safe: a workflow stops
+  offering a move once made, so a run killed between the transition and the
+  record would otherwise come back to an error — told the destination, the step
+  recognises an issue already there and reports `changed: false`. It is checked
+  afterwards too: landing somewhere else fails the step rather than reporting a
+  success nobody verified. `expect_status` refuses when the issue moved under
+  you. No create, no assign, no delete.
+
+- **`jira.issues` also reports the first issue's key on its own.** `${...}`
+  cannot index a list, so a step handed `keys` got the whole list where it
+  wanted one issue.
+
+- **`cycles/development.yaml`: one Jira task to a verified commit.** The whole
+  chain, and the first cycle that uses every piece of the section at once: take
+  a task, ask an agent whether the code already does it, plan it, have a
+  *second* agent review that plan against the project's rules, ask a person,
+  move the issue, make the change and prove it, review the result
+  independently, accept it against the criteria, and commit the tree that
+  passed. Twenty-three steps and four gates, each of which stops the run and
+  says which condition it was. It asks once, between the plan and the first
+  line of code — the cheapest moment a person can be asked, with the plan in
+  front of them and nothing yet written — so it needs the application. One task
+  per run; it remembers what it finished and declines it next time without
+  paying an agent to work that out. `cycles/task_to_commit.yaml` is unchanged
+  and is still the short unattended version.
+
+- **`check.gate`: several things that must all hold.** A condition on a step is
+  one comparison on purpose — `if:` has no `and` and no `<` — and that is right
+  for an edge in the graph and wrong for the place a run decides whether it has
+  earned the next step. Written as conditions, a four-part gate was a chain of
+  four empty steps, four nodes of noise on the canvas, and a refusal that said
+  "if: … was not true" without saying which. This is one node, and its message
+  names the check that refused and shows the values: *the review is clean:
+  '1' == '0'*. Equality is imported from `if:` rather than rewritten, so the
+  two cannot drift apart.
+
+- **`agent.review` counts its findings.** `${...}` walks mappings and cannot
+  measure a list, so "did the review find anything" was unaskable from a cycle
+  file. `issue_count` and `blocking_count` are the two numbers a gate wants,
+  the second being the useful one: a low-severity note should not stop a run.
+
+- **`jira.issues` takes the ordering.** It was `ORDER BY updated DESC`, written
+  into the code, and an ORDER BY in the extra `jql:` was a syntax error because
+  that clause is bracketed. It decides which issue a step with `limit: 1` gets,
+  so a cycle that takes one task per run was having its queue chosen for it.
+
+- **A cycle stays arranged the way you left it.** Dragging a node out of the
+  way lasted exactly as long as the window did: reopen the cycle, or restart
+  the application, and the arranging was gone — so nobody bothered arranging.
+  Positions now live in `cyclelayout.json` beside the GUI's other files.
+  Deliberately **not** in the cycle file, which is committed and shipped and
+  where a box sits on somebody's screen is none of its business. A step the
+  file does not mention goes where the layout computes it, so an arrangement
+  survives the cycle growing a step, and **Arrange forgets** rather than only
+  undoing — otherwise the mess would come back on the next open.
+
+- **The canvas runs down the page.** It ran left to right, which is fine for
+  the six-node demos and unreadable for anything real: a twenty-step cycle is
+  an ordinary shape and twenty nodes across is five thousand pixels of line.
+  Down the page it is a list, which is a thing people read all day, and a fork
+  spreads sideways and becomes the widest thing on the page — which is what you
+  want to notice. The direction is a value in the canvas's spec, so it is one
+  arithmetic rather than two that can disagree. A long cycle also **opens at a
+  size its labels can be read at** and scrolled from the top, rather than
+  fitted whole into the window at a scale that answers "how big is it" and no
+  other question; Fit still shows all of it.
+
+- **Every dialog is the application's own now.** `QMessageBox` is not styled
+  by the stylesheet - it draws its own icon, asks the platform for its buttons
+  and keeps the desktop's frame - so all 64 of them, across eleven files,
+  arrived looking like every other application on the machine and none of this
+  one. They now go through one `widgets.Message`: the title bar the main window
+  wears, the theme for nothing, dark mode included. Three shapes - a question,
+  a notice, and a choice of three, because "continue this one / start a new one
+  / cancel" does not fold into a yes/no - plus a mono box for the dialogs that
+  carry what a command printed, where somebody wants to select a line rather
+  than read a label. Buttons are named after what they do: **Overwrite**,
+  **Discard**, **Delete**, **Stop all and close**. Ten other windows - the
+  service console, the row editors, Settings, the step editor, the log viewer -
+  wore the desktop's frame too, and now wear ours. Taking that frame off takes
+  its resize handles with it, so they are put back: a window that could be
+  resized still can, and only a dialog that never had a frame - a confirmation
+  - goes without. The windows somebody *works* in rather than fills in keep
+  minimize and maximize as well.
+
+  Two things fell out of doing it. A test helper answered confirmations with
+  `QMessageBox.No`, which is a **non-zero** enum member: the day the pages
+  started returning a bool, every refusal in those tests quietly became a
+  yes. And the frame held a reference to its window while the window held one
+  to its frame - a cycle between two QObjects, which Python collects in an
+  order nobody decides. One frame on a window that lives for the whole process
+  never showed it; a frame on every dialog **segfaulted**, on the next dialog
+  rather than the one that went.
+
+- **A cycle run says where its files are.** It never did, and only the
+  scenario engine sent that event - so a cycle's reports, its agents'
+  transcripts and the JSON a Jira step saved were written to disk and then
+  unreachable: History had no directory to remember and the Artifacts page had
+  nothing to open. One event, sent before the first step, and both pages work
+  with no change of their own.
+
+- **The output panel shows what a step came to, not only what it printed.**
+  Half the plugins print nothing at all - a Jira step returns issues, a memory
+  step returns what it remembered, and neither says a word on the way past - so
+  a run could finish, having done exactly what was asked, and leave the one
+  place somebody looks blank. A finished step now closes with its status, its
+  message, its outputs and the files it wrote. It is appended rather than
+  substituted, so a step with real output keeps it.
+
+- **Settings -> Cycles.** There was a path setting for the secrets store, for
+  the projects file and for the memory store, and none for the cycles
+  themselves - the GUI never passed `--cycles-dir` at all. In a source checkout
+  the core's default is the checkout, so the cycles somebody edits are the
+  template files that ship with the application, and saving one writes their
+  own Jira instance and work email into a file that is committed. That had
+  already happened. A test now refuses to let a shipped template name a real
+  host, a real address, or a path from the machine it was edited on.
+
+- **Running part of a cycle.** Working on one step of a twenty-three step cycle
+  meant running all twenty-three, which on the development cycle means paying
+  for six agent calls to reach the seventh. Two chevrons beside Run act on the
+  selected step: `>` runs that one, `>>` runs it and everything that waits on
+  it. The steps left out are **taken from the last run** - their outputs go
+  into scope, which is the only reason a step that reads another's result can
+  run alone at all - and a partial run with nothing to take from is refused
+  before it starts rather than failing several minutes in on a reference that
+  does not exist. `--cycle-only` and `--cycle-from` from a terminal.
+
+- **Starting a cycle asks first, and says what it is agreeing to.** A full run,
+  and a run from a step onwards, both confirm - they spend agent calls and move
+  a Jira issue, and Stop ends a run without undoing what has already happened.
+  Running a single step does not ask: it is the cheap one, and the buttons
+  exist to be pressed repeatedly.
+
+- **Selecting a step lights up what it is connected to.** Its lines are drawn
+  heavier and in the accent colour, and lifted above the lines they cross -
+  still under every node, because a line over a node's writing is a line in
+  the way. On a long cycle that answers a real question: a step's links run off
+  in both directions past a dozen other boxes, and following one by eye meant
+  tracing a grey line through every other grey line. Both directions are lit,
+  not only the ones leaving it — "what does this wait for" and "what waits for
+  this" are one question when you are reading a graph. It is a repaint and
+  nothing else: a line that jumped when you clicked the node it belongs to
+  would be worse than no highlight at all.
+
+- **A node is tinted by what kind of step it is.** Agents one colour, git
+  another, Jira another — keyed on the family of the plugin, which is the part
+  of its id before the dot, so a plugin added later is grouped correctly the
+  moment it is named. Reading a twenty-step cycle, the question "where does
+  this one spend money" or "where does it touch the repository" is now a
+  glance rather than a read.
+
+  **Deliberately none of red, green or amber.** Those three already say what
+  *happened* to a step, on the stripe down its left edge, and a body speaking
+  the same language would give the canvas two meanings for one colour — a node
+  tinted green for "this is the commit" would read as one that had already
+  succeeded, before the run had started. So the stripe keeps the saturated
+  colours and the body gets a wash: enough hue to group a graph, far too little
+  to be mistaken for a verdict. Colour is not the only channel either, and
+  while checking that, the plugin's id turned out to have been sitting at a
+  contrast of 3.9 against the node — under the 4.5 small text wants, before any
+  of this. It is a step darker now, and clears it on every tint in both themes.
+
+- **Lines no longer pile up on each other.** Two edges drawn on the same pixels
+  are one edge as far as a reader is concerned, and a column layout produced
+  that by construction: every node shares an x, so an edge that skips a layer
+  ran straight down *through* the nodes between its ends and along every short
+  link on the way. On the development cycle that was 13 lines passing through
+  nodes and 25 sharing a corridor — now none of either. Edges that would cross
+  something go round it, in corridors beside the graph, longest outermost and
+  alternating sides the way a transit map does. Edges that share a side of a
+  node attach at **different points** along it rather than all at its middle,
+  so three links out of one step read as three. Deciding this is the canvas's
+  job, not the edge's: a line is only in the way of a node it does not belong
+  to, and an edge cannot see those. It is recomputed as a node is dragged,
+  because moving one step changes what every other line has to avoid.
+
+- **A step can say "not yet" instead of finishing.** `needs:` said a step goes
+  after another one; there was no way to say it goes after a *time*, and the
+  nearest thing — a `sleep` inside a shell step — holds a worker for its whole
+  length, so a cycle with four of them and the default four jobs stops running
+  anything at all. A step may now return `waiting`, which keeps its place in the
+  graph, **gives its worker back**, and is come back to when the time is up.
+  Everything that needs it waits too, which is what `needs` already meant, said
+  about time. `time.wait` is the plugin that does it — `seconds:`, or `until:`
+  a clock time or a date — but the mechanism is any plugin's to use. It is
+  deliberately not a retry: a retry is what happens after a failure, and a
+  reader who cannot tell the two apart sees a healthy cycle as one failing over
+  and over, so it has an event and a colour of its own. A step's `timeout:` now
+  bounds its **whole life**, waits included, rather than each turn of it — both
+  the honest reading of a deadline written on a step and the only thing
+  stopping a plugin that would ask to wait for ever.
+
+- **`approval.gate`: a cycle can stop and ask you.** Everything else a cycle
+  does it decides for itself, which is right up to the point where it is about
+  to edit a repository other people work in or move something on a board other
+  people read. A gate puts the question and whatever the decision rests on — a
+  plan, a diff, the findings — in a window, and the run waits. **Not answered is
+  not approved:** no application attached, nobody at the screen, the window
+  closed, the deadline passed — each of those fails the step, and there is
+  deliberately no setting to change it, because a gate that approves when it
+  cannot ask stops being a gate exactly where somebody believed they had one.
+  That is also its cost: a cycle meant to run unattended should not have one,
+  and should delete the step rather than disable it. The step's own `timeout:`
+  is the deadline and the window counts it down. `cycles/review_and_fix.yaml`
+  now asks before it lets the second agent spend money.
+
+- **Cycles remember things between runs.** A run used to start knowing nothing:
+  whether this task was already done, how much of a budget it had spent, whether
+  another run was on it right now — none of it was askable, because the `${...}`
+  scope is entirely about the run in progress. Three steps now sit over a small
+  keyed store: `memory.recall` reads, `memory.remember` writes, and
+  `memory.claim` takes a task for the run and gives it back when the run ends —
+  held by the run, so a crash, a timeout and a Ctrl+C all release it. A second
+  run of a claimed task fails saying who has it and that this is a failure of
+  timing rather than of the work. Counters move under the store's own lock,
+  which is what makes a budget that survives a restart bound anything, and the
+  store is plain JSON on purpose: "why did it skip that task" is a question
+  somebody will ask. Path in Settings → Cycle memory; readable from a terminal
+  with `--cycle-memory-list` / `-show` / `-forget`.
+
+- **`agent.implement`: make a change and prove it.** `agent.edit` makes one pass
+  and stops, which is right when a person is going to read the diff and wrong
+  when the step is meant to *finish* something — an agent that cannot run the
+  tests cannot know whether what it wrote works. This one edits, runs the checks
+  you name, and when they fail goes round again with the failure in front of it,
+  up to a budget it owns. `verified` is never the agent's own word for it: it is
+  true only when every check exited zero and a second agent, given the reading
+  tools and nothing else, signed the result off. Only high and medium findings
+  send the work back — spending the budget polishing nits is the opposite of what
+  the budget is for. The loop lives **inside the step** on purpose: what a person
+  reads off the canvas is "make the change and prove it", and how many times the
+  agent went round is the step's own business, the way `retry` is.
+
+- **`git.commit`: commit the tree that was verified, and refuse anything else.**
+  Committing is one command and `command.shell` can do it. What a shell step
+  cannot do is answer the two questions that make an automated commit
+  trustworthy. *Is this what passed?* — `agent.implement` records the git tree
+  hash at the moment the checks agreed, and this refuses if the files changed
+  since, so "verified" and "committed" are the same object rather than two
+  descriptions that usually agree. The hash is taken against a temporary index,
+  so a refusal leaves your own staging untouched. *Did I already do this?* — the
+  intent goes into the message as a `QAVector-Operation:` trailer and a re-run
+  finds its own commit instead of making a second, which is what a run killed
+  between the commit and the record needs. Local only: no push, no branch, no
+  merge. `cycles/task_to_commit.yaml` is the whole chain in one file.
+
+- **`jira.issues`: what is on somebody's plate, and what has been said about it.**
+  One step — a search plus the comments on what it finds — rather than a Jira
+  client: no create, no transition, no edit, so it can be pointed at a production
+  instance without thinking about it. Reads by `assignee`, `reporter`, `creator`
+  or all three, across every project the account can see or only the ones named
+  in `project`, takes extra JQL, and hands back a list a later step can walk or an
+  agent can be given. No new dependency: `urllib` from the standard library, the
+  way the engine already reaches an HTTP server. The API token belongs in the
+  secrets store and is referenced as `${vars.…}` — cycle files are committed and
+  shipped. Cloud and Server are named by a field rather than guessed at: Atlassian
+  removed the old search endpoint from Cloud and sends comment bodies as a
+  document tree, which this flattens to text. Display names only — an email
+  address arrives in every issue and nothing downstream needs it.
+  `cycles/todo_to_plan.yaml` is the whole idea in one file — what is in To Do,
+  with its comments, turned into an ordered plan by an agent.
+
+- **`agent.edit`: an agent that changes files, as a step of its own.** `agent.review`
+  reads and only reads — that is what lets you point one at a real checkout without
+  thinking about it. When you want the change made rather than described, this is
+  the step: it gets `Edit`, `Write` and `MultiEdit` on top of the reading tools and
+  runs with `--permission-mode acceptEdits`, because nobody is at a terminal during
+  a run and a step that waited to be asked would hang. It is deliberately **not** a
+  setting on the review — a switch would mean every existing review step changed
+  meaning depending on one line further down, while the file read the same. It is
+  also deliberately given **no shell**: a step that needs to run something has
+  `command.shell`, which says so in the file. What it changed is read off the CLI's
+  own event stream as the writes happen, so `files_changed` is exact and survives a
+  step that failed halfway. `cycles/review_and_fix.yaml` is the whole arrangement
+  in one file — review, fix, and a check that the fix did not break what already
+  worked. See `docs/cycle-agents.md`.
+
+- **An agent step shows its work as it happens, not one wall of JSON at the end.**
+  A review used to print the blob it finished with into the output — a single
+  unreadable line that arrived only once the work was over and said nothing about
+  it. The `claude_cli` backend now runs the CLI with `--output-format stream-json`
+  and turns each turn into a row in a new **Stages** tab: what it is weighing,
+  which file it opened, what came back, what it concluded, what it cost. The raw
+  stream stays out of the output and is still written whole to the step's
+  `stdout.log`. Stages are a general mechanism (`cycle.step.stage`) — any plugin
+  that emits them gets the same rows with nothing added to the interface.
+
+- **The output panel shows the whole run until you ask for less.** A cycle runs
+  several steps at once, and the panel used to show nothing at all until you
+  clicked a node and guessed right about which one was talking. With nothing
+  selected it now shows every step's output, each line saying which step it came
+  from; selecting a node narrows both the output and the stages to that step, and
+  the tab says whose they are.
+
+- **Variables can be secret, and a secret's value never enters the cycle file.**
+  A cycle file is committed and ships inside the build, so a value written there
+  travels to everyone who clones the project. A variable declared
+  `{secret: true}` puts only its name in the file; the value is encrypted beside
+  your own data, with the key at mode 0600 and the path in Settings → Cycle
+  secrets. The properties dialog edits variables as a table — name, value, type —
+  where a secret's box is masked, a stored one opens empty rather than showing
+  what it holds, and dropping a secret takes its value out of the store.
+
+- **The Cycles page draws the whole cycle at once, and the same drawing is the run
+  view.** Opening one shows every step and every connection between them on a
+  canvas; selecting a node shows what it runs, what it waits for, and — once it has
+  run — what it came to. Starting it does not move you to another page: the nodes
+  already on screen take on their status as it goes. There is deliberately no second
+  picture of a run to keep in step with the first.
+
+- **Eight things a step can be, and a way to add more.** `command.shell`,
+  `service.start` / `stop` / `restart` / `wait`, `scenario.run`, `report.json` and
+  `report.html`. The service ones ask the application to act, through the same
+  request-and-reply the Services page already answers for scenarios; `scenario.run`
+  runs the launcher, which is how the GUI has always run scenarios, so nothing about
+  profiles, logins or reports is reimplemented. Each one declares what it takes and
+  what it produces, `--describe` publishes that, and the page builds its Inspector
+  from it — so a plugin added to the core appears in the interface without the
+  interface changing.
+
+- **Steps read each other's results rather than knowing about each other.**
+  `${steps.postgres.outputs.port}` is how a step gets a port from the step that
+  started the service, and a reference that is the whole value keeps its type, so a
+  port stays a number. A reference to something that is not there is an error that
+  names what *is* there, rather than an empty string in the middle of a command.
+
+- **`--cycle-run`, and four commands beside it.** `--cycle-list`, `--cycle-show`,
+  `--cycle-save`, `--cycle-delete` and `--cycle-import` answer with JSON the way the
+  `--flow-*` commands do, and `--cycle-run=ID --events=-` runs one from a terminal
+  with no GUI at all. Service steps in a headless run fail in the first millisecond
+  saying they need the application, instead of waiting out two minutes each for an
+  answer that is not coming.
+
+- **Every run leaves one directory.** `~/QAVector/cycle-runs/<when>-<cycle>/` holds
+  the record, the graph as it was, the event stream, each step's output, and any
+  report. It is written *as the run goes*, so a machine that dies halfway leaves a
+  readable partial run rather than nothing. Nothing in it is an absolute path, so
+  the directory can be zipped and read on another machine — which is the whole point
+  of putting it in one place.
+
+### Changed
+- **`agent.implement` runs without checks.** An empty `checks` makes the review
+  the only verdict; the result says "by the review only; no checks were run"
+  and a new `checked` output is false. With no checks *and* no review it still
+  refuses, since nothing would verify the edit.
+- **Agent steps no longer have a turn limit unless they set one.** `--max-turns`
+  is passed to Claude Code only when a step sets `max_iterations`; the step's
+  `timeout` bounds it otherwise. A default of 30 stopped an implementation
+  halfway through a six-file change.
+- **A step that runs past its timeout asks before it is stopped.** In the
+  application, a window offers Continue (another timeout) or Cancel while the
+  step keeps working; no answer stops it. Runs from the command line, approval
+  gates, waits and service steps keep the old behaviour.
+- **`agent.implement` continues earlier work instead of starting over.** When
+  the checkout is exactly what an earlier run of the step left, it is checked
+  and reviewed first; if it holds, the step is verified without another paid
+  attempt, and if not, the next attempt carries on from it. Work that a later
+  step in that run (a review or acceptance) found blocking issues in goes back
+  for rework with those findings, even when the checks pass.
+- **`agent.implement` runs its checks once before the first attempt.** Checks
+  that fail on the untouched checkout stop the step at once, and a failure an
+  attempt leaves unchanged stops the loop rather than spending the budget.
+
+- **Two buttons about the command line are gone.** "Copy command" in the toolbar
+  and "Open in Command" on a History entry both existed to get somebody to the
+  launcher's argv. A cycle or a scenario run restored into the Command page is
+  not a thing anybody wanted to look at, and Run again is what that button was
+  really being used for. A *launch* can still be opened in Launch Sessions,
+  which is the half that was useful; the Command page keeps its own Copy.
+
+- **Two runs of the same thing in the same second no longer share a directory.**
+  Cycle runs are named to the second like scenario reports are, but a second run
+  inside that second gets a suffix instead of writing into the first one's files.
+  (Scenario reports still behave as they did; this is the new code not inheriting
+  the flaw.)
+
+### Fixed
+- Resume refused every run descended from one that predates step fingerprints
+  ("Original settings were not recorded for imported steps"). Such steps are
+  now checked against the run's own manifest.
+- Approval windows now use the application frame and a larger resizable review
+  area. Plans support headings, lists and readable findings; risk and review
+  counts stay above the document, with decision buttons and the deadline below.
+  An Original text tab preserves the exact supplied detail.
+- **Output for implementation steps is now a readable report.** It explains
+  the outcome, reported file changes, verification, duration and cost, with a
+  next action for an agent step limit. Existing saved errors are normalized
+  too. **Technical details** retains the original log and outputs; artifacts
+  keep their original format.
+- **A plan the review objected to now gets a second pass instead of ending the
+  run.** In the Development cycle (In Progress) one medium finding used to fail
+  the `plan_is_sound` gate, which skipped the approval, the work and the commit:
+  the plan never answered the objection and the attempt was spent for nothing.
+  The gate is gone. `settle` takes the plan, the objections and the rules and
+  closes what a plan can close, leaving open — and named — anything needing a
+  decision that is not its to make; `recheck` is a fresh reviewer reading only
+  the settled plan; and `approve` then always asks a person, showing both
+  reviews' counts and what is still open. `preflight` asks only that a person
+  agreed, that the task is still claimed, and that it is the same task.
+  Everything downstream builds, reviews and commits the settled plan.
+
+- Partial runs accept skipped optional report dependencies, preserve saved
+  failure statuses and copy reused artifacts into the new workspace.
+- A conditional cycle step that reads an output from a skipped step now also
+  skips, explaining which prerequisite produced no outputs. This prevents
+  `Remember it was already done` from failing after an earlier gate or agent
+  stopped the development cycle, without mistaking a missing verdict for a
+  completed task. Unknown steps and missing outputs from steps that ran still
+  report errors.
+- **An approval gate is never taken from an earlier run.** Running part of a
+  cycle borrows the steps it is not running from the last run of the same
+  cycle, and `approval.gate` was borrowed like any other — so a gate somebody
+  answered an hour ago passed again in every run after it, and one that had
+  been *skipped* was recorded as `success` with no outputs at all, which then
+  chained: each run inherited the previous run's phantom approval. Nobody was
+  asked, and the cycle went on to edit a repository on the strength of it. The
+  gate is now asked in every run, and nothing decided on an old answer is
+  inherited either — a step below the gate is decided again too.
+- A partial run no longer borrows a step that never ran. Only a step that
+  actually produced something can be lent; a skipped or cancelled one is
+  refused up front with the message that already exists for it, instead of
+  becoming a `success` whose outputs a later `${...}` resolves against nothing.
+- **A cycle with many stages no longer hangs the window.** The stage column was
+  rebuilt from nothing on every event of a run — a stage, but also every batch
+  of a step's output — so drawing n stages cost the sum of 1..n widget trees,
+  each with a stylesheet to parse. It appends now, and the page asks for one
+  repaint per turn of the event loop rather than doing one per event. A run of
+  300 stages builds 300 rows where it used to build 45,150.
+- **Stages no longer empties out.** It showed only the selected step's stages,
+  and only an agent step reports any, so clicking any other node blanked the
+  one readable account of what the cycle was doing — and a stage from an
+  unselected step did not even ask for a repaint. Stages now always lists the
+  whole run with each row headed by its step; picking a node narrows the
+  Output tab, which is what picking is for.
+- Starting a scenario run no longer wipes the cycle a page is showing. Both
+  runs shared one reset and one "is it running" flag, so a browser session
+  started on the Run page left the Cycles page with a coloured graph beside an
+  empty Output and Stages, and lit Stop for a cycle that had finished long ago.
+- Jira issue steps read the files on an issue. The step never asked Jira for
+  the attachment field, so nothing downstream knew a screenshot existed — and
+  an image inside a description was dropped from the text without trace, which
+  is worse: a task whose whole specification was a picture arrived as a
+  description that did not mention one.
+- `git.prepare_branch` works in a checkout with no remote. It refused one
+  outright — "No configured remote named 'origin'" — before reaching any of
+  the offline handling that exists for exactly this, though there is nothing
+  unreachable about a repository that was never given a remote and nothing
+  misconfigured either. A checkout with no remotes now prepares the branch
+  from its local base whatever the settings say; the only thing that makes a
+  directory unworkable is not being a git checkout. A remote that is *named*
+  and does not exist is still reported — a typo should not quietly build on a
+  stale base — and follows `offline` like a failed fetch, saying which remotes
+  the checkout does have.
+- Both development cycles spend an attempt only on a run the gate admitted. The
+  counter moved before the gate judged it, so every refused run — an already
+  committed task, nothing assigned, a dirty checkout — climbed a budget nothing
+  could bring back down, until a task with an unrelated problem could not be
+  worked on again without emptying the memory store by hand. The gate now reads
+  the count as it was when the run started (`< max_runs_per_task`), and the
+  counter moves right after it, still before any work.
+- A cycle keeps its run on screen. Re-reading it - clicking it in the explorer,
+  a Refresh, closing Settings, saving anything on another page - no longer
+  rebuilds an unchanged graph, and where a rebuild is needed the nodes are
+  repainted from the run the application is already following, instead of every
+  step going blank while a run was still waiting.
+- A cycle opens at the zoom the ruled paper appears at, with its first step at
+  the top, rather than fitted to whatever shape the window happens to be. The
+  two are now one number, so opening can no longer land on blank ground.
+- The Settings form scrolls. Ten paths and their notes are taller than a laptop
+  screen, and a dialog capped at the screen used to squeeze the notes into each
+  other and cut off the last of them; Save and Test connection now sit outside
+  the scrolling body where they cannot be pushed off the bottom.
+- The full-cycle Run button no longer passes its boolean checked state as the
+  text run mode, eliminating PySide6's "Cannot copy-convert (bool) to C++" warning.
+- The first HTML preview no longer hides and recreates the main window. Its
+  graphics composition is prepared before the window appears, while Chromium
+  and the document still load only when an HTML artifact is selected.
+- Opening an HTML artifact no longer crashes the main application in PySide6.
+  Wheel guards now attach to dropdowns, spin boxes and their editors instead of
+  filtering WebEngine's internal object events through an application filter.
+- Cycle Properties preserve path variables and their values when saving and
+  reopening. Paths were incorrectly written as unset secrets. Changing between
+  path, text, and secret types now also updates the secret store correctly.
+
+- **`and` in an `if:` was read as one long string and silently skipped the step.**
+  A greedy match ran from the first quote to the last, so
+  `${a.status} == 'ok' and ${b.status} == 'no'` parsed as a single literal:
+  validation said nothing, the condition evaluated false, and the step it guarded
+  was skipped with no indication why. Conditions still have no `and`, `or` or
+  comparison — half an expression evaluator is worse than a small complete one —
+  but the refusal is now audible, and it names the word you used.
+
+- **The canvas is ruled paper now, not a field of dots.** Fine square ruling with
+  a heavier line every fifth square — the surface the splash screen's artwork is
+  drawn over, so starting the application and opening a cycle land on the same
+  paper. Square and square on: the grid in that artwork runs at an angle because
+  the whole scene there is drawn in projection, and copying the angle onto a
+  canvas seen head on would be copying an artefact of the drawing rather than
+  the thing it draws.
+
+- **The canvas draws its connections as a diagram does.** Lines run along one
+  axis and turn at right angles rather than sweeping through curves, and a fork's
+  branches bend on the same line, so a split reads as one thing splitting rather
+  than as several unrelated strands.
+
+- **Dragging a step left its connections looping out and back.** Every edge left
+  its node by the right side and arrived at the next by the left, which is right
+  for the layout the core produces and wrong the moment somebody stacks two steps
+  vertically — the first thing people do on a canvas they can drag. An edge now
+  picks its sides from where the two nodes actually are, so stacked steps connect
+  bottom to top and a step dragged to the left of the one it follows is reached
+  without crossing it.
+
+- **The output panel's tabs were Qt's own.** Shaded lozenges with a raised border
+  — heavier than anything else on the page and reading as a different
+  application. They are now the idiom the nav rail already uses: a strip of words
+  with a rule under it and the live one marked by a bar in the accent.
+
+- **The Stages tab opened at the top of a run instead of at the newest row.** The
+  view scrolled to the bottom the moment its rows went in, which is one layout
+  pass before the scroll range grows — so it landed on the old maximum, which for
+  a fresh list is the top. Both the stages and the output now follow the newest
+  line, and both stop following the moment you scroll up to read something and
+  start again when you scroll back down.
+
+- **A step whose plugin takes a mapping or a list could be opened and then not
+  saved.** The cycle writer handed anything that was not a scalar to the same
+  quoting rule a string gets, so `agent.review`'s structured inputs went to the
+  file as `inputs: "{'expected': 'ok'}"` — a Python repr in quotes, which reads
+  back as a string and fails validation on the next load. Saving a step with
+  nothing changed was enough to trigger it. Nested mappings and lists are now
+  written as YAML.
+
+- **A value that YAML gives its own meaning to came back as something else.**
+  `12:30` read back as the number 750 and `2026-09-19` as a date, because the
+  writer quoted values by working through a hand-written list of risky shapes
+  and that list is never finished. It now asks the parser whether the plain form
+  reads back as the same string, and quotes when it does not.
+
+- **A newline inside a mapping value was dropped on save.** The `name = value`
+  box gives each pair a line, so a value containing a newline came back as a
+  blank line and lost it — silently, on a save that changed nothing.
+
 ## [0.15.2] - 2026-09-11
 
 ### Fixed
