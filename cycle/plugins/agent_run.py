@@ -56,6 +56,30 @@ ACCEPT_EDITS = "acceptEdits"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
+def min_effort_field():
+    """The ``min_effort`` field, shared by every agent step that takes effort."""
+    from cycle.registry import field
+    return field("min_effort", "At least this effort", "choice", default="",
+                 options=EFFORT_LEVELS,
+                 hint="A floor under Effort. Useful when Effort comes from a "
+                      "review's judgement: a task judged easy is still "
+                      "reviewed at no less than this.")
+
+
+def effort_for(plugin, step):
+    """``(level to run at, level asked for)`` - the higher of Effort and its floor.
+
+    Blank Effort with a floor runs at the floor: "at least medium" is not
+    satisfied by a CLI default nobody can see. The pair is returned so a step
+    can say when the floor raised it.
+    """
+    asked = str(plugin.setting(step.settings, "effort", "") or "").strip()
+    floor = str(plugin.setting(step.settings, "min_effort", "") or "").strip()
+    if not floor or (asked and EFFORT_LEVELS.index(asked) >= EFFORT_LEVELS.index(floor)):
+        return asked, asked
+    return floor, asked
+
+
 def at_effort(effort):
     """How a step says the level it ran at, for the first line of its message.
 
@@ -66,10 +90,14 @@ def at_effort(effort):
     return ("at %s effort" % effort) if effort else "at the CLI's default effort"
 
 
-def with_effort(message, effort):
-    """``message`` with the effort added to its first line."""
+def with_effort(message, effort, asked=None):
+    """``message`` with the effort added to its first line - and, when a floor
+    raised it, what it was raised from."""
     first, newline, rest = str(message or "").partition("\n")
-    return "%s - %s%s%s" % (first, at_effort(effort), newline, rest)
+    said = at_effort(effort)
+    if asked is not None and asked != effort:
+        said += " (raised from %s)" % (asked or "the CLI's default")
+    return "%s - %s%s%s" % (first, said, newline, rest)
 
 
 class Reply(object):

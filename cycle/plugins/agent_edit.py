@@ -67,6 +67,7 @@ class AgentEdit(CyclePlugin):
                   options=agent_run.EFFORT_LEVELS,
                   hint="How hard the model is asked to think. Blank leaves it "
                        "to whatever the Claude Code CLI is configured to use."),
+            agent_run.min_effort_field(),
             field("task", "Editing task", "multiline", required=True,
                   hint="What to change, and what to leave alone. Be specific: "
                        "this step applies what it decides."),
@@ -112,7 +113,7 @@ class AgentEdit(CyclePlugin):
     def problems(self, settings):
         settings = settings or {}
         literal = dict(settings)
-        for key in ("effort", "max_iterations", "inputs"):
+        for key in ("effort", "min_effort", "max_iterations", "inputs"):
             if isinstance(literal.get(key), str) and "${" in literal[key]:
                 literal.pop(key)
         found = super().problems(literal)
@@ -177,7 +178,7 @@ class AgentEdit(CyclePlugin):
             context, step, prompt, where, EDIT_TOOLS, status["binary"],
             mode=PERMISSION_MODE, add_dir=readable or where,
             model=self.setting(step.settings, "model"),
-            effort=self.setting(step.settings, "effort", ""),
+            effort=agent_run.effort_for(self, step)[0],
             max_turns=self.setting(step.settings, "max_iterations"))
 
         # What it changed is reported whether or not the run went well. A step
@@ -203,10 +204,10 @@ class AgentEdit(CyclePlugin):
         result.outputs["summary"] = reply.text
         if reply.cost is not None:
             result.outputs["cost_usd"] = reply.cost
-        effort = self.setting(step.settings, "effort", "") or ""
+        effort, asked = agent_run.effort_for(self, step)
         result.outputs["effort"] = effort
         result.message = agent_run.with_effort("agent.edit: %d file%s changed" % (
-            len(reply.written), "" if len(reply.written) == 1 else "s"), effort)
+            len(reply.written), "" if len(reply.written) == 1 else "s"), effort, asked)
         return result
 
 

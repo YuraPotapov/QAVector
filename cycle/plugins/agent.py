@@ -73,6 +73,7 @@ class AgentReview(CyclePlugin):
                   hint="Only for claude_cli: how hard the model is asked to "
                        "think. Blank leaves it to whatever the Claude Code CLI "
                        "is configured to use."),
+            agent_run.min_effort_field(),
             field("model_client", "AutoGen model client",
                   hint="AutoGen component class, required for AutoGen. See docs/cycle-agents.md."),
             field("model_options", "Model options", "env",
@@ -189,7 +190,7 @@ class AgentReview(CyclePlugin):
     def problems(self, settings):
         settings = settings or {}
         literal = dict(settings)
-        for key in ("framework", "effort", "max_iterations", "inputs", "model_options"):
+        for key in ("framework", "effort", "min_effort", "max_iterations", "inputs", "model_options"):
             if isinstance(literal.get(key), str) and "${" in literal[key]:
                 literal.pop(key)
         found = super().problems(literal)
@@ -213,9 +214,11 @@ class AgentReview(CyclePlugin):
         # that quietly does nothing is worse than one that is refused, because
         # the cycle file would go on claiming the review thinks harder than it
         # does.
-        elif framework in WORKER_FRAMEWORKS and str(settings.get("effort") or "").strip():
-            found.append("effort is only used by claude_cli; %s has no "
-                         "equivalent." % framework)
+        elif framework in WORKER_FRAMEWORKS:
+            for key in ("effort", "min_effort"):
+                if str(settings.get(key) or "").strip():
+                    found.append("%s is only used by claude_cli; %s has no "
+                                 "equivalent." % (key, framework))
         files = settings.get("files", [])
         if not (isinstance(files, str) and "${" in files):
             if not isinstance(files, list) or any(not isinstance(one, str) for one in files):
@@ -362,7 +365,7 @@ def _claude_cli_method(self, context, step):
         # not be able to change it.
         CLI_TOOLS, status["binary"],
         model=self.setting(step.settings, "model"),
-        effort=self.setting(step.settings, "effort", ""),
+        effort=agent_run.effort_for(self, step)[0],
         max_turns=self.setting(step.settings, "max_iterations"),
         add_dir=repository)
     result = reply.result
@@ -387,10 +390,10 @@ def _claude_cli_method(self, context, step):
         result.outputs["cost_usd"] = reply.cost
     result.artifacts.append(Artifact("json", context.relative(report_path), step.id,
                                      name="review", bytes=os.path.getsize(report_path)))
-    effort = self.setting(step.settings, "effort", "") or ""
+    effort, asked = agent_run.effort_for(self, step)
     result.outputs["effort"] = effort
     result.message = agent_run.with_effort("claude_cli review: %s" % _said(review),
-                                           effort)
+                                           effort, asked)
     return result
 
 

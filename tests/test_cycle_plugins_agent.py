@@ -773,3 +773,54 @@ def test_the_worker_carries_scope_to_its_prompt():
     base = {"task": "Plan it", "inputs": {}, "files": []}
     assert "out_of_scope" not in prompt_for(base)
     assert "out_of_scope" in prompt_for(dict(base, scope=True))
+
+
+# --------------------------------------------------------- a floor under effort
+@pytest.mark.parametrize("effort,floor,runs", [
+    ("low", "medium", "medium"),      # a judged-easy task is not reviewed lazily
+    ("high", "medium", "high"),       # a floor never lowers anything
+    ("", "medium", "medium"),         # "at least" is not met by an unseen default
+    ("low", "", "low"),               # no floor, no change
+])
+def test_the_effort_is_never_below_its_floor(effort, floor, runs):
+    from cycle.plugins.agent_run import effort_for
+
+    step = _cli_step(effort=effort, min_effort=floor)
+    assert effort_for(AgentReview(), step) == (runs, effort)
+
+
+@_posix_only
+def test_a_raised_effort_reaches_the_cli_and_says_so(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20260924-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=_replying(tmp_path, _REVIEW),
+                           effort="low", min_effort="medium"))
+
+    argv = _json.load(open(_os.path.join(str(tmp_path), "argv.json")))
+    assert argv[argv.index("--effort") + 1] == "medium"
+    assert result.outputs["effort"] == "medium"
+    assert result.message.endswith("at medium effort (raised from low)")
+
+
+def test_a_floor_is_refused_where_there_is_no_effort_to_raise():
+    from cycle import registry
+
+    found = registry.get("agent.review").problems(
+        {"framework": "crewai", "model": "x", "task": "y",
+         "python": "/agent/bin/python", "min_effort": "medium"})
+    assert any("min_effort is only used by claude_cli" in one for one in found)
+
+
+@pytest.mark.parametrize("plugin", ["agent.review", "agent.edit", "agent.implement"])
+def test_every_agent_step_offers_the_floor(plugin):
+    from cycle import registry
+
+    keys = [one.key for one in registry.get(plugin).metadata.inputs]
+    assert keys.index("min_effort") == keys.index("effort") + 1

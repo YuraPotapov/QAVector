@@ -82,6 +82,7 @@ class AgentImplement(CyclePlugin):
                   hint="How hard the model is asked to think, on every attempt "
                        "and on the review that signs them off. Blank leaves it "
                        "to whatever the Claude Code CLI is configured to use."),
+            agent_run.min_effort_field(),
             field("directory", "Directory to work in", "dir", required=True,
                   hint="Relative paths are read against the run's own "
                        "workspace, so a checkout step's output can be handed "
@@ -148,7 +149,7 @@ class AgentImplement(CyclePlugin):
     def problems(self, settings):
         settings = settings or {}
         literal = dict(settings)
-        for key in ("effort", "max_attempts", "max_iterations", "inputs", "review"):
+        for key in ("effort", "min_effort", "max_attempts", "max_iterations", "inputs", "review"):
             if isinstance(literal.get(key), str) and "${" in literal[key]:
                 literal.pop(key)
         found = super().problems(literal)
@@ -218,7 +219,7 @@ class AgentImplement(CyclePlugin):
         acceptance = str(self.setting(step.settings, "acceptance", "") or "")
         inputs = self.setting(step.settings, "inputs", {})
         model = self.setting(step.settings, "model")
-        effort = self.setting(step.settings, "effort", "")
+        effort = agent_run.effort_for(self, step)[0]
         turns = self.setting(step.settings, "max_iterations")
         budget = int(self.setting(step.settings, "max_attempts", 3))
         reviewing = bool(self.setting(step.settings, "review", True))
@@ -423,14 +424,14 @@ class AgentImplement(CyclePlugin):
                        checked=bool(self._checks(step)))
         if cost:
             outputs["cost_usd"] = round(cost, 4)
-        effort = self.setting(step.settings, "effort", "") or ""
+        effort, asked = agent_run.effort_for(self, step)
         outputs["effort"] = effort
         return registry.PluginResult(
             "success" if verified else "failed", outputs=outputs,
             artifacts=[Artifact("json", context.relative(path), step.id,
                                 name="implement",
                                 bytes=os.path.getsize(path))],
-            message=agent_run.with_effort(message, effort))
+            message=agent_run.with_effort(message, effort, asked))
 
     def _checks(self, step):
         return [one.strip() for one
