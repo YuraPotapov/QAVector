@@ -192,7 +192,7 @@ steps:
       max_iterations: 20
       model: opus
       repository: ${vars.project_dir}
-      task: "Above is one Jira task, the plan for it, and what an independent review objected to. Settle the plan: close what can be closed, and leave the rest visible.\nWork through the objections in order. Fix in the plan what a plan can fix - a package that misses a criterion, a rule the plan breaks, scope nobody asked for. An objection that cannot be closed without a decision that is not yours to make stays open: say in the summary exactly what has to be decided, and do not guess it.\nAnswer in the required shape, used like this: summary is the plan as it now stands, in the same detail as the one above. issues is one entry per package of work, its severity being how risky that package is, in the order they should be done. recommendations is where in the code each package goes, with file and line. risk is the risk of the whole thing.\nWhen the review found nothing that must be fixed, begin the summary with 'Unchanged.' and then repeat the plan and its packages exactly as they are, word for word. Otherwise begin with 'Revised.' and say in one sentence what you changed and what you left open. Do not widen the change, and do not change anything in the repository.\nKeep out_of_scope current: carry over what the plan left out, drop what the objections brought into the plan, and add anything the objections raised that you are leaving undecided."
+      task: "Above is one Jira task, the plan for it, and what an independent review objected to. Settle the plan: close what can be closed, and leave the rest visible.\nWork through the objections in order. Fix in the plan what a plan can fix - a package that misses a criterion, a rule the plan breaks, scope nobody asked for. An objection that cannot be closed without a decision that is not yours to make stays open: say in the summary exactly what has to be decided, and do not guess it.\nAnswer in the required shape, used like this: summary is the plan as it now stands, in the same detail as the one above. issues is one entry per package of work, its severity being how risky that package is, in the order they should be done. recommendations is where in the code each package goes, with file and line. risk is the risk of the whole thing.\nThe summary is the plan only, written so it can stand as the body of the commit that carries it out: what changes and why. No remarks about this review, earlier versions or whether anything changed - the objections and what is still open are shown beside it. When the review found nothing that must be fixed, repeat the plan and its packages exactly as they are. Do not widen the change, and do not change anything in the repository.\nKeep out_of_scope current: carry over what the plan left out, drop what the objections brought into the plan, and add anything the objections raised that you are leaving undecided."
       scope: true
     timeout: 900.0
     on_failure: continue
@@ -266,6 +266,15 @@ steps:
     timeout: 1800.0
     on_failure: continue
   # -- try to break it: tests written by another agent, run for real
+  - id: diff
+    plugin: command.shell
+    label: Show what changed
+    needs: [implement]
+    timeout: 120
+    with:
+      command: git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r -n1 git diff --no-index /dev/null || true
+      dir: ${vars.project_dir}
+      expect_exit: -1
   - id: probe
     plugin: agent.edit
     label: Try to break it
@@ -294,7 +303,7 @@ steps:
   - id: review
     plugin: agent.review
     label: Review the code
-    needs: [implement, probe_run]
+    needs: [implement, probe_run, diff]
     with:
       effort: high
       framework: claude_cli
@@ -308,13 +317,14 @@ steps:
       max_iterations: 20
       model: opus
       repository: ${vars.project_dir}
-      task: "You did not write this code. Read `git diff` in the repository and judge what was actually changed against the task and the plan above.\nAnswer in the required shape, used like this: issues is one entry per defect, with high or medium severity for anything that must be fixed before this is committed. Look for: behaviour the plan asked for that is not there, changes nobody asked for, a test that was weakened or removed to make something pass, and code that duplicates something the repository already has.\nDo not change anything. If the change is sound, return an empty issues list.\nA second agent wrote tests that try to break this change, and they were run against it: probe_exit is their exit code (0 means every one passed) and probe_said is the end of their output. For every failing probe decide which it is. A defect in what the task asks for is high or medium. A real defect outside the task's criteria is low - say what breaks and how; it does not block the commit, a person decides. A probe that expects something nobody could reasonably ask for is not an issue; name it in the summary.\nAlso report as low anything else you see that is wrong beyond the task's criteria: input the code does not guard, a case that breaks, business logic that looks wrong. Low never blocks; hiding it helps nobody."
+      task: "You did not write this code. The change itself is attached above as a diff, new files included - you cannot run git, so read that rather than guess from the files. Judge what was actually changed against the task and the plan above.\nAnswer in the required shape, used like this: issues is one entry per defect, with high or medium severity for anything that must be fixed before this is committed. Look for: behaviour the plan asked for that is not there, changes nobody asked for, a test that was weakened or removed to make something pass, and code that duplicates something the repository already has.\nDo not change anything. If the change is sound, return an empty issues list.\nA second agent wrote tests that try to break this change, and they were run against it: probe_exit is their exit code (0 means every one passed) and probe_said is the end of their output. For every failing probe decide which it is. A defect in what the task asks for is high or medium. A real defect outside the task's criteria is low - say what breaks and how; it does not block the commit, a person decides. A probe that expects something nobody could reasonably ask for is not an issue; name it in the summary.\nAlso report as low anything else you see that is wrong beyond the task's criteria: input the code does not guard, a case that breaks, business logic that looks wrong. Low never blocks; hiding it helps nobody."
+      files: ['${steps.diff.outputs.stdout_path}']
     timeout: 900.0
     on_failure: continue
   - id: accept
     plugin: agent.review
     label: Accept it against the task
-    needs: [integration, review]
+    needs: [integration, review, diff]
     with:
       effort: high
       framework: claude_cli
@@ -327,6 +337,7 @@ steps:
       model: sonnet
       repository: ${vars.project_dir}
       task: "Decide whether the task above is now done. Go criterion by criterion: for each thing the task asks for, point at the behaviour in the code and the evidence that it works.\nAnswer in the required shape, used like this: issues is one entry per criterion that is not met, or is met without evidence. Your own reading is not evidence that something works - the checks are. An empty issues list means every criterion is met and shown to be.\nAlso list, as low, anything you notice that is wrong beyond the criteria - an unguarded input, a case that breaks, business logic that looks wrong. Low never blocks the commit; it is there for a person to read."
+      files: ['${steps.diff.outputs.stdout_path}']
     timeout: 600.0
     on_failure: continue
   - id: final

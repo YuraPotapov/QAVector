@@ -403,6 +403,16 @@ steps:
       command: "${vars.checks}"
 
   # -- try to break it: tests written by another agent, run for real
+
+  - id: diff
+    plugin: command.shell
+    label: Show what changed
+    needs: [implement]
+    timeout: 120
+    with:
+      command: git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r -n1 git diff --no-index /dev/null || true
+      dir: ${vars.project_dir}
+      expect_exit: -1
   - id: probe
     plugin: agent.edit
     label: Try to break it
@@ -449,7 +459,7 @@ steps:
   - id: review
     plugin: agent.review
     label: Review the code
-    needs: [implement, probe_run]
+    needs: [implement, probe_run, diff]
     timeout: 900
     on_failure: continue
     with:
@@ -465,18 +475,20 @@ steps:
         probe_exit: ${steps.probe_run.outputs.exit_code}
         probe_said: ${steps.probe_run.outputs.stdout_tail}
       task: >-
-        You did not write this code. Read `git diff` in the repository and
-        judge what was actually changed against the task and the plan above.
+        You did not write this code. The change itself is attached above as
+        a diff, new files included - you cannot run git, so read that rather
+        than guess from the files. Judge what was actually changed against
+        the task and the plan above.
 
-        Answer in the required shape, used like this: issues is one entry per
-        defect, with high or medium severity for anything that must be fixed
-        before this is committed. Look for: behaviour the plan asked for that is
-        not there, changes nobody asked for, a test that was weakened or removed
-        to make something pass, and code that duplicates something the
-        repository already has.
+        Answer in the required shape, used like this: issues is one entry
+        per defect, with high or medium severity for anything that must be
+        fixed before this is committed. Look for: behaviour the plan asked
+        for that is not there, changes nobody asked for, a test that was
+        weakened or removed to make something pass, and code that duplicates
+        something the repository already has.
 
-        Do not change anything. If the change is sound, return an empty issues
-        list.
+        Do not change anything. If the change is sound, return an empty
+        issues list.
 
         A second agent wrote tests that try to break this change, and they
         were run against it: probe_exit is their exit code (0 means every
@@ -492,10 +504,11 @@ steps:
         business logic that looks wrong. Low never blocks; hiding it helps
         nobody.
 
+      files: ['${steps.diff.outputs.stdout_path}']
   - id: accept
     plugin: agent.review
     label: Accept it against the task
-    needs: [integration, review]
+    needs: [integration, review, diff]
     timeout: 600
     on_failure: continue
     with:
@@ -523,6 +536,7 @@ steps:
         that looks wrong. Low never blocks the commit; it is there for a
         person to read.
 
+      files: ['${steps.diff.outputs.stdout_path}']
   - id: final
     plugin: check.gate
     label: Is it fit to commit

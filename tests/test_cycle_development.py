@@ -86,6 +86,13 @@ if "--permission-mode" not in sys.argv:
                 "issues": [{"severity": "medium",
                             "description": "greet the nameless",
                             "file": "main.py", "line": 1}]})
+    if "You did not write this code" in prompt and "diff --git" not in prompt:
+        # A reviewer that was not shown the change cannot pass it.
+        answer({"summary": "No diff was attached.", "risk": "high",
+                "recommendations": [],
+                "issues": [{"severity": "high",
+                            "description": "the change was not shown",
+                            "file": "", "line": None}]})
     if "You did not write this plan" in prompt:                 # business
         answer({"summary": "The plan matches the task.", "risk": "low",
                 "issues": [], "recommendations": []})
@@ -958,3 +965,42 @@ def test_the_approval_shows_what_the_plan_left_out(approved):
     detail = json.dumps(asked)
     assert "Left out of scope" in detail
     assert "A name that is only spaces" in detail
+
+
+def test_the_code_review_is_shown_the_change_itself(approved):
+    """It cannot run git, so the diff is attached. The fake reviewer blocks
+    the commit when it is missing."""
+    _world, (_code, steps, _asked), _again = approved
+    said = _outputs(steps, "diff")["stdout_tail"]
+    assert "diff --git a/main.py" in said
+    assert "diff --git a/test_main.py" in said
+    assert _status(steps, "commit") == "success"
+
+
+def test_the_commit_body_is_the_plan_without_remarks_about_it(already_started):
+    already_started.build()
+    already_started.run("Start work")
+    body = already_started.message().partition("\n\n")[2]
+    assert body.strip() and not body.startswith(("Unchanged", "Revised"))
+
+
+def test_the_attached_diff_includes_files_git_does_not_track_yet(tmp_path):
+    """`git diff HEAD` alone leaves out a file the change created."""
+    import yaml
+    with open(os.path.join(ROOT, "cycles", "development_in_progress.yaml"),
+              encoding="utf-8") as handle:
+        command = [one for one in yaml.safe_load(handle)["steps"]
+                   if one["id"] == "diff"][0]["with"]["command"]
+    repo = str(tmp_path)
+    for argv in (["git", "init", "-q"], ["git", "add", "."],
+                 ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=T",
+                  "commit", "-q", "--allow-empty", "-m", "base"]):
+        subprocess.run(argv, cwd=repo, check=True)
+    with open(os.path.join(repo, "brand_new.py"), "w") as handle:
+        handle.write("x = 1\n")
+    said = subprocess.run(command, shell=True, cwd=repo, capture_output=True,
+                          text=True).stdout
+    assert "brand_new.py" in said and "new file mode" in said
+    assert subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True,
+                          text=True).stdout.strip() == "?? brand_new.py", \
+        "showing the change must not stage it"
