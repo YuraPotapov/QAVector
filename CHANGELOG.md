@@ -16,6 +16,25 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-09-24
+
+### Added
+- **Agent steps say the effort they ran at.** `agent.review`, `agent.edit` and
+  `agent.implement` end the first line of their message with the level -
+  `at low effort`, or `at the CLI's default effort` - and publish it as an
+  `effort` output. The CLI never reports it back, and a level taken from a
+  review's judgement was otherwise visible nowhere in the run.
+- **Settings -> Cycle runs** chooses where cycle runs are kept, and
+  `--cycle-runs-dir` does the same from a terminal. A run, its resume and the
+  Subjects list are all pointed at the one folder, so a list never reads a
+  different place from the one runs were written to.
+
+### Fixed
+- **A development cycle's commit had a paragraph for a subject.** The bundled
+  development cycles put the plan's whole summary on the subject line, opening
+  with whatever the plan said about itself. The subject is now the task's key
+  and title; the plan is the body.
+
 ## [0.16.1] - 2026-09-24
 
 ### Added
