@@ -28,7 +28,7 @@ from cycle import registry
 from cycle.plugins import agent_cli, agent_run
 from cycle.operations import Operation, result_document, result_from_document
 from cycle.plugins._process import run_process
-from cycle.plugins.agent_worker import extract_json, validate_review
+from cycle.plugins.agent_worker import COMPLEXITY_GUIDE, extract_json, validate_review
 from cycle.registry import (CyclePlugin, PluginMetadata, action, field,
                             output)
 from domain.cycle import Artifact
@@ -89,6 +89,12 @@ class AgentReview(CyclePlugin):
             field("max_iterations", "Maximum tool iterations", "number",
                   hint="Empty means 12 for a worker framework and no limit "
                        "for claude_cli, where the step's timeout bounds it."),
+            field("assess", "Assess", "choice", default="",
+                  options=("complexity",),
+                  hint="complexity also asks how hard the task is, on the "
+                       "effort scale (low to max), and publishes it as "
+                       "`complexity` - so a later agent step can take "
+                       "effort: ${steps.<id>.outputs.complexity}."),
         ),
         outputs=(
             output("summary", "string"), output("issues", "array"),
@@ -100,6 +106,9 @@ class AgentReview(CyclePlugin):
                    "How many of them are high or medium. The count a gate "
                    "usually wants: a low-severity note should not stop a run."),
             output("recommendations", "array"), output("risk", "string"),
+            output("complexity", "string",
+                   "How hard the task is, as an effort level - only when the "
+                   "step sets assess: complexity."),
             output("report_path", "string", "Structured review JSON in the step directory."),
             output("cost_usd", "number", "What the review cost, when the backend says."),
         ),
@@ -241,6 +250,7 @@ class AgentReview(CyclePlugin):
             "repository": repository,
             "inputs": self.setting(step.settings, "inputs", {}), "files": files,
             "max_iterations": int(self.setting(step.settings, "max_iterations", 12)),
+            "assess": self.setting(step.settings, "assess", ""),
         }
         interpreter = os.path.expanduser(self.setting(step.settings, "python"))
         # Explicit relative interpreter paths are relative to the run workspace;
@@ -281,7 +291,8 @@ class AgentReview(CyclePlugin):
             raw = cached["raw"]
             if len(raw.encode("utf-8")) > RESULT_BYTES:
                 raise ValueError("review exceeds the 2 MiB limit")
-            review = validate_review(json.loads(raw))
+            review = validate_review(json.loads(raw),
+                                     request["assess"] == "complexity")
         except (OSError, ValueError, TypeError) as exc:
             result.status = "failed"
             result.message = "Agent did not return a valid review: %s" % exc
@@ -292,8 +303,7 @@ class AgentReview(CyclePlugin):
                               **counts(review))
         result.artifacts.append(Artifact("json", context.relative(report_path), step.id,
                                          name="review", bytes=os.path.getsize(report_path)))
-        result.message = "%s review: %s risk, %d issue(s)" % (
-            request["framework"], review["risk"], len(review["issues"]))
+        result.message = "%s review: %s" % (request["framework"], _said(review))
         return result
 
 
@@ -321,9 +331,11 @@ def _claude_cli_method(self, context, step):
     except (OSError, ValueError) as exc:
         return registry.failed("Cannot prepare agent files: %s" % exc)
 
+    assess = self.setting(step.settings, "assess", "") == "complexity"
     prompt = _claude_cli_prompt(
         str(self.setting(step.settings, "task") or ""),
-        self.setting(step.settings, "inputs", {}), files, repository)
+        self.setting(step.settings, "inputs", {}), files, repository,
+        complexity=assess)
 
     directory = context.step_dir(step.id)
     # The prompt is on the command line and can be long, so it is kept out of
@@ -344,7 +356,7 @@ def _claude_cli_method(self, context, step):
         return result
 
     try:
-        review = validate_review(extract_json(reply.text))
+        review = validate_review(extract_json(reply.text), assess)
     except (ValueError, TypeError) as exc:
         result.status = "failed"
         result.message = "Agent did not return a valid review: %s" % exc
@@ -360,8 +372,7 @@ def _claude_cli_method(self, context, step):
         result.outputs["cost_usd"] = reply.cost
     result.artifacts.append(Artifact("json", context.relative(report_path), step.id,
                                      name="review", bytes=os.path.getsize(report_path)))
-    result.message = "claude_cli review: %s risk, %d issue(s)" % (
-        review["risk"], len(review["issues"]))
+    result.message = "claude_cli review: %s" % _said(review)
     return result
 
 
@@ -386,7 +397,15 @@ def counts(review):
                                   and one.get("severity") in BLOCKING)}
 
 
-def _claude_cli_prompt(task, inputs, files, repository):
+def _said(review):
+    """The one line a review step reports: risk, issues, and a judged level."""
+    line = "%s risk, %d issue(s)" % (review["risk"], len(review["issues"]))
+    if review.get("complexity"):
+        line += ", %s complexity" % review["complexity"]
+    return line
+
+
+def _claude_cli_prompt(task, inputs, files, repository, complexity=False):
     """The whole request, as one prompt.
 
     Written out rather than handed over as attachments because the CLI takes a
@@ -419,10 +438,14 @@ else - no prose before it, no code fence around it:
      "file": "path, or an empty string",
      "line": 12 or null}
   ],
-  "recommendations": ["what to do about it"]
+  "recommendations": ["what to do about it"]%s
 }
 
-Every field is required. Use an empty list when you found nothing."""]
+Every field is required. Use an empty list when you found nothing.""" % (
+        ',\n  "complexity": "low" | "medium" | "high" | "xhigh" | "max"'
+        if complexity else "")]
+    if complexity:
+        parts += ["", COMPLEXITY_GUIDE]
     return "\n".join(parts)
 
 

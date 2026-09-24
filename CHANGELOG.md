@@ -16,6 +16,14 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **A review can judge how hard the task is.** `assess: complexity` on an
+  `agent.review` step adds a `complexity` - `low`, `medium`, `high`, `xhigh` or
+  `max`, the effort scale - to what the review answers, and publishes it as an
+  output, so later agent steps can take `effort:
+  ${steps.<id>.outputs.complexity}` instead of a level fixed when the cycle was
+  written. A review asked to judge that answers without a level fails its step.
+
 ## [0.16.0] - 2026-09-24
 
 ### Added

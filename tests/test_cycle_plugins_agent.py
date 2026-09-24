@@ -567,3 +567,120 @@ def test_the_counts_are_declared_outputs():
 
     names = [one.key for one in registry.get("agent.review").metadata.outputs]
     assert "issue_count" in names and "blocking_count" in names
+
+
+# ------------------------------------------------- judging how hard a task is
+def test_the_complexity_scale_is_the_effort_scale():
+    """A review's judgement is handed straight to ``effort``, so a level one
+    side knows and the other does not would fail the step it was meant for."""
+    from cycle.plugins.agent_run import EFFORT_LEVELS
+    from cycle.plugins.agent_worker import COMPLEXITIES
+
+    assert COMPLEXITIES == EFFORT_LEVELS
+
+
+def test_a_review_asked_to_judge_complexity_must_answer_it():
+    with pytest.raises(ValueError, match="complexity"):
+        validate_review(dict(REVIEW), complexity=True)
+    with pytest.raises(ValueError, match="complexity"):
+        validate_review(dict(REVIEW, complexity="huge"), complexity=True)
+    assert validate_review(dict(REVIEW, complexity="xhigh"),
+                           complexity=True)["complexity"] == "xhigh"
+
+
+def test_a_complexity_nobody_asked_for_is_dropped():
+    assert "complexity" not in validate_review(dict(REVIEW, complexity="low"))
+
+
+def test_the_prompt_asks_for_complexity_only_when_the_step_does():
+    plain = _claude_cli_prompt("Review it", {}, [], "")
+    judged = _claude_cli_prompt("Review it", {}, [], "", complexity=True)
+    assert '"complexity"' not in plain
+    assert '"complexity": "low" | "medium" | "high" | "xhigh" | "max"' in judged
+    assert "- xhigh:" in judged
+
+
+def test_an_assessment_nobody_offers_is_refused():
+    from cycle import registry
+
+    found = registry.get("agent.review").problems(
+        {"framework": "claude_cli", "model": "sonnet", "task": "Review it",
+         "assess": "difficulty"})
+    assert any("difficulty" in one for one in found), found
+
+
+@_posix_only
+def test_a_judged_complexity_comes_back_as_an_output(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20260924-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    binary = _replying(tmp_path, dict(_REVIEW, complexity="high"))
+
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=binary, assess="complexity"))
+
+    assert result.ok, result.message
+    assert result.outputs["complexity"] == "high"
+    assert "high complexity" in result.message
+    argv = _json.load(open(_os.path.join(str(tmp_path), "argv.json")))
+    assert any("- max:" in one for one in argv), "the scale reached the prompt"
+
+
+@_posix_only
+def test_a_review_that_forgets_to_judge_fails_its_step(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20260924-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=_replying(tmp_path, _REVIEW), assess="complexity"))
+
+    assert not result.ok
+    assert "complexity" in result.message
+
+
+def test_the_worker_is_asked_to_judge_and_its_answer_published(context, monkeypatch):
+    seen = {}
+
+    def worker(_ctx, _step, argv, *_args, **_kwargs):
+        seen.update(json.loads(Path(argv[-2]).read_text()))
+        Path(argv[-1]).write_text(json.dumps(dict(REVIEW, complexity="medium")))
+        return registry.succeeded()
+
+    monkeypatch.setattr("cycle.plugins.agent.run_process", worker)
+    result = AgentReview().execute(context, review_step(assess="complexity"))
+
+    assert result.ok, result.message
+    assert seen["assess"] == "complexity"
+    assert result.outputs["complexity"] == "medium"
+
+
+def test_the_worker_prompt_carries_the_scale_only_when_asked():
+    from cycle.plugins.agent_worker import prompt_for
+
+    base = {"task": "Review it", "inputs": {}, "files": []}
+    assert "complexity" not in prompt_for(base)
+    assert "- max:" in prompt_for(dict(base, assess="complexity"))
+
+
+@pytest.mark.parametrize("plugin", ["agent.review", "agent.implement"])
+def test_a_later_step_may_take_its_effort_from_the_judgement(plugin):
+    """Checked when the step starts, against the value the reference became."""
+    from cycle import registry
+
+    settings = {"framework": "claude_cli", "model": "sonnet", "task": "Do it",
+                "directory": "/tmp", "checks": "true",
+                "effort": "${steps.reconcile.outputs.complexity}"}
+    found = registry.get(plugin).problems(settings)
+    assert not any("ffort" in one for one in found), found
+    found = registry.get(plugin).problems(dict(settings, effort="huge"))
+    assert any("ffort" in one for one in found), found

@@ -96,6 +96,34 @@ In `agent.implement` the same level covers every attempt **and** the review
 that signs them off: a reviewer asked to think less than the writer did is not
 a check on it.
 
+### Letting a review set the effort
+
+A fixed level is a guess made when the cycle is written, long before anybody
+has seen the task. `assess: complexity` on an `agent.review` step asks the
+review to judge, while it reads the task and the code anyway, how hard the work
+is - on the same five-level scale - and publishes the answer as `complexity`.
+The steps after it take it as their effort:
+
+```yaml
+- id: reconcile
+  plugin: agent.review
+  with:
+    assess: complexity
+    effort: high                 # fixed: the judgement does not exist yet
+    task: Which parts of this task are not done yet?
+
+- id: plan
+  plugin: agent.review
+  needs: [reconcile]
+  with:
+    effort: ${steps.reconcile.outputs.complexity}
+```
+
+A review asked to judge and answering without a level - or with one that is not
+on the scale - fails its step, as a review without a risk does, rather than
+leaving later steps to run at whatever the CLI defaults to. The reference is
+checked when each step starts, against the level it became.
+
 ## Git checkout
 
 Git must be installed and available on the core process's PATH.
