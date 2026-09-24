@@ -1,15 +1,15 @@
-"""The application icon, painted from the design tokens.
+"""The application icon, rendered from assets/qavector-mark.svg.
 
-Drawn rather than shipped as a file, for the same reason the stylesheet is
-generated rather than checked in: the icon is part of the design system, and a
-committed PNG would be one more place the accent colour has to be changed by hand.
-Painting it also means every size is rendered at its own size instead of being
-scaled down from one bitmap, which is what makes the 16px taskbar version legible.
+Three steps converging on a checked verdict - scenarios, services and agents
+run as one graph that ends in "verified", which is what QAVector does. (The
+three offset windows in assets/qavector-icon.svg were the mark of the old
+chrome-multi-session and are kept only as artwork.) The marks are files the
+designer owns, so changing the icon is replacing a file, not editing
+coordinates here.
 
-The mark is three offset windows in ascending lightness on a dark slate ground -
-"more than one browser session", which is the whole point of the tool. At 16px the
-title bars and hairlines drop out and it reduces to three light bands, which is
-still the same idea.
+Every size is rendered from the vector at its own size rather than scaled down
+from one bitmap. Below SMALL_BELOW the three steps would run together into a
+smudge, so a simpler drawing is used: one step and the verdict.
 
 ``python -m cms_gui.icon <directory>`` writes the PNG and ICO files a packaged
 build needs.
@@ -19,47 +19,42 @@ import os
 import struct
 import sys
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPainter, QPixmap
+# Imported by name so a frozen build carries the SVG module and its plugin.
+from PySide6.QtSvg import QSvgRenderer
 
-from . import theme
-
-# The design grid every coordinate below is expressed in.
-GRID = 32.0
+#: The artwork, in the assets folder the packaged GUI already carries.
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+SOURCE = os.path.join(ASSETS, "qavector-mark.svg")
+SMALL_SOURCE = os.path.join(ASSETS, "qavector-mark-small.svg")
+#: Sizes under this use SMALL_SOURCE.
+SMALL_BELOW = 24
 
 # Rendered sizes: the platform picks; 16/32 are the ones that have to survive.
 SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
-
-# (x, y, fill) on the grid, painted back to front. One window size for all three.
-# The three fills are two ramp steps apart rather than one: at 16px the outlines
-# are gone and lightness is the only thing separating them.
-WINDOW_W, WINDOW_H = 18.0, 14.0
-WINDOWS = ((2.0, 4.0, theme.ACCENT_RAMP[600]),
-           (7.0, 9.0, theme.ACCENT_RAMP[400]),
-           (12.0, 14.0, theme.ACCENT_RAMP[100]))
-GROUND = theme.ACCENT_RAMP[900]
-TITLE_BAR = theme.ACCENT_RAMP[800]
-TITLE_H = 3.0
-
-# Below this the title bars and the 1px outlines stop separating anything and
-# start muddying the three bands, so they are left out entirely.
-DETAIL_FROM = 24
 
 _cache = {}
 
 
 def pixmap(size):
-    """The icon at one size, painted for that size."""
+    """The icon at one size, rendered for that size.
+
+    Blank when the artwork is missing or unreadable - a window without an icon
+    is a smaller problem than a window that will not open.
+    """
     if size in _cache:
         return _cache[size]
     image = QPixmap(size, size)
     image.fill(Qt.transparent)
-    painter = QPainter(image)
-    try:
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        _paint(painter, size)
-    finally:
-        painter.end()
+    renderer = QSvgRenderer(SMALL_SOURCE if size < SMALL_BELOW else SOURCE)
+    if renderer.isValid():
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            renderer.render(painter)
+        finally:
+            painter.end()
     _cache[size] = image
     return image
 
@@ -70,35 +65,6 @@ def app_icon():
     for size in SIZES:
         icon.addPixmap(pixmap(size))
     return icon
-
-
-def _paint(painter, size):
-    scale = size / GRID
-    detail = size >= DETAIL_FROM
-    hairline = max(1.0, scale)
-
-    def rect(x, y, width, height):
-        return QRectF(x * scale, y * scale, width * scale, height * scale)
-
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor(GROUND))
-    painter.drawRect(QRectF(0, 0, size, size))
-
-    for x, y, fill in WINDOWS:
-        body = rect(x, y, WINDOW_W, WINDOW_H)
-        if detail:
-            # Outline in the ground colour so two overlapping windows still read
-            # as two windows rather than as one lighter shape.
-            pen = painter.pen()
-            pen.setColor(QColor(GROUND))
-            pen.setWidthF(hairline)
-            painter.setPen(pen)
-        painter.setBrush(QColor(fill))
-        painter.drawRect(body)
-        if detail:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(TITLE_BAR))
-            painter.drawRect(rect(x, y, WINDOW_W, TITLE_H))
 
 
 # -- files, for packaging -----------------------------------------------------

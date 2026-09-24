@@ -1,8 +1,9 @@
 """The application icon.
 
-It is painted rather than loaded, so the things that can go wrong are a size that
-comes out blank and a small size where the three windows stop being three
-windows. Both are checked by looking at the pixels.
+It is rendered from assets/qavector-mark.svg - with a simpler drawing for the
+smallest sizes - so the things that can go wrong are the artwork not being
+found, which renders nothing, and a small size where the mark stops reading
+as a mark. Both are checked by looking at the pixels.
 """
 
 import os
@@ -10,18 +11,35 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cms_gui import icon, theme
+from cms_gui import icon
+
+GROUND = "#1d2d3d"
+VERDICT = "#eef6ff"
+STEP = "#94bce3"
 
 
 def _colours(size):
-    """Every colour in the icon at ``size``, with how many pixels each covers."""
+    """Every opaque colour in the icon at ``size``, with its pixel count."""
     image = icon.pixmap(size).toImage()
     counts = {}
     for x in range(image.width()):
         for y in range(image.height()):
-            name = image.pixelColor(x, y).name().lower()
-            counts[name] = counts.get(name, 0) + 1
+            colour = image.pixelColor(x, y)
+            if colour.alpha() == 255:
+                name = colour.name().lower()
+                counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def test_the_artwork_ships_with_the_gui():
+    for path in (icon.SOURCE, icon.SMALL_SOURCE):
+        assert os.path.isfile(path), path
+        assert os.path.dirname(path).endswith("assets")
+
+
+def test_the_old_windows_artwork_is_kept():
+    """The chrome-multi-session mark is no longer the icon, but stays as art."""
+    assert os.path.isfile(os.path.join(icon.ASSETS, "qavector-icon.svg"))
 
 
 def test_every_size_renders_something(qapp):
@@ -29,6 +47,7 @@ def test_every_size_renders_something(qapp):
         pixmap = icon.pixmap(size)
         assert not pixmap.isNull(), size
         assert (pixmap.width(), pixmap.height()) == (size, size)
+        assert _colours(size), "size %d came out blank" % size
 
 
 def test_the_icon_carries_every_size(qapp):
@@ -36,43 +55,42 @@ def test_the_icon_carries_every_size(qapp):
     assert available == set(icon.SIZES)
 
 
-def test_the_whole_square_is_painted(qapp):
-    # A transparent corner would show as a notch against a dark task bar.
+def test_the_rounded_corners_are_clear(qapp):
     image = icon.pixmap(64).toImage()
-    for x, y in ((0, 0), (63, 0), (0, 63), (63, 63), (32, 32)):
-        assert image.pixelColor(x, y).alpha() == 255, (x, y)
+    for x, y in ((0, 0), (63, 0), (0, 63), (63, 63)):
+        assert image.pixelColor(x, y).alpha() == 0, (x, y)
+    assert image.pixelColor(32, 8).alpha() == 255, "the ground is there"
 
 
-def test_it_is_painted_in_the_design_s_own_colours(qapp):
+def test_the_steps_and_the_verdict_are_drawn(qapp):
     colours = _colours(256)
-    for token in (icon.GROUND, theme.ACCENT_RAMP[600], theme.ACCENT_RAMP[400],
-                  theme.ACCENT_RAMP[100]):
-        assert token.lower() in colours, token
+    assert colours.get(GROUND, 0) > colours.get(VERDICT, 0) > 1000
+    assert colours.get(STEP, 0) > 500
 
 
-def test_the_ground_covers_less_than_half_so_the_mark_is_the_subject(qapp):
-    colours = _colours(64)
-    assert colours[icon.GROUND.lower()] < 64 * 64 * 0.55
-
-
-def test_three_windows_are_still_distinguishable_at_sixteen_pixels(qapp):
-    """The size that actually matters, and the one with no outlines to help.
-
-    Below DETAIL_FROM the title bars and hairlines are dropped, so the three
-    lightness steps are the only thing left telling them apart - each has to hold
-    a meaningful number of pixels of its own.
-    """
+def test_the_verdict_still_reads_at_sixteen_pixels(qapp):
+    """The size that actually matters. The small drawing has one step and a
+    large verdict, so the light disc keeps pixels of its own there."""
     colours = _colours(16)
-    for fill in (theme.ACCENT_RAMP[600], theme.ACCENT_RAMP[400],
-                 theme.ACCENT_RAMP[100]):
-        assert colours.get(fill.lower(), 0) >= 8, fill
+    assert colours.get(GROUND, 0) >= 20
+    assert colours.get(VERDICT, 0) >= 12
 
 
-def test_the_small_sizes_leave_out_the_detail_that_would_muddy_them(qapp):
-    # The title bar tone appears once the icon is big enough to hold it, and not
-    # before.
-    assert theme.ACCENT_RAMP[800].lower() not in _colours(16)
-    assert theme.ACCENT_RAMP[800].lower() in _colours(32)
+def test_the_smallest_sizes_use_the_simpler_drawing(qapp, monkeypatch):
+    used = []
+    real = icon.QSvgRenderer
+    monkeypatch.setattr(icon, "QSvgRenderer", lambda path: used.append(path) or real(path))
+    monkeypatch.setattr(icon, "_cache", {})
+    icon.pixmap(16)
+    icon.pixmap(24)
+    assert used == [icon.SMALL_SOURCE, icon.SOURCE]
+
+
+def test_missing_artwork_gives_a_blank_icon_not_a_crash(qapp, monkeypatch):
+    monkeypatch.setattr(icon, "SOURCE", "/nowhere/qavector-mark.svg")
+    monkeypatch.setattr(icon, "_cache", {})
+    pixmap = icon.pixmap(32)
+    assert (pixmap.width(), pixmap.height()) == (32, 32)
 
 
 def test_it_can_be_written_out_for_packaging(qapp, tmp_path):

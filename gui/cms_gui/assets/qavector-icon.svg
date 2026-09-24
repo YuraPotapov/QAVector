@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <!-- Window 1 (back) -->
+  <g transform="translate(10, 14)">
+    <rect x="0" y="0" width="80" height="60" rx="4" fill="#2d4356" />
+    <rect x="0" y="0" width="80" height="16" rx="4" fill="#1b2a38" />
+    <rect x="0" y="10" width="80" height="6" fill="#1b2a38" />
+    <rect x="0" y="16" width="80" height="44" fill="#4a709c" />
+  </g>
+
+  <!-- Window 2 (middle) -->
+  <g transform="translate(24, 30)">
+    <rect x="0" y="0" width="80" height="60" rx="4" fill="#2d4356" />
+    <rect x="0" y="0" width="80" height="16" rx="4" fill="#1b2a38" />
+    <rect x="0" y="10" width="80" height="6" fill="#1b2a38" />
+    <rect x="0" y="16" width="80" height="44" fill="#729fc5" />
+  </g>
+
+  <!-- Window 3 (front, active) -->
+  <g transform="translate(38, 46)">
+    <rect x="0" y="0" width="80" height="60" rx="4" fill="#2d4356" />
+    <rect x="0" y="0" width="80" height="16" rx="4" fill="#1b2a38" />
+    <rect x="0" y="10" width="80" height="6" fill="#1b2a38" />
+    <rect x="0" y="16" width="80" height="44" fill="#e6f0fa" />
+  </g>
+</svg>
