@@ -16,6 +16,27 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-09-24
+
+### Changed
+- **The development cycles question a requirement that makes no business
+  sense.** Their plan reviews applied only rules written down, so a ticket that
+  specified a misleading figure - and said marketing had signed it off - passed
+  as "0 blocking". A requirement against plain business sense or arithmetic is
+  now a medium issue that a person has to decide, even when the task asks for
+  it in so many words; the reviews do not rewrite it themselves. A plan's risk
+  is never lower than its riskiest package, and an open decision makes it at
+  least medium, so the top of the approval window no longer reads "low" over a
+  question nobody has answered.
+
+### Fixed
+- **A person's answer at an approval reached only the plan it revised.** The
+  review after it read the task alone and refused the revised plan for
+  changing the requirement "without any recorded authority", and the
+  acceptance would have refused the finished work for the same reason. Every
+  agent step after the revised one now gets the person's decisions as
+  `person_decided`, told they replace the task where the two differ.
+
 ## [0.16.4] - 2026-09-24
 
 ### Fixed
