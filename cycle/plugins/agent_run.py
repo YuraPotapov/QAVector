@@ -158,7 +158,9 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     # Collected whether or not the run went well. A pass that failed halfway
     # has still edited whatever it edited, and leaving that out of the record
     # would be the worst possible answer.
-    changed = distinct(written, add_dir or cwd)
+    # Against cwd, where the edits are made: add_dir may be a directory the
+    # agent only reads, and a write there is exactly what should stand out.
+    changed = distinct(written, cwd)
     answer = agent_stream.last_result(_read_stdout(result,
                                                    operation.directory))
     if not result.ok:

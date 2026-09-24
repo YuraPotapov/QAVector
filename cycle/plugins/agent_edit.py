@@ -24,6 +24,14 @@ shell would make "what did this step do" unanswerable from the file.
 What it changed is read off the CLI's own event stream rather than by diffing a
 directory afterwards: every write announces its path as it happens, so the
 answer is exact and costs nothing.
+
+**Reading one place, writing another.** ``read_only`` names a directory the
+agent may read but must not change - a checkout it writes tests *against*,
+say, while the tests go somewhere of their own. The CLI cannot be told "read
+only" for one directory, so the step checks instead: a write anywhere outside
+``directory`` fails it, naming the path. With ``create_directory`` the step
+makes ``directory`` first, for exactly that arrangement - a scratch folder in
+the run's workspace that does not exist until something writes there.
 """
 
 import os
@@ -66,6 +74,15 @@ class AgentEdit(CyclePlugin):
                   hint="Relative paths are read against the run's own "
                        "workspace, so a checkout step's output can be handed "
                        "straight in. An absolute path edits that path itself."),
+            field("create_directory", "Create the directory", "check",
+                  default=False,
+                  hint="Make the directory first if it is not there. Off by "
+                       "default: an agent let loose on a checkout that turns "
+                       "out to be empty would work hard on nothing."),
+            field("read_only", "Also readable, never written", "dir",
+                  hint="A directory the agent may read but must not change, "
+                       "such as the checkout it writes tests against. A write "
+                       "outside the directory to edit fails the step."),
             field("inputs", "Structured inputs", "env",
                   hint="A mapping of results or context for the work."),
             field("files", "Logs and artifacts", "args",
@@ -99,7 +116,7 @@ class AgentEdit(CyclePlugin):
             if isinstance(literal.get(key), str) and "${" in literal[key]:
                 literal.pop(key)
         found = super().problems(literal)
-        for key in ("model", "task", "directory", "claude"):
+        for key in ("model", "task", "directory", "claude", "read_only"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
         files = settings.get("files", [])
@@ -133,21 +150,32 @@ class AgentEdit(CyclePlugin):
         where = os.path.realpath(os.path.join(
             context.workspace,
             os.path.expanduser(str(self.setting(step.settings, "directory")))))
+        if not os.path.isdir(where) and _checked(self.setting(
+                step.settings, "create_directory", False)):
+            os.makedirs(where, exist_ok=True)
         if not os.path.isdir(where):
             # Refused rather than created: an agent let loose on a directory
             # that was meant to be a checkout and is in fact empty would work
             # very hard on nothing.
             return registry.failed("Directory to edit does not exist: %s" % where)
+        readable = str(self.setting(step.settings, "read_only", "") or "").strip()
+        if readable:
+            readable = os.path.realpath(os.path.join(
+                context.workspace, os.path.expanduser(readable)))
+            if not os.path.isdir(readable):
+                return registry.failed("Readable directory does not exist: %s"
+                                       % readable)
         try:
             files = read_files(context, self.setting(step.settings, "files", []))
         except (OSError, ValueError) as exc:
             return registry.failed("Cannot prepare agent files: %s" % exc)
 
         prompt = _prompt(str(self.setting(step.settings, "task") or ""),
-                         self.setting(step.settings, "inputs", {}), files, where)
+                         self.setting(step.settings, "inputs", {}), files, where,
+                         readable)
         reply = agent_run.run_claude(
             context, step, prompt, where, EDIT_TOOLS, status["binary"],
-            mode=PERMISSION_MODE, add_dir=where,
+            mode=PERMISSION_MODE, add_dir=readable or where,
             model=self.setting(step.settings, "model"),
             effort=self.setting(step.settings, "effort", ""),
             max_turns=self.setting(step.settings, "max_iterations"))
@@ -163,6 +191,14 @@ class AgentEdit(CyclePlugin):
             result.status = "failed"
             result.message = reply.problem
             return result
+        # Only when something was declared read-only: without it, a write
+        # elsewhere is reported (as an absolute path) but was never forbidden.
+        strays = [one for one in reply.written if os.path.isabs(one)] if readable else []
+        if strays:
+            result.status = "failed"
+            result.message = ("agent.edit wrote outside %s, which it may not: %s"
+                              % (where, ", ".join(strays)))
+            return result
 
         result.outputs["summary"] = reply.text
         if reply.cost is not None:
@@ -174,7 +210,12 @@ class AgentEdit(CyclePlugin):
         return result
 
 
-def _prompt(task, inputs, files, where):
+def _checked(value):
+    """A check box's value, which a hand-written cycle file may give as text."""
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def _prompt(task, inputs, files, where, readable=""):
     """The whole request, as one prompt.
 
     No answer schema, unlike the review's: the work here is the edit, and what
@@ -190,6 +231,11 @@ def _prompt(task, inputs, files, where):
              "tidy anything you were not asked about - this runs unattended "
              "and every change you make is applied.",
              "You cannot run commands, so do not plan to test what you write."]
+    if readable:
+        parts += ["", "# Read only",
+                  "%s is there to be read, not changed. Read whatever you need "
+                  "from it; write nothing there - a write there fails this step."
+                  % readable]
     if inputs:
         import json
         parts += ["", "# Results so far",

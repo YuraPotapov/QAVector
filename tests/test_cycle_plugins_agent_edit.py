@@ -261,3 +261,51 @@ def test_the_effort_it_ran_at_is_said_and_published(edit):
     assert argv[argv.index("--effort") + 1] == "low"
     assert result.message.endswith(" - at low effort")
     assert result.outputs["effort"] == "low"
+
+
+# ------------------------------------------- reading one place, writing another
+PROBE = """
+here = os.getcwd()
+open(os.path.join(here, "test_probe.py"), "w").write("def test_x(): pass\\n")
+say({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "Write",
+     "input": {"file_path": os.path.join(here, "test_probe.py")}}]}})
+say({"type": "result", "subtype": "success", "is_error": False, "result": "ok"})
+"""
+
+
+def test_it_writes_a_scratch_folder_while_reading_the_checkout(edit, tmp_path):
+    """The arrangement a probe step uses: tests written in the run's own
+    workspace, against a checkout they must not change."""
+    result, argv, repository, _recorder = edit(
+        PROBE, directory="probe", create_directory=True,
+        read_only=str(tmp_path / "repo"))
+
+    assert result.ok, result.message
+    assert result.outputs["files_changed"] == ["test_probe.py"]
+    assert argv[argv.index("--add-dir") + 1] == str(repository)
+    assert (repository / "main.py").read_text() == "print('old')\n"
+    prompt = argv[argv.index("-p") + 1]
+    assert "to be read, not changed" in prompt and str(repository) in prompt
+
+
+def test_a_write_into_the_read_only_directory_fails_the_step(edit, tmp_path):
+    result, _argv, _repository, _recorder = edit(
+        WROTE, directory="probe", create_directory=True,
+        read_only=str(tmp_path / "repo"))
+
+    assert not result.ok
+    assert "wrote outside" in result.message
+    assert "main.py" in result.message
+
+
+def test_a_missing_directory_is_still_refused_unless_it_may_be_made(edit):
+    result, _argv, _repository, _recorder = edit(PROBE, directory="probe")
+    assert not result.ok and "does not exist" in result.message
+
+
+def test_a_read_only_directory_that_is_not_there_is_refused(edit, tmp_path):
+    result, _argv, _repository, _recorder = edit(
+        PROBE, directory="probe", create_directory=True,
+        read_only=str(tmp_path / "nowhere"))
+    assert not result.ok and "Readable directory does not exist" in result.message
