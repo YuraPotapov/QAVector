@@ -248,6 +248,48 @@ def flows_dir():
     return user_flows_dir()
 
 
+def bundled_cycles_dir():
+    """The cycles that ship with the app: read-only, replaced on upgrade."""
+    return os.path.join(app_root(), "cycles")
+
+
+def user_cycles_dir():
+    """The cycles tree the user owns, where anything they write goes."""
+    return os.path.join(user_data_root(), "cycles")
+
+
+def cycles_search_path():
+    """Where to look for a cycle, nearest first.
+
+    The same two-tree arrangement as :func:`flows_search_path`, for the same
+    reason: a cycle the user edited is found before a bundled one with the same
+    id, and in a source checkout the two collapse to one entry.
+    """
+    seen, path = set(), []
+    for candidate in (user_cycles_dir(), bundled_cycles_dir()):
+        key = os.path.normpath(os.path.abspath(candidate))
+        if key not in seen:
+            seen.add(key)
+            path.append(candidate)
+    return path
+
+
+def cycles_dir():
+    """The cycles tree to write to, and the first one searched."""
+    return user_cycles_dir()
+
+
+def cycle_runs_dir():
+    """One directory per cycle run: its metadata, logs, artifacts and reports.
+
+    Beside ``reports`` rather than inside it. A report directory is what one
+    scenario left behind; a cycle run is the whole of an execution - several
+    scenarios, the services it started, the commands it ran - and mixing the
+    two would make both harder to clean up and neither easy to read.
+    """
+    return os.path.join(user_data_root(), "cycle-runs")
+
+
 def extensions_dir():
     """The vendored, unpacked Chrome extensions. Read-only; installs copy out."""
     return os.path.join(app_root(), "extensions")
@@ -293,7 +335,10 @@ def ensure_user_data_root(example_config=None):
     for path in (root, sessions_dir(), reports_dir(),
                  # Scenarios are written here - by the editor, and later by the
                  # recorder - so the directory has to exist before either runs.
-                 os.path.join(user_flows_dir(), "scenarios")):
+                 os.path.join(user_flows_dir(), "scenarios"),
+                 # And cycles here, for the same reason: the editor writes into
+                 # it, and a run writes its workspace under cycle-runs.
+                 user_cycles_dir(), cycle_runs_dir()):
         try:
             os.makedirs(path, exist_ok=True)
         except OSError:

@@ -4,6 +4,7 @@ __pycache__/
 
 # Virtualenv
 .venv/
+.venv-agent/
 
 # Per-user Chrome profiles + generated auto-login extensions (contain cookies/passwords)
 user_sessions/
@@ -28,6 +29,19 @@ services.json
 # so they carry the app's data. Regenerated on every --run-tests run.
 reports/
 !reports/.gitkeep
+
+# One directory per cycle run: its record, its logs, whatever its steps wrote.
+# Same reasoning as reports/ - it is the output of running the thing, not the
+# thing. In a source checkout the data root IS the checkout, so without this
+# every run would show up as something to commit.
+cycle-runs/
+
+# The values of cycles' secret variables, and the key that decrypts them. A
+# cycle file declares only that a variable is secret; the value lives here, and
+# here is never the project. Listed even though the default puts both under the
+# user's data root, because in a source checkout the data root IS the checkout.
+cyclesecrets.json
+cyclesecrets.key
 
 # Local IDE run configurations: they name real environments and users
 # (--env=..., --user=...), so they stay on the machine that uses them.

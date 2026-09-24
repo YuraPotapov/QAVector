@@ -1,0 +1,51 @@
+id: todo_to_plan
+name: To Do to a plan
+description: "Reads what is sitting in To Do for one person, with the comments on each ticket, and hands the lot to an agent to turn into a plan: what each task actually asks for, where in the code it lands, and what order to take them in. It reads every project by default; narrow it with jira_projects, or copy the two steps per project to get a plan each.\nUnlike the other demo cycles this one is a template, not something that runs out of the box - it needs your Jira. Fill in the variables below, put the API token in Settings -> Cycle secrets, and it runs. The agent step needs no API key: it uses the Claude Code CLI's own browser sign-in."
+project: Demo
+variables:
+  jira_email: you@yourcompany.example
+  jira_projects: ""
+  jira_site: https://yourcompany.atlassian.net
+  jira_token: {secret: true}
+  jira_user: currentUser()
+  project_dir: ""
+
+steps:
+  - id: todo
+    plugin: jira.issues
+    label: Read what is in To Do
+    with:
+      comment_limit: 20
+      comments: true
+      email: ${vars.jira_email}
+      flavour: cloud
+      jql: statusCategory = "To Do"
+      limit: 25
+      project: ${vars.jira_projects}
+      role: any
+      site: ${vars.jira_site}
+      token: ${vars.jira_token}
+      user: ${vars.jira_user}
+    timeout: 120.0
+  - id: plan
+    plugin: agent.review
+    label: Turn them into a plan
+    needs: [todo]
+    if: ${steps.todo.outputs.count}
+    with:
+      framework: claude_cli
+      inputs:
+        task_count: ${steps.todo.outputs.count}
+        tasks: ${steps.todo.outputs.issues}
+      max_iterations: 20
+      model: sonnet
+      repository: ${vars.project_dir}
+      task: "You are planning work, not doing it. Above is every Jira task sitting in To Do for one person, each with the comments on it. When a repository is given, read what you need of it; do not execute anything.\nFor each task work out what it actually asks for - the comments often change or narrow what the summary says - where in the code it lands, what it depends on, and roughly how big it is. Say plainly when a task is too vague to plan, and what you would have to ask to plan it.\nAnswer in the required shape, used like this:\nsummary - the approach across all of them, and the order you would take them in, with a sentence on why that order.\nissues - one entry per task, its Jira key first in the description. severity is how risky or uncertain that piece of work is, not how urgent the ticket is. Use the file and line fields when you found where it lands.\nrecommendations - the plan itself, as ordered steps. Each one should be something a person could start on Monday morning.\nrisk - the risk of the whole body of work taken together.\nPlan only what is in the list. Do not invent tasks, and do not pad the plan with work nobody asked for."
+    timeout: 900.0
+  - id: report
+    plugin: report.html
+    label: Save the plan
+    needs: [plan]
+    if: ${run.id}
+    with:
+      title: To Do to a plan

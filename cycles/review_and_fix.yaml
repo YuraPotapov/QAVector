@@ -1,0 +1,160 @@
+id: review_and_fix
+name: Review and fix
+description: >
+  An agent reads code, says what is wrong with it, a second agent applies the
+  fix, and the cycle proves the fix did not break anything. Nothing here needs
+  an API key: both agent steps use the Claude Code CLI's own browser sign-in,
+  so run `claude auth login` once if you have not already.
+
+  It writes its own subject into the run and commits it, so it works on any
+  machine and the diff at the end is real. Two agent steps cost real money -
+  a few cents at sonnet.
+
+  It stops once to ask you, between reading the code and changing it, so run
+  it from the application rather than a terminal: a question nobody can answer
+  ends the run instead of approving itself.
+project: Demo
+
+variables:
+  # Read against the run's own workspace, which is what makes this cycle work
+  # anywhere without editing. The subject is written fresh every run, so a fix
+  # never carries over into the next one.
+  project_dir: source/calc
+
+steps:
+  - id: prepare
+    plugin: command.shell
+    label: Write the code and commit it
+    with:
+      dir: "${vars.project_dir}"
+      command: |
+        git init -q .
+        cat > calc.py <<'PYTHON'
+        """Small numeric helpers."""
+
+
+        def average(numbers):
+            """Return the mean of numbers."""
+            total = 0
+            for value in numbers:
+                total += value
+            return total / len(numbers)
+        PYTHON
+        git add -A
+        git -c user.email=cycle@example.invalid -c user.name=QAVector \
+            commit -qm "the subject, before review"
+        echo "wrote $(ls)"
+
+  - id: review
+    plugin: agent.review
+    label: Review the code
+    needs: [prepare]
+    timeout: 300
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: "${vars.project_dir}"
+      max_iterations: 6
+      task: >-
+        Review calc.py. Judge correctness for edge cases above everything
+        else: what happens for inputs a caller can reasonably pass. Report
+        only real defects, with file and line. Do not comment on style,
+        type hints, or anything the file does not need. Do not execute
+        anything. If there are no defects, return an empty issues list.
+
+  # The one decision in this cycle that is not the machine's. Between reading
+  # the code and changing it is where a person is cheapest to ask: the findings
+  # are in front of them, nothing has been written yet, and the second agent -
+  # the one that costs money and edits files - has not started.
+  #
+  # It is why this cycle needs the application rather than a terminal. Delete
+  # this step to run it unattended; do not disable it, because a disabled step
+  # skips everything that needs it and the fix would quietly never happen.
+  - id: approve
+    plugin: approval.gate
+    label: Agree to the fix
+    needs: [review]
+    # Ten minutes to decide. Past that the run stops rather than waits, and
+    # nothing has been changed.
+    timeout: 600
+    with:
+      question: Apply this fix?
+      detail: |
+        Risk: ${steps.review.outputs.risk}
+
+        ${steps.review.outputs.summary}
+
+        Issues found:
+        ${steps.review.outputs.issues}
+      options: [Apply the fix, Leave it alone]
+
+  - id: fix
+    plugin: agent.edit
+    label: Apply the fix
+    needs: [approve]
+    timeout: 600
+    with:
+      model: sonnet
+      directory: "${vars.project_dir}"
+      max_iterations: 12
+      # The review's own findings, handed over as they came out of it. This is
+      # the whole reason the two steps are separate: what one concluded is an
+      # input to the other rather than something written twice.
+      inputs:
+        risk: "${steps.review.outputs.risk}"
+        issues: "${steps.review.outputs.issues}"
+        recommendations: "${steps.review.outputs.recommendations}"
+      task: >-
+        Fix the defects listed in the issues above, in calc.py. Keep the
+        name, the signature and the behaviour of average() for non-empty
+        input exactly as they are - a caller depends on both. If the issues
+        list is empty, change nothing at all and say so. Do not add tests,
+        type hints, or anything that was not asked for.
+
+  # diff and verify both need only the fix, so they run at the same time.
+  - id: diff
+    plugin: command.shell
+    label: Show what changed
+    needs: [fix]
+    with:
+      dir: "${vars.project_dir}"
+      command: git --no-pager diff --stat && git --no-pager diff
+
+  - id: verify
+    plugin: command.shell
+    label: Prove it still works
+    needs: [fix]
+    # The one step whose failure is the point of running this at all, so the
+    # report below is still written when it fails rather than being skipped
+    # with it.
+    on_failure: continue
+    with:
+      dir: "${vars.project_dir}"
+      command: |
+        python3 - <<'PYTHON'
+        import sys
+        sys.path.insert(0, ".")
+        from calc import average
+
+        # The fix must not have changed what already worked.
+        assert average([1, 2, 3]) == 2, "average() changed for ordinary input"
+
+        # And the empty case must no longer fall over. Returning something and
+        # raising a ValueError are both fair answers; the crash is not.
+        try:
+            result = average([])
+        except ZeroDivisionError:
+            sys.exit("average([]) still raises ZeroDivisionError")
+        except ValueError as exc:
+            print("average([]) raises ValueError:", exc)
+        else:
+            print("average([]) ->", result)
+        print("ok")
+        PYTHON
+
+  - id: report
+    plugin: report.html
+    label: Save the report
+    needs: [diff, verify]
+    with:
+      title: Review and fix

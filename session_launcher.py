@@ -547,7 +547,7 @@ def resolve_server_logs(env_values, requested, path=None):
 
 
 def describe(config_path, flows_dir=None, sessions_dir=None, reports_dir=None,
-             log_sources_path=None):
+             log_sources_path=None, cycles_dir=None):
     """Everything a front-end needs to populate its pickers, as one dict.
 
     ``--describe`` prints this as JSON and exits. It exists so a GUI never has to
@@ -660,6 +660,12 @@ def describe(config_path, flows_dir=None, sessions_dir=None, reports_dir=None,
         # offer exactly the actions that exist and know the shape of each one's
         # arguments without keeping its own copy of the list to drift out of step.
         "flow_actions": flow_actions(),
+        # The same idea one level up: every cycle on the machine, and every
+        # plugin a cycle step may name, so a front-end builds its own editor
+        # from what this core actually has rather than from its own copy of the
+        # list. Both degrade to empty when the engine extra is not installed.
+        "cycles": cycle_inventory(cycles_dir),
+        "cycle_plugins": cycle_plugins(),
         "overlay_components": list(_OVERLAY_COMPONENTS),
         "report_artifacts": list(_REPORT_ARTIFACTS),
         "report_screen_modes": list(_REPORT_SCREEN_MODES),
@@ -709,6 +715,45 @@ def flow_actions():
         # accepted by wait_for; anything else is Playwright's default
         "states": ["visible", "attached", "hidden", "detached"],
     }
+
+
+def cycle_plugins():
+    """Every cycle plugin's metadata: what it takes, produces, and touches.
+
+    The same bargain ``flow_actions`` makes for the step grammar, one level up.
+    A front-end builds a step's configuration form from these fields, so the
+    form and the validation behind it read one table and cannot drift apart -
+    and a plugin added here appears in the editor without the editor changing.
+
+    Empty when the engine extra is not installed, like everything else in
+    --describe: a plain launch has no use for it and must not pay for it.
+    """
+    try:
+        from cycle import registry
+    except ImportError:
+        return []
+    try:
+        return registry.describe()
+    except Exception:     # noqa: BLE001 - one bad plugin must not deny the rest
+        return []
+
+
+def cycle_inventory(cycles_dir=None):
+    """Every cycle on the machine, enough of each to list it.
+
+    Deliberately the cheap half: parse problems travel, per-plugin settings
+    validation does not. --describe reads every cycle on every start and the
+    splash waits on it, so the expensive check stays in --cycle-show, which is
+    asked for one cycle at a time.
+    """
+    try:
+        from cycle import cyclefile
+    except ImportError:
+        return []
+    try:
+        return cyclefile.list_cycles(cycles_dir)
+    except Exception:     # noqa: BLE001 - a broken tree is an empty list
+        return []
 
 
 def run_flow_command(command, source, flows_dir=None):
@@ -795,6 +840,460 @@ def _save_selectors(source, flows_dir=None):
                 "problems": ["%s must contain a JSON object with a \"yaml\" key"
                              % source]}
     return flowfile.save_selectors(document["yaml"], flows_dir)
+
+
+def run_plugin_action(target, source):
+    """Serve one --cycle-plugin-action call: print JSON, then exit.
+
+    A plugin declares what it can be asked outside a run - is it signed in, can
+    it reach its provider - and this is how a front-end asks. Deliberately
+    generic: the core knows nothing about what any action means, so a plugin
+    added later gets its setup offered in the interface without a line changing
+    here. The alternative, a flag per plugin, is how Core ends up knowing about
+    every plugin that ever ships.
+
+    ``target`` is ``<plugin id>:<action key>``; ``source`` is an optional JSON
+    file holding the step's settings, because whether a plugin is ready usually
+    depends on how the step configured it.
+    """
+    plugin_id, _, key = str(target or "").partition(":")
+    settings = {}
+    if source:
+        try:
+            with open(source, encoding="utf-8") as handle:
+                settings = json.load(handle)
+        except (OSError, ValueError) as exc:
+            _plugin_action_answer({"ok": False, "problems":
+                                   ["cannot read %s: %s" % (source, exc)]}, 2)
+    if not isinstance(settings, dict):
+        _plugin_action_answer({"ok": False,
+                               "problems": ["%s must contain a JSON object"
+                                            % source]}, 2)
+    try:
+        from cycle import registry
+        plugin = registry.get(plugin_id)
+        if plugin is None:
+            raise ValueError("no plugin called %r is installed" % plugin_id)
+        answer = plugin.run_action(key, settings)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        _plugin_action_answer({"ok": False, "plugin": plugin_id, "action": key,
+                               "problems": ["%s: %s" % (type(exc).__name__, exc)]},
+                              2)
+    answer = dict(answer or {})
+    answer.setdefault("ok", False)
+    answer.update(plugin=plugin_id, action=key)
+    _plugin_action_answer(answer, 0)
+
+
+def _plugin_action_answer(payload, code):
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    sys.exit(code)
+
+
+def run_secret_command(command, source, secrets_path=None):
+    """Serve one --cycle-secret-* call: print JSON, then exit.
+
+    A secret's value never travels in ``argv``. ``ps`` shows the full command
+    line of every process on the machine to every user on it, and shell history
+    keeps it afterwards - so the value arrives the way ``--cycle-save`` sends a
+    document, in a file named by ``--from``, and only the cycle and the variable
+    name are on the line.
+
+    Nothing here ever prints a value back. The only question a front-end has is
+    "is this one set", and answering it with the secret itself would put it in a
+    pipe, a log and a screen for no reason at all.
+    """
+    kind, argument = command
+    cycle_id, _, name = str(argument or "").partition(":")
+    try:
+        from cycle import secrets
+        path = secrets.resolve_path(secrets_path)
+        if kind == "list":
+            payload = {"ok": True, "cycle": cycle_id, "path": path,
+                       "private": secrets.is_private(path),
+                       "secrets": secrets.names(cycle_id, secrets_path)}
+        elif kind == "set":
+            if not name:
+                raise ValueError("--cycle-secret-set needs CYCLE:NAME")
+            secrets.set_secret(cycle_id, name, _secret_value(source),
+                               secrets_path)
+            payload = {"ok": True, "cycle": cycle_id, "name": name,
+                       "path": path}
+        elif kind == "copy":
+            # CYCLE:OTHER rather than CYCLE:NAME here: the whole point is one
+            # credential shared by several cycles, and naming the variable as
+            # well would mean saying "jira_token" twice for the common case.
+            if not name:
+                raise ValueError("--cycle-secret-copy needs FROM:TO")
+            copied = secrets.copy_to(cycle_id, name, path=secrets_path)
+            payload = {"ok": True, "cycle": cycle_id, "to": name,
+                       "copied": copied, "path": path}
+        elif kind == "delete":
+            secrets.delete(cycle_id, name or None, secrets_path)
+            payload = {"ok": True, "cycle": cycle_id, "name": name,
+                       "path": path}
+        else:                                   # unreachable; kept honest anyway
+            raise ValueError("unknown secret command %r" % kind)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        json.dump({"ok": False, "cycle": cycle_id,
+                   "problems": ["%s: %s" % (type(exc).__name__, exc)]},
+                  sys.stdout, indent=2, ensure_ascii=False, default=str)
+        print()
+        sys.exit(2)
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    sys.exit(0)
+
+
+def _secret_value(source):
+    """The value for --cycle-secret-set, read from the ``--from`` file.
+
+    An empty or absent file means "clear it", which is how a front-end removes
+    a secret it no longer wants without a second flag.
+    """
+    if not source:
+        return ""
+    try:
+        with open(source, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read %s: %s" % (source, exc))
+    if not isinstance(document, dict) or "value" not in document:
+        raise ValueError("%s must contain a JSON object with a \"value\" key"
+                         % source)
+    return str(document["value"] or "")
+
+
+def run_session_command(command, memory_path=None, cycles_dir=None):
+    """Serve one --cycle-session* call: print JSON, then exit.
+
+    A session is every run of one cycle on one subject - see
+    ``cycle/sessions.py``. Listing is how a front-end shows "what have these
+    cycles been working on"; deleting removes the runs, their index rows and
+    the memory record the subject names, and says exactly which.
+    """
+    kind, argument = command
+    try:
+        from cycle import sessions
+        if kind == "list":
+            payload = {"ok": True,
+                       "sessions": sessions.sessions(cycle_id=argument,
+                                                     memory_path=memory_path,
+                                                     cycles_dir=cycles_dir)}
+        elif kind == "delete":
+            payload = dict(sessions.delete(argument, memory_path=memory_path),
+                           ok=True)
+        else:                                   # unreachable; kept honest anyway
+            raise ValueError("unknown session command %r" % kind)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        json.dump({"ok": False, "id": argument,
+                   "problems": [str(exc) if exc.__class__.__name__ == "SessionError"
+                                else "%s: %s" % (type(exc).__name__, exc)]},
+                  sys.stdout, indent=2, ensure_ascii=False, default=str)
+        print()
+        sys.exit(2)
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    sys.exit(0)
+
+
+def run_memory_command(command, source, memory_path=None):
+    """Serve one --cycle-memory-* call: print JSON, then exit.
+
+    What the project remembers is a plain file somebody can open, unlike the
+    secrets store - so these exist to answer the question from a script rather
+    than to protect anything. Forgetting is offered because a record that is
+    wrong is worse than none: a cycle that believes a task is done will not do
+    it again.
+    """
+    kind, argument = command
+    try:
+        from cycle import memory
+        path = memory.resolve_path(memory_path)
+        if kind == "list":
+            payload = {"ok": True, "path": path,
+                       "keys": memory.keys(argument, memory_path)}
+        elif kind == "show":
+            payload = dict(memory.describe(argument, memory_path) or
+                           {"key": argument, "fields": {}}, ok=True, path=path)
+        elif kind == "forget":
+            payload = {"ok": True, "key": argument, "path": path,
+                       "forgotten": memory.forget(argument, memory_path)}
+        else:                                   # unreachable; kept honest anyway
+            raise ValueError("unknown memory command %r" % kind)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        json.dump({"ok": False, "key": argument,
+                   "problems": ["%s: %s" % (type(exc).__name__, exc)]},
+                  sys.stdout, indent=2, ensure_ascii=False, default=str)
+        print()
+        sys.exit(2)
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    sys.exit(0)
+
+
+def run_cycle_command(command, source, cycles_dir=None):
+    """Serve one --cycle-show/save/delete/import/list call: print JSON, then exit.
+
+    Written from :func:`run_flow_command` and answering the same way, because it
+    has the same job one level up: the cycle file format belongs to the core,
+    the GUI depends on PySide6 and nothing else, and the caller is a program - so
+    every one of these answers with JSON whether or not it worked, rather than
+    leaving somebody parsing an error string out of stderr.
+    """
+    kind, argument = command
+    try:
+        # Lazy, like every other core import here: a plain launch must not pay
+        # for pyyaml just because these flags exist.
+        from cycle import cyclefile, registry
+        if kind == "show":
+            payload = cyclefile.describe_cycle(argument, cycles_dir, registry)
+        elif kind == "list":
+            payload = {"cycles": cyclefile.list_cycles(cycles_dir, registry)}
+        elif kind == "delete":
+            payload = cyclefile.delete(argument, cycles_dir)
+        elif kind == "import":
+            payload = cyclefile.import_file(argument, cycles_dir, registry)
+        elif kind == "save":
+            payload = _save_cycle(argument, source, cycles_dir)
+        else:                                   # unreachable; kept honest anyway
+            raise ValueError("unknown cycle command %r" % kind)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        json.dump({"ok": False, "id": argument,
+                   "problems": ["%s: %s" % (type(exc).__name__, exc)]},
+                  sys.stdout, indent=2, ensure_ascii=False, default=str)
+        print()
+        sys.exit(2)
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    # "ok" is absent from a --cycle-show or --cycle-list payload, which are
+    # reads and cannot fail here; only the writes report one.
+    sys.exit(0 if payload.get("ok", True) else 1)
+
+
+def _save_cycle(cycle_id, source, cycles_dir=None):
+    """--cycle-save: read the JSON document at ``source`` and write the cycle.
+
+    The document is either ``{"yaml": "..."}`` - the text somebody typed - or
+    the cycle document itself, which is what a form produces. One writer either
+    way, so both go through the same validation and land in the same shape.
+    """
+    from cycle import cyclefile, registry
+    if not source:
+        return {"ok": False, "id": cycle_id,
+                "problems": ["--cycle-save needs --from=FILE (a JSON document)"]}
+    try:
+        with open(source, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "id": cycle_id,
+                "problems": ["cannot read %s: %s" % (source, exc)]}
+    if not isinstance(document, dict):
+        return {"ok": False, "id": cycle_id,
+                "problems": ["%s must contain a JSON object" % source]}
+    if "yaml" in document:
+        return cyclefile.save(cycle_id, cycles_dir, yaml_text=document["yaml"],
+                              registry=registry)
+    return cyclefile.save(cycle_id, cycles_dir, document=document,
+                          registry=registry)
+
+
+def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
+                   jobs=None, control=False, reports_dir=None,
+                   secrets_path=None, memory_path=None, only=None,
+                   start_from="", resume="", reuse_from=""):
+    """Run one cycle to completion. Returns the exit code.
+
+    Handled before the Chrome launch loop, because a cycle opens no windows of
+    its own: the step that drives a browser is ``scenario.run``, and it opens
+    what it needs when it gets there.
+
+    The control channel is the same one a scenario run uses, set up the same
+    way - so a cycle's service steps reach the GUI through the bridge that
+    already exists, and ``cycle.stop`` arrives on the same stdin reader. With no
+    control channel the service steps say so immediately instead of waiting out
+    a timeout, which is what makes a cycle runnable from a terminal.
+    """
+    from cycle import ask as cycle_ask
+    from cycle import bus, checkpoints, cyclefile, executor, model, registry
+    from cycle import loader as cycle_loader
+    from cycle import run as run_mod
+    from cycle import workspace as workspace_mod
+    from engine import services as engine_services
+
+    try:
+        cycle, raw = cycle_loader.read_cycle(cycle_id, cycles_dir)
+    except Exception as exc:  # noqa: BLE001 - a missing or malformed file
+        log.error("%s", exc)
+        _emit("cycle.run.end", cycle=cycle_id, status="error",
+              message=str(exc), exit_code=2)
+        return 2
+
+    problems = model.problems(cycle, registry=registry, raw=raw)
+    if problems:
+        # Refused loudly and before anything starts. A cycle that half-runs and
+        # then stops on a typo has already started services somebody now has to
+        # find and stop by hand.
+        log.error("%s cannot run:", cycle_id)
+        for problem in problems:
+            log.error("  %s", problem)
+        _emit("cycle.run.end", cycle=cycle_id, status="error",
+              message="; ".join(problems[:3]), exit_code=2)
+        return 2
+
+    chosen, refusal = _cycle_selection(cycle, only, start_from)
+    if resume and (only or start_from or variables or reuse_from):
+        refusal = "Resume cannot be combined with partial selection or variable overrides."
+    if resume and (workspace_mod.safe_id(resume) != resume or resume in (".", "..")):
+        refusal = "Resume requires a run ID, not a path."
+    if reuse_from and (not chosen or workspace_mod.safe_id(reuse_from) != reuse_from):
+        refusal = "--cycle-reuse requires a run ID and --cycle-only or --cycle-from."
+    reuse = (run_mod.load(workspace_mod.path_of(reuse_from)) if reuse_from and not refusal
+             else run_mod.latest_of(cycle.id) if chosen else None)
+    if reuse_from and (reuse is None or reuse.cycle_id != cycle.id):
+        refusal = "No saved run %s for cycle %s." % (reuse_from, cycle.id)
+    if not refusal and chosen:
+        absent = executor.missing_for(cycle, chosen, reuse)
+        if absent:
+            refusal = ("%s reads what %s produced, and %s did not run in %s. "
+                       "Run the cycle once before running part of it."
+                       % (", ".join(sorted(chosen)), ", ".join(absent),
+                          "they" if len(absent) > 1 else "it",
+                          reuse.id if reuse is not None
+                          else "any earlier run of this cycle"))
+    if refusal:
+        # Before anything starts, like every other refusal here. The
+        # alternative is a step failing several minutes in on a reference that
+        # does not exist - true, unhelpful, and after the expensive part.
+        log.error("%s", refusal)
+        _emit("cycle.run.end", cycle=cycle_id, status="error",
+              message=refusal, exit_code=2)
+        return 2
+
+    run_id = resume or workspace_mod.new_run_id(cycle_id)
+    workspace = (workspace_mod.path_of(run_id) if resume
+                 else workspace_mod.create(run_id))
+    if resume and not os.path.isfile(run_mod.metadata_path(workspace)):
+        message = "No saved run named %s." % resume
+        log.error("%s", message)
+        _emit("cycle.run.end", cycle=cycle_id, status="error", message=message, exit_code=2)
+        return 2
+    log.info("Run %s -> %s", run_id, workspace)
+    # The same event a scenario run sends, and for the same reason: it is the
+    # only way anything watching finds out where this run's files are being
+    # written. Without it a cycle's reports, its agents' transcripts and the
+    # JSON a Jira step saved were on disk and unreachable - History had no
+    # directory to remember and the Artifacts page had nothing to open.
+    _emit("run.dir", dir=workspace)
+
+    values = _cycle_secrets(cycle, secrets_path)
+
+    # The run's own copy of what it said, in its own directory. Unconditional,
+    # unlike the stream below: a run started from a terminal is as worth
+    # reading afterwards as one started from a front-end, and this is what
+    # lets either read back a run nothing was watching at the time.
+    record = bus.JsonlObserver(workspace, run_id)
+    observers = [run_mod.Persister(), record]
+    if _events is not None and _events.enabled():
+        observers.append(bus.EventObserver(run_id))
+
+    if control:
+        # The identical two lines a --run-tests run uses: a reader on stdin for
+        # the answers, and the service bridge turned on only when both halves of
+        # the pipe are live. Asking a person rides the same pipe and is turned
+        # on by the same condition - there is somewhere to ask only when there
+        # is both an event out and a channel back.
+        threading.Thread(target=read_commands, args=({},), daemon=True).start()
+        engine_services.configure(_events is not None and _events.enabled())
+        cycle_ask.configure(_events is not None and _events.enabled())
+
+    try:
+        run = executor.run_cycle(
+            cycle, workspace, variables_=variables, jobs=jobs,
+            observer=bus.Tee(observers), flows_dir=flows_dir,
+            cycles_dir=cycles_dir, run_id=run_id, secrets=values,
+            memory_path=memory_path, only=chosen, reuse=reuse, resume=bool(resume))
+    except checkpoints.CheckpointError as exc:
+        log.error("%s", exc)
+        _emit("cycle.run.end", cycle=cycle_id, status="error", message=str(exc), exit_code=2)
+        return 2
+    finally:
+        # Whatever happened, release anything still blocked waiting for the GUI
+        # to answer a service request - the same thing a scenario run does -
+        # and anyone still waiting on a question nobody is going to answer now.
+        engine_services.abandon_all()
+        cycle_ask.abandon_all()
+        record.close()
+
+    _print_cycle_summary(run)
+    # run.finished as well, so a front-end that already settles on that event
+    # for scenario runs needs no new handling to notice a cycle has ended.
+    _emit("run.finished", run=run_id, status=run.status,
+          exit_code=run.exit_code)
+    return run.exit_code
+
+
+def _cycle_selection(cycle, only, start_from):
+    """``(step ids to run, why not)`` for --cycle-only and --cycle-from.
+
+    Empty ids mean the whole cycle, which is the ordinary case and not a
+    selection at all. A name that is not a step is refused rather than
+    quietly ignored: somebody who mistyped a step id meant to run something.
+    """
+    from cycle import model        # lazy, like everything else the cycle needs
+
+    known = {step.id for step in cycle.steps}
+    if start_from and only:
+        return set(), "--cycle-only and --cycle-from ask for two different things."
+    if start_from:
+        if start_from not in known:
+            return set(), "%s is not a step in %s." % (start_from, cycle.id)
+        return model.downstream(cycle, {start_from}), ""
+    named = set(only or ())
+    unknown = sorted(named - known)
+    if unknown:
+        return set(), "%s %s not a step in %s." % (
+            ", ".join(unknown), "is" if len(unknown) == 1 else "are", cycle.id)
+    return named, ""
+
+
+def _cycle_secrets(cycle, secrets_path):
+    """The declared secrets of this cycle, decrypted, for the run alone.
+
+    Warns about a name the cycle declares and the store has no value for,
+    instead of refusing: the run may not reach that step at all, and a cycle
+    someone has just been handed should be able to tell them which values it
+    wants rather than only that it will not start.
+    """
+    declared = tuple(getattr(cycle, "secrets", ()) or ())
+    if not declared:
+        return {}
+    try:
+        from cycle import secrets as secrets_mod
+        held = secrets_mod.load(secrets_path).get(cycle.id, {})
+    except Exception as exc:  # noqa: BLE001 - a run without them still runs
+        log.warning("cannot read the secrets store: %s", exc)
+        held = {}
+    missing = [name for name in declared if not held.get(name)]
+    if missing:
+        log.warning("%s has no value set for: %s", cycle.id, ", ".join(missing))
+    return {name: held.get(name, "") for name in declared}
+
+
+def _print_cycle_summary(run):
+    """The end of a run, on stderr where the rest of the log goes."""
+    tally = run.tally()
+    log.info("%s %s in %.1fs - %d passed, %d failed, %d skipped",
+             run.cycle_id, run.status, run.duration_ms / 1000.0,
+             tally.get("success", 0),
+             tally.get("failed", 0) + tally.get("timeout", 0),
+             tally.get("skipped", 0))
+    for step_id, step in run.steps.items():
+        if step.status != "success":
+            log.info("  %s: %s%s", step_id, step.status,
+                     " - %s" % step.message if step.message else "")
+    log.info("Run directory: %s", run.workspace)
 
 
 def _shortening_example(envs):
@@ -999,10 +1498,21 @@ def _bad_option_message(arg, config_path):
                 "  --run-tests=all            every scenario in flows/scenarios\n"
                 "  --run-tests=config         each user's own 'run-tests' field\n"
                 "  --run-tests=ID[,ID...]     named scenarios, or tag:NAME")
+    if arg == "--cycle-var":
+        return ("--cycle-var needs NAME=VALUE, e.g. --cycle-var=branch=main.\n"
+                "Repeat it for each variable a cycle takes.")
+    if arg == "--cycle-jobs":
+        return "--cycle-jobs needs a number: how many steps may run at once."
     if arg in ("--user", "--password", "--filter-users", "--url", "--config",
                "--sessions-dir", "--user-session", "--log-level", "--report-level",
                "--report-screen", "--jobs", "--flows-dir", "--reports-dir",
-               "--extensions"):
+               "--extensions", "--cycles-dir", "--cycle-run", "--cycle-show",
+               "--cycle-save", "--cycle-delete", "--cycle-import",
+               "--cycle-secret-list", "--cycle-secret-set",
+               "--cycle-secret-copy",
+               "--cycle-secret-delete", "--cycle-secrets-file",
+               "--cycle-memory-show", "--cycle-memory-forget",
+               "--cycle-memory-file"):
         return "%s needs a value: %s=VALUE (note the '=', not a space)." % (arg, arg)
     return ("Unknown option %r. Run --help for the full list." % arg)
 
@@ -2286,13 +2796,20 @@ def read_commands(windows_by_session):
     here. Opt-in through ``--control=-`` because a reader on stdin would
     otherwise swallow the keystrokes of anyone running this in a terminal.
 
-    Two commands. ``stop-session`` does both halves of what stopping one window
-    means: tell the engine to stop driving it (so it stops issuing steps rather
-    than having them fail against a browser being torn down), then close the
-    window itself. ``service.result`` is the answer to a ``service.request``
+    Four commands. ``stop-session`` does both halves of what stopping one
+    window means: tell the engine to stop driving it (so it stops issuing steps
+    rather than having them fail against a browser being torn down), then close
+    the window itself. ``service.result`` is the answer to a ``service.request``
     event - the scenario asked the GUI to start or watch a service and a session
-    thread is blocked waiting for this. Unknown commands are ignored rather than
+    thread is blocked waiting for this. ``ask.result`` is the same thing for a
+    ``cycle.ask`` event - a person's answer to an approval gate. ``cycle.stop``
+    asks a running cycle to
+    stop, by the run id it announced. Unknown commands are ignored rather than
     fatal: a newer GUI talking to an older core should lose a feature, not the run.
+
+    ``windows_by_session`` is ``{}`` in cycle mode, where there are no windows of
+    this process's own - ``stop-session`` then simply finds nothing to close,
+    which is the correct answer rather than a special case.
     """
     from engine import runner as engine_runner
     from engine import services as engine_services
@@ -2317,6 +2834,24 @@ def read_commands(windows_by_session):
             engine_services.deliver(message.get("id"), ok=message.get("ok"),
                                     status=message.get("status", ""),
                                     message=message.get("message", ""))
+        elif command == "ask.result":
+            # The same pipe as service.result, carrying a person's answer
+            # instead of a supervisor's. Imported here for the same reason the
+            # cycle imports below are: a scenario run never asks.
+            from cycle import ask as cycle_ask
+            cycle_ask.deliver(message.get("id"), answer=message.get("answer"),
+                              who=message.get("who", ""),
+                              revise=message.get("revise") is True,
+                              feedback=message.get("feedback", ""))
+        elif command == "cycle.stop":
+            # Imported here rather than at the top of the function: a scenario
+            # run never reaches this branch and must not pay for the import.
+            from cycle import executor as cycle_executor
+            asked = cycle_executor.request_stop(message.get("run_id"))
+            log.info("Stopping %s", message.get("run_id") or "every cycle run")
+            if not asked:
+                log.warning("No cycle run called %r is going here.",
+                            message.get("run_id"))
         else:
             log.warning("Ignoring an unknown control command: %r", command)
 
@@ -2672,6 +3207,94 @@ Editing scenarios (answer with JSON on stdout, then exit):
                             in file F ({"yaml": "..."}). Names of your own
                             override the ones that ship with the application.
 
+Cycles - one graph of steps: start a service, run a scenario, run a command,
+write a report. The steps that do not depend on each other run at the same time.
+  --cycle-list              Every cycle as JSON: its name, how many steps, and
+                            anything wrong with it.
+  --cycle-show=ID           One cycle as JSON: its text, the graph its steps
+                            make, and its problems.
+  --cycle-save=ID --from=F  Write a cycle from the JSON document in file F -
+                            either {"yaml": "..."} or the document itself.
+                            Validated first; nothing is written unless it holds.
+  --cycle-delete=ID         Delete a cycle. Refuses the ones that ship with the
+                            application - duplicate those instead.
+  --cycle-import=FILE       Copy a cycle file in, validating it first.
+  --cycles-dir=DIR          Where cycles live (default: beside the rest of your
+                            data, then the ones that ship with the app).
+  --cycle-secret-list=ID    Which of a cycle's secret variables have a value.
+                            Names only - a value is never printed.
+  --cycle-secret-set=ID:N --from=F
+                            Set one secret from the JSON {"value": "..."} in
+                            file F. The value is not on the command line: ps
+                            shows that to everyone on the machine.
+  --cycle-secret-copy=FROM:TO
+                            Give cycle TO the secrets cycle FROM has, for the
+                            ordinary case of one credential wanted by several
+                            cycles. The value is decrypted and re-encrypted
+                            inside the store - it is never printed and never on
+                            a command line. A secret TO already has is left
+                            alone; delete it first to replace it.
+  --cycle-secret-delete=ID[:N]
+                            Forget one secret, or every secret of one cycle.
+  --cycle-secrets-file=PATH Where the encrypted store lives (default: beside
+                            the rest of the user data).
+
+  --cycle-memory-list[=P]   What the project remembers, as keys. P narrows to
+                            keys starting with it.
+  --cycle-memory-show=KEY   One record: what is remembered, when, and who holds
+                            it right now.
+  --cycle-memory-forget=KEY Forget one record. A record that is wrong is worse
+                            than none - a cycle believing a task is done will
+                            not do it again.
+  --cycle-memory-file=PATH  Where the store lives (default: beside the rest of
+                            the user data). Plain JSON, meant to be readable.
+
+  --cycle-sessions[=ID]     What the cycles have been working on: every run of
+                            one cycle on one subject, grouped, newest first.
+                            ID narrows to one cycle. A cycle with no subject
+                            gives one session per run.
+  --cycle-session-delete=S  Delete one session: its run directories, their
+                            index rows and the memory record its subject
+                            names. Never a git branch or a Jira issue. Refused
+                            while one of its runs is going.
+
+  --cycle-plugin-action=P:A Ask a plugin something outside a run, as JSON: is it
+                            signed in, can it reach its provider. --from=FILE
+                            carries the step's settings. What a plugin can be
+                            asked is in --describe under cycle_plugins.actions,
+                            so this flag never grows a case per plugin.
+                            Example: agent.review has sign_in_status and
+                            sign_in, because an agent.review step using
+                            framework=claude_cli needs no API key at all - it
+                            uses the Claude Code CLI's own browser sign-in.
+
+Running a cycle:
+  --cycle-run=ID            Run it and exit with 0 if every step passed. Opens
+                            no browser of its own: a scenario.run step opens
+                            what it needs when it gets there. Cannot be combined
+                            with --run-tests or --recorder.
+  --cycle-jobs=N            How many steps may run at once (default: 4).
+  --cycle-var=NAME=VALUE    Override one of the cycle's variables. Repeatable.
+  --cycle-resume=RUN_ID     Continue this saved run in its workspace. Keep verified
+                            completed results and retry unfinished work. Refuse
+                            changed completed inputs or uncertain external calls.
+  --cycle-reuse=RUN_ID      Pin the source for --cycle-only/--cycle-from to this
+                            run instead of whichever run happened most recently.
+  --cycle-only=ID[,ID]      Run only these steps. Everything else is taken from
+                            the most recent run of this cycle - its outputs go
+                            into scope, so a step that reads another's result
+                            still finds one - rather than being run again. For
+                            working on one part of a cycle without paying for
+                            the rest of it.
+  --cycle-from=ID           The same, for this step and everything that waits
+                            on it: the plan was fine, redo it from here.
+  --control=-               Accept commands on stdin, which is what lets a cycle
+                            start and stop the services the GUI manages, and
+                            what makes {"command": "cycle.stop"} work.
+
+  Example:
+    --cycle-run=nightly --cycle-var=branch=main --events=- --cycle-jobs=4
+
 Recording:
   --recorder                Open ONE window with the Scenario Recorder shown in
                             it. Nothing is recorded until you ask: Capture Step
@@ -2754,6 +3377,21 @@ def main():
     describe_json = False # --describe: print the JSON inventory and exit
     flow_command = None   # ("show"|"save"|"delete"|"import", id or path); JSON, then exit
     flow_source = None    # --from=FILE: the JSON document --flow-save writes
+    cycle_command = None  # ("show"|"save"|"delete"|"import"|"list", id or path)
+    cycle_run = None      # --cycle-run=ID: a run mode, not a JSON command
+    cycle_only = []       # --cycle-only: run just these, reuse the rest
+    cycle_from = ""       # --cycle-from: run this one and everything after
+    cycle_resume = ""     # --cycle-resume: exact saved execution, not the latest
+    cycle_reuse = ""      # --cycle-reuse: exact source for a partial execution
+    plugin_action = None  # --cycle-plugin-action=PLUGIN:ACTION: JSON, then exit
+    cycle_vars = {}       # --cycle-var=NAME=VALUE, repeatable
+    cycle_jobs = None     # --cycle-jobs: steps at once (None = the engine default)
+    cycles_dir = None     # --cycles-dir: where cycles live (None = the default)
+    secret_command = None # --cycle-secret-list/set/delete: JSON, then exit
+    memory_command = None # --cycle-memory-list/show/forget: JSON, then exit
+    memory_file = None    # --cycle-memory-file: the store (None = the default)
+    session_command = None  # --cycle-sessions / --cycle-session-delete: JSON, then exit
+    secrets_file = None   # --cycle-secrets-file: the store (None = the default)
     users_filter = None   # None = launch every user in the config
     env_name = None       # --env=NAME; None = every environment
     recorder = None       # --recorder: record a scenario from a live window
@@ -2924,6 +3562,82 @@ def main():
         elif arg.startswith("--flow-import="):
             flow_command = ("import", os.path.abspath(os.path.expanduser(
                 arg.split("=", 1)[1].strip())))
+        # -- cycles. The same five shapes as the flow commands above, answering
+        # the same way, because a front-end editing one edits the other.
+        elif arg.startswith("--cycle-show="):
+            cycle_command = ("show", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-save="):
+            cycle_command = ("save", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-delete="):
+            cycle_command = ("delete", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-import="):
+            cycle_command = ("import", os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip())))
+        elif arg == "--cycle-list":
+            cycle_command = ("list", "")
+        # -- secret variables. The value of one never appears here: --set takes
+        # it from the --from file, because argv is world-readable through ps.
+        elif arg.startswith("--cycle-secret-list="):
+            secret_command = ("list", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-secret-set="):
+            secret_command = ("set", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-secret-copy="):
+            secret_command = ("copy", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-secret-delete="):
+            secret_command = ("delete", arg.split("=", 1)[1].strip())
+        # -- what the project remembers. A plain file, unlike the secrets one:
+        # these read and write it from a script, not protect it.
+        elif arg.startswith("--cycle-memory-list"):
+            secret_command = None
+            memory_command = ("list", arg.split("=", 1)[1].strip()
+                              if "=" in arg else "")
+        elif arg.startswith("--cycle-memory-show="):
+            memory_command = ("show", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-memory-forget="):
+            memory_command = ("forget", arg.split("=", 1)[1].strip())
+        elif arg == "--cycle-sessions" or arg.startswith("--cycle-sessions="):
+            session_command = ("list", arg.split("=", 1)[1].strip()
+                               if "=" in arg else "")
+        elif arg.startswith("--cycle-session-delete="):
+            session_command = ("delete", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-memory-file="):
+            memory_file = os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip()))
+        elif arg.startswith("--cycle-secrets-file="):
+            secrets_file = os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip()))
+        elif arg.startswith("--cycle-plugin-action="):
+            plugin_action = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-run="):
+            cycle_run = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-var="):
+            # Repeatable, and split on the FIRST equals, so a value may contain
+            # one: --cycle-var=url=https://host/?a=b is one variable, not a
+            # parse error.
+            pair = arg.split("=", 1)[1]
+            if "=" not in pair:
+                bad_option = "--cycle-var"
+            else:
+                name, value = pair.split("=", 1)
+                cycle_vars[name.strip()] = value
+        elif arg.startswith("--cycle-jobs="):
+            raw = arg.split("=", 1)[1].strip()
+            try:
+                cycle_jobs = max(1, int(raw))
+            except ValueError:
+                bad_option = "--cycle-jobs"
+        elif arg.startswith("--cycle-only="):
+            cycle_only = [one.strip() for one
+                          in arg.split("=", 1)[1].split(",") if one.strip()]
+        elif arg.startswith("--cycle-from="):
+            cycle_from = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-resume="):
+            cycle_resume = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-reuse="):
+            cycle_reuse = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycles-dir="):
+            cycles_dir = os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip()))
         elif arg == "--recorder" or arg.startswith("--recorder="):
             # Recording mode: open the windows as usual, but with a debug port
             # and the recorder shown in each of them. Nothing is recorded until
@@ -3062,7 +3776,7 @@ def main():
         # parsing error strings.
         try:
             payload = describe(config_path, log_sources_path=log_sources_path,
-                               flows_dir=flows_dir,
+                               flows_dir=flows_dir, cycles_dir=cycles_dir,
                                sessions_dir=sessions_dir, reports_dir=reports_dir)
         except Exception as exc:  # noqa: BLE001 - the report IS the error report
             json.dump({"error": "%s: %s" % (type(exc).__name__, exc)}, sys.stdout,
@@ -3074,6 +3788,37 @@ def main():
         sys.exit(0)
     if bad_option is not None:
         sys.exit(_bad_option_message(bad_option, config_path))
+    # After the option check, deliberately. A cycle command exits with JSON the
+    # way the flow commands do, but a cycle *run* is long and starts services,
+    # and neither should happen when the command line has a typo in it that
+    # might be the very flag that was meant to narrow what runs.
+    if plugin_action:
+        run_plugin_action(plugin_action, flow_source)
+    if secret_command:
+        run_secret_command(secret_command, flow_source, secrets_file)
+    if memory_command:
+        run_memory_command(memory_command, flow_source, memory_file)
+    if session_command:
+        run_session_command(session_command, memory_file, cycles_dir)
+    if cycle_command:
+        # --from= is shared with --flow-save: one flag, one meaning - the JSON
+        # document this write is being given.
+        run_cycle_command(cycle_command, flow_source, cycles_dir)
+    if cycle_run:
+        if run_tests or recorder:
+            sys.exit("--cycle-run cannot be combined with --run-tests or "
+                     "--recorder: a cycle runs scenarios through its own "
+                     "scenario.run step, and decides itself when to open a "
+                     "browser.")
+        # Before the launch loop, because a cycle opens no windows of its own.
+        sys.exit(run_cycle_mode(cycle_run, cycles_dir=cycles_dir,
+                                flows_dir=flows_dir, variables=cycle_vars,
+                                jobs=cycle_jobs, control=control_stdin,
+                                reports_dir=reports_dir,
+                                secrets_path=secrets_file,
+                                memory_path=memory_file,
+                                only=cycle_only, start_from=cycle_from,
+                                resume=cycle_resume, reuse_from=cycle_reuse))
     if session_prefix and (os.sep in session_prefix or (os.altsep and os.altsep in session_prefix)):
         sys.exit("--user-session must be a single name, no path separators.")
     if overlay_components and run_tests is None:

@@ -1,0 +1,38 @@
+id: demo_parallel
+name: Parallel demo
+description: Proves the engine runs independent branches at the same time. Two steps that sleep for two seconds each, both waiting on the same first step, finish about two seconds after it - not four. Nothing here touches a browser or a service, so it runs anywhere.
+project: Demo
+variables:
+  greeting: hello
+
+steps:
+  - id: start
+    plugin: command.shell
+    label: Say hello
+    with:
+      command: echo "${vars.greeting} from the first step"
+  - id: left
+    plugin: command.shell
+    label: Left branch
+    needs: [start]
+    with:
+      command: echo "left, working"; sleep 2; echo "left, done"
+  - id: right
+    plugin: command.shell
+    label: Right branch
+    needs: [start]
+    with:
+      command: echo "right, working"; sleep 2; echo "right, done"
+  - id: join
+    plugin: command.shell
+    label: Both are in
+    needs: [left, right]
+    with:
+      command: echo "both branches finished"
+  - id: report
+    plugin: report.html
+    label: Write it up
+    needs: [join]
+  - id: summary
+    plugin: report.json
+    needs: [join]

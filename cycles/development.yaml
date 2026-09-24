@@ -1,0 +1,536 @@
+id: development
+name: Development cycle
+description: >
+  One Jira task, from what it actually asks for to a verified local commit:
+  read it, work out whether it is already done, plan it, have the plan reviewed
+  against the business rules, get a person's agreement, move the issue, make the
+  change and prove it, review the result independently, accept it against the
+  criteria, and commit the tree that passed - refusing to commit anything else.
+
+  It stops once to ask you, between the plan and the first line of code. That is
+  the cheapest moment a person can be asked: the plan is in front of them, the
+  issue has not moved, and nothing has been written. So run this from the
+  application - from a terminal it fails honestly at the gate, having changed
+  nothing.
+
+  One task per run. Run it again for the next one; it remembers what it
+  finished and will not pick the same task up twice.
+
+  This is a template: it needs your Jira and a checkout. Fill in the variables,
+  put the API token in Settings -> Cycle secrets, and it runs. The agent steps
+  need no API key - they use the Claude Code CLI's own browser sign-in.
+
+  It commits **locally**. No push, no branch, no merge, no move to Done:
+  anything that tells other people the work is finished is a step this cycle
+  deliberately does not have.
+project: Demo
+
+variables:
+  # -- Jira -------------------------------------------------------------------
+  jira_site: https://yourcompany.atlassian.net
+  jira_email: you@yourcompany.example
+  jira_user: currentUser()
+  jira_projects: ""
+  jira_token: {secret: true}
+
+  # Which task this run takes. The order decides the queue: oldest-updated
+  # first means a task that keeps being passed over eventually comes up, which
+  # "newest first" never does.
+  jira_open: statusCategory != Done
+  jira_order: updated ASC
+
+  # The move out of To Do, as YOUR workflow spells it - it is named after the
+  # action, not the status, and every instance names it differently.
+  jira_start: Start Progress
+  jira_in_progress: In Progress
+
+  # -- the work ---------------------------------------------------------------
+  # The checkout to change. Absolute, because this is your repository rather
+  # than something the run clones - and because what this cycle produces is a
+  # commit in it.
+  project_dir: {kind: path, value: /path/to/your/checkout}
+
+  # The branch work is based on, and the remote it comes from. Declared in both
+  # development cycles under the same names, so a checkout is configured once
+  # and the two agree about it. This cycle commits on whatever branch is
+  # already checked out and reads neither of them today; the In Progress
+  # variant prepares the task branch from them.
+  git_base: main
+  git_remote: origin
+
+  # What has to pass before anything is committed. One command per line, run in
+  # the directory above. These are the definition of done: a cycle with a check
+  # that proves nothing commits work that proves nothing.
+  checks: |
+    python3 -m pytest -q
+
+  # Everything the work has to obey beyond the ticket - the product rules, the
+  # conventions, the things a newcomer gets wrong. A path, a URL, or simply the
+  # rules written out. The business review reads this and nothing else, so a
+  # rule that is not here is a rule the review cannot check.
+  business_rules: |
+    Keep to what the task asks for. Do not widen the change.
+    Do not weaken or delete an existing test to make a new one pass.
+
+  # How many runs may take this task before it is left alone. Counted in the
+  # memory store, so restarting the application does not give it a fresh three.
+  # Deliberately not called max_attempts: the implement step has a setting of
+  # that name for its own inner loop, and two different things under one name
+  # in one file is how somebody changes the wrong one.
+  max_runs_per_task: 3
+  # One task to work on, instead of the next one in the queue. Empty takes the
+  # queue; "Run again" on the Subjects list fills it in for one run.
+  task_key: ""
+
+
+# What this cycle works on: one Jira task per run. The Subjects list on the
+# Cycles page groups runs by it, and "Run again" pins it through task_key.
+subject:
+  kind: task
+  key: ${steps.todo.outputs.key}
+  title: ${steps.todo.outputs.title}
+  memory: dev/${steps.todo.outputs.key}
+  pin: task_key
+
+steps:
+  # -- what are we working on -------------------------------------------------
+  - id: todo
+    plugin: jira.issues
+    label: Take one task
+    timeout: 120
+    with:
+      site: "${vars.jira_site}"
+      flavour: cloud
+      email: "${vars.jira_email}"
+      token: "${vars.jira_token}"
+      user: "${vars.jira_user}"
+      # Set: exactly that task. Empty: the queue below.
+      issue: "${vars.task_key}"
+      project: "${vars.jira_projects}"
+      role: assignee
+      # Open, not To Do: a task this cycle already moved to In Progress and did
+      # not finish has to come back to it, and Jira is the authority on which
+      # of them are still open. That is the whole of "resume unfinished work".
+      jql: "${vars.jira_open}"
+      order: "${vars.jira_order}"
+      limit: 1
+      comments: true
+      comment_limit: 20
+
+  - id: history
+    plugin: memory.recall
+    label: What earlier runs know
+    needs: [todo]
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      # One named field rather than the whole record: `field` gives an output
+      # that is always there and empty when unknown, and reaching into
+      # `fields.state` would fail the step on the first run of a task.
+      field: state
+
+  - id: claim
+    plugin: memory.claim
+    label: Take it for this run
+    needs: [history]
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      seconds: 7200
+    # Deliberately left to stop the run: a run that does not own this task must
+    # not write anything into its record, and every step below writes. A second
+    # run of the same task ends here, saying who has it.
+
+  - id: spent
+    plugin: memory.recall
+    label: How much of the budget is gone
+    needs: [claim]
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      # Read rather than moved, because this is the count the gate judges and
+      # a gate that judged a number it had just incremented would charge the
+      # task for being asked. `default` is what makes it readable at all: on a
+      # task nobody has touched the field does not exist yet, and '' compares
+      # as "not numbers" - a broken gate rather than an unspent budget.
+      field: attempts
+      default: "0"
+
+  - id: admit
+    plugin: check.gate
+    label: Is this ours to do
+    needs: [todo, history, spent]
+    on_failure: continue
+    with:
+      checks:
+        there is a task: "${steps.todo.outputs.count} > 0"
+        not already committed: "${steps.history.outputs.value} != committed"
+        # Strictly less, on the count *before* this run: three spent attempts
+        # is a budget of three used up. The same three runs as counting after
+        # the increment, without a refused run being one of them.
+        within its budget: "${steps.spent.outputs.value} < ${vars.max_runs_per_task}"
+
+  - id: budget
+    plugin: memory.remember
+    label: Count this attempt
+    needs: [admit]
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      # Moved by the store under its own lock, and before the work rather than
+      # after: a run that dies mid-way has still spent an attempt, and a
+      # counter written at the end would give a crashing task infinite tries.
+      # After the gate rather than before it, because a run the gate refused
+      # did no work to charge for - and a budget spent by the runs that were
+      # turned away is a task nobody can ever get back to.
+      bump: attempts
+
+  # -- is it already done -----------------------------------------------------
+  - id: reconcile
+    plugin: agent.review
+    label: Is it already done
+    # The counter, not the gate: the attempt is charged before any work of this
+    # run begins, which is what stops a run that dies here from being free.
+    needs: [budget]
+    timeout: 600
+    on_failure: continue
+    with:
+      framework: claude_cli
+      # Reading, not designing: the bigger model is spent on the plan and on
+      # the two steps that judge what was written.
+      model: sonnet
+      effort: high
+      repository: "${vars.project_dir}"
+      max_iterations: 20
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+      task: >-
+        Above is one Jira task with its comments. Read the repository and work
+        out, from the code as it is committed now, which of the things this task
+        asks for are already true and which are not.
+
+        Answer in the required shape, used like this: issues is one entry per
+        thing the task asks for that is NOT yet true, its severity being how
+        much work it is. An empty issues list therefore means the task is
+        already done - so return one only when you have found the behaviour in
+        the committed code and can say where it is.
+
+        A similar commit message, a change on another branch, or a function
+        whose name matches is not evidence. summary says what you found and
+        where. Do not change anything and do not run anything.
+
+  - id: work_remains
+    plugin: check.gate
+    label: Is there work left
+    needs: [reconcile]
+    on_failure: continue
+    with:
+      checks:
+        something is not done yet: "${steps.reconcile.outputs.issue_count} > 0"
+
+  # -- what are we going to do ------------------------------------------------
+  - id: plan
+    plugin: agent.review
+    label: Work out the change
+    needs: [work_remains]
+    timeout: 900
+    on_failure: continue
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: "${vars.project_dir}"
+      max_iterations: 25
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+        not_done_yet: "${steps.reconcile.outputs.issues}"
+      task: >-
+        Above is one Jira task and the list of what it asks for that is not yet
+        true. Write the plan for making it true.
+
+        Answer in the required shape, used like this: summary is the change to
+        make, in enough detail that somebody could start on it without the
+        ticket. issues is one entry per package of work, its severity being how
+        risky that package is - keep them in the order they should be done and
+        say what each one depends on. recommendations is where in the code each
+        package goes, with file and line where you found it. risk is the risk of
+        the whole thing.
+
+        Keep it to what the task asks for. Say plainly in the summary when the
+        task is too vague to act on, and what you would have to ask.
+
+  - id: business
+    plugin: agent.review
+    label: Review the plan
+    needs: [plan]
+    timeout: 600
+    on_failure: continue
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: "${vars.project_dir}"
+      max_iterations: 15
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+        the_plan: "${steps.plan.outputs.summary}"
+        packages: "${steps.plan.outputs.issues}"
+        rules: "${vars.business_rules}"
+      task: >-
+        You did not write this plan. Review it against the task above and the
+        rules given - and against nothing else: a rule that is not written down
+        is not a rule you may apply.
+
+        Answer in the required shape, used like this: issues is one entry per
+        thing wrong with the plan - a rule it breaks, a criterion it does not
+        cover, scope it adds that nobody asked for - with high or medium
+        severity for anything that must be fixed before work starts. An empty
+        issues list means the plan may proceed.
+
+        Judge the plan, not the code. Do not change anything.
+
+  - id: plan_is_sound
+    plugin: check.gate
+    label: Did the review pass it
+    needs: [business]
+    on_failure: continue
+    with:
+      checks:
+        nothing blocking in the plan: "${steps.business.outputs.blocking_count} == 0"
+
+  # -- does a person agree ----------------------------------------------------
+  # The one decision here that is not the machine's, and the last moment before
+  # anything outside this run changes. Rejecting it ends the run with the issue
+  # where it was and the repository untouched.
+  - id: approve
+    plugin: approval.gate
+    label: Agree to the plan
+    needs: [plan_is_sound]
+    timeout: 1800
+    on_failure: continue
+    with:
+      question: "Start work on ${steps.todo.outputs.key}?"
+      detail: |
+        ${steps.plan.outputs.summary}
+
+        Packages:
+        ${steps.plan.outputs.issues}
+
+        Where it lands:
+        ${steps.plan.outputs.recommendations}
+
+        Risk: ${steps.plan.outputs.risk}
+        Review found: ${steps.business.outputs.issue_count} note(s)
+      options: [Start work, Leave it]
+
+  - id: preflight
+    plugin: check.gate
+    label: Still true just before writing
+    needs: [approve, claim, todo, plan_is_sound]
+    on_failure: continue
+    with:
+      # The last look before anything outside this run changes. Each of these
+      # was true earlier; this asks whether it still is.
+      checks:
+        a person agreed: "${steps.approve.outputs.approved} == true"
+        the plan passed review: "${steps.plan_is_sound.outputs.passed} == true"
+        the task is still ours: "${steps.claim.outputs.claimed} == true"
+        we know which task: "${steps.todo.outputs.key} != ''"
+
+  # -- do it ------------------------------------------------------------------
+  # Needs the transition, not just the approval: nothing writes code until the
+  # board says somebody is on it.
+  - id: start
+    plugin: jira.transition
+    label: Move it to In Progress
+    needs: [preflight]
+    timeout: 120
+    on_failure: continue
+    with:
+      site: "${vars.jira_site}"
+      flavour: cloud
+      email: "${vars.jira_email}"
+      token: "${vars.jira_token}"
+      issue: "${steps.todo.outputs.key}"
+      to: "${vars.jira_start}"
+      # Where it should end up, which is also how a re-run recognises work
+      # already done: a workflow stops offering a move once it has been made.
+      lands_in: "${vars.jira_in_progress}"
+      comment: Picked up by QAVector.
+
+  - id: implement
+    plugin: agent.implement
+    label: Make the change and prove it
+    needs: [start]
+    timeout: 5400
+    on_failure: continue
+    with:
+      model: sonnet
+      directory: "${vars.project_dir}"
+      checks: "${vars.checks}"
+      max_attempts: 3
+      review: true
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+        plan: "${steps.plan.outputs.summary}"
+        packages: "${steps.plan.outputs.issues}"
+        rules: "${vars.business_rules}"
+      acceptance: "${steps.plan.outputs.summary}"
+      task: >-
+        Make the change described in the plan above, package by package, in the
+        order the plan gives them. Keep it to what the plan asks for: this runs
+        unattended, every edit is applied, and anything you change beyond the
+        plan is something nobody agreed to.
+
+  # -- prove it ---------------------------------------------------------------
+  # Both read the same tree and run at the same time. Neither knows what the
+  # other concluded, which is the point of having two.
+  - id: integration
+    plugin: command.shell
+    label: Check the whole change
+    needs: [implement]
+    timeout: 1800
+    on_failure: continue
+    with:
+      dir: "${vars.project_dir}"
+      command: "${vars.checks}"
+
+  - id: review
+    plugin: agent.review
+    label: Review the code
+    needs: [implement]
+    timeout: 900
+    on_failure: continue
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: "${vars.project_dir}"
+      max_iterations: 20
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+        plan: "${steps.plan.outputs.summary}"
+        changed: "${steps.implement.outputs.files_changed}"
+        rules: "${vars.business_rules}"
+      task: >-
+        You did not write this code. Read `git diff` in the repository and
+        judge what was actually changed against the task and the plan above.
+
+        Answer in the required shape, used like this: issues is one entry per
+        defect, with high or medium severity for anything that must be fixed
+        before this is committed. Look for: behaviour the plan asked for that is
+        not there, changes nobody asked for, a test that was weakened or removed
+        to make something pass, and code that duplicates something the
+        repository already has.
+
+        Do not change anything. If the change is sound, return an empty issues
+        list.
+
+  - id: accept
+    plugin: agent.review
+    label: Accept it against the task
+    needs: [integration, review]
+    timeout: 600
+    on_failure: continue
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: "${vars.project_dir}"
+      max_iterations: 15
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+        checks_said: "${steps.integration.outputs.stdout_tail}"
+        review_found: "${steps.review.outputs.issues}"
+        rules: "${vars.business_rules}"
+      task: >-
+        Decide whether the task above is now done. Go criterion by criterion:
+        for each thing the task asks for, point at the behaviour in the code and
+        the evidence that it works.
+
+        Answer in the required shape, used like this: issues is one entry per
+        criterion that is not met, or is met without evidence. Your own reading
+        is not evidence that something works - the checks are. An empty issues
+        list means every criterion is met and shown to be.
+
+  - id: final
+    plugin: check.gate
+    label: Is it fit to commit
+    needs: [implement, integration, review, accept]
+    on_failure: continue
+    with:
+      # The gate INV-04 and INV-05 are about: verified and commit-ready are tied
+      # to artefacts, not to an agent saying so, and the thing committed is the
+      # thing that passed.
+      checks:
+        the work proved itself: "${steps.implement.outputs.verified} == true"
+        the checks passed: "${steps.integration.outputs.exit_code} == 0"
+        the review is clean: "${steps.review.outputs.blocking_count} == 0"
+        every criterion is met: "${steps.accept.outputs.blocking_count} == 0"
+        there is a verified tree: "${steps.implement.outputs.tree} != ''"
+
+  - id: commit
+    plugin: git.commit
+    label: Commit the verified tree
+    needs: [final]
+    on_failure: continue
+    with:
+      directory: "${vars.project_dir}"
+      # The hash the work had when the checks agreed. The step refuses if the
+      # files changed since - so what was verified and what was committed are
+      # the same object rather than two descriptions that usually agree.
+      expect_tree: "${steps.implement.outputs.tree}"
+      author_name: QAVector
+      author_email: cycle@example.invalid
+      message: |
+        ${steps.todo.outputs.key}: ${steps.plan.outputs.summary}
+
+  # -- write down what happened -----------------------------------------------
+  - id: record
+    plugin: memory.remember
+    label: Remember the commit
+    needs: [commit]
+    on_failure: continue
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      fields:
+        state: committed
+        commit: "${steps.commit.outputs.commit}"
+        tree: "${steps.commit.outputs.tree}"
+        branch: "${steps.commit.outputs.branch}"
+
+  - id: record_reuse
+    plugin: memory.remember
+    label: Remember it was already done
+    needs: [work_remains, reconcile]
+    # Its own condition, so it runs precisely because the gate above refused.
+    # A step with an `if:` is not skipped along with a dependency that failed -
+    # that rule is what makes the other branch reachable at all.
+    if: "${steps.work_remains.outputs.passed} == 'false'"
+    on_failure: continue
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      fields:
+        state: committed
+        found: "${steps.reconcile.outputs.summary}"
+
+  - id: note
+    plugin: memory.remember
+    label: Where this run got to
+    needs: [commit, implement, approve, admit]
+    # Always. A run that stopped early is the one worth reading, and the next
+    # run starts from what this one wrote down.
+    if: "${run.id}"
+    on_failure: continue
+    with:
+      key: "dev/${steps.todo.outputs.key}"
+      fields:
+        # Only what exists whatever happened: a skipped step has a status but
+        # no outputs, and reaching into one would fail this step precisely on
+        # the runs it is here to record.
+        last_run: "${run.id}"
+        last_commit_step: "${steps.commit.status}"
+        last_implement_step: "${steps.implement.status}"
+        last_approval_step: "${steps.approve.status}"
+        last_message: "${steps.admit.message}"
+
+  - id: report
+    plugin: report.html
+    label: Save the report
+    needs: [note, record, record_reuse]
+    if: "${run.id}"
+    on_failure: continue
+    with:
+      title: Development cycle

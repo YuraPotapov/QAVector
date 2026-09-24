@@ -44,6 +44,7 @@ hiddenimports = (
     collect_submodules("engine")
     + collect_submodules("adapters")
     + collect_submodules("domain")
+    + collect_submodules("cycle")
     + ["yaml", "playwright", "playwright.sync_api",
        "cryptography.hazmat.primitives.ciphers",
        "cryptography.hazmat.primitives.serialization",
@@ -52,6 +53,9 @@ hiddenimports = (
 
 datas = [
     (os.path.join(ROOT, "flows"), "flows"),
+    (os.path.join(ROOT, "cycles"), "cycles"),
+    # Executed by the user's framework environment, not the frozen core.
+    (os.path.join(ROOT, "cycle", "plugins", "agent_worker.py"), "cycle/plugins"),
     (os.path.join(ROOT, "extensions"), "extensions"),
     (os.path.join(ROOT, "engine", "hud.js"), "engine"),
     (os.path.join(ROOT, "engine", "recorder.js"), "engine"),
@@ -78,7 +82,9 @@ analysis = Analysis(
     hookspath=[],
     runtime_hooks=[],
     # The core has no user interface and never will: it talks JSONL on stdout.
-    excludes=["PySide6", "shiboken6", "tkinter", "pytest", "IPython", "matplotlib"],
+    excludes=["PySide6", "shiboken6", "tkinter", "pytest", "IPython", "matplotlib",
+              # These imports belong to agent_worker.py in the external venv.
+              "crewai", "autogen_agentchat", "autogen_core", "autogen_ext", "pydantic"],
     noarchive=False,
 )
 

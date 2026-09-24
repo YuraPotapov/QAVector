@@ -1,0 +1,4 @@
+# Optional: install in the interpreter configured on agent.review, Python 3.11/3.12.
+autogen-agentchat>=0.7.5,<0.8
+autogen-ext[ollama]>=0.7.5,<0.8
+# Install other autogen-ext provider extras in that environment as needed.

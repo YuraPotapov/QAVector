@@ -1,0 +1,35 @@
+id: hello_print_review
+name: Hello print - agent review
+description: An agent review that needs no API key and no setting up. The claude_cli backend uses the Claude Code CLI's own browser sign-in, so run `claude auth login` once if you have not already, then start this. It writes its own small subject into the run, so it works anywhere - point project_dir at a real checkout to review that instead.
+project: Demo
+variables:
+  project_dir: source/hello_print
+
+steps:
+  - id: prepare
+    plugin: command.shell
+    label: Write the project to review
+    with:
+      command: "cat > main.py <<'PYTHON'\nimport sys\n\ndef greet(name=\"QAVector\", stream=None):\n    message = \"Hello, %s!\" % name\n    (stream or sys.stdout).write(message + \"\\n\")\n    return message\n\nif __name__ == \"__main__\":\n    greet()\nPYTHON\ncat > README.md <<'TEXT'\n# hello_print\n\nPrints `Hello, QAVector!` and exits.\nTEXT\necho \"wrote $(ls | tr '\\n' ' ')\"\n"
+      dir: ${vars.project_dir}
+  - id: review
+    plugin: agent.review
+    label: Review the print project
+    needs: [prepare]
+    with:
+      framework: claude_cli
+      inputs:
+        expected_stdout: "Hello, QAVector!\n"
+        runtime: Python 3
+        third_party_dependencies: none
+      max_iterations: 4
+      model: sonnet
+      repository: ${vars.project_dir}
+      task: Review this minimal Python project. Read main.py and README.md. The only requirement is to print exactly "Hello, QAVector!" followed by a newline and exit. Check correctness and unnecessary complexity. Report only actual issues, with file and line references. If there are no issues, return an empty issues list; do not invent problems or recommend architecture that this one-line example does not need. Do not execute the program, commands or tests. Write the summary and recommendations in Ukrainian.
+    timeout: 300
+  - id: report
+    plugin: report.html
+    label: Save the review report
+    needs: [review]
+    with:
+      title: Hello print - agent review

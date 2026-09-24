@@ -140,10 +140,41 @@ def test_a_checkout_has_one_flows_tree():
     assert rp.flows_search_path() == [rp.bundled_flows_dir()]
 
 
+def test_cycles_are_laid_out_the_same_way_flows_are(frozen):
+    # The same two-tree arrangement for the same reason, so a cycle the user
+    # edited shadows a bundled one and an upgrade cannot overwrite theirs.
+    bundle, home = frozen
+    assert rp.cycles_search_path() == [
+        os.path.join(str(home), rp.USER_DIR_NAME, "cycles"),
+        os.path.join(str(bundle), "cycles"),
+    ]
+    assert rp.cycles_dir() == rp.user_cycles_dir()
+
+
+def test_a_checkout_has_one_cycles_tree():
+    assert rp.cycles_search_path() == [rp.bundled_cycles_dir()]
+
+
+def test_cycle_runs_sit_beside_reports_not_inside_them(frozen):
+    # A report directory is what one scenario left behind; a cycle run is the
+    # whole of an execution. Mixing them would make both harder to clean up.
+    bundle, home = frozen
+    assert rp.cycle_runs_dir() == os.path.join(str(home), rp.USER_DIR_NAME,
+                                               "cycle-runs")
+    assert rp.cycle_runs_dir() != rp.reports_dir()
+
+
 def test_first_run_creates_somewhere_to_put_scenarios(frozen):
     bundle, home = frozen
     root = rp.ensure_user_data_root()
     assert os.path.isdir(os.path.join(root, "flows", "scenarios"))
+
+
+def test_first_run_creates_somewhere_to_put_cycles_and_their_runs(frozen):
+    bundle, home = frozen
+    root = rp.ensure_user_data_root()
+    assert os.path.isdir(os.path.join(root, "cycles"))
+    assert os.path.isdir(os.path.join(root, "cycle-runs"))
 
 
 def test_cms_home_overrides_everything(frozen, tmp_path):

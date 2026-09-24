@@ -1,0 +1,175 @@
+id: task_to_commit
+name: Task to a verified commit
+description: >
+  Reads what is in To Do for one person, turns one task into a plan, makes the
+  change, proves it with the project's own checks, and commits the tree that
+  passed - refusing to commit anything else.
+
+  Unlike the demo cycles this is a template: it needs your Jira and a checkout
+  to work in. Fill in the variables below, put the API token in
+  Settings -> Cycle secrets, and it runs. The agent steps need no API key -
+  they use the Claude Code CLI's own browser sign-in.
+
+  It moves the issue to In Progress and commits **locally**. No push, no
+  branch, no merge, and no move to Done: anything that tells other people the
+  work is finished is a step this cycle deliberately does not have.
+project: Demo
+
+variables:
+  # -- Jira -------------------------------------------------------------------
+  jira_site: https://yourcompany.atlassian.net
+  jira_email: you@yourcompany.example
+  jira_user: currentUser()
+  jira_projects: ""
+  jira_token: {secret: true}
+
+  # The move out of To Do, as YOUR workflow spells it - it is named after the
+  # action, not the status, and every instance names it differently. Leave both
+  # empty and the cycle does not touch Jira at all.
+  jira_start: Start Progress
+  jira_in_progress: In Progress
+
+  # -- the work ---------------------------------------------------------------
+  # The checkout to change. Absolute, because this is your repository rather
+  # than something the run clones - and because what this cycle produces is a
+  # commit in it.
+  project_dir: {kind: path, value: /path/to/your/checkout}
+
+  # What has to pass before anything is committed. One command per line, run in
+  # the directory above. These are the definition of done: a cycle with a check
+  # that proves nothing commits work that proves nothing.
+  checks: |
+    python3 -m pytest -q
+
+steps:
+  - id: todo
+    plugin: jira.issues
+    label: Read what is in To Do
+    timeout: 120
+    with:
+      site: "${vars.jira_site}"
+      flavour: cloud
+      email: "${vars.jira_email}"
+      token: "${vars.jira_token}"
+      user: "${vars.jira_user}"
+      project: "${vars.jira_projects}"
+      role: any
+      jql: statusCategory = "To Do"
+      # One task per run. The engine runs a fixed graph, so "a step per task"
+      # is not a thing a cycle file can say - run it again for the next one.
+      limit: 1
+      comments: true
+      comment_limit: 20
+
+  - id: plan
+    plugin: agent.review
+    label: Work out what it is asking for
+    needs: [todo]
+    timeout: 600
+    # Nothing in To Do is a perfectly good answer, and an agent call to be told
+    # so costs money for no one's benefit.
+    if: "${steps.todo.outputs.count}"
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: "${vars.project_dir}"
+      max_iterations: 20
+      inputs:
+        tasks: "${steps.todo.outputs.issues}"
+      task: >-
+        Above is one Jira task with the comments on it, and you can read the
+        repository it concerns. Work out what it actually asks for - the
+        comments often change or narrow what the summary says - and where in
+        the code it lands. Do not change anything and do not run anything.
+
+        Answer in the required shape, used like this: summary is the change to
+        make, in enough detail that somebody could start on it without the
+        ticket. issues is one entry per thing that has to be true when it is
+        done, its severity being how risky that piece is. recommendations is
+        where in the code each piece goes, with file and line where you found
+        it. risk is the risk of the whole thing.
+
+        Say plainly in the summary when the task is too vague to act on, and
+        what you would have to ask.
+
+  - id: start
+    plugin: jira.transition
+    label: Move it to In Progress
+    needs: [plan]
+    timeout: 120
+    with:
+      site: "${vars.jira_site}"
+      flavour: cloud
+      email: "${vars.jira_email}"
+      token: "${vars.jira_token}"
+      issue: "${steps.todo.outputs.key}"
+      to: "${vars.jira_start}"
+      # Where it should end up, which is also how a re-run recognises work
+      # already done: a workflow stops offering a move once it has been made.
+      lands_in: "${vars.jira_in_progress}"
+      comment: Picked up by QAVector.
+
+  # Needs the transition, not just the plan: nothing writes code until the
+  # board says somebody is on it. There is deliberately no `if:` making that
+  # optional - a condition here would also let a *failed* transition through,
+  # because the grammar cannot say "succeeded or skipped, but not failed". A
+  # cycle that should not touch Jira deletes this step rather than clearing a
+  # flag.
+  - id: impl
+    plugin: agent.implement
+    label: Make the change and prove it
+    needs: [start]
+    timeout: 3600
+    with:
+      model: sonnet
+      directory: "${vars.project_dir}"
+      checks: "${vars.checks}"
+      max_attempts: 3
+      review: true
+      # The plan's own conclusions, handed over as they came out of it. This is
+      # why the two are separate steps: what one worked out is an input to the
+      # other rather than something written twice.
+      inputs:
+        task: "${steps.todo.outputs.issues}"
+        plan: "${steps.plan.outputs.summary}"
+      acceptance: "${steps.plan.outputs.summary}"
+      task: >-
+        Make the change described in the plan above. Keep it to what the plan
+        asks for: this runs unattended, every edit is applied, and anything you
+        change beyond the task is something nobody asked you to change.
+
+  # diff and commit both need only the work, so they run at the same time.
+  - id: diff
+    plugin: command.shell
+    label: Show what changed
+    needs: [impl]
+    # Its own condition, so it survives a step that could not finish: a run
+    # that gave up is exactly when you most want to see what it did manage.
+    if: "${steps.impl.outputs.changed}"
+    with:
+      dir: "${vars.project_dir}"
+      command: git --no-pager diff --stat && git --no-pager diff
+
+  - id: commit
+    plugin: git.commit
+    label: Commit the verified tree
+    needs: [impl]
+    with:
+      directory: "${vars.project_dir}"
+      # The hash the work had when the checks agreed. The step refuses if the
+      # files changed since - so what was verified and what was committed are
+      # the same object rather than two descriptions that usually agree.
+      expect_tree: "${steps.impl.outputs.tree}"
+      author_name: QAVector
+      author_email: cycle@example.invalid
+      message: "${steps.plan.outputs.summary}"
+
+  - id: report
+    plugin: report.html
+    label: Save the report
+    needs: [diff, commit]
+    # Written either way. A run that refused to commit is the one worth
+    # reading.
+    if: "${run.id}"
+    with:
+      title: Task to a verified commit

@@ -207,6 +207,21 @@ or by one of its criteria. Those services belong to the GUI, so a scenario using
 them is run from the Scenarios page rather than from a terminal; the *Services*
 section of [docs/flows.md](docs/flows.md) has the six actions.
 
+### Cycles
+
+A **cycle** arranges all of that into one graph: start a service, wait for it,
+run scenarios, run a command, write a report. Steps that do not depend on each
+other run at the same time, so two suites against one server take as long as the
+slower of them.
+
+```bash
+python3 session_launcher.py --cycle-run=nightly --events=-
+```
+
+The GUI's **Cycles** page draws the whole cycle - every step and every connection
+- and the same drawing is the run view: the nodes take on their status as it
+goes. Writing one: **[docs/cycles.md](docs/cycles.md)**.
+
 ## Running the tests
 
 ```bash

@@ -1846,3 +1846,483 @@ def test_describe_says_which_scenarios_can_run_without_a_browser(monkeypatch, co
     by_id = {s["id"]: s for s in payload["scenarios"]}
     assert by_id["demo_simple"]["browser_actions"] == []
     assert "assert_exists" in by_id["demo_smoke"]["browser_actions"]
+
+
+# --------------------------------------------------------------------- cycles
+# The CLI half. What the cycle engine itself does is covered by tests/test_cycle_*.py;
+# these check that the flags reach it, that the answers are JSON whichever way they
+# go, and that the exit codes mean what a caller reads them as.
+
+@pytest.fixture
+def cycle_tree(tmp_path):
+    """A cycles directory with one good cycle and one that does not parse."""
+    root = tmp_path / "cycles"
+    root.mkdir()
+    (root / "demo.yaml").write_text(
+        "id: demo\n"
+        "name: Demo cycle\n"
+        "variables:\n"
+        "  greeting: hello\n"
+        "steps:\n"
+        "  - id: first\n"
+        "    plugin: command.shell\n"
+        "    with:\n"
+        "      command: echo ${vars.greeting}\n"
+        "  - id: second\n"
+        "    plugin: command.shell\n"
+        "    needs: [first]\n"
+        "    with:\n"
+        "      command: echo done\n",
+        encoding="utf-8")
+    (root / "broken.yaml").write_text("steps: not-a-list\n", encoding="utf-8")
+    return str(root)
+
+
+def _cycle_cmd(monkeypatch, capsys, *args):
+    """Run main() with the given flags; returns (exit_code, parsed JSON)."""
+    monkeypatch.setattr("sys.argv", ["session_launcher.py"] + list(args))
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+    return exc.value.code, json.loads(capsys.readouterr().out)
+
+
+def test_cycle_list_answers_with_every_cycle(monkeypatch, capsys, cycle_tree):
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-list",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 0
+    by_id = {row["id"]: row for row in payload["cycles"]}
+    assert by_id["demo"]["name"] == "Demo cycle"
+    assert by_id["demo"]["steps"] == 2
+    assert by_id["demo"]["problems"] == []
+
+
+def test_cycle_list_still_lists_the_others_when_one_is_broken(monkeypatch, capsys,
+                                                              cycle_tree):
+    """One bad file must not be the reason nothing can be listed."""
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-list",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 0
+    by_id = {row["id"]: row for row in payload["cycles"]}
+    assert set(by_id) == {"demo", "broken"}
+    assert by_id["broken"]["problems"]
+
+
+def test_cycle_show_carries_the_graph_the_canvas_draws(monkeypatch, capsys,
+                                                       cycle_tree):
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-show=demo",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 0
+    assert payload["writable"] is True and payload["source"] == "user"
+    assert [node["id"] for node in payload["cycle"]["nodes"]] == ["first", "second"]
+    assert payload["cycle"]["edges"] == [{"from": "first", "to": "second",
+                                          "kind": "dependency"}]
+    # The file as written, so a YAML view shows what is on disk.
+    assert "id: demo" in payload["yaml"]
+
+
+def test_cycle_show_reports_a_missing_cycle_as_json(monkeypatch, capsys, cycle_tree):
+    """Never a bare traceback: the caller parses this."""
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-show=no_such",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 2 and payload["ok"] is False
+    assert "no cycle" in payload["problems"][0]
+
+
+def test_cycle_show_opens_a_broken_cycle_and_reports_why(monkeypatch, capsys,
+                                                         cycle_tree):
+    """It is exactly the one somebody needs to open and fix."""
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-show=broken",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 0
+    assert payload["problems"]
+    assert payload["yaml"] == "steps: not-a-list\n"
+
+
+def test_cycle_save_writes_a_cycle_from_a_document(monkeypatch, capsys, cycle_tree,
+                                                   tmp_path):
+    document = tmp_path / "doc.json"
+    document.write_text(json.dumps({
+        "name": "Written by a form",
+        "steps": [{"id": "only", "plugin": "command.shell",
+                   "with": {"command": "echo hi"}}]}), encoding="utf-8")
+
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-save=fresh",
+                               "--from=" + str(document),
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 0 and payload["ok"] is True
+    written = open(payload["path"], encoding="utf-8").read()
+    assert "id: fresh" in written and "plugin: command.shell" in written
+
+
+def test_cycle_save_writes_nothing_when_it_would_not_hold(monkeypatch, capsys,
+                                                          cycle_tree, tmp_path):
+    """A cycle that cannot run is worse than no cycle: it fails when it is started."""
+    document = tmp_path / "doc.json"
+    document.write_text(json.dumps({
+        "steps": [{"id": "a", "plugin": "command.shell", "needs": ["ghost"]}]}),
+        encoding="utf-8")
+
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-save=never",
+                               "--from=" + str(document),
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 1 and payload["ok"] is False
+    assert not os.path.exists(os.path.join(cycle_tree, "never.yaml"))
+
+
+def test_cycle_save_without_a_document_says_what_it_needs(monkeypatch, capsys,
+                                                          cycle_tree):
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-save=x",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 1
+    assert "--from=" in payload["problems"][0]
+
+
+def test_cycle_delete_removes_one(monkeypatch, capsys, cycle_tree):
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-delete=demo",
+                               "--cycles-dir=" + cycle_tree)
+    assert code == 0 and payload["ok"] is True
+    assert not os.path.exists(os.path.join(cycle_tree, "demo.yaml"))
+
+
+def test_describe_publishes_the_cycles_and_the_plugins(monkeypatch, config, capsys,
+                                                       cycle_tree):
+    """So a front-end builds its editor from what this core has, not its own copy."""
+    payload, code = _describe(monkeypatch, config, "--cycles-dir=" + cycle_tree,
+                              capsys=capsys)
+    assert code == 0
+    assert "demo" in {row["id"] for row in payload["cycles"]}
+
+    by_id = {entry["id"]: entry for entry in payload["cycle_plugins"]}
+    assert "command.shell" in by_id
+    assert "report.html" in by_id
+    shell = by_id["command.shell"]
+    assert "command" in {spec["key"] for spec in shell["inputs"]}
+    assert "exit_code" in {one["key"] for one in shell["outputs"]}
+
+
+# ----------------------------------------------------------- secret variables
+@pytest.fixture
+def secret_cycle(tmp_path):
+    """A cycles directory whose one cycle declares a secret and prints it."""
+    root = tmp_path / "secret-cycles"
+    root.mkdir()
+    (root / "keeper.yaml").write_text(
+        "id: keeper\n"
+        "variables:\n"
+        "  token: {secret: true}\n"
+        "steps:\n"
+        "  - id: show\n"
+        "    plugin: command.shell\n"
+        "    with:\n"
+        "      command: echo ${vars.token}\n",
+        encoding="utf-8")
+    return str(root)
+
+
+def _value_file(tmp_path, value):
+    path = tmp_path / "value.json"
+    path.write_text(json.dumps({"value": value}), encoding="utf-8")
+    return str(path)
+
+
+def test_a_secret_can_be_set_listed_and_forgotten(monkeypatch, capsys, tmp_path):
+    store = str(tmp_path / "store.json")
+
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-secret-list=keeper",
+                               "--cycle-secrets-file=" + store)
+    assert (code, payload["secrets"]) == (0, [])
+
+    code, payload = _cycle_cmd(monkeypatch, capsys,
+                               "--cycle-secret-set=keeper:token",
+                               "--from=" + _value_file(tmp_path, "ghp_example"),
+                               "--cycle-secrets-file=" + store)
+    assert (code, payload["ok"]) == (0, True)
+
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-secret-list=keeper",
+                               "--cycle-secrets-file=" + store)
+    assert payload["secrets"] == ["token"]
+
+    code, payload = _cycle_cmd(monkeypatch, capsys,
+                               "--cycle-secret-delete=keeper:token",
+                               "--cycle-secrets-file=" + store)
+    assert payload["ok"] is True
+
+    code, payload = _cycle_cmd(monkeypatch, capsys, "--cycle-secret-list=keeper",
+                               "--cycle-secrets-file=" + store)
+    assert payload["secrets"] == []
+
+
+def test_listing_secrets_never_prints_a_value(monkeypatch, capsys, tmp_path):
+    """The only question a front-end has is which are set."""
+    store = str(tmp_path / "store.json")
+    _cycle_cmd(monkeypatch, capsys, "--cycle-secret-set=keeper:token",
+               "--from=" + _value_file(tmp_path, "ghp_example"),
+               "--cycle-secrets-file=" + store)
+    _code, payload = _cycle_cmd(monkeypatch, capsys,
+                                "--cycle-secret-list=keeper",
+                                "--cycle-secrets-file=" + store)
+    assert "ghp_example" not in json.dumps(payload)
+
+
+def test_setting_a_secret_without_a_name_says_what_it_needs(monkeypatch, capsys,
+                                                            tmp_path):
+    code, payload = _cycle_cmd(monkeypatch, capsys,
+                               "--cycle-secret-set=keeper",
+                               "--from=" + _value_file(tmp_path, "x"),
+                               "--cycle-secrets-file=" + str(tmp_path / "s.json"))
+    assert code == 2 and payload["ok"] is False
+    assert "CYCLE:NAME" in " ".join(payload["problems"])
+
+
+def test_a_run_gets_its_secret_from_the_store_and_not_from_the_file(
+        monkeypatch, capsys, secret_cycle, tmp_path):
+    store = str(tmp_path / "store.json")
+    _cycle_cmd(monkeypatch, capsys, "--cycle-secret-set=keeper:token",
+               "--from=" + _value_file(tmp_path, "ghp_example"),
+               "--cycle-secrets-file=" + store)
+
+    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
+    monkeypatch.setattr("sys.argv", ["session_launcher.py",
+                                     "--cycle-run=keeper",
+                                     "--cycles-dir=" + secret_cycle,
+                                     "--cycle-secrets-file=" + store])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+    assert exc.value.code == 0
+
+    written = sorted(one for one in (tmp_path / "data" / "cycle-runs").iterdir()
+                     if one.is_dir())[0]
+    assert (written / "steps" / "show" / "stdout.log").read_text().strip() == (
+        "ghp_example")
+    # And the file it came from still says only that the variable is secret.
+    assert "ghp_example" not in (pathlib.Path(secret_cycle) /
+                                 "keeper.yaml").read_text(encoding="utf-8")
+
+
+def test_a_run_whose_secret_is_unset_says_so_and_still_runs(
+        monkeypatch, capsys, secret_cycle, tmp_path, caplog):
+    """A cycle just handed over should say which values it wants, not refuse."""
+    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
+    monkeypatch.setattr("sys.argv", ["session_launcher.py",
+                                     "--cycle-run=keeper",
+                                     "--cycles-dir=" + secret_cycle,
+                                     "--cycle-secrets-file=" + str(tmp_path / "none.json")])
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SystemExit) as exc:
+            sl.main()
+    assert exc.value.code == 0
+    assert "no value set for: token" in caplog.text
+
+
+def test_a_cycle_run_refuses_to_share_the_command_line_with_a_scenario_run(
+        monkeypatch, capsys, cycle_tree):
+    monkeypatch.setattr("sys.argv", ["session_launcher.py",
+                                     "--cycle-run=demo",
+                                     "--cycles-dir=" + cycle_tree,
+                                     "--run-tests=all"])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+    assert "--cycle-run cannot be combined" in str(exc.value)
+
+
+def test_a_cycle_run_runs_it_and_exits_with_the_result(monkeypatch, capsys,
+                                                       cycle_tree, tmp_path):
+    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
+    monkeypatch.setattr("sys.argv", ["session_launcher.py",
+                                     "--cycle-run=demo",
+                                     "--cycles-dir=" + cycle_tree])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+    assert exc.value.code == 0
+
+    runs = tmp_path / "data" / "cycle-runs"
+    written = sorted(one for one in runs.iterdir() if one.is_dir())
+    assert len(written) == 1
+    assert (written[0] / "metadata.json").exists()
+    assert (written[0] / "steps" / "first" / "stdout.log").read_text().strip() == "hello"
+
+
+def test_a_cycle_variable_can_be_overridden_on_the_command_line(monkeypatch, capsys,
+                                                                cycle_tree, tmp_path):
+    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
+    monkeypatch.setattr("sys.argv", ["session_launcher.py",
+                                     "--cycle-run=demo",
+                                     "--cycle-var=greeting=good morning",
+                                     "--cycles-dir=" + cycle_tree])
+    with pytest.raises(SystemExit):
+        sl.main()
+
+    written = sorted(one for one in (tmp_path / "data" / "cycle-runs").iterdir()
+                     if one.is_dir())[0]
+    assert (written / "steps" / "first" / "stdout.log").read_text().strip() == (
+        "good morning")
+
+
+def test_a_cycle_that_will_not_run_is_refused_before_anything_starts(
+        monkeypatch, capsys, cycle_tree, tmp_path, caplog):
+    """Half-running and then stopping on a typo leaves services somebody has to find."""
+    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
+    monkeypatch.setattr("sys.argv", ["session_launcher.py",
+                                     "--cycle-run=broken",
+                                     "--cycles-dir=" + cycle_tree])
+    with caplog.at_level("ERROR"):
+        with pytest.raises(SystemExit) as exc:
+            sl.main()
+    assert exc.value.code == 2
+    assert not (tmp_path / "data" / "cycle-runs").exists() or not list(
+        (tmp_path / "data" / "cycle-runs").iterdir())
+
+
+def test_a_cycle_var_without_a_value_is_refused_with_an_explanation(monkeypatch,
+                                                                    cycle_tree):
+    monkeypatch.setattr("sys.argv", ["session_launcher.py", "--cycle-run=demo",
+                                     "--cycle-var=lonely"])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+    assert "NAME=VALUE" in str(exc.value)
+
+
+def test_the_help_text_says_how_to_run_a_cycle(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["session_launcher.py", "--help"])
+    with pytest.raises(SystemExit):
+        sl.main()
+    text = capsys.readouterr().out
+    assert "--cycle-run=ID" in text
+    assert "--cycle-list" in text
+
+
+# ------------------------------------------------------------- plugin actions
+# A plugin declares what it can be asked outside a run - is it signed in, can it
+# reach its provider. This flag is how a front-end asks, and it is deliberately
+# generic: no case per plugin, so a plugin added later needs nothing here.
+
+def test_a_plugin_action_answers_with_json(monkeypatch, capsys, tmp_path):
+    document = tmp_path / "settings.json"
+    document.write_text(json.dumps({"framework": "crewai"}), encoding="utf-8")
+
+    monkeypatch.setattr("sys.argv", [
+        "session_launcher.py",
+        "--cycle-plugin-action=agent.review:sign_in_status",
+        "--from=" + str(document)])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exc.value.code == 0
+    assert payload["plugin"] == "agent.review"
+    assert payload["action"] == "sign_in_status"
+    assert "ok" in payload and "summary" in payload
+
+
+def test_a_plugin_action_needs_no_settings_file(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", [
+        "session_launcher.py",
+        "--cycle-plugin-action=agent.review:sign_in_status"])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+
+    assert exc.value.code == 0
+    assert "ok" in json.loads(capsys.readouterr().out)
+
+
+def test_an_action_on_a_plugin_that_is_not_installed_is_json_too(monkeypatch,
+                                                                 capsys):
+    """Never a bare traceback: the caller parses this."""
+    monkeypatch.setattr("sys.argv", [
+        "session_launcher.py", "--cycle-plugin-action=no.such.plugin:anything"])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exc.value.code == 2
+    assert payload["ok"] is False
+    assert "no.such.plugin" in payload["problems"][0]
+
+
+def test_an_action_the_plugin_does_not_declare_is_answered(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", [
+        "session_launcher.py", "--cycle-plugin-action=command.shell:nonsense"])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exc.value.code == 0
+    assert payload["ok"] is False
+    assert "Unknown action" in payload["summary"]
+
+
+def test_a_settings_file_that_will_not_parse_is_reported(monkeypatch, capsys,
+                                                         tmp_path):
+    document = tmp_path / "broken.json"
+    document.write_text("{not json", encoding="utf-8")
+
+    monkeypatch.setattr("sys.argv", [
+        "session_launcher.py",
+        "--cycle-plugin-action=agent.review:sign_in_status",
+        "--from=" + str(document)])
+    with pytest.raises(SystemExit) as exc:
+        sl.main()
+
+    assert exc.value.code == 2
+    assert "cannot read" in json.loads(capsys.readouterr().out)["problems"][0]
+
+
+def test_describe_publishes_what_a_plugin_can_be_asked(monkeypatch, config,
+                                                       capsys):
+    """So the Inspector offers setup without knowing what any of it means."""
+    payload, _code = _describe(monkeypatch, config, capsys=capsys)
+    by_id = {entry["id"]: entry for entry in payload["cycle_plugins"]}
+
+    assert "actions" in by_id["command.shell"]
+    actions = {one["key"]: one for one in by_id["agent.review"]["actions"]}
+    assert set(actions) == {"sign_in_status", "sign_in"}
+    assert actions["sign_in"]["kind"] == "command"
+
+
+def test_the_help_text_says_how_to_ask_a_plugin(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["session_launcher.py", "--help"])
+    with pytest.raises(SystemExit):
+        sl.main()
+    assert "--cycle-plugin-action" in capsys.readouterr().out
+
+
+# ------------------------------------------------ running part of a cycle
+# Working on one step of a long cycle meant running all of it. The steps that
+# are left out are taken from the last run instead, so what they produced is
+# still in scope - which is the only reason a step that reads another's result
+# can run on its own at all.
+def test_a_selection_of_steps_is_checked_against_the_cycle():
+    from domain.cycle import Cycle, CycleStep
+
+    cycle = Cycle(id="c", steps=[CycleStep(id="one", plugin="command.shell"),
+                                 CycleStep(id="two", plugin="command.shell",
+                                           needs=("one",))])
+
+    assert sl._cycle_selection(cycle, ["two"], "") == ({"two"}, "")
+    assert sl._cycle_selection(cycle, [], "") == (set(), "")
+
+    chosen, why = sl._cycle_selection(cycle, ["nope"], "")
+    assert chosen == set() and "not a step in c" in why
+
+
+def test_from_a_step_means_that_one_and_everything_after_it():
+    from domain.cycle import Cycle, CycleStep
+
+    cycle = Cycle(id="c", steps=[
+        CycleStep(id="one", plugin="command.shell"),
+        CycleStep(id="two", plugin="command.shell", needs=("one",)),
+        CycleStep(id="three", plugin="command.shell", needs=("two",))])
+
+    assert sl._cycle_selection(cycle, [], "two")[0] == {"two",
+                                                                      "three"}
+
+
+def test_asking_for_both_at_once_is_refused():
+    """They are two different questions, and guessing which was meant would be
+    guessing about what to run."""
+    from domain.cycle import Cycle, CycleStep
+
+    cycle = Cycle(id="c", steps=[CycleStep(id="one", plugin="command.shell")])
+    chosen, why = sl._cycle_selection(cycle, ["one"], "one")
+
+    assert chosen == set() and "two different things" in why

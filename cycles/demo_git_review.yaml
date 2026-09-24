@@ -1,0 +1,33 @@
+id: demo_git_review
+name: Git and agent review
+description: Set repository, agent_python and model before running. Reviews committed source without running tests.
+variables:
+  repository: /path/to/your/repository
+  agent_python: /path/to/agent-env/bin/python
+  model: ollama/your-installed-model
+
+steps:
+  - id: checkout
+    plugin: git.checkout
+    timeout: 180
+    with:
+      repository: "${vars.repository}"
+
+  - id: review
+    plugin: agent.review
+    needs: [checkout]
+    timeout: 300
+    with:
+      framework: crewai
+      python: "${vars.agent_python}"
+      model: "${vars.model}"
+      model_options:
+        base_url: http://localhost:11434
+      repository: "${steps.checkout.outputs.workspace}"
+      task: Review the repository for correctness and maintainability. Cite files and lines.
+      inputs:
+        commit: "${steps.checkout.outputs.commit}"
+
+  - id: report
+    plugin: report.html
+    needs: [review]
