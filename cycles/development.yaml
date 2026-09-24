@@ -68,6 +68,10 @@ variables:
   # conventions, the things a newcomer gets wrong. A path, a URL, or simply the
   # rules written out. The business review reads this and nothing else, so a
   # rule that is not here is a rule the review cannot check.
+  # What runs the probe tests another agent writes to try to break
+  # the change. The folder they are in is appended; it runs in the
+  # checkout, so the tests import the project as its own tests do.
+  probe_runner: python3 -m pytest -q -p no:cacheprovider
   business_rules: |
     Keep to what the task asks for. Do not widen the change.
     Do not weaken or delete an existing test to make a new one pass.
@@ -81,7 +85,6 @@ variables:
   # One task to work on, instead of the next one in the queue. Empty takes the
   # queue; "Run again" on the Subjects list fills it in for one run.
   task_key: ""
-
 
 # What this cycle works on: one Jira task per run. The Subjects list on the
 # Cycles page groups runs by it, and "Run again" pins it through task_key.
@@ -254,6 +257,7 @@ steps:
         Keep it to what the task asks for. Say plainly in the summary when the
         task is too vague to act on, and what you would have to ask.
 
+      scope: true
   - id: business
     plugin: agent.review
     label: Review the plan
@@ -270,6 +274,7 @@ steps:
         the_plan: "${steps.plan.outputs.summary}"
         packages: "${steps.plan.outputs.issues}"
         rules: "${vars.business_rules}"
+        left_out: ${steps.plan.outputs.out_of_scope}
       task: >-
         You did not write this plan. Review it against the task above and the
         rules given - and against nothing else: a rule that is not written down
@@ -282,6 +287,11 @@ steps:
         issues list means the plan may proceed.
 
         Judge the plan, not the code. Do not change anything.
+
+        The plan also names what it deliberately leaves out, as left_out. If
+        the task or the rules plainly require one of those, that is an issue
+        with medium severity. If it is only a sensible extra, leave it: the
+        person who approves the plan sees that list and decides.
 
   - id: plan_is_sound
     plugin: check.gate
@@ -315,6 +325,9 @@ steps:
 
         Risk: ${steps.plan.outputs.risk}
         Review found: ${steps.business.outputs.issue_count} note(s)
+
+        Left out of scope - send it back if any of this has to be in:
+        ${steps.plan.outputs.out_of_scope}
       options: [Start work, Leave it]
 
   - id: preflight
@@ -389,10 +402,54 @@ steps:
       dir: "${vars.project_dir}"
       command: "${vars.checks}"
 
+  # -- try to break it: tests written by another agent, run for real
+  - id: probe
+    plugin: agent.edit
+    label: Try to break it
+    needs: [implement]
+    timeout: 900
+    on_failure: continue
+    with:
+      model: sonnet
+      effort: high
+      directory: probe
+      create_directory: true
+      read_only: ${vars.project_dir}
+      inputs:
+        task: ${steps.todo.outputs.issues}
+        changed: ${steps.implement.outputs.files_changed}
+      task: >-
+        You did not write the change in the checkout. Write pytest tests, in
+        this directory only, that try to break it: inputs the code does not
+        expect (wrong types, empty, whitespace, very large, negative),
+        boundaries and rounding, repeated calls and their order, the state
+        left after an error, and the business rules the task implies without
+        spelling out.
+
+        Read the checkout's own tests first and import the project the way
+        they do; the tests run with the checkout as the working directory.
+        Name the files test_*.py. Each test's docstring says what it expects
+        and why that follows from the task or from ordinary correctness - do
+        not test behaviour nobody could reasonably expect. Five to fifteen
+        focused tests.
+
+        Do not fix anything. The checkout is read-only here: a write there
+        fails this step.
+
+  - id: probe_run
+    plugin: command.shell
+    label: Run the probes
+    needs: [probe]
+    timeout: 600
+    with:
+      command: ${vars.probe_runner} ${run.workspace}/probe
+      dir: ${vars.project_dir}
+      expect_exit: -1
+
   - id: review
     plugin: agent.review
     label: Review the code
-    needs: [implement]
+    needs: [implement, probe_run]
     timeout: 900
     on_failure: continue
     with:
@@ -405,6 +462,8 @@ steps:
         plan: "${steps.plan.outputs.summary}"
         changed: "${steps.implement.outputs.files_changed}"
         rules: "${vars.business_rules}"
+        probe_exit: ${steps.probe_run.outputs.exit_code}
+        probe_said: ${steps.probe_run.outputs.stdout_tail}
       task: >-
         You did not write this code. Read `git diff` in the repository and
         judge what was actually changed against the task and the plan above.
@@ -418,6 +477,20 @@ steps:
 
         Do not change anything. If the change is sound, return an empty issues
         list.
+
+        A second agent wrote tests that try to break this change, and they
+        were run against it: probe_exit is their exit code (0 means every
+        one passed) and probe_said is the end of their output. For every
+        failing probe decide which it is. A defect in what the task asks for
+        is high or medium. A real defect outside the task's criteria is low
+        - say what breaks and how; it does not block the commit, a person
+        decides. A probe that expects something nobody could reasonably ask
+        for is not an issue; name it in the summary.
+
+        Also report as low anything else you see that is wrong beyond the
+        task's criteria: input the code does not guard, a case that breaks,
+        business logic that looks wrong. Low never blocks; hiding it helps
+        nobody.
 
   - id: accept
     plugin: agent.review
@@ -444,6 +517,11 @@ steps:
         criterion that is not met, or is met without evidence. Your own reading
         is not evidence that something works - the checks are. An empty issues
         list means every criterion is met and shown to be.
+
+        Also list, as low, anything you notice that is wrong beyond the
+        criteria - an unguarded input, a case that breaks, business logic
+        that looks wrong. Low never blocks the commit; it is there for a
+        person to read.
 
   - id: final
     plugin: check.gate

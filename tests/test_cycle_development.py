@@ -68,6 +68,13 @@ say({"type": "system", "subtype": "init", "model": "claude-sonnet-5"})
 prompt = sys.argv[sys.argv.index("-p") + 1]
 
 def answer(review):
+    # The optional parts of a review, only when the prompt asked for them -
+    # exactly what the plugin validates.
+    if '"out_of_scope": [' in prompt:
+        review = dict(review, out_of_scope=["A name that is only spaces is "
+                                            "greeted as it is."])
+    if '"complexity":' in prompt:
+        review = dict(review, complexity="low")
     say({"type": "result", "subtype": "success", "is_error": False,
          "result": json.dumps(review), "total_cost_usd": 0.01})
     sys.exit(0)
@@ -95,6 +102,21 @@ if "--permission-mode" not in sys.argv:
                             "file": "main.py", "line": 1}]})
     answer({"summary": "Looks right.", "risk": "low", "issues": [],
             "recommendations": []})       # implement's own review gate
+
+if "try to break it" in prompt:                                 # probes
+    # Written where the step runs, never into the checkout it may only read.
+    # One passes and one fails, so the run shows both reach the review.
+    here = os.getcwd()
+    open(os.path.join(here, "test_probe.py"), "w").write(
+        'from main import greet\n\n\n'
+        'def test_no_name_at_all():\n    assert greet(None) == "Hello, there"\n\n\n'
+        'def test_only_spaces():\n    assert greet("  ") == "Hello, there"\n')
+    say({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Write",
+         "input": {"file_path": os.path.join(here, "test_probe.py")}}]}})
+    say({"type": "result", "subtype": "success", "is_error": False,
+         "result": "Two probes.", "total_cost_usd": 0.01})
+    sys.exit(0)
 
 where = sys.argv[sys.argv.index("--add-dir") + 1]
 open(os.path.join(where, "main.py"), "w").write(
@@ -907,3 +929,32 @@ def test_it_is_said_before_the_run_starts(already_started):
     proc.wait(timeout=600)
 
     assert order[:2] == ["run.dir", "cycle.run.start"], order
+
+
+# ------------------------------------------------ trying to break the change
+def test_probes_are_written_outside_the_checkout_and_run_against_it(approved):
+    """The probe tests are evidence, not part of the change: they must not be
+    committed, and they must really run - the fake writes one that fails."""
+    world, (_code, steps, _asked), _again = approved
+    assert _status(steps, "probe") == "success"
+    assert _outputs(steps, "probe")["files_changed"] == ["test_probe.py"]
+    assert _outputs(steps, "probe_run")["exit_code"] == 1, "one probe fails"
+    assert "test_only_spaces" in _outputs(steps, "probe_run")["stdout_tail"]
+    committed = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"],
+                               cwd=world.repo, capture_output=True,
+                               text=True).stdout.split()
+    assert "test_probe.py" not in committed
+    assert not os.path.exists(os.path.join(world.repo, "test_probe.py"))
+
+
+def test_a_failing_probe_does_not_stop_the_review_that_judges_it(approved):
+    _world, (_code, steps, _asked), _again = approved
+    assert _status(steps, "review") == "success"
+    assert _status(steps, "commit") == "success"
+
+
+def test_the_approval_shows_what_the_plan_left_out(approved):
+    _world, (_code, _steps, asked), _again = approved
+    detail = json.dumps(asked)
+    assert "Left out of scope" in detail
+    assert "A name that is only spaces" in detail

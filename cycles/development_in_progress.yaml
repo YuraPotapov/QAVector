@@ -5,6 +5,7 @@ project: Demo
 variables:
   business_rules: "Keep to what the task asks for. Do not widen the change.\nDo not weaken or delete an existing test to make a new one pass.\n"
   checks: "python3 -m pytest -q\n"
+  probe_runner: python3 -m pytest -q -p no:cacheprovider
   git_base: main
   git_remote: origin
   jira_email: you@yourcompany.example
@@ -151,6 +152,7 @@ steps:
       model: opus
       repository: ${vars.project_dir}
       task: "Above is one Jira task and the list of what it asks for that is not yet true. Write the plan for making it true.\nAnswer in the required shape, used like this: summary is the change to make, in enough detail that somebody could start on it without the ticket. issues is one entry per package of work, its severity being how risky that package is - keep them in the order they should be done and say what each one depends on. recommendations is where in the code each package goes, with file and line where you found it. risk is the risk of the whole thing.\nKeep it to what the task asks for. Say plainly in the summary when the task is too vague to act on, and what you would have to ask."
+      scope: true
     timeout: 900.0
     on_failure: continue
   - id: business
@@ -165,10 +167,11 @@ steps:
         rules: ${vars.business_rules}
         task: ${steps.todo.outputs.issues}
         the_plan: ${steps.plan.outputs.summary}
+        left_out: ${steps.plan.outputs.out_of_scope}
       max_iterations: 15
       model: opus
       repository: ${vars.project_dir}
-      task: "You did not write this plan. Review it against the task above and the rules given - and against nothing else: a rule that is not written down is not a rule you may apply.\nAnswer in the required shape, used like this: issues is one entry per thing wrong with the plan - a rule it breaks, a criterion it does not cover, scope it adds that nobody asked for - with high or medium severity for anything that must be fixed before work starts. An empty issues list means the plan may proceed.\nJudge the plan, not the code. Do not change anything."
+      task: "You did not write this plan. Review it against the task above and the rules given - and against nothing else: a rule that is not written down is not a rule you may apply.\nAnswer in the required shape, used like this: issues is one entry per thing wrong with the plan - a rule it breaks, a criterion it does not cover, scope it adds that nobody asked for - with high or medium severity for anything that must be fixed before work starts. An empty issues list means the plan may proceed.\nJudge the plan, not the code. Do not change anything.\nThe plan also names what it deliberately leaves out, as left_out. If the task or the rules plainly require one of those, that is an issue with medium severity. If it is only a sensible extra, leave it: the person who approves the plan sees that list and decides."
     timeout: 600.0
     on_failure: continue
   - id: settle
@@ -185,10 +188,12 @@ steps:
         task: ${steps.todo.outputs.issues}
         the_plan: ${steps.plan.outputs.summary}
         where_it_lands: ${steps.plan.outputs.recommendations}
+        left_out: ${steps.plan.outputs.out_of_scope}
       max_iterations: 20
       model: opus
       repository: ${vars.project_dir}
-      task: "Above is one Jira task, the plan for it, and what an independent review objected to. Settle the plan: close what can be closed, and leave the rest visible.\nWork through the objections in order. Fix in the plan what a plan can fix - a package that misses a criterion, a rule the plan breaks, scope nobody asked for. An objection that cannot be closed without a decision that is not yours to make stays open: say in the summary exactly what has to be decided, and do not guess it.\nAnswer in the required shape, used like this: summary is the plan as it now stands, in the same detail as the one above. issues is one entry per package of work, its severity being how risky that package is, in the order they should be done. recommendations is where in the code each package goes, with file and line. risk is the risk of the whole thing.\nWhen the review found nothing that must be fixed, begin the summary with 'Unchanged.' and then repeat the plan and its packages exactly as they are, word for word. Otherwise begin with 'Revised.' and say in one sentence what you changed and what you left open. Do not widen the change, and do not change anything in the repository."
+      task: "Above is one Jira task, the plan for it, and what an independent review objected to. Settle the plan: close what can be closed, and leave the rest visible.\nWork through the objections in order. Fix in the plan what a plan can fix - a package that misses a criterion, a rule the plan breaks, scope nobody asked for. An objection that cannot be closed without a decision that is not yours to make stays open: say in the summary exactly what has to be decided, and do not guess it.\nAnswer in the required shape, used like this: summary is the plan as it now stands, in the same detail as the one above. issues is one entry per package of work, its severity being how risky that package is, in the order they should be done. recommendations is where in the code each package goes, with file and line. risk is the risk of the whole thing.\nWhen the review found nothing that must be fixed, begin the summary with 'Unchanged.' and then repeat the plan and its packages exactly as they are, word for word. Otherwise begin with 'Revised.' and say in one sentence what you changed and what you left open. Do not widen the change, and do not change anything in the repository.\nKeep out_of_scope current: carry over what the plan left out, drop what the objections brought into the plan, and add anything the objections raised that you are leaving undecided."
+      scope: true
     timeout: 900.0
     on_failure: continue
   - id: recheck
@@ -214,7 +219,7 @@ steps:
     label: Agree to the plan
     needs: [recheck, settle, business]
     with:
-      detail: "${steps.settle.outputs.summary}\n\nPackages:\n${steps.settle.outputs.issues}\n\nWhere it lands:\n${steps.settle.outputs.recommendations}\n\nRisk: ${steps.settle.outputs.risk}\nFirst review: ${steps.business.outputs.blocking_count} blocking of ${steps.business.outputs.issue_count} note(s).\nAfter the second pass: ${steps.recheck.outputs.blocking_count} blocking of ${steps.recheck.outputs.issue_count} note(s).\nStill open:\n${steps.recheck.outputs.issues}\n"
+      detail: "${steps.settle.outputs.summary}\n\nPackages:\n${steps.settle.outputs.issues}\n\nWhere it lands:\n${steps.settle.outputs.recommendations}\n\nRisk: ${steps.settle.outputs.risk}\nFirst review: ${steps.business.outputs.blocking_count} blocking of ${steps.business.outputs.issue_count} note(s).\nAfter the second pass: ${steps.recheck.outputs.blocking_count} blocking of ${steps.recheck.outputs.issue_count} note(s).\nStill open:\n${steps.recheck.outputs.issues}\n\nLeft out of scope - send it back if any of this has to be in:\n${steps.settle.outputs.out_of_scope}\n"
       options: [Start work, Leave it]
       question: Start work on ${steps.todo.outputs.key}?
       revision_step: settle
@@ -260,10 +265,36 @@ steps:
       dir: ${vars.project_dir}
     timeout: 1800.0
     on_failure: continue
+  # -- try to break it: tests written by another agent, run for real
+  - id: probe
+    plugin: agent.edit
+    label: Try to break it
+    needs: [implement]
+    timeout: 900
+    on_failure: continue
+    with:
+      model: opus
+      effort: high
+      directory: probe
+      create_directory: true
+      read_only: ${vars.project_dir}
+      inputs:
+        task: ${steps.todo.outputs.issues}
+        changed: ${steps.implement.outputs.files_changed}
+      task: "You did not write the change in the checkout. Write pytest tests, in this directory only, that try to break it: inputs the code does not expect (wrong types, empty, whitespace, very large, negative), boundaries and rounding, repeated calls and their order, the state left after an error, and the business rules the task implies without spelling out.\nRead the checkout's own tests first and import the project the way they do; the tests run with the checkout as the working directory. Name the files test_*.py. Each test's docstring says what it expects and why that follows from the task or from ordinary correctness - do not test behaviour nobody could reasonably expect. Five to fifteen focused tests.\nDo not fix anything. The checkout is read-only here: a write there fails this step."
+  - id: probe_run
+    plugin: command.shell
+    label: Run the probes
+    needs: [probe]
+    timeout: 600
+    with:
+      command: ${vars.probe_runner} ${run.workspace}/probe
+      dir: ${vars.project_dir}
+      expect_exit: -1
   - id: review
     plugin: agent.review
     label: Review the code
-    needs: [implement]
+    needs: [implement, probe_run]
     with:
       effort: high
       framework: claude_cli
@@ -272,10 +303,12 @@ steps:
         plan: ${steps.settle.outputs.summary}
         rules: ${vars.business_rules}
         task: ${steps.todo.outputs.issues}
+        probe_exit: ${steps.probe_run.outputs.exit_code}
+        probe_said: ${steps.probe_run.outputs.stdout_tail}
       max_iterations: 20
       model: opus
       repository: ${vars.project_dir}
-      task: "You did not write this code. Read `git diff` in the repository and judge what was actually changed against the task and the plan above.\nAnswer in the required shape, used like this: issues is one entry per defect, with high or medium severity for anything that must be fixed before this is committed. Look for: behaviour the plan asked for that is not there, changes nobody asked for, a test that was weakened or removed to make something pass, and code that duplicates something the repository already has.\nDo not change anything. If the change is sound, return an empty issues list."
+      task: "You did not write this code. Read `git diff` in the repository and judge what was actually changed against the task and the plan above.\nAnswer in the required shape, used like this: issues is one entry per defect, with high or medium severity for anything that must be fixed before this is committed. Look for: behaviour the plan asked for that is not there, changes nobody asked for, a test that was weakened or removed to make something pass, and code that duplicates something the repository already has.\nDo not change anything. If the change is sound, return an empty issues list.\nA second agent wrote tests that try to break this change, and they were run against it: probe_exit is their exit code (0 means every one passed) and probe_said is the end of their output. For every failing probe decide which it is. A defect in what the task asks for is high or medium. A real defect outside the task's criteria is low - say what breaks and how; it does not block the commit, a person decides. A probe that expects something nobody could reasonably ask for is not an issue; name it in the summary.\nAlso report as low anything else you see that is wrong beyond the task's criteria: input the code does not guard, a case that breaks, business logic that looks wrong. Low never blocks; hiding it helps nobody."
     timeout: 900.0
     on_failure: continue
   - id: accept
@@ -293,7 +326,7 @@ steps:
       max_iterations: 15
       model: sonnet
       repository: ${vars.project_dir}
-      task: "Decide whether the task above is now done. Go criterion by criterion: for each thing the task asks for, point at the behaviour in the code and the evidence that it works.\nAnswer in the required shape, used like this: issues is one entry per criterion that is not met, or is met without evidence. Your own reading is not evidence that something works - the checks are. An empty issues list means every criterion is met and shown to be."
+      task: "Decide whether the task above is now done. Go criterion by criterion: for each thing the task asks for, point at the behaviour in the code and the evidence that it works.\nAnswer in the required shape, used like this: issues is one entry per criterion that is not met, or is met without evidence. Your own reading is not evidence that something works - the checks are. An empty issues list means every criterion is met and shown to be.\nAlso list, as low, anything you notice that is wrong beyond the criteria - an unguarded input, a case that breaks, business logic that looks wrong. Low never blocks the commit; it is there for a person to read."
     timeout: 600.0
     on_failure: continue
   - id: final

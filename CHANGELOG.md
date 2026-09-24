@@ -28,6 +28,31 @@ app-agnostic, since that will break things on purpose.
   `--cycle-runs-dir` does the same from a terminal. A run, its resume and the
   Subjects list are all pointed at the one folder, so a list never reads a
   different place from the one runs were written to.
+- **A plan says what it leaves out, and the person approving it sees that.**
+  `scope: true` on an `agent.review` step asks it to list everything the task
+  leaves unsaid that the work deliberately does not handle, published as
+  `out_of_scope` with an `out_of_scope_count`. The development cycles' plans
+  use it, their business review may object to something left out that the
+  task requires, and the approval window shows the list under *Left out of
+  scope* - so where the line was drawn is a person's decision, and *Send for
+  revision* is how to move it.
+- **The development cycles try to break the change before committing it.** A
+  new `probe` step has a second agent write tests aimed at the change - odd
+  inputs, boundaries, state after an error, rules the task implies - in the
+  run's own folder, and `probe_run` runs them against the checkout
+  (`probe_runner`, pytest by default). The code review reads the result and
+  sorts each failure into a defect in the task (blocking), a real defect
+  outside it (low) or a probe asking for something nobody wanted. Nothing the
+  probes write is committed.
+- `agent.edit` takes `read_only` - a directory the agent may read but not
+  change, where a write fails the step - and `create_directory`.
+
+### Changed
+- **Reviews say what is wrong beyond the task, without blocking on it.** The
+  development cycles' code review and acceptance now report defects outside
+  the task's criteria as low severity: an unguarded input, a case that breaks,
+  business logic that looks wrong. Only high and medium stop a commit, as
+  before; low is there for a person to read rather than hidden.
 
 ### Fixed
 - **A development cycle's commit had a paragraph for a subject.** The bundled
