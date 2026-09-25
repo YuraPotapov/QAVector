@@ -181,6 +181,11 @@ class PluginMetadata:
     #: own business: a gate's timeout is how long its question waits, a wait's
     #: is what bounds it, and a service request is given the same number.
     asks_when_overdue: bool = True
+    #: Whether a step of this plugin can be listened to: asked, outside any
+    #: run, what it would take now - see :meth:`CyclePlugin.peek`. A cycle's
+    #: ``triggers:`` may watch only such a step. What "a queue" means is the
+    #: plugin's own business; the engine only compares keys.
+    watchable: bool = False
 
     def to_dict(self):
         """What ``--describe`` publishes, so a front-end can build its own form."""
@@ -195,6 +200,7 @@ class PluginMetadata:
             "reusable": self.reusable,
             "recoverable": self.recoverable,
             "asks_when_overdue": self.asks_when_overdue,
+            "watchable": self.watchable,
             "permissions": list(self.permissions),
             "inputs": [{"key": one.key, "label": one.label, "kind": one.kind,
                         "hint": one.hint, "required": one.required,
@@ -346,6 +352,18 @@ class CyclePlugin(object):
         """
         return {"ok": False, "summary": "Unknown action %r" % key,
                 "detail": "", "argv": []}
+
+    # -- being listened to ---------------------------------------------------
+    def peek(self, settings):
+        """What a step with these settings would take now, without running it.
+
+        Only for a plugin whose metadata says ``watchable``. Returns a list of
+        ``{"key", "title", ...}`` - ``key`` is what identifies one item from
+        the next and is what an accepted item is run with; anything else is
+        shown to the person being asked. Nothing may be written anywhere.
+        Raises on failure, with a message a person can read.
+        """
+        raise NotImplementedError("%s cannot be watched" % self.metadata.id)
 
     # -- the lifecycle --------------------------------------------------------
     def prepare(self, context, step):

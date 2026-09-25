@@ -113,6 +113,8 @@ class JiraIssues(CyclePlugin):
         id="jira.issues", name="Jira Issues", category=registry.ACTION,
         summary="Read a person's issues and the comments on them. Reads only.",
         permissions=("network",),
+        # A cycle's trigger may listen to this step: see peek().
+        watchable=True,
         inputs=(
             field("site", "Site", required=True,
                   hint="https://yourcompany.atlassian.net, or your Jira "
@@ -267,6 +269,15 @@ class JiraIssues(CyclePlugin):
                              % (key, ceiling))
         return found
 
+    def peek(self, settings):
+        """The issues this step would take now - keys, titles and statuses only.
+
+        For a trigger listening for new work: the step's own query, with
+        ``issue`` ignored, since a listener pinned to one key would never see
+        another. Raises :class:`JiraError` when Jira cannot be asked.
+        """
+        return _peek(settings)
+
     def execute(self, context, step):
         problems = self.problems(step.settings)
         if problems:
@@ -366,6 +377,38 @@ class JiraIssues(CyclePlugin):
 
 
 # -- the query ----------------------------------------------------------------
+def _peek(settings, limit=20):
+    """The issues a ``jira.issues`` step with these settings would take now.
+
+    What :meth:`JiraIssues.peek` answers with.
+
+    For a listener that asks "is there anything new" on a schedule: the same
+    query the step runs - issue, JQL, project, ordering - but only keys,
+    titles and statuses, with no comments, no attachments and nothing written
+    anywhere. ``issue`` is ignored, since a listener pinned to one key would
+    never see another. Raises :class:`JiraError` when Jira cannot be asked.
+    """
+    from cycle.context import CancelToken
+
+    settings = dict(settings or {})
+    get = Session(site=str(settings.get("site") or "").rstrip("/"),
+                  auth=settings.get("auth", "basic"),
+                  email=str(settings.get("email") or ""),
+                  token=str(settings.get("token") or ""),
+                  verify=bool(settings.get("verify_tls", True)))
+    flavour = settings.get("flavour", CLOUD)
+    query = jql_for(str(settings.get("user") or ""), settings.get("role", "any"),
+                    str(settings.get("jql") or ""), str(settings.get("project") or ""),
+                    str(settings.get("order") or ""))
+    raw = _search(get, flavour, query, int(limit), CancelToken())
+    found = []
+    for one in raw:
+        issue = _issue(one, get.site, flavour)
+        found.append({"key": issue["key"], "title": issue["summary"],
+                      "status": issue["status"], "url": issue["url"]})
+    return found
+
+
 def jql_for(user, role, extra="", project="", order=""):
     """The JQL for "this person's issues", in the order the step asked for.
 

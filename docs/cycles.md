@@ -514,6 +514,70 @@ A subject cannot read a secret: it is written to disk and shown on screen.
 From a terminal: `--cycle-sessions[=CYCLE]` lists them as JSON, and
 `--cycle-session-delete=ID` deletes one.
 
+### Starting when a new task appears
+
+A cycle can listen for its own work. A trigger names the step the cycle takes
+its task from, and while the application is open that step is asked every
+`every` seconds what it would take now. Only a step whose plugin says it can be
+listened to (`watchable`, published by `--describe`) may be watched; today that
+is `jira.issues`, and the rest of this section uses it as the example:
+
+```yaml
+subject:
+  kind: task
+  key: ${steps.todo.outputs.key}
+  pin: task_key
+
+triggers:
+  - id: new_task
+    watch: todo        # a step whose plugin is watchable - here jira.issues
+    every: 300         # seconds; 60 at the least
+    # pin: task_key    # defaults to the subject's pin
+```
+
+A task the listener has not seen before is offered in a window - *Start work on
+QA-7?* - with four answers. **Start work** runs the cycle with `pin` set to that
+task's key; the cycle still asks its own approval before any code is written.
+**Ignore** means it is never offered again. **Not now** asks again at the next
+check. **In plan (20)** counts down on its own button and presses itself at
+zero: a task nobody answered about goes on the plan instead of holding up every
+task behind it. Several new tasks are asked about one window at a time.
+
+**The plan** is in the Subjects list on the Cycles page, under *+ New run*, the
+open cycle's first: each task with when it was planned, *Start work* for the one
+picked, and a bin that takes it off (and does not offer it again). It is kept in
+the memory store, so it survives a restart. `--cycle-watch-planned` lists it and
+`--cycle-plan-remove=ID` takes an entry off.
+
+The first check a trigger ever makes only remembers what is already in the
+queue, so turning a listener on does not greet you with a question per open
+task. It asks one task at a time, and never while a run is going: a task that
+turns up during a run is offered when it finishes. A check that fails - the
+source unreachable, a secret not set - is retried on schedule without a dialog.
+
+The step's settings are resolved from the cycle's variables and secrets; they
+cannot read another step's outputs, since no step has run. What the plugin does
+with them is its own: `jira.issues` runs the step's query - project, JQL,
+ordering - with `issue` ignored, since a listener pinned to one key would never
+see another. What has been seen is kept in the memory store under
+`watch/<cycle>/<trigger>`.
+
+**Turning it on and off.** Double-click the watched step: a step whose plugin
+can be listened to has a *Listen for new work* section with **Listen** and
+**Every (seconds)**. Unticking Listen writes `enabled: false` into the trigger
+rather than deleting it, so ticking it again keeps the schedule; ticking it on
+a step that never had one adds a trigger for it. Like everything else in that
+dialog, it is saved in the cycle file.
+
+**Seeing it work.** While anything is listened for, the status bar says so -
+*Listening: 1 cycle - next check 0:42* - with each cycle's own schedule in its
+tooltip. A check that failed turns it red and says why; that is the only place
+a failure shows, since a listener must not interrupt anybody with a dialog
+because the network is down.
+
+From a terminal: `--cycle-watch=CYCLE[:TRIGGER]` prints what is new (it starts
+nothing), and `--cycle-watch-seen=CYCLE[:TRIGGER]:KEY` marks one task seen.
+
 ### How a run began
 
 Right after `cycle.run.start` every run says how it began, as `cycle.run.mode`:
@@ -645,6 +709,13 @@ quietly turn off the work as well as the question.
 the findings are in front of you, nothing has been written yet, and the agent
 that costs money has not started.
 
+
+**Nobody answered goes on the plan.** A gate that times out, or finds no
+application to ask in, still fails - not answered is not approved, and nothing
+after it runs. But the question is kept on the plan with the run it belongs to:
+the Subjects list shows *QA-4 waiting for your approval*, and **Resume** there
+continues that run and asks again. A refusal is an answer and is not planned;
+nor is a run somebody stopped.
 ### Reading Jira
 
 Each successful `jira.issues` step writes two neighboring artifacts:
@@ -1004,6 +1075,13 @@ forget:
 A plugin that starts something and leaves it running subclasses `ManagedPlugin`
 and implements `start` / `stop` / `status` instead of `execute`; the run holds
 the handle and stops it at the end.
+
+A plugin whose step is worth listening to - it reads a queue that new work
+arrives in - sets `watchable=True` in its metadata and implements
+`peek(settings)`: what the step would take now, as a list of `{"key", "title"}`,
+without running anything or writing anywhere. That is all a cycle's `triggers:`
+needs; the engine and the application only compare keys, and never learn what
+kind of queue it is.
 
 A plugin that has nothing to do *yet* returns `registry.waiting(seconds)`
 instead of a verdict. It keeps no state between turns — each one is a fresh

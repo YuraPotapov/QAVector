@@ -24,7 +24,8 @@ nowhere else for one to come from.
 
 import re
 
-from domain.cycle import Cycle, CycleStep, ON_FAILURE, STOP, Subject
+from domain.cycle import (Cycle, CycleStep, ON_FAILURE, STOP, Subject, Trigger,
+                          WATCH_EVERY, WATCH_EVERY_MIN)
 
 #: A step id has to survive being a dict key, a path segment under the run
 #: workspace (``steps/<id>/``), and a reference inside ``${steps.<id>....}``.
@@ -40,10 +41,11 @@ STEP_KEYS = frozenset((
 
 #: Keys a cycle may carry.
 CYCLE_KEYS = frozenset(("id", "name", "description", "project", "version",
-                        "variables", "subject", "steps"))
+                        "variables", "subject", "triggers", "steps"))
 
 #: Keys of the ``subject:`` mapping - see :class:`~domain.cycle.Subject`.
 SUBJECT_KEYS = frozenset(("kind", "key", "title", "memory", "pin"))
+TRIGGER_KEYS = frozenset(("id", "watch", "every", "pin", "enabled"))
 
 #: The subject fields that are ``${...}`` expressions, resolved during a run.
 SUBJECT_EXPRESSIONS = ("key", "title", "memory")
@@ -95,6 +97,7 @@ def parse_cycle(raw, cycle_id, source=None):
 
     return Cycle(id=declared or cycle_id,
                  subject=_parse_subject(raw.get("subject")),
+                 triggers=_parse_triggers(raw.get("triggers")),
                  name=str(raw.get("name") or "").strip(),
                  description=str(raw.get("description") or "").strip(),
                  project=str(raw.get("project") or "").strip(),
@@ -258,6 +261,8 @@ def problems(cycle, registry=None, raw=None):
     found = []
     found.extend(_key_problems(raw))
     found.extend(_subject_problems(cycle))
+    found.extend(_trigger_problems(
+        cycle, raw.get("triggers") if isinstance(raw, dict) else None, registry))
     found.extend(_step_problems(cycle, registry))
     found.extend(_needs_problems(cycle))
     found.extend(_ring_problems(cycle))
@@ -269,6 +274,73 @@ def problems(cycle, registry=None, raw=None):
                 revisions.targets(cycle, step.id, target)
             except ValueError as exc:
                 found.append("%s: %s" % (step.id, exc))
+    return found
+
+
+def _parse_triggers(raw):
+    """``triggers:`` as Trigger objects. Shapes :func:`_trigger_problems` would
+    refuse are kept as far as they go, so the message can name them."""
+    if not isinstance(raw, list):
+        return ()
+    found = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        found.append(Trigger(
+            id=str(entry.get("id") or "trigger%d" % (index + 1)).strip(),
+            watch=str(entry.get("watch") or "").strip(),
+            every=_int_or(entry.get("every"), WATCH_EVERY),
+            pin=str(entry.get("pin") or "").strip(),
+            enabled=entry.get("enabled", True) is not False))
+    return tuple(found)
+
+
+def trigger_pin(cycle, trigger):
+    """The variable an offered key is run with: the trigger's own, else the
+    subject's - the one "Run again on this task" already uses."""
+    return trigger.pin or (cycle.subject.pin if cycle.subject is not None else "")
+
+
+def _trigger_problems(cycle, raw, registry=None):
+    found = []
+    if raw is not None and not isinstance(raw, list):
+        return ["triggers must be a list, not %s" % type(raw).__name__]
+    for index, entry in enumerate(raw or []):
+        if not isinstance(entry, dict):
+            found.append("triggers: entry %d must be a mapping" % (index + 1))
+            continue
+        for key in sorted(set(entry) - TRIGGER_KEYS):
+            found.append("triggers: unknown key %r; a trigger takes %s"
+                         % (key, ", ".join(sorted(TRIGGER_KEYS))))
+    seen = set()
+    for trigger in cycle.triggers:
+        where = "triggers: %s" % trigger.id
+        if trigger.id in seen:
+            found.append("%s is named twice" % where)
+        seen.add(trigger.id)
+        step = cycle.step(trigger.watch)
+        if not trigger.watch:
+            found.append("%s: watch is empty; name the step it listens to"
+                         % where)
+        elif step is None:
+            found.append("%s: watch names %r, which is not a step in this cycle"
+                         % (where, trigger.watch))
+        elif registry is not None and registry.get(step.plugin) is not None \
+                and not registry.get(step.plugin).metadata.watchable:
+            found.append("%s: watch names %r, a %s step, which cannot be watched; "
+                         "its plugin does not say it can be" % (where, trigger.watch,
+                                                               step.plugin))
+        if trigger.every < WATCH_EVERY_MIN:
+            found.append("%s: every is %d seconds; the least is %d, so a "
+                         "listener does not hammer Jira"
+                         % (where, trigger.every, WATCH_EVERY_MIN))
+        pin = trigger_pin(cycle, trigger)
+        if not pin:
+            found.append("%s: nothing to run an offered issue with; set pin, or "
+                         "give the subject a pin" % where)
+        elif pin not in cycle.variables:
+            found.append("%s: pin names %r, which is not one of the cycle's "
+                         "variables" % (where, pin))
     return found
 
 
@@ -637,9 +709,22 @@ def to_document(cycle):
         document["subject"] = {name: getattr(cycle.subject, name)
                                for name in ("kind", "key", "title", "memory", "pin")
                                if getattr(cycle.subject, name)}
+    if cycle.triggers:
+        document["triggers"] = [_trigger_document(one) for one in cycle.triggers]
     document["steps"] = [_step_document(step) for step in
                          sorted(cycle.steps, key=lambda one: one.source_index)]
     return document
+
+
+def _trigger_document(trigger):
+    entry = {"id": trigger.id, "watch": trigger.watch}
+    if trigger.every != WATCH_EVERY:
+        entry["every"] = trigger.every
+    if trigger.pin:
+        entry["pin"] = trigger.pin
+    if not trigger.enabled:
+        entry["enabled"] = False
+    return entry
 
 
 def _step_document(step):
@@ -703,6 +788,10 @@ def to_graph(cycle):
                          title=cycle.subject.title, memory=cycle.subject.memory,
                          pin=cycle.subject.pin, sources=subject_sources(cycle))
                     if cycle.subject is not None else None),
+        # What may offer to start it: the GUI listens for these while open.
+        "triggers": [dict(id=one.id, watch=one.watch, every=one.every,
+                          pin=trigger_pin(cycle, one), enabled=one.enabled)
+                     for one in cycle.triggers],
         "nodes": [{"id": step.id,
                    "label": step.title,
                    "plugin": step.plugin,

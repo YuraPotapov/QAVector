@@ -25,6 +25,13 @@ subject:
   memory: dev/${steps.todo.outputs.key}
   pin: task_key
 
+# While the application is open, repeat the todo step's query every
+# `every` seconds and offer any task it has not seen before: "start
+# work on it?". Nothing starts without the answer.
+triggers:
+  - id: new_task
+    watch: todo
+    every: 300
 steps:
   - id: todo
     plugin: jira.issues

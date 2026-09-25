@@ -17,6 +17,12 @@ waits out its timeout and then fails, so a cycle meant to run unattended at
 three in the morning should not have one. That is a real cost and the reason
 the step is not on by default anywhere.
 
+**Nobody answered goes on the plan.** Still a failure - nothing the run would
+have done is done - but the question is kept in the plan (``cycle/planner.py``)
+with the run it belongs to, so it is looked at later instead of lost in a list
+of failed runs; resuming the run asks it again. A refusal is an answer and is
+not planned, and neither is a run somebody stopped.
+
 **How the answer reaches it.** ``cycle/ask.py`` - the same pipe the service
 steps use, asking a different question. With no GUI attached the step says so
 in its first millisecond rather than waiting out the timeout, the way a service
@@ -152,10 +158,39 @@ class ApprovalGate(CyclePlugin):
             return registry.succeeded(message="approved: %s" % chosen, **outputs)
         # A refusal and a silence are different things and the message says
         # which, but neither lets the run go on.
+        if not answer.get("answered") and _unanswered(context):
+            _plan(context, step, question)
         return registry.PluginResult(
             "failed", outputs=outputs,
             message=("not approved: %s" % chosen if answer.get("answered")
                      else answer.get("message", "nobody answered")))
+
+
+def _unanswered(context):
+    """Nobody answered, as opposed to somebody stopping the run.
+
+    The executor cancels a step whose timeout passed with a reason saying so;
+    a Stop cancels it too, and that is somebody's decision, not a silence.
+    """
+    if not context.cancel.is_set():
+        return True
+    return str(context.cancel.reason or "").startswith("timed out after")
+
+
+def _plan(context, step, question):
+    """Put the question on the plan. Never raises: failing to write it down
+    must not change what the step decided."""
+    try:
+        from cycle import planner
+        planner.add_approval(context.run.cycle_id, context.run.id, step.id, question,
+                             subject=getattr(context.run, "subject", None),
+                             memory_path=context.memory_path)
+        context.stage(step.id, {"kind": "note", "title": "Kept on the plan",
+                                "detail": "Nobody answered. It is on the plan in the "
+                                          "Subjects list; resume the run to be asked "
+                                          "again.", "status": "done"})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _names(value):

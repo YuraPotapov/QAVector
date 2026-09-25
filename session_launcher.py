@@ -998,6 +998,75 @@ def run_session_command(command, memory_path=None, cycles_dir=None):
     sys.exit(0)
 
 
+def _plan_document(source):
+    """``{"title", "url"}`` from the ``--from`` file, or {} without one."""
+    if not source:
+        return {}
+    with open(source, encoding="utf-8") as handle:
+        document = json.load(handle)
+    return document if isinstance(document, dict) else {}
+
+
+def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=None,
+                      source=None):
+    """Serve one --cycle-watch* call: print JSON, then exit.
+
+    ``--cycle-watch=CYCLE[:TRIGGER]`` asks the queue a trigger watches what is
+    new since it last looked; ``--cycle-watch-seen=CYCLE[:TRIGGER]:KEY``
+    records one key as seen so it is not offered again. Neither starts a run:
+    that is the person's decision, made in the application.
+    """
+    kind, argument = command
+    try:
+        from cycle import loader, watch
+        parts = argument.split(":")
+        if kind == "planned":
+            from cycle import planner
+            payload = {"ok": True, "planned": planner.items(memory_path)}
+        elif kind == "unplan":
+            from cycle import planner
+            payload = {"ok": True, "id": argument,
+                       "removed": planner.remove(argument, memory_path, cycles_dir)}
+        elif kind == "plan":
+            if len(parts) < 2:
+                raise ValueError("--cycle-watch-plan needs CYCLE:KEY or "
+                                 "CYCLE:TRIGGER:KEY")
+            cycle_id, key = parts[0], parts[-1]
+            trigger_id = parts[1] if len(parts) > 2 else ""
+            about = _plan_document(source)
+            cycle = loader.load_cycle(cycle_id, cycles_dir)
+            payload = {"ok": True, "cycle": cycle_id, "key": key,
+                       "planned": watch.plan(cycle, key, about.get("title", ""),
+                                             about.get("url", ""), trigger_id,
+                                             memory_path)}
+        elif kind == "check":
+            cycle_id, trigger_id = parts[0], (parts[1] if len(parts) > 1 else "")
+            cycle = loader.load_cycle(cycle_id, cycles_dir)
+            payload = dict(watch.check(cycle, trigger_id, secrets_path=secrets_path,
+                                       memory_path=memory_path,
+                                       env=dict(os.environ)), ok=True)
+        else:
+            if len(parts) < 2:
+                raise ValueError("--cycle-watch-seen needs CYCLE:KEY or "
+                                 "CYCLE:TRIGGER:KEY")
+            cycle_id, key = parts[0], parts[-1]
+            trigger_id = parts[1] if len(parts) > 2 else ""
+            cycle = loader.load_cycle(cycle_id, cycles_dir)
+            payload = {"ok": True, "cycle": cycle_id, "key": key,
+                       "seen": watch.mark_seen(cycle, key, trigger_id, memory_path)}
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        json.dump({"ok": False, "id": argument,
+                   "problems": [str(exc) if exc.__class__.__name__ in (
+                       "WatchError", "CycleNotFound") else
+                       "%s: %s" % (type(exc).__name__, exc)]},
+                  sys.stdout, indent=2, ensure_ascii=False, default=str)
+        print()
+        sys.exit(2)
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    sys.exit(0)
+
+
 def run_memory_command(command, source, memory_path=None):
     """Serve one --cycle-memory-* call: print JSON, then exit.
 
@@ -1512,7 +1581,8 @@ def _bad_option_message(arg, config_path):
                "--cycle-secret-copy",
                "--cycle-secret-delete", "--cycle-secrets-file",
                "--cycle-memory-show", "--cycle-memory-forget",
-               "--cycle-memory-file", "--cycle-runs-dir"):
+               "--cycle-memory-file", "--cycle-runs-dir", "--cycle-watch",
+               "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove"):
         return "%s needs a value: %s=VALUE (note the '=', not a space)." % (arg, arg)
     return ("Unknown option %r. Run --help for the full list." % arg)
 
@@ -3252,6 +3322,19 @@ write a report. The steps that do not depend on each other run at the same time.
                             run, a resume and the session list alike (default:
                             cycle-runs under the user data).
 
+  --cycle-watch=ID[:TRIGGER]
+                            What is new in the queue a cycle's trigger watches,
+                            since it last looked. The first check only
+                            remembers what is there. Starts nothing.
+  --cycle-watch-seen=ID[:TRIGGER]:KEY
+                            Do not offer KEY again, and take it off the plan.
+  --cycle-watch-plan=ID[:TRIGGER]:KEY --from=F
+                            Keep KEY to look at later; F is {"title", "url"}.
+  --cycle-watch-planned     Everything on the plan, across cycles, as JSON: new
+                            tasks kept for later, and approvals a run stopped at
+                            because nobody answered.
+  --cycle-plan-remove=ID    Take one entry off the plan.
+
   --cycle-sessions[=ID]     What the cycles have been working on: every run of
                             one cycle on one subject, grouped, newest first.
                             ID narrows to one cycle. A cycle with no subject
@@ -3394,6 +3477,7 @@ def main():
     memory_command = None # --cycle-memory-list/show/forget: JSON, then exit
     memory_file = None    # --cycle-memory-file: the store (None = the default)
     session_command = None  # --cycle-sessions / --cycle-session-delete: JSON, then exit
+    watch_command = None  # --cycle-watch / --cycle-watch-seen: JSON, then exit
     secrets_file = None   # --cycle-secrets-file: the store (None = the default)
     users_filter = None   # None = launch every user in the config
     env_name = None       # --env=NAME; None = every environment
@@ -3598,6 +3682,16 @@ def main():
             memory_command = ("show", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-memory-forget="):
             memory_command = ("forget", arg.split("=", 1)[1].strip())
+        elif arg == "--cycle-watch-planned":
+            watch_command = ("planned", "")
+        elif arg.startswith("--cycle-plan-remove="):
+            watch_command = ("unplan", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-watch-plan="):
+            watch_command = ("plan", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-watch-seen="):
+            watch_command = ("seen", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-watch="):
+            watch_command = ("check", arg.split("=", 1)[1].strip())
         elif arg == "--cycle-sessions" or arg.startswith("--cycle-sessions="):
             session_command = ("list", arg.split("=", 1)[1].strip()
                                if "=" in arg else "")
@@ -3805,6 +3899,9 @@ def main():
         run_memory_command(memory_command, flow_source, memory_file)
     if session_command:
         run_session_command(session_command, memory_file, cycles_dir)
+    if watch_command:
+        run_watch_command(watch_command, cycles_dir, secrets_file, memory_file,
+                          flow_source)
     if cycle_command:
         # --from= is shared with --flow-save: one flag, one meaning - the JSON
         # document this write is being given.

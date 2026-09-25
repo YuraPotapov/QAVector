@@ -257,6 +257,7 @@ def test_a_broken_store_does_not_make_recall_raise_into_a_step(store):
     assert memory.holder("QA-1", store) == ""
 
 
+@pytest.mark.real_memory_default
 def test_the_default_store_is_under_the_user_s_data_and_not_in_a_checkout():
     import runtime_paths
 

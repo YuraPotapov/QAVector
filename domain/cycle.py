@@ -115,6 +115,33 @@ class Subject:
     pin: str = ""
 
 
+#: How often a listener asks, in seconds, when a trigger does not say.
+WATCH_EVERY = 300
+#: The least it may ask: a Jira instance polled every few seconds by every
+#: open copy of the application is somebody else's outage.
+WATCH_EVERY_MIN = 60
+
+
+@dataclass
+class Trigger:
+    """Something that offers to start the cycle on its own.
+
+    One kind so far: ``watch`` names a ``jira.issues`` step, and while the
+    application is open the query that step runs is repeated every ``every``
+    seconds. An issue it has not seen before is offered to a person - "start
+    work on it?" - and, if they agree, the cycle runs with ``pin`` set to that
+    issue's key. Nothing starts without the question being answered.
+    """
+
+    id: str
+    watch: str = ""         # the jira.issues step whose query is repeated
+    every: int = WATCH_EVERY
+    pin: str = ""           # the variable an offered key is run with
+    #: Off keeps the trigger - its step and its schedule - without listening,
+    #: so turning it back on does not mean writing it again.
+    enabled: bool = True
+
+
 @dataclass
 class Cycle:
     """A parsed cycle: its id, its steps, and its metadata.
@@ -149,6 +176,8 @@ class Cycle:
     #: What the cycle works on, or None for a cycle whose every run stands on
     #: its own.
     subject: Subject = None
+    #: What may offer to start the cycle without somebody pressing Run.
+    triggers: tuple = ()                            # tuple[Trigger]
     steps: list = field(default_factory=list)       # list[CycleStep]
     source: str = None                              # file path it was read from
 

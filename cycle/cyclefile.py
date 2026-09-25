@@ -34,7 +34,8 @@ _SAFE_ID = re.compile(r"[^A-Za-z0-9_-]+")
 #: The order keys are written in. Not alphabetical - this is the order somebody
 #: reads a cycle in: what it is, then what it takes, then what it does.
 _CYCLE_KEY_ORDER = ("id", "name", "description", "project", "version",
-                    "variables", "subject", "steps")
+                    "variables", "subject", "triggers", "steps")
+_TRIGGER_KEY_ORDER = ("id", "watch", "every", "pin", "enabled")
 #: The order a subject reads in: what kind of thing, which one, then the rest.
 _SUBJECT_KEY_ORDER = ("kind", "key", "title", "memory", "pin")
 _STEP_KEY_ORDER = ("id", "plugin", "label", "needs", "if", "with", "timeout",
@@ -120,6 +121,11 @@ def list_cycles(cycles_dir=None, registry=None):
         row["description"] = parsed.description
         row["project"] = parsed.project
         row["steps"] = len(parsed.steps)
+        # So a front-end knows which cycles to listen for without opening each.
+        row["triggers"] = [dict(id=one.id, watch=one.watch, every=one.every,
+                                pin=model.trigger_pin(parsed, one),
+                                enabled=one.enabled)
+                           for one in parsed.triggers]
         row["problems"] = model.problems(parsed, registry=registry, raw=raw)
         rows.append(row)
     return rows
@@ -165,6 +171,22 @@ def render(document):
                     # Paths carry both a kind and a value. Keep the mapping;
                     # treating every declaration as secret discards the path.
                     lines.extend(_render_value(name, one, 2))
+        elif key == "triggers" and isinstance(value, list):
+            # Written like steps: one entry each, the id first. Without this
+            # branch a trigger was dropped by every save the application made,
+            # which is how turning one off in the step's dialog deleted it.
+            lines.append("triggers:")
+            for one in value:
+                if not isinstance(one, dict):
+                    continue
+                names = _TRIGGER_KEY_ORDER + tuple(sorted(set(one) - set(_TRIGGER_KEY_ORDER)))
+                first = True
+                for name in names:
+                    if name not in one or one[name] in ("", None):
+                        continue
+                    lines.append("%s%s: %s" % ("  - " if first else "    ", name,
+                                               _scalar(one[name])))
+                    first = False
         elif key == "subject" and isinstance(value, dict):
             lines.append("subject:")
             for name in _SUBJECT_KEY_ORDER + tuple(sorted(set(value) - set(_SUBJECT_KEY_ORDER))):

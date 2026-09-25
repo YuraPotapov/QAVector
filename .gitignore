@@ -43,6 +43,9 @@ cycle-runs
 # user's data root, because in a source checkout the data root IS the checkout.
 cyclesecrets.json
 cyclesecrets.key
+# And what cycles remember - the plan, what a listener has seen - for the same
+# reason: in a source checkout the data root is the checkout.
+cyclememory.json
 
 # Local IDE run configurations: they name real environments and users
 # (--env=..., --user=...), so they stay on the machine that uses them.
