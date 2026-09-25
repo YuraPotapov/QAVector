@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.8] - 2026-09-26
+
+### Fixed
+- **The window could not be maximized on a small screen.** The Cycles header
+  would not shorten a long cycle name, so one name held the window - on every
+  page - wider than a 1366 px screen, and maximizing left its right side off
+  the edge. The name and the state line beside it now shorten to "..." when
+  there is no room, with the whole text in their tooltip.
+
 ## [0.16.7] - 2026-09-25
 
 ### Added
