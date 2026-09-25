@@ -202,8 +202,8 @@ class CyclesPage(QWidget):
         # start work, the way Run and Stop do, and a button that starts
         # something should look like a button.
 
-        self.title = widgets.heading("Cycles")
-        self.state = widgets.mono("")
+        self.title = widgets.elided_line("Cycles")
+        self.state = widgets.elided_line("", "mono")
 
         layout.addWidget(widgets.row(
             self.title, None, self.state, self.properties_button,

@@ -318,6 +318,19 @@ def test_the_page_is_headed_with_the_cycle_s_name(opened):
     assert opened.title.text() == "Demo cycle"
 
 
+def test_a_long_name_does_not_widen_the_page(page, qapp):
+    """The header shortens its text instead: a page wider than the screen
+    holds the whole window wider than it, and then it cannot be maximized."""
+    page.show()     # a hidden layout never recomputes its minimum
+    qapp.processEvents()
+    short = page.minimumSizeHint().width()
+    page.title.setText("A cycle with a very long name " * 6)
+    page.state.setText("28 step(s), 1 problem(s) - working on task QA-123 " * 3)
+    qapp.processEvents()
+    assert page.minimumSizeHint().width() == short
+    assert page.title.text().startswith("A cycle with a very long name")
+
+
 def test_the_page_says_how_big_the_cycle_is(opened):
     assert "4 step" in opened.state.text()
 

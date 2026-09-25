@@ -432,6 +432,21 @@ class ElidedLabel(QLabel):
     def text(self):
         return self._full
 
+    def sizeHint(self):
+        # The whole text, not what is showing: a label that had to shorten once
+        # would otherwise ask for only that much and never get its text back.
+        # Only read under a policy other than Ignored - see elided_line.
+        hint = super().sizeHint()
+        margins = self.contentsMargins()
+        hint.setWidth(self.fontMetrics().horizontalAdvance(self._full) + 2
+                      + margins.left() + margins.right())
+        return hint
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(self.fontMetrics().horizontalAdvance("…") * 3)
+        return hint
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._elide()
@@ -846,6 +861,19 @@ def pick_path(parent, title, start="", directory=False, save=False):
 def heading(text, role="h1"):
     label = QLabel(text)
     label.setProperty("role", role)
+    return label
+
+
+def elided_line(text="", role="h1"):
+    """A heading or a status that may be long, in a row it shares with buttons.
+
+    It asks for its whole text and gets it when there is room, but gives way
+    before the buttons do: a cycle's name in the header was enough to hold the
+    window wider than a laptop screen, and so unable to maximize.
+    """
+    label = ElidedLabel(text, Qt.ElideRight)
+    label.setProperty("role", role)
+    label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
     return label
 
 
