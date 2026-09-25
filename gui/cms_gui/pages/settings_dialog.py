@@ -83,49 +83,8 @@ class SettingsDialog(QDialog):
         developer = bool(settings.developer_mode)
         column.addWidget(widgets.heading("Settings", "h2"))
         column.addWidget(widgets.lede(
-            "Stored by the GUI. It never imports the core - it spawns the launcher "
-            "through this interpreter, so the two environments stay independent."
-            if developer else
             "Where QAVector finds its accounts, scenarios, services and log sources."))
         column.addSpacing(12)
-
-        detected_script, detected_python = core_mod.autodetect()
-        current_script = settings.core_script or detected_script or ""
-        self.script = QLineEdit(current_script)
-        self.script.setProperty("mono", True)
-        self.script.setPlaceholderText("path to session_launcher.py")
-        script_field = widgets.field("Core script",
-                                     widgets.row(self.script,
-                                                 self._browse_button(self._pick_script)))
-        column.addWidget(script_field)
-
-        # An installed build's core is an executable, so there is no interpreter to
-        # choose - leave the field empty and say why rather than offering a Python
-        # that could not run it anyway.
-        packaged = not core_mod.needs_interpreter(current_script)
-        self.interpreter = QLineEdit(
-            "" if packaged else (settings.interpreter or detected_python or sys.executable))
-        self.interpreter.setProperty("mono", True)
-        self.interpreter.setPlaceholderText(
-            "not needed: the core is a packaged executable" if packaged
-            else "python that has playwright + cryptography")
-        self.interpreter_browse = self._browse_button(self._pick_interpreter)
-        self.interpreter.setEnabled(not packaged)
-        self.interpreter_browse.setEnabled(not packaged)
-        interpreter_field = widgets.field(
-            "Interpreter", widgets.row(self.interpreter, self.interpreter_browse),
-            "Only used for a session_launcher.py; a packaged core runs itself. "
-            "The core's own .venv is detected automatically when gui/ sits inside "
-            "the core checkout.")
-        column.addWidget(interpreter_field)
-
-        # Which core runs, and through what, is a developer's question - an
-        # installed build finds its own. Hidden rather than dropped, though: a
-        # saved path wins over detection (core.Core), so a build pointed at a
-        # checkout once would otherwise have no way back from the UI.
-        self.core_fields = (script_field, interpreter_field)
-        for box in self.core_fields:
-            box.setVisible(developer)
 
         self.config = QLineEdit(settings.config)
         self.config.setProperty("mono", True)
@@ -321,23 +280,6 @@ class SettingsDialog(QDialog):
         button.clicked.connect(slot)
         return button
 
-    def _pick_script(self):
-        path = widgets.pick_path(self, "session_launcher.py",
-                                 os.path.dirname(self.script.text() or "") or "~")
-        if path:
-            self.script.setText(path)
-            guess = core_mod._venv_python(os.path.dirname(path))
-            if guess and not self.interpreter.text():
-                self.interpreter.setText(guess)
-
-    def _pick_interpreter(self):
-        # A chooser does not list dotted directories, but it does show what is
-        # inside one it opens in - and the answer here is usually .venv/bin.
-        path = widgets.pick_path(self, "Python interpreter",
-                                 self.interpreter.text() or "~")
-        if path:
-            self.interpreter.setText(path)
-
     def _pick_log_sources(self):
         path = widgets.pick_path(self, "logsources.json",
                                  self.log_sources.text() or lsf.default_path())
@@ -436,16 +378,13 @@ class SettingsDialog(QDialog):
             self.flows.setPlaceholderText(path)
 
     def core(self):
-        return core_mod.Core(self.script.text().strip(),
-                             self.interpreter.text().strip(),
+        return core_mod.Core(None, None,
                              self.config.text().strip(),
                              self.log_sources.text().strip(),
                              self.flows.text().strip(),
                              cycles_dir=self.cycles.text().strip())
 
     def apply(self):
-        self.settings.core_script = self.script.text().strip()
-        self.settings.interpreter = self.interpreter.text().strip()
         self.settings.config = self.config.text().strip()
         self.settings.services_path = self.services.text().strip()
         self.settings.cycle_projects_path = self.cycle_projects.text().strip()

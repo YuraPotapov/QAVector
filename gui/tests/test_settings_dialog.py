@@ -79,55 +79,50 @@ def test_the_dialog_opens_on_what_was_saved(qapp):
 
 
 def test_the_setting_is_what_ends_up_on_the_command_line(qapp, tmp_path):
-    """The whole point of the field, end to end.
+    """--flows-dir reaches the core on every call.
 
-    The Scenarios page reads and writes through the core, so the tree it edits
-    is whichever one this flag names - and it has to be on --describe and
-    --flow-save alike, not only on a run.
+    Not only on a run: the core reads the tree it is given, and the Scenarios
+    page's editor and a run have to be looking at the same tree - so it has to
+    be on --describe and --flow-save alike.
     """
-    script = tmp_path / "session_launcher.py"
-    script.write_text("")
     settings = Settings()
     settings.flows_path = ""
     dialog = SettingsDialog(settings)
-    dialog.script.setText(str(script))
     dialog.flows.setText(str(tmp_path / "flows"))
     core = dialog.core()
-    assert "--flows-dir=%s" % (tmp_path / "flows") in core.argv("--describe")
-    assert "--flows-dir=%s" % (tmp_path / "flows") in core.argv("--flow-save=alpha")
     assert isinstance(core, core_mod.Core)
+    if core.script:
+        assert "--flows-dir=%s" % (tmp_path / "flows") in core.argv("--describe")
+        assert "--flows-dir=%s" % (tmp_path / "flows") in core.argv("--flow-save=alpha")
 
 
-def test_which_core_runs_is_only_on_show_in_developer_mode(qapp):
-    """An installed build finds its own core; only a developer points it elsewhere."""
+def test_which_core_runs_is_not_a_setting(qapp):
+    """An installed GUI runs the core installed beside it, one started from a
+    checkout runs that checkout's. There is nothing to choose, in either mode."""
     settings = Settings()
-    settings.developer_mode = False
-    try:
-        # Held in a name: a dialog nobody holds is collected at once, and its
-        # fields go with it before they can be looked at.
-        regular = SettingsDialog(settings)
-        assert all(box.isHidden() for box in regular.core_fields)
-        settings.developer_mode = True
-        developer = SettingsDialog(settings)
-        assert not any(box.isHidden() for box in developer.core_fields)
-    finally:
-        settings.developer_mode = False
+    for developer in (False, True):
+        settings.developer_mode = developer
+        try:
+            dialog = SettingsDialog(settings)
+            assert not hasattr(dialog, "script")
+            assert not hasattr(dialog, "interpreter")
+        finally:
+            settings.developer_mode = False
 
 
-def test_hidden_core_fields_are_still_saved(dialog, tmp_path):
-    """Hidden is not dropped: a saved core path wins over detection, so it has to
-    keep round-tripping - or a build once pointed at a checkout could never be
-    pointed back."""
-    dialog, settings = dialog
-    script = tmp_path / "session_launcher.py"
-    script.write_text("")
-    assert all(box.isHidden() for box in dialog.core_fields)
-    dialog.script.setText(str(script))
-    dialog.apply()
-    try:
-        assert settings.core_script == str(script)
-    finally:
-        settings.core_script = ""
+def test_a_core_path_saved_by_an_earlier_version_is_forgotten(qapp):
+    """It won over detection: a build once pointed at a checkout kept running
+    the checkout's code with nothing on screen saying so."""
+    from PySide6.QtCore import QSettings
+    from cms_gui.settings import APP, ORG
+
+    raw = QSettings(ORG, APP)
+    raw.setValue("core/script", "/old/checkout/session_launcher.py")
+    raw.setValue("core/interpreter", "/old/checkout/.venv/bin/python")
+    raw.sync()
+    Settings()
+    raw = QSettings(ORG, APP)
+    assert not raw.contains("core/script") and not raw.contains("core/interpreter")
 
 
 def test_where_the_cycle_memory_goes_is_remembered(dialog):

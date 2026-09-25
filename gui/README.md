@@ -49,7 +49,6 @@ them without a restart:
 | Command | hidden | yes |
 | *Copy command* in the toolbar | hidden | yes |
 | the generated command line under the Launch summary | hidden | yes |
-| *Core script* and *Interpreter* in Settings | hidden | yes |
 | flag names in the pages and menus | plain wording | the flag |
 
 Launch Sessions is never hidden: it is the primary interface in one mode and

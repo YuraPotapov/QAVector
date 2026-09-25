@@ -21,23 +21,15 @@ class Settings:
 
     def __init__(self):
         self._qs = QSettings(ORG, APP)
-
-    # -- core location --------------------------------------------------------
-    @property
-    def core_script(self):
-        return self._qs.value("core/script", "", str)
-
-    @core_script.setter
-    def core_script(self, value):
-        self._qs.setValue("core/script", value or "")
-
-    @property
-    def interpreter(self):
-        return self._qs.value("core/interpreter", "", str)
-
-    @interpreter.setter
-    def interpreter(self, value):
-        self._qs.setValue("core/interpreter", value or "")
+        # Which core runs is not a setting any more: an installed GUI runs the
+        # core installed beside it, and one started from a checkout runs that
+        # checkout's (core.autodetect). A path saved by an earlier version won
+        # over both - an installed build once pointed at a checkout kept
+        # running the checkout's code with nothing on screen saying so - so it
+        # is forgotten rather than left to be read.
+        for key in ("core/script", "core/interpreter"):
+            if self._qs.contains(key):
+                self._qs.remove(key)
 
     @property
     def config(self):
