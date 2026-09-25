@@ -16,6 +16,51 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.7] - 2026-09-25
+
+### Added
+- **A cycle can listen for new tasks.** `triggers:` names a step whose plugin
+  can be listened to - `jira.issues` today - and `every:` how many seconds
+  apart. While the application is open that step is asked what it would take
+  now, and a task it has not seen before is offered: *Start work on QA-7?*
+  Start work runs the cycle pinned to it; Ignore never offers it again; Not
+  now asks at the next check. The first check only remembers what is already
+  there, tasks are asked about one window at a time and never during a run,
+  and a failed check is retried without a dialog. `--cycle-watch` and
+  `--cycle-watch-seen` do the same from a terminal.
+- **Which steps can be listened to is the plugin's to say.** A plugin sets
+  `watchable` and implements `peek(settings)`; the engine and the application
+  compare keys and never learn what kind of queue it is.
+- **Listening is switched in the step's own dialog.** A watchable step has
+  *Listen* and *Every (seconds)*; off writes `enabled: false` and keeps the
+  schedule.
+- **The status bar says it is listening** - *Listening: 1 cycle - next check
+  0:42* - beside the running services, and turns red with the reason when a
+  check fails. CPU and RAM stay at the far right.
+- **A plan for what nobody answered.** The new-task window has *In plan (20)*,
+  counting down and pressing itself at zero. An approval a run stopped at
+  because nobody answered goes on the plan too - still not approved, the run
+  still stopped - with Resume to continue that run and be asked again. The plan
+  is in the Subjects list on the Cycles page and survives a restart;
+  `--cycle-watch-planned` and `--cycle-plan-remove` from a terminal.
+
+### Changed
+- **Which core runs is no longer a setting.** An installed GUI runs the core
+  installed beside it, and one started from a checkout runs that checkout's.
+  Settings -> Core script and Interpreter are gone, and a path an earlier
+  version saved - which won over detection, so an installed build could keep
+  running a checkout's code with nothing saying so - is forgotten.
+- The bundled development cycles listen for new tasks every five minutes.
+
+### Fixed
+- **Saving a cycle from the application dropped its triggers.** The file writer
+  knew a fixed list of top-level keys, so any save from a step's dialog or
+  Properties - even one turning listening off - wrote the cycle back without
+  them.
+- **A new task could be asked about twice.** A check that landed while its
+  window was open queued it again, so answering - even Ignore - brought the
+  same window back.
+
 ## [0.16.6] - 2026-09-24
 
 ### Changed
