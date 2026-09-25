@@ -284,3 +284,77 @@ def test_a_stored_state_for_other_panels_is_ignored(qapp, dispose):
     made.remember_in(settings, "k")
     assert made.sizes()[0] > 0
     dispose(made)
+
+
+# ------------------------------------------------------------------ planned
+def planned(key="QA-7", cycle="dev", title="Count the items"):
+    return {"key": key, "title": title, "cycle": cycle, "trigger": "new_task",
+            "url": "https://x.invalid/" + key, "at": time.time()}
+
+
+def test_planned_tasks_sit_under_the_new_run_row_the_open_cycle_s_first(panel):
+    panel.set_cycle("dev", {"nodes": []})
+    panel.set_sessions([session()])
+    panel.set_planned([planned(key="OPS-1", cycle="ops"), planned()])
+    assert panel.row_ids() == [cs.NEW_RUN, "plan:dev:QA-7", "plan:ops:OPS-1",
+                               "dev:QA-1"]
+
+
+def test_a_planned_row_says_what_and_that_it_waits(panel):
+    panel.set_cycle("dev", {"nodes": []})
+    panel.set_planned([planned(key="OPS-1", cycle="ops")])
+    row = panel.list.itemWidget(panel.list.item(1))
+    assert row.title.text() == "OPS-1  Count the items"
+    assert row.detail.text().startswith("ops - planned ")
+    assert row.detail.text().endswith("waiting for you")
+
+
+def test_picking_a_planned_task_offers_to_start_work_on_it(panel):
+    panel.set_cycle("dev", {"nodes": []})
+    panel.set_planned([planned()])
+    started, fresh = [], []
+    panel.planned_start.connect(started.append)
+    panel.new_requested.connect(lambda: fresh.append(True))
+    panel._clicked(panel.list.item(1))
+
+    assert panel.new_button.isVisible() or not panel.isVisible()
+    assert panel.new_button.text() == "Start work"
+    assert "Count the items" in panel.details.toPlainText()
+    panel.new_button.click()
+    assert [one["key"] for one in started] == ["QA-7"] and fresh == []
+
+
+def test_the_bin_takes_it_off_the_plan(panel):
+    panel.set_cycle("dev", {"nodes": []})
+    panel.set_planned([planned()])
+    removed = []
+    panel.planned_remove.connect(removed.append)
+    panel.list.itemWidget(panel.list.item(1)).bin.click()
+    assert [one["key"] for one in removed] == ["QA-7"]
+
+
+def test_a_planned_task_that_went_away_is_no_longer_picked(panel):
+    panel.set_cycle("dev", {"nodes": []})
+    panel.set_planned([planned()])
+    panel._clicked(panel.list.item(1))
+    panel.set_planned([])
+    assert panel.planned_item() is None and panel.new_button.text() == "Start"
+
+
+def test_an_approval_nobody_answered_is_resumed_from_the_plan(panel):
+    waiting = {"id": "approval:r1:approve", "kind": "approval", "cycle": "dev",
+               "run": "r1", "step": "approve", "key": "QA-4",
+               "question": "Start work on QA-4?", "at": time.time()}
+    panel.set_cycle("dev", {"nodes": []})
+    panel.set_planned([waiting])
+    assert panel.row_ids()[1] == "plan:approval:r1:approve"
+    row = panel.list.itemWidget(panel.list.item(1))
+    assert row.title.text() == "QA-4  waiting for your approval"
+    assert "resume to be asked again" in row.detail.text()
+    started = []
+    panel.planned_start.connect(started.append)
+    panel._clicked(panel.list.item(1))
+    assert panel.new_button.text() == "Resume"
+    assert "Start work on QA-4?" in panel.details.toPlainText()
+    panel.new_button.click()
+    assert started[0]["run"] == "r1"

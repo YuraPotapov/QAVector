@@ -118,6 +118,8 @@ class CyclesPage(QWidget):
     cycle_opened = Signal(str)
     #: Put this earlier run on the canvas: (cycle id, run directory).
     session_opened = Signal(str, str)
+    #: A planned task, to start work on: the window knows how to run it.
+    planned_started = Signal(dict)
     stop_requested = Signal()
     saved = Signal()
 
@@ -254,6 +256,8 @@ class CyclesPage(QWidget):
         self.subjects.run_picked.connect(self._open_session_run)
         self.subjects.new_requested.connect(lambda: self._run(""))
         self.subjects.delete_requested.connect(self._delete_session)
+        self.subjects.planned_start.connect(self.planned_started.emit)
+        self.subjects.planned_remove.connect(self._remove_planned)
 
         # Folding splitters: any panel dragged shut leaves a bold line where
         # it went, and clicking the line brings it back.
@@ -429,10 +433,19 @@ class CyclesPage(QWidget):
             step, plugin, self, bool((self._open or {}).get("writable")),
             live=(state.get("steps") or {}).get(step_id),
             ask_plugin=lambda key, settings: self._ask_plugin(
-                step.get("plugin", ""), key, settings))
+                step.get("plugin", ""), key, settings),
+            trigger=self._trigger_of(step_id))
         if dialog.exec() != QDialog.Accepted or dialog.saved is None:
             return
-        self._replace_step(step_id, dialog.saved)
+        self._replace_step(step_id, dialog.saved, dialog.saved_trigger)
+
+    def _trigger_of(self, step_id):
+        """The trigger that watches this step, as the file has it, or None."""
+        document = (self._open or {}).get("document") or {}
+        for one in document.get("triggers") or []:
+            if isinstance(one, dict) and one.get("watch") == step_id:
+                return one
+        return None
 
     def open_properties(self):
         """The cycle's own name, project and variables."""
@@ -512,7 +525,7 @@ class CyclesPage(QWidget):
                 return step
         return None
 
-    def _replace_step(self, step_id, changed):
+    def _replace_step(self, step_id, changed, listening=None):
         """Put an edited step back in the document and write the whole thing.
 
         The whole document rather than a patch: the core writes a cycle file,
@@ -528,6 +541,8 @@ class CyclesPage(QWidget):
         else:
             return
         document["steps"] = steps
+        document = _with_listening(document, step_id, changed.get("id", step_id),
+                                   listening)
         cycle_id = self.current_id()
         if self._write_cycle(cycle_id, document):
             self.open(cycle_id)
@@ -593,8 +608,30 @@ class CyclesPage(QWidget):
             return
         self._sessions_loaded = True
         self.subjects.set_sessions((answer or {}).get("sessions") or [])
+        self.refresh_planned()
         self.subjects.set_live(self._live_cycle())
         self._update_buttons()
+
+    def refresh_planned(self):
+        """Ask the core what is on the plan. Never raises, for the same reason
+        refresh_sessions does not."""
+        if self.core is None:
+            return
+        try:
+            answer = self.core.cycle_watch_planned()
+        except core_mod.CoreError:
+            return
+        self.subjects.set_planned((answer or {}).get("planned") or [])
+
+    def _remove_planned(self, item):
+        """Off the plan, and not offered again."""
+        if self.core is None:
+            return
+        try:
+            self.core.cycle_plan_remove(item.get("id", ""))
+        except core_mod.CoreError as exc:
+            self.output.set_problems([str(exc)])
+        self.refresh_planned()
 
     def _schedule_sessions(self):
         if not self._sessions_pending:
@@ -1846,3 +1883,38 @@ def _clean(number):
     except (TypeError, ValueError):
         return number
     return int(value) if value.is_integer() else value
+
+
+def _with_listening(document, old_id, new_id, listening):
+    """``document`` with the trigger watching one step brought in line with
+    what its dialog said: renamed with the step, turned on or off, rescheduled.
+
+    Off is written as ``enabled: false`` rather than the trigger being deleted,
+    so turning it back on keeps its schedule. A step that was never listened to
+    and still is not gets no trigger at all.
+    """
+    triggers = [dict(one) for one in document.get("triggers") or []
+                if isinstance(one, dict)]
+    mine = None
+    for one in triggers:
+        if one.get("watch") == old_id:
+            one["watch"] = new_id
+            mine = one
+    if listening is not None:
+        if mine is None and listening.get("enabled"):
+            taken = {one.get("id") for one in triggers}
+            name = "listen_" + new_id
+            mine = {"id": name if name not in taken else name + "_2", "watch": new_id}
+            triggers.append(mine)
+        if mine is not None:
+            mine["every"] = listening["every"]
+            if listening["enabled"]:
+                mine.pop("enabled", None)
+            else:
+                mine["enabled"] = False
+    changed = dict(document)
+    if triggers:
+        changed["triggers"] = triggers
+    else:
+        changed.pop("triggers", None)
+    return changed

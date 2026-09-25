@@ -29,6 +29,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 
 from .. import icons, theme, widgets
 
+#: What a listening step's schedule starts at, and the least it may be. The
+#: core's own (domain/cycle.py) - repeated because the GUI never imports the
+#: core, and checked again by the core when the file is saved.
+WATCH_EVERY = 300
+WATCH_EVERY_MIN = 60
+
 #: What a step carries regardless of plugin. Kept here rather than read off the
 #: node payload so the order is the order somebody reads them in.
 ON_FAILURE = ("stop", "continue")
@@ -116,7 +122,7 @@ class NodeDialog(_Editor):
     """
 
     def __init__(self, step, plugin, parent=None, writable=True, live=None,
-                 ask_plugin=None):
+                 ask_plugin=None, trigger=None):
         super().__init__(step.get("label") or step.get("id", "Step"), parent,
                          writable)
         self._step = dict(step)
@@ -124,6 +130,11 @@ class NodeDialog(_Editor):
         self._ask_plugin = ask_plugin
         self._widgets = {}
         self.saved = None            # the changed step, once Save was pressed
+        #: The trigger watching this step, as the file has it, or None.
+        self._trigger = dict(trigger) if trigger else None
+        #: {"enabled", "every"} once saved - for a step that can be listened
+        #: to - or None when there is nothing to say about listening.
+        self.saved_trigger = None
 
         self.subtitle.setText("%s%s" % (
             self._plugin.get("id") or step.get("plugin", ""),
@@ -132,6 +143,7 @@ class NodeDialog(_Editor):
 
         self._add_step_fields()
         self._add_plugin_fields()
+        self._add_listening()
         self._add_actions()
         self._add_live(live)
         self.body_layout.addStretch(1)
@@ -215,6 +227,37 @@ class NodeDialog(_Editor):
             self._line(key, label, _text(value), hint)
 
     # -- what the plugin can be asked ----------------------------------------
+    # -- being listened to ---------------------------------------------------
+    def _add_listening(self):
+        """Only for a step whose plugin says it can be listened to. Off keeps
+        the schedule in the file, so turning it back on is one tick."""
+        if not self._plugin.get("watchable"):
+            return
+        trigger = self._trigger or {}
+        self.body_layout.addWidget(widgets.kicker("Listen for new work"))
+        self._check("listen.enabled", "Listen",
+                    bool(trigger) and trigger.get("enabled", True) is not False,
+                    "While the application is open, ask this step what it "
+                    "would take and offer anything new: start work on it? "
+                    "Nothing starts without the answer.")
+        self._line("listen.every", "Every (seconds)",
+                   _text(trigger.get("every", WATCH_EVERY)),
+                   "How often it asks. %d at the least." % WATCH_EVERY_MIN)
+
+    def _listening(self, problems):
+        if not self._plugin.get("watchable"):
+            return None
+        enabled = bool(self._value("listen.enabled"))
+        every = _number(self._value("listen.every").strip() or str(WATCH_EVERY))
+        if every is None or every < WATCH_EVERY_MIN:
+            if enabled or self._trigger:
+                problems.append("Every must be a number of seconds, %d at the "
+                                "least." % WATCH_EVERY_MIN)
+            return None
+        if not enabled and not self._trigger:
+            return None                 # never listened, still not: nothing to say
+        return {"enabled": enabled, "every": int(every)}
+
     def _add_actions(self):
         actions = self._plugin.get("actions") or []
         if not actions or self._ask_plugin is None:
@@ -457,6 +500,7 @@ class NodeDialog(_Editor):
         settings = self._settings()
         if settings:
             step["with"] = settings
+        listening = self._listening(problems)
 
         if problems:
             self._complain(problems)
@@ -464,6 +508,7 @@ class NodeDialog(_Editor):
         # Everything else the core decides. A second opinion here is a second
         # thing to keep in step with the validator that actually runs.
         self.saved = step
+        self.saved_trigger = listening
         self.accept()
 
 

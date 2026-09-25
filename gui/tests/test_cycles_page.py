@@ -67,6 +67,14 @@ class FakeCore:
         self.sessions_asked += 1
         return {"ok": True, "sessions": list(self.sessions)}
 
+    def cycle_watch_planned(self):
+        return {"ok": True, "planned": list(getattr(self, "planned", []))}
+
+    def cycle_plan_remove(self, entry_id):
+        self.planned = [one for one in getattr(self, "planned", [])
+                        if one.get("id") != entry_id]
+        return {"ok": True, "removed": True}
+
     def cycle_session_delete(self, session_id):
         self.sessions_deleted.append(session_id)
         self.sessions = [one for one in self.sessions if one.get("id") != session_id]

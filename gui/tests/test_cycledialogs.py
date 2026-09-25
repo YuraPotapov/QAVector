@@ -60,11 +60,12 @@ def step(**extra):
 def node(qapp, dispose):
     made = []
 
-    def build(one=None, plugin=SHELL, writable=True, live=None, ask=None):
+    def build(one=None, plugin=SHELL, writable=True, live=None, ask=None,
+              trigger=None):
         # `plugin` defaults rather than falling back, so a test can pass {} to
         # mean "this core has never heard of it".
         dialog = NodeDialog(one or step(), plugin, None, writable,
-                            live=live, ask_plugin=ask)
+                            live=live, ask_plugin=ask, trigger=trigger)
         made.append(dialog)
         return dialog
 
@@ -754,3 +755,63 @@ def test_a_path_is_never_mistaken_for_a_secret(qapp, dispose):
         assert box.echoMode() != box.EchoMode.Password
     finally:
         dispose(dialog)
+
+
+
+# ------------------------------------------------------ listening for new work
+WATCHABLE = dict(SHELL, id="test.queue", watchable=True)
+
+
+def _listen(dialog):
+    return dialog._widgets.get("listen.enabled"), dialog._widgets.get("listen.every")
+
+
+def test_only_a_step_that_can_be_listened_to_offers_it(node):
+    assert _listen(node(plugin=SHELL)) == (None, None)
+    enabled, every = _listen(node(plugin=WATCHABLE))
+    assert enabled is not None and not enabled.isChecked()
+    assert every.text() == "300"
+
+
+def test_a_listening_step_shows_its_schedule_and_can_be_turned_off(node):
+    dialog = node(plugin=WATCHABLE,
+                  trigger={"id": "new_task", "watch": "build", "every": 120})
+    enabled, every = _listen(dialog)
+    assert enabled.isChecked() and every.text() == "120"
+    enabled.setChecked(False)
+    dialog._save()
+    assert dialog.saved_trigger == {"enabled": False, "every": 120}
+
+
+def test_turning_it_on_asks_for_a_sensible_schedule(node):
+    dialog = node(plugin=WATCHABLE)
+    enabled, every = _listen(dialog)
+    enabled.setChecked(True)
+    every.setText("5")
+    dialog._save()
+    assert dialog.saved is None and "60 at the least" in dialog.note.text()
+    every.setText("90")
+    dialog._save()
+    assert dialog.saved_trigger == {"enabled": True, "every": 90}
+
+
+def test_a_step_never_listened_to_says_nothing_about_it(node):
+    dialog = node(plugin=WATCHABLE)
+    dialog._save()
+    assert dialog.saved is not None and dialog.saved_trigger is None
+
+
+def test_the_file_keeps_an_off_trigger_and_follows_a_renamed_step():
+    from cms_gui.pages.cycles import _with_listening
+
+    document = {"id": "c", "steps": [{"id": "todo"}],
+                "triggers": [{"id": "new_task", "watch": "todo", "every": 300}]}
+    off = _with_listening(document, "todo", "take", {"enabled": False, "every": 300})
+    assert off["triggers"] == [{"id": "new_task", "watch": "take", "every": 300,
+                                "enabled": False}]
+    on = _with_listening(off, "take", "take", {"enabled": True, "every": 120})
+    assert on["triggers"] == [{"id": "new_task", "watch": "take", "every": 120}]
+    fresh = _with_listening({"id": "c", "steps": []}, "q", "q",
+                            {"enabled": True, "every": 300})
+    assert fresh["triggers"] == [{"id": "listen_q", "watch": "q", "every": 300}]
+    assert "triggers" not in _with_listening({"id": "c"}, "q", "q", None)

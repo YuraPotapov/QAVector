@@ -355,7 +355,8 @@ class Core:
     def argv(self, *args):
         """Full command line: the program, the global flags, then ``args``."""
         if not self.script:
-            raise CoreError("No core script configured (Settings -> Core script).")
+            raise CoreError("The core was not found: neither an installed one nor "
+                            "a session_launcher.py beside the GUI.")
         command = list(self.prefix)
         if self.config:
             command.append("--config=" + self.config)
@@ -531,6 +532,36 @@ class Core:
     # -- sessions: every run of one cycle on one subject ----------------------
     # The memory flag goes with both: a session shows what its subject's
     # record holds, and deleting one forgets that record.
+
+    # -- listening for new tasks ----------------------------------------------
+    # The secrets flag because the watched query signs in to Jira; the memory
+    # flag because what has been seen is kept in the memory store.
+
+    def cycle_watch(self, cycle_id, trigger_id=""):
+        """What is new in the queue a cycle's trigger watches. Starts nothing."""
+        target = cycle_id + (":" + trigger_id if trigger_id else "")
+        return self._flow_json("--cycle-watch=" + target,
+                               *(self.secrets_flag() + self.memory_flag()))
+
+    def cycle_watch_seen(self, cycle_id, key, trigger_id=""):
+        """Do not offer ``key`` again."""
+        target = ":".join(one for one in (cycle_id, trigger_id, key) if one)
+        return self._flow_json("--cycle-watch-seen=" + target, *self.memory_flag())
+
+    def cycle_watch_plan(self, cycle_id, key, trigger_id="", title="", url=""):
+        """Keep ``key`` to look at later; it is not offered again meanwhile."""
+        target = ":".join(one for one in (cycle_id, trigger_id, key) if one)
+        return self._with_document("--cycle-watch-plan=" + target,
+                                   {"title": title, "url": url}, prefix="cms-plan-",
+                                   extra=tuple(self.memory_flag()))
+
+    def cycle_watch_planned(self):
+        """Everything on the plan - tasks and waiting approvals - oldest first."""
+        return self._flow_json("--cycle-watch-planned", *self.memory_flag())
+
+    def cycle_plan_remove(self, entry_id):
+        """Take one entry off the plan."""
+        return self._flow_json("--cycle-plan-remove=" + entry_id, *self.memory_flag())
 
     def cycle_sessions(self, cycle_id=""):
         """Every session, the most recently active first."""

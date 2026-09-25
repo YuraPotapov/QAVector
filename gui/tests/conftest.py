@@ -187,3 +187,16 @@ def no_waiting_dialogs(monkeypatch):
 
     monkeypatch.setattr(widgets.Message, "exec",
                         lambda self: QDialog.Accepted, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_queue_is_asked(monkeypatch):
+    """A window built in a test starts listening for new tasks, and the core it
+    asks is the real one: the bundled cycles' queues are real Jira sites. A
+    test must not reach the network, so asking says it cannot - the listener's
+    own tests use a fake core and never get here."""
+    from cms_gui import core as core_mod
+
+    monkeypatch.setattr(core_mod.Core, "cycle_watch",
+                        lambda self, cycle_id, trigger_id="": {
+                            "ok": False, "problems": ["not asked in tests"]})

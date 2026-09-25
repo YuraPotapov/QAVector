@@ -26,6 +26,7 @@ from . import (commands, core as core_mod, cyclereplay,
                launch as launch_mod, load as load_mod,
                logsourcesfile as lsf, theme, titlebar, widgets)
 from .askbridge import AskBridge
+from .cyclewatch import Listener
 from .loader import LoaderThread
 from . import version as gui_version
 from .runner import LauncherProcess, RunState
@@ -150,8 +151,7 @@ class MainWindow(QMainWindow):
         self.resize(1380, 880)
 
         self.settings = Settings()
-        self.core = core_mod.Core(self.settings.core_script, self.settings.interpreter,
-                                  self.settings.config, flows_dir=self.settings.flows_path,
+        self.core = core_mod.Core(None, None, self.settings.config, flows_dir=self.settings.flows_path,
                                   cycles_dir=self.settings.cycles_path,
                                   secrets_path=self.settings.cycle_secrets_path,
                                   memory_path=self.settings.cycle_memory_path,
@@ -200,6 +200,12 @@ class MainWindow(QMainWindow):
         self.services_label = QLabel("")
         self.services_label.setStyleSheet("padding: 0 10px;")
         self.statusBar().addPermanentWidget(self.services_label)
+        # Beside it, because it is the same kind of fact - something running
+        # in the background: whether any cycle is listened for, when it next
+        # asks, or that its last check failed, which is otherwise silent.
+        self.listen_label = QLabel("")
+        self.listen_label.setStyleSheet("padding: 0 10px;")
+        self.statusBar().addPermanentWidget(self.listen_label)
         self.services.supervisor.status_changed.connect(self._update_services)
         self._update_services()
 
@@ -228,16 +234,26 @@ class MainWindow(QMainWindow):
         self.workers_label.setStyleSheet("padding: 0 10px;")
         self.statusBar().addPermanentWidget(self.workers_label)
         self.run_state.changed.connect(self._update_workers)
+        # Placed last of all, at the end of __init__: see _place_metrics.
         self.metrics_label = QLabel("")
         self.metrics_label.setStyleSheet("padding: 0 10px;")
-        self.statusBar().addPermanentWidget(self.metrics_label)
 
         self.loader_thread = None
+        # New tasks in the queues cycles watch. Asked about one at a time, and
+        # only when nothing is running - see _offer_next.
+        self.listener = Listener(self.core, self)
+        self.listener.offers_changed.connect(self._offer_next)
+        self._offering = False
+        self._listen_timer = QTimer(self)
+        self._listen_timer.timeout.connect(self._update_listening)
+        self._listen_timer.start(1000)
         self._load = load_mod.Sampler()
         self._metrics_timer = QTimer(self)
         self._metrics_timer.timeout.connect(self._update_metrics)
         self._metrics_timer.start(2000)
         
+        self._place_metrics()
+
         # Ask the core what exists as soon as the window is up, so the pages are
         # populated before the user reaches them.
         QTimer.singleShot(500 if self.splash else 80, self.refresh_inventory)
@@ -528,6 +544,7 @@ class MainWindow(QMainWindow):
         self.cycles.set_run_state(self.run_state)
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
         self.cycles.session_opened.connect(self._open_cycle_run)
+        self.cycles.planned_started.connect(self._start_planned)
         self.command = CommandPage(self.settings)
         self.launch = LaunchSessionsPage(self.settings)
         self.run = RunPage(self.run_state)
@@ -793,6 +810,16 @@ class MainWindow(QMainWindow):
             "%s %s running at once, out of %s.\nLast change: %s"
             % (limit, workers["unit"], ceiling, workers["why"] or "none yet"))
 
+    def _place_metrics(self):
+        """CPU and RAM go at the far right of the status bar, always.
+
+        The status bar lays permanent widgets out in the order they are added,
+        so whatever is added after this one lands to its right. Added here, as
+        the last thing construction does, rather than beside its creation - a
+        label added later in __init__ once pushed "Listening" past it.
+        """
+        self.statusBar().addPermanentWidget(self.metrics_label)
+
     def _update_metrics(self):
         load = self._load.read()
         used = load.used_percent
@@ -902,15 +929,14 @@ class MainWindow(QMainWindow):
 
         def _on_error(exc):
             self.describe_label.setText("could not read the configuration")
-            self.status_right.setText("check Settings -> Core script")
+            self.status_right.setText("the core did not answer")
             self._finish_splash()
             if self._headless:
                 logging.error("Cannot read the core: %s", exc)
                 QApplication.quit()
                 return
             widgets.warn(self, "Cannot read the core",
-                                "%s\n\nCheck Settings -> Core script / Interpreter."
-                                % exc)
+                                "%s" % exc)
                                 
         def _on_finished(inventory):
             self.inventory = inventory
@@ -933,6 +959,8 @@ class MainWindow(QMainWindow):
             # than travelling with every call the way --flows-dir does.
             self.cycles.set_projects_path(self.settings.cycle_projects_path)
             self.cycles.set_inventory(self.inventory)
+            self.listener.set_core(self.core)
+            self.listener.set_inventory(self.inventory)
             
             _splash_msg("Loading credentials...")
             self.credentials.load(self.inventory.config_path or self.core.config_path)
@@ -1042,21 +1070,90 @@ class MainWindow(QMainWindow):
         dialog.set_flows_dir(self.inventory.dirs().get("flows") or "")
         if dialog.exec() == QDialog.Accepted:
             dialog.apply()
-            self.core = core_mod.Core(self.settings.core_script,
-                                      self.settings.interpreter, self.settings.config,
+            self.core = core_mod.Core(None, None, self.settings.config,
                                       flows_dir=self.settings.flows_path,
                                       cycles_dir=self.settings.cycles_path,
                                       secrets_path=self.settings.cycle_secrets_path,
                                       memory_path=self.settings.cycle_memory_path,
                                       runs_path=self.settings.cycle_runs_path)
             self._aim_log_sources()
+            self.listener.set_core(self.core)
             self.refresh_inventory()
+
+    # -- new tasks ------------------------------------------------------------
+    def _update_listening(self):
+        line, detail, trouble = self.listener.status()
+        self.listen_label.setText(line)
+        self.listen_label.setToolTip(detail)
+        self.listen_label.setStyleSheet("padding: 0 10px;%s" % (
+            " color: %s;" % theme.BAD if trouble else ""))
+
+    def _start_planned(self, item):
+        """Start work on a task that was put on the plan - or, for an approval
+        nobody answered, resume the run that stopped at it."""
+        if self.process.is_running():
+            return
+        if item.get("kind") == "approval":
+            try:
+                self.core.cycle_plan_remove(item.get("id", ""))
+            except core_mod.CoreError:
+                pass
+            self.cycles.refresh_planned()
+            self.cycles.explorer.select(item["cycle"])
+            self.start_cycle_run(item["cycle"], how="resume", step=item.get("run", ""))
+            return
+        pin = ""
+        for row in self.inventory.cycles:
+            if row.get("id") == item.get("cycle"):
+                for one in row.get("triggers") or []:
+                    if one.get("id") == item.get("trigger"):
+                        pin = one.get("pin") or ""
+        self.listener.seen(item)
+        self.cycles.refresh_planned()
+        self.cycles.explorer.select(item["cycle"])
+        self.start_cycle_run(item["cycle"], variables={pin: item["key"]} if pin else {})
+
+    def _ask_about(self, offer):
+        """The "new task" window - see cyclewatch.ask_about."""
+        from .cyclewatch import ask_about
+        return ask_about(self, offer)
+
+    def _offer_next(self):
+        """Ask about the oldest new task - if nothing is running and nobody is
+        already being asked. Start runs the cycle on it; Ignore never offers it
+        again; Not now leaves it to be offered at the trigger's next check."""
+        if self._offering or getattr(self, "_closing", False):
+            return
+        if self.process.is_running():
+            return                              # _on_finished asks again
+        offer = self.listener.next_offer()
+        if offer is None:
+            return
+        self._offering = True
+        try:
+            answer = self._ask_about(offer)
+        finally:
+            self._offering = False
+            self.listener.answered(offer)
+        if answer == "In plan":
+            self.listener.plan(offer)
+            self.cycles.refresh_planned()
+        elif answer == "Start work":
+            self.listener.seen(offer)
+            self.show_page("cycles")
+            self.cycles.explorer.select(offer["cycle"])
+            self.start_cycle_run(offer["cycle"], variables=(
+                {offer["pin"]: offer["key"]} if offer["pin"] else {}))
+            return
+        if answer == "Ignore":
+            self.listener.seen(offer)
+        QTimer.singleShot(0, self._offer_next)
 
     def one_shot(self, title, args):
         """Run a command that just prints something, and show what it printed."""
         if not self.core.is_configured():
-            widgets.note(self, title, "Configure the core first "
-                                                 "(Settings -> Core script).")
+            widgets.note(self, title, "The core was not found. Reinstall QAVector, or start "
+                                                 "the GUI from a checkout.")
             return
         try:
             code, out, err = self.core.run(*args)
@@ -1181,8 +1278,8 @@ class MainWindow(QMainWindow):
         if self.process.is_running():
             return
         if not self.core.is_configured():
-            widgets.note(self, "Run", "Configure the core first "
-                                                 "(Settings -> Core script).")
+            widgets.note(self, "Run", "The core was not found. Reinstall QAVector, or start "
+                                                 "the GUI from a checkout.")
             return
         source, page = self._run_page(source)
         if source == "launch":
@@ -1296,7 +1393,7 @@ class MainWindow(QMainWindow):
         self.run_state.mark_stopping(name)
         self.status_right.setText("stopping %s — the others carry on" % name)
 
-    def start_cycle_run(self, cycle_id, how="", step=""):
+    def start_cycle_run(self, cycle_id, how="", step="", variables=None):
         """Run one cycle. Modelled on start_run, and deliberately separate.
 
         A scenario run is assembled from a page's form; a cycle run is one id
@@ -1318,11 +1415,12 @@ class MainWindow(QMainWindow):
         if not cycle_id or self.process.is_running():
             return
         if not self.core.is_configured():
-            widgets.note(self, "Run", "Configure the core first "
-                                                 "(Settings -> Core script).")
+            widgets.note(self, "Run", "The core was not found. Reinstall QAVector, or start "
+                                                 "the GUI from a checkout.")
             return
         args = (["--cycle-run=" + cycle_id, "--events=-", "--control=-"]
-                + self.core.secrets_flag() + self.core.memory_flag())
+                + self.core.secrets_flag() + self.core.memory_flag()
+                + ["--cycle-var=%s=%s" % one for one in sorted((variables or {}).items())])
         if how == "resume" and step:
             args.append("--cycle-resume=" + step)
         elif how and step:
@@ -1420,6 +1518,8 @@ class MainWindow(QMainWindow):
         # would otherwise leave the Cycles page offering Stop for a run that
         # is not there, and steps spinning forever.
         self.run_state.cycle_interrupted()
+        # A task that turned up during the run was kept waiting for this.
+        QTimer.singleShot(0, self._offer_next)
         self.run.run_finished(code)
         self.status_right.setText("finished (exit %d)" % code)
         if self.run_state.run_dir:
@@ -1707,6 +1807,8 @@ class MainWindow(QMainWindow):
             if stopping:
                 QApplication.restoreOverrideCursor()
         self._closing = True
+        self.listener.shutdown()
+        self._listen_timer.stop()
         self._metrics_timer.stop()
         self.settings.save_geometry(self.saveGeometry())
         # A QThread whose QObject is destroyed while it is still running takes the

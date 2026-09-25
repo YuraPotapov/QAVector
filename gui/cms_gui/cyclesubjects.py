@@ -39,6 +39,55 @@ from . import icons, theme, widgets
 #: The id the "start something new" row carries, which no session can have:
 #: every session id has a colon in it.
 NEW_RUN = "new"
+#: The row id of an entry on the plan: "plan:" and the core's own id.
+PLAN_PREFIX = "plan:"
+#: The two kinds the core puts on the plan (cycle/planner.py).
+APPROVAL = "approval"
+
+
+def plan_id(item):
+    return PLAN_PREFIX + str(item.get("id") or "%s:%s" % (item.get("cycle", ""),
+                                                           item.get("key", "")))
+
+
+def planned_title(item):
+    if item.get("kind") == APPROVAL:
+        return "%s  waiting for your approval" % (item.get("key") or item.get("cycle", ""))
+    return "%s  %s" % (item.get("key", ""), item.get("title", "")) if item.get(
+        "title") else item.get("key", "")
+
+
+def planned_detail(item, cycle_id=""):
+    when = time.strftime("%d %b %H:%M", time.localtime(item.get("at") or 0))
+    where = "" if item.get("cycle") == cycle_id else "%s - " % item.get("cycle", "")
+    if item.get("kind") == APPROVAL:
+        return "%snobody answered %s - resume to be asked again" % (where, when)
+    return "%splanned %s - waiting for you" % (where, when)
+
+
+def start_label(item):
+    return "Resume" if item.get("kind") == APPROVAL else "Start work"
+
+
+def planned_html(item):
+    """The pane under the list, for an entry on the plan."""
+    if item.get("kind") == APPROVAL:
+        said = ("A run of %s stopped here because nobody answered it: <i>%s</i>. "
+                "Nothing after it was done. Resume continues that run and asks "
+                "again; the bin takes it off the plan and leaves the run as it is."
+                % (html.escape(item.get("cycle", "")),
+                   html.escape(item.get("question", ""))))
+    else:
+        said = ("A new task the cycle %s found while listening, kept for you to "
+                "look at. Start work runs the cycle on it; the bin takes it off "
+                "the plan." % html.escape(item.get("cycle", "")))
+    rows = ["<p><b>%s</b></p>" % html.escape(planned_title(item)),
+            "<p style='color:%s'>%s</p>" % (theme.NEUTRAL[600], said),
+            "<p>%s</p>" % html.escape(planned_detail(item))]
+    if item.get("url"):
+        rows.append("<p><a href='%s'>%s</a></p>" % (html.escape(item["url"], True),
+                                                   html.escape(item["url"])))
+    return "".join(rows)
 
 #: Everything the sidebar looks like, in one place - the habit
 #: ``cyclegraph.py`` and ``stages.py`` keep.
@@ -304,10 +353,14 @@ class SubjectsPanel(QWidget):
     run_picked = Signal(str, str)
     new_requested = Signal()
     delete_requested = Signal(dict)
+    #: A planned task: start work on it, or take it off the plan.
+    planned_start = Signal(dict)
+    planned_remove = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sessions = []
+        self._planned = []
         self._cycle = ""
         self._graph_subject = None
         self._labels = {}
@@ -333,7 +386,7 @@ class SubjectsPanel(QWidget):
         self.details.anchorClicked.connect(self._link)
         self.new_button = icons.button(QPushButton(), "run", "Start")
         self.new_button.setProperty("variant", "primary")
-        self.new_button.clicked.connect(self.new_requested.emit)
+        self.new_button.clicked.connect(self._start)
         below = QWidget()
         below_layout = QVBoxLayout(below)
         below_layout.setContentsMargins(0, 0, 0, 0)
@@ -362,6 +415,20 @@ class SubjectsPanel(QWidget):
     def set_sessions(self, sessions):
         self._sessions = [one for one in sessions or [] if isinstance(one, dict)]
         self.set_live(self._live)
+
+    def set_planned(self, planned):
+        """Tasks kept for later, across cycles. The open cycle's come first."""
+        self._planned = [one for one in planned or [] if isinstance(one, dict)]
+        if self._picked.startswith(PLAN_PREFIX) and self.planned_item() is None:
+            self._picked = ""
+        self._rebuild()
+
+    def planned_item(self):
+        """The planned task picked, or None."""
+        for one in self._planned:
+            if plan_id(one) == self._picked:
+                return one
+        return None
 
     def set_live(self, live):
         """The run on screen. Its session becomes the picked row."""
@@ -429,6 +496,16 @@ class SubjectsPanel(QWidget):
         if self._cycle:
             self._add(NEW_RUN, _Row("+ New run", new_run_text(
                 self._graph_subject, self._labels), theme.NEUTRAL[500]))
+        ordered = ([one for one in self._planned if one.get("cycle") == self._cycle]
+                   + [one for one in self._planned if one.get("cycle") != self._cycle])
+        for item in ordered:
+            row = _Row(planned_title(item), planned_detail(item, self._cycle),
+                       theme.ACCENT, deletable=not self._busy)
+            row.bin.setToolTip("Take it off the plan." if item.get("kind") == APPROVAL
+                               else "Take it off the plan. It is not offered again.")
+            row.bin.clicked.connect(lambda _checked=False, one=item:
+                                    self.planned_remove.emit(one))
+            self._add(plan_id(item), row)
         for session in self.ordered():
             detail = " - ".join(part for part in row_detail(session, self._cycle)
                                 if part)
@@ -451,6 +528,14 @@ class SubjectsPanel(QWidget):
                     picked.get("subject") or {}).get("key"):
                 live = None
         mine = picked is None or picked.get("cycle") == self._cycle
+        planned = self.planned_item()
+        if planned is not None:
+            self.details.setHtml(planned_html(planned))
+            self.new_button.setText(start_label(planned))
+            self.new_button.setVisible(True)
+            self.new_button.setEnabled(not self._busy)
+            return
+        self.new_button.setText("Start")
         if picked is None and self._picked != NEW_RUN:
             self.details.setHtml(
                 "<p style='color:%s'>%s</p>" % (
@@ -465,6 +550,13 @@ class SubjectsPanel(QWidget):
         self.new_button.setEnabled(not self._busy and bool(self._cycle))
 
     # -- what a person does ---------------------------------------------------
+    def _start(self):
+        planned = self.planned_item()
+        if planned is not None:
+            self.planned_start.emit(planned)
+        else:
+            self.new_requested.emit()
+
     def _clicked(self, item):
         picked = item.data(ROLE_SESSION) or ""
         self._picked = picked
@@ -478,3 +570,6 @@ class SubjectsPanel(QWidget):
         picked = self.picked()
         if target.startswith("run:") and picked is not None:
             self.run_picked.emit(picked.get("cycle", ""), target[len("run:"):])
+        elif target.startswith(("http://", "https://")):
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(url)
