@@ -624,7 +624,20 @@ def _search(get, flavour, query, limit, cancel):
             break
         if flavour == SERVER and start >= int(page.get("total") or 0):
             break
+    if not found:
+        _signed_in(get, flavour)
     return found[:limit]
+
+
+def _signed_in(get, flavour):
+    """Raises :class:`JiraError` when the credentials are refused.
+
+    Cloud answers a search with refused Basic credentials as an anonymous one:
+    200 and no issues, since ``currentUser()`` is nobody and nobody can browse
+    the project. An expired token would read as an empty queue, so an empty
+    answer is checked against the one endpoint that does say 401.
+    """
+    get("/rest/api/%s/myself" % ("3" if flavour == CLOUD else "2"))
 
 
 def _add_comments(get, flavour, issues, limit, cancel):

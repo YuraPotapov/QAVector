@@ -109,7 +109,9 @@ def jira():
     made = []
 
     def serve(**answers):
-        one = _Jira(answers)
+        # Signed in unless a test says otherwise: an empty search asks.
+        one = _Jira(dict({CLOUD_MYSELF: {"accountId": "5b10a2"},
+                          SERVER_MYSELF: {"name": "me"}}, **answers))
         made.append(one)
         return one
 
@@ -137,6 +139,8 @@ CLOUD_SEARCH = "/rest/api/3/search/jql"
 CLOUD_COMMENT = "/rest/api/3/issue"
 SERVER_SEARCH = "/rest/api/2/search"
 SERVER_COMMENT = "/rest/api/2/issue"
+CLOUD_MYSELF = "/rest/api/3/myself"
+SERVER_MYSELF = "/rest/api/2/myself"
 
 
 # --------------------------------------------------------------------- Cloud
@@ -508,6 +512,32 @@ def test_refused_credentials_say_which_credentials(jira, run):
 
     assert not result.ok
     assert "401" in result.message and "API token" in result.message
+
+
+def test_refused_credentials_are_not_an_empty_queue(jira, run):
+    """Cloud answers a search with a refused token as anonymous: 200, nothing."""
+    server = jira(**{CLOUD_SEARCH: {"issues": [], "isLast": True},
+                     CLOUD_MYSELF: (401, {})})
+    result = run(server.site)
+
+    assert not result.ok
+    assert "401" in result.message and "API token" in result.message
+
+
+def test_an_empty_queue_is_checked_on_server_too(jira, run):
+    server = jira(**{SERVER_SEARCH: {"issues": [], "total": 0},
+                     SERVER_MYSELF: (401, {})})
+    result = run(server.site, flavour="server", auth="bearer", email="")
+
+    assert not result.ok
+    assert "/rest/api/2/myself" in result.message
+
+
+def test_found_issues_need_no_extra_request(jira, run):
+    server = jira(**{CLOUD_SEARCH: {"issues": [_issue("QA-1")], "isLast": True},
+                     CLOUD_COMMENT: {"comments": []}})
+    assert run(server.site).ok
+    assert not any("myself" in path for path in server.paths())
 
 
 def test_a_jql_jira_would_not_accept_says_what_it_objected_to(jira, run):

@@ -34,6 +34,15 @@ class Queue(object):
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def do_GET(self):                                   # noqa: N802
+                # An empty queue checks who is signed in.
+                raw = json.dumps({"accountId": "me"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
         self.server = HTTPServer(("127.0.0.1", 0), Handler)
         self.site = "http://127.0.0.1:%d" % self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
