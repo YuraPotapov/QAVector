@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.9] - 2026-09-28
+
+### Fixed
+- **An expired Jira token looked like an empty queue.** Jira Cloud answers a
+  search with refused credentials as if nobody were signed in: no error, no
+  issues. The Jira node and the Jira trigger now check who is signed in when a
+  search comes back empty, and fail with "Jira answered 401 ... API token"
+  instead of reporting 0 tasks.
+
 ## [0.16.8] - 2026-09-26
 
 ### Fixed
