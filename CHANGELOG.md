@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.11] - 2026-09-29
+
+### Fixed
+- **The Artifacts button above Output no longer lists only "Run folder".**
+  With no step picked, or a step that wrote nothing, its list held that one
+  entry, which did what pressing the button already did. It is now a plain
+  button that opens the run's folder, and has a list only while a step has
+  files to name.
+
 ## [0.16.10] - 2026-09-29
 
 ### Added
@@ -90,6 +99,10 @@ app-agnostic, since that will break things on purpose.
   the canvas, so nothing that comes and goes resizes the page or the window.
 
 ### Fixed
+- **The package no longer carries scenarios and cycles nobody committed.**
+  The build took `flows/` and `cycles/` as they stood in the checkout, so
+  whatever its owner had recorded or written there for their own projects
+  was installed for everyone. Only the files git tracks are shipped now.
 - **Dark theme: a selected row no longer looks cut out of the page.** Picked
   rows in trees, tables and lists (the Cycles explorer, the Artifacts tree),
   the highlighted menu or drop-down entry and the rail's current page were a
