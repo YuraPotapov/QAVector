@@ -16,6 +16,106 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.10] - 2026-09-29
+
+### Added
+- **Stages in a window of its own.** An icon on the Stages tab moves the feed
+  and its message box into a separate window - minimize, maximize, put it on
+  another screen - and the icon left in the tab, or closing the window, puts
+  it back. The window closes with the application and never keeps it running;
+  whether Stages was detached, and where the window was, survive a restart.
+  **Ctrl+Shift+S** goes to Stages from any window, detached or not.
+- **From a cycle to its files.** A step's right-click menu, an Artifacts button
+  above the Output tab and an artifacts link beside each run in Subjects open
+  the Artifacts page on that run with the file selected.
+- **Clarifications during a cycle.** Stages can send text to a named step or
+  the rest of the run. The recipient follows whoever is working - the running
+  step, or the rest of the run when none is - asks when several are running
+  at once, and never moves under a draft. Enter sends (Shift+Enter for a new
+  line), and Ctrl+Shift+M opens the composer over any window. A clarification
+  that reached a step also reaches the steps that judge its work - review and
+  accept after implement - and agent.implement's own reviewer now sees the
+  inputs the work was given. Plugins
+  read durable snapshots at supported points; messages, confirmations and
+  uncertain outcomes survive Resume and historical replay.
+- **Editing on the canvas.** A step can be added from the view bar or from a
+  step's right-click menu (every plugin the core offers, by category), and a
+  step can be duplicated, deleted, moved to a phase or made to wait for
+  another from that menu - a dependency that would make a loop is not offered.
+  Changes collect in a draft: the canvas, the Problems tab and a dry run of the
+  YAML show what they add up to, Undo and Redo walk through them, Changes shows
+  the diff, and nothing is written until Save. Running, opening another cycle
+  or editing Properties with unsaved changes asks first.
+- **Links drawn on the canvas.** Drag a step's bottom dot onto another step to
+  make it wait for this one, or its top dot the other way. Click a link to
+  pick it out: drag either end to another step to re-point it, press Delete -
+  or right-click, Remove this link - to take it away. A link that would make a
+  loop, or one already there, is refused while it is dragged, with the reason.
+  A step's right-click menu has **Runs before** beside **Waits for**.
+- **Phases.** A step may say `group: Plan`; the canvas frames each phase's
+  steps and can fold a phase into one box that shows how its steps went. The
+  two development cycles are grouped into seven phases. A phase is how a step
+  is shown: it is not part of the step's fingerprint, so Resume is unaffected.
+- **Design and Run.** The canvas says which graph it is: the file (or the
+  draft) in Design, the run's own graph in Run. A run's colours are painted in
+  Design only while the graph on screen is the one that ran.
+- **`retry.backoff: exponential`** doubles `retry.delay` before each further
+  try. `fixed` - the default - keeps it the same.
+- **Loading shows itself.** Opening a cycle, reading its sessions and reading
+  back a run happen off the GUI thread; while they do, the canvas, the output,
+  the Subjects list and its detail pane - and the explorer, while the list of
+  cycles is first read - show a skeleton of what is coming, breathing slowly.
+  The canvas's is its own ruled paper with placeholder nodes of the real size
+  and spacing. It appears only after 180 ms, so a quick answer never flickers. With 500 runs behind a
+  cycle the window used to stop for up to 1.3 s; the longest pause is now
+  under 0.1 s.
+- The explorer shows each cycle's size, where it came from, its problems and
+  how its last run went; filters by name, id, description and project; moves a
+  cycle to another project; and answers F2, Delete and the menu key.
+
+### Changed
+- **A save from a form edits the file instead of rewriting it.** Comments,
+  layout and block text survive changing a step, a name or a project. A save
+  that cannot keep a comment shows the diff and asks; one made after the file
+  changed on disk is refused rather than undoing the other change.
+- A cycle naming a project that is not in the projects list is shown under
+  that project's name, marked as not in the list, instead of under Unassigned -
+  on a fresh install every shipped cycle looked unassigned.
+- **The shipped development cycles no longer listen to Jira** until somebody
+  turns it on in the "Take one task" step's window; their triggers are
+  `enabled: false`.
+- "Hard Run" is now "Start over (new run)". What Run, Resume and Start over
+  do is said in the button's tooltip instead of a line under the header; the
+  help is written on the empty canvas and the unsaved-changes bar floats over
+  the canvas, so nothing that comes and goes resizes the page or the window.
+
+### Fixed
+- **Dark theme: a selected row no longer looks cut out of the page.** Picked
+  rows in trees, tables and lists (the Cycles explorer, the Artifacts tree),
+  the highlighted menu or drop-down entry and the rail's current page were a
+  pale band with dark text. They are now a deep accent band with light text.
+  The light theme is unchanged.
+- After **Fit**, resizing the panel could stop the canvas following it: the
+  canvas re-centring itself by one scroll-bar pixel below full size was taken
+  for somebody panning.
+- **Opening a step and pressing Save changed it.** `options: [Start work,
+  Leave it]` became four options, a `${...}` reference to a list became a list
+  holding the reference, numbers and flags in a mapping became strings, and
+  every default the form showed was written in - which changed the step's
+  fingerprint, so Resume refused runs it had no reason to. A field nobody
+  touched is now given back exactly as it came.
+- `retry.backoff` was documented as accepted and ignored, but was reported as
+  a problem - so any cycle using it could neither run nor be saved.
+- A listener asked Jira with a blank credential when the token secret was not
+  set - on a fresh install, every five minutes, to the template's placeholder
+  site. Nothing is asked until the secret has a value.
+- Saving a cycle written as `name.yml` created a `name.yaml` beside it, and
+  deleting that brought the old file back.
+- A heading shortened to "..." kept the width of its first text, so a cycle's
+  name was cut short with half the header empty beside it.
+- Arrange re-routed every line once per node it moved; it now routes once
+  (220 ms to 13 ms on the 28-step development cycle).
+
 ## [0.16.9] - 2026-09-28
 
 ### Fixed
