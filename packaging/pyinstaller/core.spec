@@ -19,6 +19,9 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 
+sys.path.insert(0, SPECPATH)
+from tracked_files import tracked_datas  # noqa: E402
+
 
 def playwright_driver_datas():
     """The Node driver, at the one path playwright will look for it.
@@ -51,9 +54,11 @@ hiddenimports = (
        "cryptography.hazmat.primitives.asymmetric.rsa"]
 )
 
-datas = [
-    (os.path.join(ROOT, "flows"), "flows"),
-    (os.path.join(ROOT, "cycles"), "cycles"),
+# Scenarios and cycles file by file, only the ones git tracks: a checkout's
+# flows/ and cycles/ also hold whatever its owner recorded or wrote for their
+# own projects, and that is not for everyone who installs the package. See
+# tracked_files.py.
+datas = tracked_datas(ROOT, "flows") + tracked_datas(ROOT, "cycles") + [
     # Executed by the user's framework environment, not the frozen core.
     (os.path.join(ROOT, "cycle", "plugins", "agent_worker.py"), "cycle/plugins"),
     (os.path.join(ROOT, "extensions"), "extensions"),
