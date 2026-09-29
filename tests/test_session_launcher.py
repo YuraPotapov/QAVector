@@ -2326,3 +2326,32 @@ def test_asking_for_both_at_once_is_refused():
     chosen, why = sl._cycle_selection(cycle, ["one"], "one")
 
     assert chosen == set() and "two different things" in why
+
+
+@pytest.mark.parametrize("refusal", ["", "No run missing is going here."])
+def test_cycle_message_control_survives_invalid_json_shapes(monkeypatch, refusal):
+    import io
+    from cycle import executor
+
+    submitted, emitted = [], []
+    request = {"command": "cycle.message", "id": "note-1", "run_id": "missing",
+               "scope": "run", "kind": "text",
+               "payload": {"text": "Also called from cron"}}
+
+    def submit(message):
+        submitted.append(message)
+        return refusal
+
+    monkeypatch.setattr(executor, "submit_interaction", submit)
+    monkeypatch.setattr(sl, "_emit", lambda kind, **data: emitted.append((kind, data)))
+    monkeypatch.setattr(sl.sys, "stdin", io.StringIO(
+        "null\n[]\n42\n" + json.dumps(request) + "\n"))
+    sl.read_commands({})
+
+    assert submitted == [request]
+    if refusal:
+        assert emitted == [("cycle.interaction.refused", {
+            "id": "note-1", "run_id": "missing", "reason": refusal})]
+    else:
+        # Queueing for the scheduler is not a durable acceptance.
+        assert emitted == []

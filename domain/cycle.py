@@ -53,6 +53,12 @@ STOP = "stop"
 CONTINUE = "continue"
 ON_FAILURE = (STOP, CONTINUE)
 
+#: `retry.backoff:` - how the wait between tries grows. FIXED waits
+#: `retry.delay` every time; EXPONENTIAL doubles it before each further try.
+FIXED = "fixed"
+EXPONENTIAL = "exponential"
+BACKOFF = (FIXED, EXPONENTIAL)
+
 #: How a run was started. Only MANUAL exists today; the field is here because a
 #: run's account of itself is worth nothing later if it cannot say what started
 #: it, and adding the field afterwards means every old run answers "unknown".
@@ -85,11 +91,31 @@ class CycleStep:
     on_failure: str = STOP
     disabled: bool = False
     source_index: int = 0              # position in the file; decides layout ties
+    #: How the wait between tries grows - see :data:`BACKOFF`.
+    retry_backoff: str = FIXED
+    #: Which phase of the cycle this step belongs to, for a reader: the canvas
+    #: frames a group's steps together and can fold them into one box. It
+    #: changes nothing about when or whether the step runs.
+    group: str = ""
 
     @property
     def title(self):
         """What to call this step in a UI or a log line."""
         return self.label or self.id
+
+    def retry_wait(self, attempt):
+        """Seconds to wait before try ``attempt`` (the second try is 2).
+
+        Exponential doubles the delay each time: 5, 10, 20... The step's own
+        ``timeout:`` still bounds the whole of it, waits included, so a long
+        run of doublings ends where the deadline says rather than where the
+        arithmetic would.
+        """
+        if attempt < 2:
+            return 0.0
+        if self.retry_backoff == EXPONENTIAL:
+            return self.retry_delay * (2 ** (attempt - 2))
+        return self.retry_delay
 
 
 @dataclass

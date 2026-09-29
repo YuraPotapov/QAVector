@@ -141,6 +141,11 @@ class AgentImplement(CyclePlugin):
         ),
         # The same sign-in the other agent steps offer, and the same CLI.
         actions=AgentReview.metadata.actions,
+        # Every attempt and every review is a call started afresh from a
+        # prompt, so each one is a point where a person's message can go in.
+        accepts=(registry.accepts(
+            "text", "Clarification",
+            when="Before its next agent call: the next attempt, or the review"),),
     )
 
     def run_action(self, key, settings):
@@ -291,13 +296,21 @@ class AgentImplement(CyclePlugin):
             self._say(context, step, "start",
                       "Attempt %d of %d" % (attempt, budget))
 
+            # A person's messages are read at the start of each call, not
+            # during one: the CLI takes its prompt once. Said so, so a message
+            # sent now is known to wait for the next call rather than this.
             reply = agent_run.run_claude(
                 context, step,
                 _prompt(task, acceptance, inputs, files, where, checks, failure,
                         _conflicted(where)),
                 where, agent_run.EDIT_TOOLS, binary,
                 mode=agent_run.ACCEPT_EDITS, add_dir=where, model=model,
-                effort=effort, max_turns=turns, name="attempt-%d" % attempt)
+                effort=effort, max_turns=turns, name="attempt-%d" % attempt,
+                clarify=True, last=attempt == budget and not reviewing)
+            context.inbox(step.id).offer(
+                "Before its next agent call: attempt %d of %d has already "
+                "started, so the review of it, or the attempt after it"
+                % (attempt, budget))
             for path in reply.written:
                 if path not in written:
                     written.append(path)
@@ -331,7 +344,7 @@ class AgentImplement(CyclePlugin):
             if reviewing:
                 findings, failure = self._review(
                     context, step, binary, where, task, acceptance, model,
-                    attempt, effort)
+                    attempt, effort, last=attempt == budget)
                 if failure:
                     continue
             verified = True
@@ -367,7 +380,7 @@ class AgentImplement(CyclePlugin):
         return ""
 
     def _review(self, context, step, binary, where, task, acceptance, model,
-                attempt, effort=""):
+                attempt, effort="", last=False):
         """A second agent, reading only the result. Returns (findings, failure).
 
         It gets the reading tools and nothing else, so it cannot quietly fix
@@ -379,12 +392,20 @@ class AgentImplement(CyclePlugin):
         context.cancel.raise_if_set()
         # On continuation an earlier edit attempt may already have changed
         # the checkout. Its old review is not evidence about this tree.
-        prompt = _review_prompt(task, acceptance, where)
+        # The same inputs the work was given - the task, the plan. Told only
+        # the step's own instruction, a reviewer judged "do the task in
+        # inputs.task" without ever seeing the task, and so could not tell
+        # work that met it from work that merely looked tidy.
+        prompt = _review_prompt(task, acceptance, where,
+                                self.setting(step.settings, "inputs", {}))
         prompt += "\n\n# Tree being reviewed\n" + _tree(where)
+        # The reviewer hears the same messages the work did: judged against
+        # the task alone, work that followed a person's correction would be
+        # sent back for following it.
         reply = agent_run.run_claude(
             context, step, prompt, where,
             agent_run.READ_TOOLS, binary, model=model, effort=effort,
-            add_dir=where, name="review-%d" % attempt)
+            add_dir=where, name="review-%d" % attempt, clarify=True, last=last)
         if not reply.ok:
             # A review that could not run is not an approval.
             return [], "the review could not run: %s" % reply.problem
@@ -503,7 +524,7 @@ def _prompt(task, acceptance, inputs, files, where, checks, failure,
     return "\n".join(parts)
 
 
-def _review_prompt(task, acceptance, where):
+def _review_prompt(task, acceptance, where, inputs=None):
     """The gate. Reading tools only, and the review schema as the answer."""
     parts = ["You are reviewing work somebody else just did, for an automated "
              "pipeline. You cannot change anything and should not try.", "",
@@ -513,6 +534,11 @@ def _review_prompt(task, acceptance, where):
              "not run anything." % where]
     if acceptance.strip():
         parts += ["", "# Done means", acceptance.strip()]
+    if inputs:
+        parts += ["", "# What they were given",
+                  "The same material the work started from; the task above may "
+                  "refer to it.",
+                  json.dumps(inputs, indent=2, ensure_ascii=False, default=str)]
     parts += ["", "# What to judge",
               "Whether the change actually does what was asked, and whether it "
               "broke anything nearby. The automated checks have already passed, "

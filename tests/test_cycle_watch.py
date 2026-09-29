@@ -59,6 +59,17 @@ def queue():
     made.close()
 
 
+@pytest.fixture(autouse=True)
+def token_is_set(monkeypatch):
+    """The queue's token has a value, the way it does once somebody set it.
+
+    Without one a listener asks nothing at all - see
+    test_an_unset_secret_is_refused_before_anything_is_asked.
+    """
+    monkeypatch.setattr(watch.secret_store, "get",
+                        lambda cycle_id, name, path=None: "sekret" if name == "token" else None)
+
+
 def cycle_for(site, **trigger):
     return model.parse_cycle({
         "id": "dev",
@@ -131,6 +142,27 @@ def test_the_step_s_secret_is_used_and_nothing_starts(queue, tmp_path, monkeypat
 def test_jira_unreachable_is_a_watch_error(tmp_path):
     with pytest.raises(watch.WatchError):
         watch.check(cycle_for("http://127.0.0.1:1"), memory_path=str(tmp_path / "m.json"))
+
+
+def test_an_unset_secret_is_refused_before_anything_is_asked(queue, tmp_path,
+                                                            monkeypatch):
+    """A shipped template listens from the first start, with a placeholder
+    site and no token. Asking anyway sent a blank credential to that site
+    every five minutes; now nothing leaves the machine until the token is set."""
+    from cycle import registry
+    asked = []
+    monkeypatch.setattr(registry.get("jira.issues"), "peek",
+                        lambda settings: asked.append(settings) or [])
+    monkeypatch.setattr(watch.secret_store, "get",
+                        lambda cycle_id, name, path=None: None)
+
+    with pytest.raises(watch.WatchError) as caught:
+        watch.check(cycle_for(queue.site), memory_path=str(tmp_path / "m.json"))
+
+    assert asked == [] and queue.queries == []
+    assert "token" in str(caught.value) and "Cycle secrets" in str(caught.value)
+    assert not memory.known("watch/dev/new_task", str(tmp_path / "m.json")), \
+        "a refused check is not a first look - nothing may be recorded as seen"
 
 
 # ------------------------------------------------------------------ the file

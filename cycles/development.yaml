@@ -97,17 +97,21 @@ subject:
 
 # While the application is open, repeat the todo step's query every
 # `every` seconds and offer any task it has not seen before: "start
-# work on it?". Nothing starts without the answer.
+# work on it?". Nothing starts without the answer. Off as shipped - a
+# template has nobody's Jira in it yet. Turn it on in the "Take one task"
+# step's window (Listen), once the Jira variables and token are set.
 triggers:
   - id: new_task
     watch: todo
     every: 300
+    enabled: false
 
 steps:
   # -- what are we working on -------------------------------------------------
   - id: todo
     plugin: jira.issues
     label: Take one task
+    group: Take the task
     timeout: 120
     with:
       site: "${vars.jira_site}"
@@ -131,6 +135,7 @@ steps:
   - id: history
     plugin: memory.recall
     label: What earlier runs know
+    group: Take the task
     needs: [todo]
     with:
       key: "dev/${steps.todo.outputs.key}"
@@ -142,6 +147,7 @@ steps:
   - id: claim
     plugin: memory.claim
     label: Take it for this run
+    group: Take the task
     needs: [history]
     with:
       key: "dev/${steps.todo.outputs.key}"
@@ -153,6 +159,7 @@ steps:
   - id: spent
     plugin: memory.recall
     label: How much of the budget is gone
+    group: Take the task
     needs: [claim]
     with:
       key: "dev/${steps.todo.outputs.key}"
@@ -167,6 +174,7 @@ steps:
   - id: admit
     plugin: check.gate
     label: Is this ours to do
+    group: Take the task
     needs: [todo, history, spent]
     on_failure: continue
     with:
@@ -181,6 +189,7 @@ steps:
   - id: budget
     plugin: memory.remember
     label: Count this attempt
+    group: Take the task
     needs: [admit]
     with:
       key: "dev/${steps.todo.outputs.key}"
@@ -196,6 +205,7 @@ steps:
   - id: reconcile
     plugin: agent.review
     label: Is it already done
+    group: Check
     # The counter, not the gate: the attempt is charged before any work of this
     # run begins, which is what stops a run that dies here from being free.
     needs: [budget]
@@ -229,6 +239,7 @@ steps:
   - id: work_remains
     plugin: check.gate
     label: Is there work left
+    group: Check
     needs: [reconcile]
     on_failure: continue
     with:
@@ -239,6 +250,7 @@ steps:
   - id: plan
     plugin: agent.review
     label: Work out the change
+    group: Plan
     needs: [work_remains]
     timeout: 900
     on_failure: continue
@@ -274,6 +286,7 @@ steps:
   - id: business
     plugin: agent.review
     label: Review the plan
+    group: Plan
     needs: [plan]
     timeout: 600
     on_failure: continue
@@ -318,6 +331,7 @@ steps:
   - id: plan_is_sound
     plugin: check.gate
     label: Did the review pass it
+    group: Plan
     needs: [business]
     on_failure: continue
     with:
@@ -331,6 +345,7 @@ steps:
   - id: approve
     plugin: approval.gate
     label: Agree to the plan
+    group: Agree
     needs: [plan_is_sound]
     timeout: 1800
     on_failure: continue
@@ -355,6 +370,7 @@ steps:
   - id: preflight
     plugin: check.gate
     label: Still true just before writing
+    group: Agree
     needs: [approve, claim, todo, plan_is_sound]
     on_failure: continue
     with:
@@ -372,6 +388,7 @@ steps:
   - id: start
     plugin: jira.transition
     label: Move it to In Progress
+    group: Agree
     needs: [preflight]
     timeout: 120
     on_failure: continue
@@ -390,6 +407,7 @@ steps:
   - id: implement
     plugin: agent.implement
     label: Make the change and prove it
+    group: Build
     needs: [start]
     timeout: 5400
     on_failure: continue
@@ -417,6 +435,7 @@ steps:
   - id: integration
     plugin: command.shell
     label: Check the whole change
+    group: Build
     needs: [implement]
     timeout: 1800
     on_failure: continue
@@ -429,6 +448,7 @@ steps:
   - id: diff
     plugin: command.shell
     label: Show what changed
+    group: Build
     needs: [implement]
     timeout: 120
     with:
@@ -438,6 +458,7 @@ steps:
   - id: probe
     plugin: agent.edit
     label: Try to break it
+    group: Build
     needs: [implement]
     timeout: 900
     on_failure: continue
@@ -471,6 +492,7 @@ steps:
   - id: probe_run
     plugin: command.shell
     label: Run the probes
+    group: Build
     needs: [probe]
     timeout: 600
     with:
@@ -481,6 +503,7 @@ steps:
   - id: review
     plugin: agent.review
     label: Review the code
+    group: Judge
     needs: [implement, probe_run, diff]
     timeout: 900
     on_failure: continue
@@ -530,6 +553,7 @@ steps:
   - id: accept
     plugin: agent.review
     label: Accept it against the task
+    group: Judge
     needs: [integration, review, diff]
     timeout: 600
     on_failure: continue
@@ -562,6 +586,7 @@ steps:
   - id: final
     plugin: check.gate
     label: Is it fit to commit
+    group: Judge
     needs: [implement, integration, review, accept]
     on_failure: continue
     with:
@@ -578,6 +603,7 @@ steps:
   - id: commit
     plugin: git.commit
     label: Commit the verified tree
+    group: Record
     needs: [final]
     on_failure: continue
     with:
@@ -599,6 +625,7 @@ steps:
   - id: record
     plugin: memory.remember
     label: Remember the commit
+    group: Record
     needs: [commit]
     on_failure: continue
     with:
@@ -612,6 +639,7 @@ steps:
   - id: record_reuse
     plugin: memory.remember
     label: Remember it was already done
+    group: Record
     needs: [work_remains, reconcile]
     # Its own condition, so it runs precisely because the gate above refused.
     # A step with an `if:` is not skipped along with a dependency that failed -
@@ -627,6 +655,7 @@ steps:
   - id: note
     plugin: memory.remember
     label: Where this run got to
+    group: Record
     needs: [commit, implement, approve, admit]
     # Always. A run that stopped early is the one worth reading, and the next
     # run starts from what this one wrote down.
@@ -647,6 +676,7 @@ steps:
   - id: report
     plugin: report.html
     label: Save the report
+    group: Record
     needs: [note, record, record_reuse]
     if: "${run.id}"
     on_failure: continue

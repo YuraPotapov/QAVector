@@ -10,11 +10,10 @@ writing that answer to a report are separate operations.
 | --- | --- |
 | **Run** | Main button before a run or after success. Starts a new execution. |
 | **Resume** | Main button after failure, Stop or interruption. Continue the displayed run by its exact ID. Keep successful results; retry unfinished work and affected descendants. |
-| **Hard Run** | Dropdown action. Start from the beginning with a new identity, workspace and inputs. Paid services are called again; previous runs stay saved. |
+| **Start over (new run)** | Dropdown action. Start from the beginning with a new identity, workspace and inputs. Paid services are called again; previous runs stay saved. |
 | **Run from here / Run step** | Explicit partial execution using the displayed run's results, or the latest run if none is displayed. Intended for deliberately rerunning a chosen part, including older runs. |
 
-The button's label and the explanation below it show which action a click will
-perform. Hard Run confirms the fresh execution and its repeated service calls.
+The button's label and its tooltip say which action a click will perform. Start over confirms the fresh execution and its repeated service calls.
 
 `--cycle-run=development_in_progress --cycle-resume=<run-id>` is the CLI
 equivalent of Resume. It cannot be combined with selection flags or variable
@@ -44,7 +43,10 @@ crashed process does not disappear from history.
    merely because a user selected a downstream node.
 
 The manifest fingerprints each node's definition, referenced cycle variables
-and plugin version. It does not persist resolved credentials. Resume validates
+and plugin version. It does not persist resolved credentials. How a node is
+*shown* - its `label` and its `group` - is not part of the fingerprint, and a
+field added to steps later (`retry.backoff`) is left out while it has the value
+every older node implicitly had, so runs made before it existed still resume. Resume validates
 the definitions of retained nodes and the hashes of their artifacts before
 executing work. Settings of a failed node, such as its iteration limit, may be
 fixed without invalidating an unchanged completed plan.
@@ -52,6 +54,37 @@ fixed without invalidating an unchanged completed plan.
 Unknown steps, missing artifacts, changed completed definitions and uncertain
 in-flight effects stop recovery with a reason. They never trigger an automatic
 paid recomputation. Original results remain available for inspection.
+
+## Clarifications during execution
+
+A clarification is accepted only after its message record has been saved in
+`.execution/interactions.json`. Snapshot creation is serialized with
+acceptance, so text arriving after one call's input has been fixed waits for
+the next supported point. Snapshots are retained even when empty.
+
+Each delivery refers to its step execution, point and operation receipt.
+A complete receipt confirms delivery unless it explicitly records
+`input_delivered: false`, as when a subprocess could not start. A started,
+unreadable or otherwise unresolved receipt cannot establish delivery.
+Recovery preserves that uncertainty instead of treating it as permission
+to repeat the external call.
+
+A message delivered to a step is also part of the snapshots of the steps
+after it in the graph, recorded as deliveries of their own; it is fixed in each
+snapshot like any other item, so Resume rebuilds the same inputs for them too.
+
+Resume keeps the same execution identity and saved snapshots. Ordinary retry
+also continues that execution; revising the plan creates a new execution for
+the affected steps. New run guidance reaches later compatible consumers,
+while a private message stays addressed to its original execution. Messages
+are not copied into a new run's inbox.
+
+The operation key includes the actual request with its clarifications.
+Completed operations are not invalidated by text sent afterwards, and a
+future call with changed input cannot use the old request's receipt.
+Message-state write failures fail execution while still releasing held
+resources and unregistering the run. Diagnostic event loss does not erase
+the authoritative message history shown on replay.
 
 ## Dependencies and refreshed resources
 

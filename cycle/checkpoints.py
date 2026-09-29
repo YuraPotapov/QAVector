@@ -14,8 +14,8 @@ from contextlib import contextmanager
 from dataclasses import asdict
 
 from cycle import model, run as records, variables
-from domain.cycle import (CANCELLED, FAILED, PENDING, RUNNING, SKIPPED, SUCCESS,
-                          TIMEOUT, WAITING, StepRun)
+from domain.cycle import (CANCELLED, FAILED, FIXED, PENDING, RUNNING, SKIPPED,
+                          SUCCESS, TIMEOUT, WAITING, StepRun)
 
 
 class CheckpointError(RuntimeError):
@@ -63,13 +63,28 @@ def file_digest(path):
     return digest_.hexdigest()
 
 
+#: Step fields that say how a step is *shown*, never what it does. Leaving
+#: them out of the fingerprint is what lets somebody rename or regroup a
+#: finished step without Resume calling it changed.
+_PRESENTATION = ("label", "source_index", "group")
+
+#: Fields added after runs were already fingerprinted, with the value every
+#: older step implicitly had. A field at that value stays out of the
+#: fingerprint, so a run made before the field existed still resumes; a step
+#: that sets it to anything else is a different step and says so.
+_ADDED_LATER = {"retry_backoff": FIXED}
+
+
 def signatures(cycle, overrides, registry):
     values = dict(cycle.variables, **(overrides or {}))
     result = {}
     for step in cycle.steps:
         definition = asdict(step)
-        for key in ("label", "source_index"):
+        for key in _PRESENTATION:
             definition.pop(key, None)
+        for key, default in _ADDED_LATER.items():
+            if definition.get(key) == default:
+                definition.pop(key, None)
         refs = variables.REFERENCE.findall(json.dumps(definition, default=str))
         used = {ref.split(".")[1] for ref in refs if ref.startswith("vars.")}
         plugin = registry.get(step.plugin)

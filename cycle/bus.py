@@ -84,6 +84,17 @@ class NullObserver(object):
     def revision(self, run, record):
         """A person asked for the plan again; ``record`` is the round."""
 
+    def interaction(self, message):
+        """A message a person sent, as it stands now - see
+        ``cycle/interactions.py``. Said again on every change of state, whole,
+        so a reader keeps one row per message and replaces it."""
+
+    def interaction_offers(self, table):
+        """Who can be sent what now: ``{version, run, steps}``."""
+
+    def interaction_refused(self, message_id, reason):
+        """A request that could not be recorded at all, and why."""
+
     def run_end(self, run):
         """The run is over, whatever way it ended."""
 
@@ -183,6 +194,18 @@ class EventObserver(NullObserver):
                    gate=record.get("gate", ""), target=record.get("target", ""),
                    feedback=record.get("feedback", ""), who=record.get("who", ""),
                    steps=list(record.get("steps") or []))
+
+    def interaction(self, message):
+        # Nested for the reason a subject is: a message has a "kind" of its
+        # own, and the event's would overwrite it on the way.
+        self._emit("cycle.interaction", message=dict(message))
+
+    def interaction_offers(self, table):
+        self._emit("cycle.interaction.offers", version=table.get("version", 0),
+                   run=table.get("run"), steps=dict(table.get("steps") or {}))
+
+    def interaction_refused(self, message_id, reason):
+        self._emit("cycle.interaction.refused", id=message_id, reason=reason)
 
     def run_end(self, run):
         tally = run.tally()
@@ -310,6 +333,15 @@ class Tee(NullObserver):
     def revision(self, run, record):
         self._fan("revision", run, record)
 
+    def interaction(self, message):
+        self._fan("interaction", message)
+
+    def interaction_offers(self, table):
+        self._fan("interaction_offers", table)
+
+    def interaction_refused(self, message_id, reason):
+        self._fan("interaction_refused", message_id, reason)
+
     def run_end(self, run):
         self._fan("run_end", run)
 
@@ -340,7 +372,8 @@ class Recorder(NullObserver):
         self._note("step_end", step=step_run.step_id, status=step_run.status)
 
     def step_retry(self, step_run, attempt, delay, message=""):
-        self._note("step_retry", step=step_run.step_id, attempt=attempt)
+        self._note("step_retry", step=step_run.step_id, attempt=attempt,
+                   delay=delay)
 
     def step_waiting(self, step_run, seconds):
         self._note("step_waiting", step=step_run.step_id, seconds=seconds,
@@ -367,6 +400,15 @@ class Recorder(NullObserver):
     def revision(self, run, record):
         self._note("revision", number=record.get("number"),
                    steps=list(record.get("steps") or []))
+
+    def interaction(self, message):
+        self._note("interaction", **dict(message))
+
+    def interaction_offers(self, table):
+        self._note("interaction_offers", **dict(table))
+
+    def interaction_refused(self, message_id, reason):
+        self._note("interaction_refused", id=message_id, reason=reason)
 
     def run_end(self, run):
         self._note("run_end", status=run.status)

@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cycle import bus, registry                                   # noqa: E402
+from cycle.plugins import agent_run                              # noqa: E402
 from cycle.context import CancelToken, Cancelled, RunContext      # noqa: E402
 from cycle.plugins.agent_implement import BLOCKING, _tree         # noqa: E402
 from cycle.workspace import create                                # noqa: E402
@@ -105,17 +106,20 @@ def work(tmp_path):
     project.mkdir()
 
     def run(bodies=None, reviews=None, cancel=None, git=False, earlier=None,
-            later=None, **settings):
+            later=None, listening=None, on_stage=None, **settings):
         if git:
             subprocess.run(["git", "init", "-q"], cwd=str(project), check=True,
                            capture_output=True)
         binary = _claude(tmp_path, bodies, reviews)
-        recorder = bus.Recorder()
+        recorder = _Hearing(on_stage)
         workspace = create("20260919-000000-i", str(tmp_path / "runs"))
         context = RunContext(CycleRun(id="r", cycle_id="c",
                                       workspace=workspace),
                              None, workspace, observer=recorder,
                              cancel=cancel or CancelToken())
+        if listening is not None:
+            # What a person has said to this run - see _listening below.
+            context.interactions = listening(workspace, recorder)
         if earlier is not None:
             from domain.cycle import StepRun
             context.earlier = {"impl": ("20260919-000000-old", StepRun(
@@ -138,6 +142,20 @@ def work(tmp_path):
         return result, project, recorder
 
     return run
+
+
+class _Hearing(bus.Recorder):
+    """A recorder that can act on a stage as it is reported - which is how a
+    test says something to the step *during* an attempt."""
+
+    def __init__(self, on_stage=None):
+        super().__init__()
+        self._on_stage = on_stage
+
+    def step_stage(self, step_id, stage):
+        super().step_stage(step_id, stage)
+        if self._on_stage is not None:
+            self._on_stage(dict(stage))
 
 
 def _stages(recorder):
@@ -621,3 +639,183 @@ def test_it_offers_the_same_sign_in_as_the_other_agent_steps():
 
 def test_its_metadata_survives_the_wire():
     json.dumps(registry.get("agent.implement").metadata.to_dict())
+
+
+# ------------------------------------------------ a person's messages, mid-run
+CRON = "Take into account that this method is also called from cron."
+
+
+def _message(message_id, text, scope="step"):
+    from cycle.interactions import parse_request
+    request, problem = parse_request({"id": message_id, "run_id": "r", "scope": scope,
+                                      "step": "impl", "kind": "text",
+                                      "payload": {"text": text}})
+    assert not problem
+    return request
+
+
+def _listening(execution=1, before=()):
+    """A run whose one agent.implement step takes messages and is going as
+    ``execution``. ``before`` is ``(id, text)`` already said to it."""
+    from cycle import interactions
+    from cycle.model import parse_cycle
+    from domain.cycle import StepRun
+
+    def listening(workspace, recorder):
+        plugin = registry.get("agent.implement")
+        cycle = parse_cycle({"id": "c", "steps": [
+            {"id": "impl", "plugin": "agent.implement"}]}, "c")
+        run = CycleRun(id="r", cycle_id="c", workspace=workspace,
+                       revisions=[{"steps": ["impl"]}] * (execution - 1),
+                       steps={"impl": StepRun("impl", plugin="agent.implement",
+                                              status="running")})
+        store = interactions.RunInteractions(os.path.join(workspace, ".execution"),
+                                             "r", recorder, workspace)
+        store.load()
+        store.open(run, cycle, registry)
+        store.begin("impl", execution, plugin)
+        for message_id, text in before:
+            assert store.accept(_message(message_id, text))[1] == ""
+        listening.store = store
+        return store
+
+    return listening
+
+
+def _prompt_of(one):
+    return one["argv"][one["argv"].index("-p") + 1]
+
+
+def test_a_clarification_sent_during_an_attempt_reaches_the_next_one(work):
+    """The case the feature is for: the first attempt is already running when
+    the person notices, so it is the second that must hear it."""
+    listening, sent = _listening(), []
+
+    def on_stage(stage):
+        if stage["title"].startswith("Check: ") and stage["status"] == "failed" and not sent:
+            sent.append(listening.store.accept(_message("m1", CRON)))
+
+    result, project, _recorder = work(listening=listening, on_stage=on_stage)
+    assert result.ok and result.outputs["attempts"] == 2
+    first = (project / "prompt-0.txt").read_text()
+    second = (project / "prompt-1.txt").read_text()
+    assert agent_run.CLARIFICATIONS not in first and CRON not in first
+    assert "1. (to this step) " + CRON in second
+    # The task as it was first given still reads first.
+    assert second.index("# Task") < second.index(agent_run.CLARIFICATIONS)
+
+    [record] = listening.store.messages()
+    assert record["state"] == "delivered"
+    [delivery] = record["deliveries"]
+    assert delivery["point"] == "attempt-2"
+    with open(os.path.join(listening.store.workspace, delivery["operation"],
+                           "receipt.json"), encoding="utf-8") as handle:
+        assert json.load(handle)["state"] == "complete"
+
+
+def test_the_review_hears_what_the_work_was_told(tmp_path, work):
+    """Judged against the task alone, work that followed a person's correction
+    would be sent back for following it."""
+    listening = _listening(before=[("m1", CRON)])
+    work(bodies=["print('ok')"], review=True, reviews=[REVIEW_OK], listening=listening)
+    runs = _runs(tmp_path)
+    assert [one["reviewing"] for one in runs] == [False, True]
+    assert all(CRON in _prompt_of(one) for one in runs)
+    [record] = listening.store.messages()
+    assert [one["point"] for one in record["deliveries"]] == ["attempt-1", "review-1"]
+
+
+def test_with_nothing_said_the_call_is_the_one_it_always_was(tmp_path, work):
+    """Byte for byte: so a run begun before this existed, resumed now, finds
+    the answer it already paid for rather than asking again."""
+    work(bodies=["print('ok')"])
+    work(bodies=["print('ok')"], listening=_listening())
+    assert len(_runs(tmp_path)) == 1
+
+
+def test_a_call_with_new_clarifications_is_not_answered_from_the_old_one(tmp_path, work):
+    work(bodies=["print('ok')"], listening=_listening())
+    # Sent round again with nothing new to hear: the same call, already paid for.
+    work(bodies=["print('ok')"], listening=_listening(execution=2))
+    assert len(_runs(tmp_path)) == 1
+    # Sent round again with something new: a new call, and a new answer.
+    work(bodies=["print('ok')"], listening=_listening(execution=3, before=[("m1", CRON)]))
+    runs = _runs(tmp_path)
+    assert len(runs) == 2 and CRON in _prompt_of(runs[-1])
+
+
+def test_a_resumed_attempt_reads_what_it_read_before_and_pays_nothing_again(tmp_path, work):
+    """Something said after a call was made is not written into it afterwards."""
+    work(bodies=["print('ok')"], listening=_listening(before=[("m1", CRON)]))
+    again = _listening(before=[("m2", "Mind the timezone as well.")])
+    work(bodies=["print('ok')"], listening=again)
+    assert len(_runs(tmp_path)) == 1
+    messages = {one["id"]: one for one in again.store.messages()}
+    assert [one["point"] for one in messages["m1"]["deliveries"]] == ["attempt-1"]
+    assert messages["m2"]["state"] == "pending"
+
+
+def test_it_says_it_takes_clarifications_and_when():
+    [accepts] = registry.get("agent.implement").metadata.accepts
+    assert accepts.kind == "text" and "next agent call" in accepts.when
+
+
+@pytest.mark.parametrize("reviewing", [False, True])
+def test_final_agent_call_withdraws_offer_before_the_process_starts(
+        work, monkeypatch, reviewing):
+    listening = _listening()
+    process = agent_run.run_process
+    offered = []
+
+    def inspect(ctx, step, argv, cwd, name, **kwargs):
+        offered.append((name, "impl" in listening.store.offers()["steps"]))
+        return process(ctx, step, argv, cwd, name, **kwargs)
+
+    monkeypatch.setattr(agent_run, "run_process", inspect)
+    result, _project, _recorder = work(bodies=["print('ok')"], review=reviewing,
+                                       max_attempts=1, listening=listening)
+    assert result.ok
+    assert offered == ([("attempt-1", True), ("review-1", False)] if reviewing
+                       else [("attempt-1", False)])
+
+
+def test_message_received_during_cli_waits_for_next_attempt(tmp_path, work):
+    listening, sent = _listening(), []
+
+    def on_stage(stage):
+        if stage["title"].startswith("Started - ") and not sent:
+            record, problem = listening.store.accept(_message("m1", CRON))
+            sent.append(record)
+            assert not problem
+            assert record["state"] == "pending" and record["deliveries"] == []
+
+    result, project, _recorder = work(listening=listening, on_stage=on_stage)
+    assert result.ok and len(sent) == 1
+    prompts = [_prompt_of(one) for one in _runs(tmp_path)]
+    assert CRON not in prompts[0] and CRON in prompts[1]
+    assert listening.store.messages()[0]["deliveries"][0]["point"] == "attempt-2"
+
+
+def test_successful_attempt_does_not_restart_to_deliver_late_message(tmp_path, work):
+    listening, sent = _listening(), []
+
+    def on_stage(stage):
+        if stage["title"].startswith("Started - ") and not sent:
+            sent.append(listening.store.accept(_message("m1", CRON)))
+
+    result, _project, _recorder = work(bodies=["print('ok')"], max_attempts=3,
+                                       listening=listening, on_stage=on_stage)
+    assert result.ok and result.outputs["attempts"] == 1
+    assert len(_runs(tmp_path)) == 1
+    assert listening.store.messages()[0]["state"] == "pending"
+    listening.store.finish("impl", "success")
+    assert listening.store.messages()[0]["state"] == "undelivered"
+
+
+def test_the_review_is_given_what_the_work_was_given(tmp_path, work):
+    """Told only "do the task in inputs.task", a reviewer never saw the task."""
+    work(bodies=["print('ok')"], review=True, reviews=[REVIEW_OK],
+         inputs={"task": "DEMO-5: welcome code"})
+    [review] = [one for one in _runs(tmp_path) if one["reviewing"]]
+    prompt = _prompt_of(review)
+    assert "# What they were given" in prompt and "DEMO-5: welcome code" in prompt

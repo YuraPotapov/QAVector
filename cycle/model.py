@@ -24,8 +24,9 @@ nowhere else for one to come from.
 
 import re
 
-from domain.cycle import (Cycle, CycleStep, ON_FAILURE, STOP, Subject, Trigger,
-                          WATCH_EVERY, WATCH_EVERY_MIN)
+from domain.cycle import (BACKOFF, EXPONENTIAL, FIXED, Cycle, CycleStep,
+                          ON_FAILURE, STOP, Subject, Trigger, WATCH_EVERY,
+                          WATCH_EVERY_MIN)
 
 #: A step id has to survive being a dict key, a path segment under the run
 #: workspace (``steps/<id>/``), and a reference inside ``${steps.<id>....}``.
@@ -35,7 +36,7 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 #: Keys a step may carry. Anything else is a typo worth reporting - a silently
 #: ignored ``timout:`` is a step that quietly never times out.
 STEP_KEYS = frozenset((
-    "id", "plugin", "label", "needs", "with", "if", "timeout", "retry",
+    "id", "plugin", "label", "group", "needs", "with", "if", "timeout", "retry",
     "on_failure", "disabled",
 ))
 
@@ -56,10 +57,8 @@ SUBJECT_EXPRESSIONS = ("key", "title", "memory")
 #: somebody fill it in.
 PATH = "path"
 
-#: Keys of the ``retry:`` mapping. ``backoff`` is accepted and ignored, with a
-#: warning from :func:`problems`: the plan calls for it later, and a file
-#: written against it now should be told plainly that it does nothing yet
-#: rather than quietly behaving as though it said nothing.
+#: Keys of the ``retry:`` mapping. ``backoff`` is ``fixed`` (the default) or
+#: ``exponential`` - see :data:`domain.cycle.BACKOFF`.
 RETRY_KEYS = frozenset(("attempts", "delay", "backoff"))
 
 
@@ -205,9 +204,13 @@ def _parse_step(entry, index):
         timeout=_float_or_none(entry.get("timeout")),
         retry_attempts=_int_or(retry.get("attempts"), 1),
         retry_delay=_float_or(retry.get("delay"), 0.0),
+        # Kept as written, so problems() can name a word it does not know
+        # rather than the step quietly retrying at a fixed pace.
+        retry_backoff=str(retry.get("backoff") or FIXED).strip(),
         on_failure=str(entry.get("on_failure") or STOP).strip(),
         disabled=bool(entry.get("disabled")),
         source_index=index,
+        group=str(entry.get("group") or "").strip(),
     )
 
 
@@ -366,9 +369,6 @@ def _key_problems(raw):
         if isinstance(retry, dict):
             for key in sorted(set(retry) - RETRY_KEYS):
                 found.append("%s: unknown retry key %r" % (where, key))
-            if "backoff" in retry:
-                found.append("%s: retry.backoff is not implemented yet and is "
-                             "ignored; every attempt waits retry.delay." % where)
     return found
 
 
@@ -473,6 +473,17 @@ def _step_problems(cycle, registry):
                          % (step.id, step.retry_attempts))
         if step.retry_delay < 0:
             found.append("%s: retry.delay cannot be negative." % step.id)
+        if step.retry_backoff not in BACKOFF:
+            found.append("%s: retry.backoff is %r; it has to be %s."
+                         % (step.id, step.retry_backoff, " or ".join(BACKOFF)))
+        elif (step.retry_backoff == EXPONENTIAL and step.retry_attempts > 1
+              and step.retry_delay <= 0):
+            # Twice nothing is nothing: the file asks for waits that grow and
+            # would get none at all, which is worth a line rather than a
+            # retry loop that hammers whatever just failed.
+            found.append("%s: retry.backoff is exponential but retry.delay is "
+                         "0, so there is nothing to double; set a delay."
+                         % step.id)
 
         if step.condition:
             from cycle import conditions
@@ -731,6 +742,8 @@ def _step_document(step):
     entry = {"id": step.id, "plugin": step.plugin}
     if step.label:
         entry["label"] = step.label
+    if step.group:
+        entry["group"] = step.group
     if step.needs:
         entry["needs"] = list(step.needs)
     if step.condition:
@@ -744,6 +757,8 @@ def _step_document(step):
         retry["attempts"] = step.retry_attempts
     if step.retry_delay:
         retry["delay"] = step.retry_delay
+    if step.retry_backoff and step.retry_backoff != FIXED:
+        retry["backoff"] = step.retry_backoff
     if retry:
         entry["retry"] = retry
     if step.on_failure and step.on_failure != STOP:
@@ -802,7 +817,10 @@ def to_graph(cycle):
                    "condition": step.condition,
                    "timeout": step.timeout,
                    "retry": step.retry_attempts,
-                   "on_failure": step.on_failure}
+                   "backoff": step.retry_backoff,
+                   "on_failure": step.on_failure,
+                   # A phase for the reader; the canvas frames and folds by it.
+                   "group": step.group}
                   for step in sorted(cycle.steps, key=lambda s: s.source_index)],
         "edges": [{"from": need, "to": step.id, "kind": "dependency"}
                   for step in sorted(cycle.steps, key=lambda s: s.source_index)

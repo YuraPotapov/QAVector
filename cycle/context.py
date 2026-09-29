@@ -130,6 +130,10 @@ class RunContext(object):
         #: hour and failed on a setting somebody has since fixed can look at
         #: what it left behind instead of paying for all of it again.
         self.earlier = {}
+        #: What a person has said to this run - ``cycle.interactions``'s
+        #: ``RunInteractions``, set by the executor. Plugins reach it only
+        #: through :meth:`inbox`, never directly.
+        self.interactions = None
         self._held = []                       # [(step_id, plugin, handle)]
         self._lock = threading.Lock()
 
@@ -149,6 +153,12 @@ class RunContext(object):
     def earlier_of(self, step_id):
         """``(run id, StepRun)`` for this step's last attempt, or ``(None, None)``."""
         return self.earlier.get(step_id, (None, None))
+
+    def inbox(self, step_id):
+        """One step's messages from the person running this - see
+        ``cycle.interactions.Inbox``. Outside a run it reads nothing."""
+        from cycle.interactions import Inbox
+        return Inbox(self.interactions, step_id)
 
     # -- where things go ------------------------------------------------------
     @property

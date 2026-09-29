@@ -17,6 +17,17 @@ def result_document(result):
     return asdict(result)
 
 
+def recorded(context, step, name, request):
+    """Whether a call with exactly this request was already begun in this run.
+
+    Looked up without creating anything, unlike :class:`Operation` - this is
+    asked about a call that may never be made.
+    """
+    path = os.path.join(context.workspace, "steps", step.id, "operations",
+                        checkpoints.digest([name, request]), "receipt.json")
+    return os.path.isfile(path)
+
+
 def result_from_document(raw):
     raw = dict(raw)
     raw["artifacts"] = [Artifact(**item) for item in raw.get("artifacts", [])]
@@ -59,9 +70,19 @@ class Operation:
                              self.record)
         self.store.write(self.path, {"state": "started", "epoch": self.epoch})
 
-    def complete(self, answer, ok):
-        self.store.write(self.path, {"state": "complete", "epoch": self.epoch,
-                                     "ok": ok, "answer": answer})
+    def complete(self, answer, ok, input_delivered=None):
+        """Save a known outcome and, when known, whether its input arrived.
+
+        A process that could not start still has a complete failure receipt.
+        Recording that its input never arrived lets interaction recovery tell
+        that apart from a call that ran, even if the process died before its
+        messages could be released. Older adapters may omit this information.
+        """
+        record = {"state": "complete", "epoch": self.epoch,
+                  "ok": ok, "answer": answer}
+        if input_delivered is not None:
+            record["input_delivered"] = bool(input_delivered)
+        self.store.write(self.path, record)
 
     def process_context(self):
         return _ProcessContext(self.context, self.directory)

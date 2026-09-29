@@ -57,6 +57,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from cycle import ask, checkpoints, conditions, model, registry as default_registry, variables
+from cycle import interactions as interactions_mod
 from cycle.bus import NullObserver
 from cycle.context import CancelToken, Cancelled, RunContext
 from cycle import revisions, sessions
@@ -91,6 +92,10 @@ DRAIN_GRACE = 10.0
 #: ``engine.runner.request_session_stop``.
 _live = {}
 _live_lock = threading.Lock()
+#: The scheduler of each run in :data:`_live`, for messages from a person. Kept
+#: beside the tokens rather than instead of them: stopping must keep working
+#: exactly as it did, whatever becomes of this.
+_schedulers = {}
 
 
 def request_stop(run_id=None, reason="the run was stopped"):
@@ -106,6 +111,26 @@ def request_stop(run_id=None, reason="the run was stopped"):
     for token in tokens:
         token.set(reason)
     return len(tokens)
+
+
+def submit_interaction(raw):
+    """Hand a person's message to the run it names. Returns why not, or "".
+
+    Called from the launcher's control thread, which is exactly the thread that
+    must **not** judge or record it: the run's state belongs to its scheduler.
+    So this checks the shape, puts the request in that scheduler's queue and
+    wakes it; whether the message is taken is decided there and announced as a
+    ``cycle.interaction`` event. Only a request that never reaches a run - a
+    malformed one, or one for a run that is not going here - is refused now.
+    """
+    request, problem = interactions_mod.parse_request(raw)
+    if problem:
+        return problem
+    with _live_lock:
+        scheduler = _schedulers.get(request["run_id"])
+    if scheduler is None:
+        return "No run %s is going here." % request["run_id"]
+    return scheduler.inbox.put(request)
 
 
 def run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
@@ -160,6 +185,14 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                           for step in cycle.steps})
         borrowed = _borrow(run, cycle, only, reuse, registry)
 
+    # What a person said to this run before it went down, if it did. Read
+    # before anything starts, like the rest of the record: a history that
+    # cannot be read refuses the resume rather than dropping what it held.
+    interactions = interactions_mod.RunInteractions(store.directory, run.id,
+                                                    observer, store.workspace)
+    if resume:
+        interactions.load()
+
     store.begin(run, cycle, registry)
     prior_duration = run.duration_ms if resume else 0.0
 
@@ -167,6 +200,7 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                          observer=observer, flows_dir=flows_dir,
                          cycles_dir=cycles_dir, environment=environment,
                          memory_path=memory_path)
+    context.interactions = interactions
 
     with _live_lock:
         _live[run.id] = cancel
@@ -190,6 +224,9 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
         # run is not about what the last attempt was about.
         run.subject = {}
     scheduler = _Scheduler(cycle, run, context, observer, registry, jobs)
+    with _live_lock:
+        _schedulers[run.id] = scheduler
+    checkpoint_failed = False
     try:
         observer.run_start(run, model.to_graph(cycle), jobs)
         for step_run in borrowed:
@@ -199,22 +236,38 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
             observer.step_end(step_run)
         observer.run_mode(run, _mode(cycle, run, store, resume, borrowed, only,
                                      reuse))
+        # After the run is announced, so whatever draws it has a run to put
+        # the offers and any earlier messages on.
+        interactions.open(run, cycle, registry)
         if run.subject:
             observer.subject(run)
         else:
             scheduler.learn_subject()
         scheduler.drive()
     except checkpoints.CheckpointError as exc:
+        checkpoint_failed = True
         cancel.set(str(exc))
         run.message = str(exc)
     finally:
+        # Normally already closed by the loop; this is for the run that never
+        # got as far as it, and for a delivery its call never came back from.
+        for finish in (scheduler.close_messages, interactions.seal):
+            try:
+                finish()
+            except checkpoints.CheckpointError as exc:
+                # A failed message receipt must fail the run, but must not
+                # leave services held open or a dead scheduler registered.
+                checkpoint_failed = True
+                cancel.set(str(exc))
+                run.message = str(exc)
         _cleanup(context, cycle, observer)
         with _live_lock:
             _live.pop(run.id, None)
+            _schedulers.pop(run.id, None)
         run.ended_at = time.time()
         run.duration_ms = prior_duration + (time.monotonic() - started) * 1000.0
         run.status = _verdict(run)
-        if run.message.startswith("Cannot save execution state"):
+        if checkpoint_failed or run.message.startswith("Cannot save execution state"):
             run.status = FAILED
         if not run.message and run.status != SUCCESS:
             run.message = scheduler.why()
@@ -523,6 +576,12 @@ class _Scheduler(object):
         self.prepared = {}                    # step id -> plugin, for cleanup
         # Shared with _cleanup, which runs after this object is finished with.
         self.context._prepared = self.prepared
+        #: What a person has said to the run. Only this loop judges and
+        #: routes it; the control thread only queues requests - see
+        #: :func:`submit_interaction` and :meth:`_apply_requests`.
+        self.interactions = context.interactions or interactions_mod.RunInteractions(
+            os.path.join(context.workspace, ".execution"), run.id, observer)
+        self.inbox = _Requests(lambda: self.done.put(_WAKE))
 
         # Three levels of token, and the middle one is the point. The run's own
         # token means "somebody stopped this run" and nothing else touches it,
@@ -545,6 +604,7 @@ class _Scheduler(object):
             # opposite of what it asked for.
             while self.inflight or self.waiting:
                 finished = self._take()
+                self._apply_requests()
                 if finished is None:
                     self._enforce_deadlines()
                     self._submit(pool)        # anything whose wait is over
@@ -573,9 +633,61 @@ class _Scheduler(object):
             # is only the fallback for the ordinary case where nothing was
             # wrong and the last step simply finished.
             self.stopping.set()
-            pool.shutdown(wait=False)
-            self._drain()
+            # Before the drain, not after: a step still finishing now is on
+            # its way down, and a message it had not read is not going to be.
+            try:
+                self.close_messages()
+            finally:
+                pool.shutdown(wait=False)
+                self._drain()
         self._resolve_remaining()
+
+    def close_messages(self):
+        """Stop taking messages, and say so about everything still waiting.
+
+        A request still in the queue is answered as well - refused, since the
+        run no longer takes anything - rather than left for nobody to read.
+        """
+        leftover = self.inbox.close()
+        if self.context.cancel.is_set():
+            why = self._stopped()
+        elif self.stopping.reason:
+            why = "The run ended (%s) before it was read." % self.stopping.reason
+        else:
+            why = "The run ended before it was read."
+        try:
+            self.interactions.close(why)
+        finally:
+            for request in leftover:
+                self.interactions.accept(request)
+
+    def _stopped(self):
+        """Why a message did not arrive, when the reason is that somebody
+        stopped the run - which the step's own "cancelled" would hide."""
+        return ("The run was stopped before it was read."
+                if self.context.cancel.is_set() else "")
+
+    def _apply_requests(self):
+        """Judge and record every message that arrived since the last turn.
+
+        Here, on the loop's own thread, because what a message may address is a
+        question about the run as it is now - which step is still going, which
+        execution of it - and only this thread knows that without a race.
+        """
+        for request in self.inbox.drain():
+            try:
+                self.interactions.accept(request)
+            except checkpoints.CheckpointError:
+                raise
+            except Exception:                 # noqa: BLE001 - one bad request
+                log.warning("Could not judge message %s", request.get("id"),
+                            exc_info=True)
+                try:
+                    self.observer.interaction_refused(
+                        request.get("id", ""),
+                        "The message could not be processed. Check the run's log.")
+                except Exception:             # observers are diagnostics
+                    pass
 
     def why(self):
         """Why the run ended the way it did, for the run's own message."""
@@ -591,9 +703,12 @@ class _Scheduler(object):
         """One finished step, or None when it is time to check deadlines."""
         timeout = self._until_next_deadline()
         try:
-            return self.done.get(timeout=timeout)
+            finished = self.done.get(timeout=timeout)
         except queue.Empty:
             return None
+        # A message arrived: the loop was woken to look at it, not given a
+        # result.
+        return None if finished is _WAKE else finished
 
     def _until_next_deadline(self):
         """How long the loop may sit on the queue before it has to look around.
@@ -710,6 +825,8 @@ class _Scheduler(object):
                 finished = self.done.get(timeout=0.1)
             except queue.Empty:
                 continue
+            if finished is _WAKE:
+                continue
             self._record(*finished)
 
     def _resolve_remaining(self):
@@ -719,6 +836,7 @@ class _Scheduler(object):
             step_run.status = TIMEOUT if "timed out" in token.reason else CANCELLED
             step_run.message = (step_run.message
                                 or "still running when the run ended")
+            self.interactions.finish(step_id, step_run.status, reason=self._stopped())
             self.observer.step_end(step_run)
         if self.inflight:
             self.run.message = ("%d step(s) were still running when the run "
@@ -892,6 +1010,10 @@ class _Scheduler(object):
         step_run.definition_digest = self.context.checkpoints.definitions[step.id]
         self.context.checkpoints.step(self.run, step_run)
         self.observer.step_start(step_run, attempt=step_run.attempts + 1)
+        # Before the worker exists, so the first point it takes already knows
+        # which execution it belongs to.
+        self.interactions.begin(step.id, interactions_mod.execution_of(self.run, step.id),
+                                plugin)
         pool.submit(self._work, step, plugin, settings, token)
 
     def _work(self, step, plugin, settings, token):
@@ -930,7 +1052,7 @@ class _Scheduler(object):
                     break
                 if attempt > 1:
                     self.observer.step_retry(self.run.steps[step.id], attempt,
-                                             step.retry_delay,
+                                             step.retry_wait(attempt),
                                              getattr(result, "message", "")
                                              or str(error or ""))
                     self.observer.step_start(self.run.steps[step.id], attempt)
@@ -954,8 +1076,9 @@ class _Scheduler(object):
                     break
                 if attempt < max(1, step.retry_attempts):
                     # Waiting on the token, not sleeping: a cancelled run must
-                    # not sit through the rest of a retry delay.
-                    if token.wait(step.retry_delay):
+                    # not sit through the rest of a retry delay - and a timed
+                    # out one must not sit through a doubled one either.
+                    if token.wait(step.retry_wait(attempt + 1)):
                         break
         except Exception as exc:              # noqa: BLE001 - prepare, or the pool
             result, error = None, exc
@@ -996,6 +1119,9 @@ class _Scheduler(object):
                         mapping.pop(name, None)
                     self.context.restored.discard(name)
                     self.observer.step_end(self.run.steps[name])
+                # Each of them runs again as a new execution, which a message
+                # written to the last one does not reach.
+                self.interactions.reoffer(changed)
                 if self.run.revisions:
                     self.observer.revision(self.run, self.run.revisions[-1])
                 self.context.stage(step.id, {"kind": "review", "status": "done",
@@ -1059,6 +1185,7 @@ class _Scheduler(object):
                                     waits=self.waited[step.id])
 
         self.context.checkpoints.step(self.run, step_run)
+        self.interactions.finish(step.id, step_run.status, reason=self._stopped())
         self.observer.step_end(step_run)
         if step_run.status == SUCCESS:
             self.learn_subject(step.id)
@@ -1102,6 +1229,7 @@ class _Scheduler(object):
         self.waiting[step.id] = resume_at
         self.waited[step.id] = self.waited.get(step.id, 0) + 1
         self.context.checkpoints.step(self.run, step_run)
+        self.interactions.park(step.id)
         self.observer.step_waiting(step_run, max(0.0, resume_at - time.monotonic()))
 
     def _resolve(self, step, status, reason):
@@ -1111,6 +1239,8 @@ class _Scheduler(object):
         step_run.message = reason
         step_run.ended_at = time.time()
         self.context.checkpoints.step(self.run, step_run)
+        self.interactions.finish(step.id, status, started=step.id in self.begun,
+                                 reason=self._stopped())
         if status == SKIPPED:
             self.observer.step_skipped(step_run, reason)
         self.observer.step_end(step_run)
@@ -1141,6 +1271,43 @@ class _Step(object):
 #: they can never be mistaken for a status.
 _GO = object()
 _WAIT = object()
+#: Put on the results queue to wake the loop when a message arrives. Never a
+#: result: :meth:`_Scheduler._take` and ``_drain`` step over it.
+_WAKE = object()
+
+
+class _Requests(object):
+    """Messages waiting for the scheduler's next turn. Filled by any thread.
+
+    Closed once the run stops taking messages, after which :meth:`put` says so
+    at once rather than queueing something nobody will read.
+    """
+
+    def __init__(self, wake):
+        self._lock = threading.Lock()
+        self._items = []
+        self._closed = False
+        self._wake = wake
+
+    def put(self, request):
+        with self._lock:
+            if self._closed:
+                return "The run is finishing; it no longer takes messages."
+            self._items.append(request)
+        self._wake()
+        return ""
+
+    def drain(self):
+        with self._lock:
+            items, self._items = self._items, []
+        return items
+
+    def close(self):
+        """Take no more. Returns whatever was still waiting to be judged."""
+        with self._lock:
+            self._closed = True
+            items, self._items = self._items, []
+        return items
 
 
 def _clean(number):

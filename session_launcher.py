@@ -1147,6 +1147,13 @@ def _save_cycle(cycle_id, source, cycles_dir=None):
     The document is either ``{"yaml": "..."}`` - the text somebody typed - or
     the cycle document itself, which is what a form produces. One writer either
     way, so both go through the same validation and land in the same shape.
+
+    Either may come in an envelope that says how to save it -
+    ``{"document": {...}}`` or ``{"yaml": "..."}`` beside any of ``base``,
+    ``allow_loss``, ``dry_run`` and ``source`` (see ``cyclefile.save``). A
+    cycle document never has a ``document`` or ``yaml`` key of its own, so an
+    envelope cannot be mistaken for one, and a bare document still saves the
+    way it always did.
     """
     from cycle import cyclefile, registry
     if not source:
@@ -1161,9 +1168,16 @@ def _save_cycle(cycle_id, source, cycles_dir=None):
     if not isinstance(document, dict):
         return {"ok": False, "id": cycle_id,
                 "problems": ["%s must contain a JSON object" % source]}
+    options = dict(base=str(document.get("base") or "") or None,
+                   allow_loss=bool(document.get("allow_loss")),
+                   dry_run=bool(document.get("dry_run")),
+                   source_id=str(document.get("source") or "") or None)
     if "yaml" in document:
         return cyclefile.save(cycle_id, cycles_dir, yaml_text=document["yaml"],
-                              registry=registry)
+                              registry=registry, **options)
+    if isinstance(document.get("document"), dict):
+        return cyclefile.save(cycle_id, cycles_dir, document=document["document"],
+                              registry=registry, **options)
     return cyclefile.save(cycle_id, cycles_dir, document=document,
                           registry=registry)
 
@@ -2866,7 +2880,7 @@ def read_commands(windows_by_session):
     here. Opt-in through ``--control=-`` because a reader on stdin would
     otherwise swallow the keystrokes of anyone running this in a terminal.
 
-    Four commands. ``stop-session`` does both halves of what stopping one
+    ``stop-session`` does both halves of what stopping one
     window means: tell the engine to stop driving it (so it stops issuing steps
     rather than having them fail against a browser being torn down), then close
     the window itself. ``service.result`` is the answer to a ``service.request``
@@ -2874,7 +2888,11 @@ def read_commands(windows_by_session):
     thread is blocked waiting for this. ``ask.result`` is the same thing for a
     ``cycle.ask`` event - a person's answer to an approval gate. ``cycle.stop``
     asks a running cycle to
-    stop, by the run id it announced. Unknown commands are ignored rather than
+    stop, by the run id it announced. ``cycle.message`` is something a person
+    wants a running cycle to know - see ``cycle/interactions.py``; it is handed
+    to the run's own scheduler, which decides whether it is taken and says so
+    as a ``cycle.interaction`` event, and only a message that reaches no run is
+    refused here. Unknown commands are ignored rather than
     fatal: a newer GUI talking to an older core should lose a feature, not the run.
 
     ``windows_by_session`` is ``{}`` in cycle mode, where there are no windows of
@@ -2891,6 +2909,9 @@ def read_commands(windows_by_session):
             message = json.loads(line)
         except ValueError:
             log.warning("Ignoring an unreadable control line: %.80s", line)
+            continue
+        if not isinstance(message, dict):
+            log.warning("Ignoring a control line that is not an object: %.80s", line)
             continue
         command = message.get("command")
         session = message.get("session")
@@ -2922,6 +2943,14 @@ def read_commands(windows_by_session):
             if not asked:
                 log.warning("No cycle run called %r is going here.",
                             message.get("run_id"))
+        elif command == "cycle.message":
+            from cycle import executor as cycle_executor
+            refused = cycle_executor.submit_interaction(message)
+            if refused:
+                # Nothing recorded it, so nothing else will say so.
+                log.warning("Message %s refused: %s", message.get("id"), refused)
+                _emit("cycle.interaction.refused", id=str(message.get("id") or ""),
+                      run_id=str(message.get("run_id") or ""), reason=refused)
         else:
             log.warning("Ignoring an unknown control command: %r", command)
 
@@ -3376,7 +3405,10 @@ Running a cycle:
                             on it: the plan was fine, redo it from here.
   --control=-               Accept commands on stdin, which is what lets a cycle
                             start and stop the services the GUI manages, and
-                            what makes {"command": "cycle.stop"} work.
+                            what makes {"command": "cycle.stop"} work - and
+                            {"command": "cycle.message", ...}, a clarification
+                            for a running step or for the rest of the run
+                            (see docs/cycles.md, "Talking to a running cycle").
 
   Example:
     --cycle-run=nightly --cycle-var=branch=main --events=- --cycle-jobs=4

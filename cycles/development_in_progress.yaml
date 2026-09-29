@@ -27,15 +27,19 @@ subject:
 
 # While the application is open, repeat the todo step's query every
 # `every` seconds and offer any task it has not seen before: "start
-# work on it?". Nothing starts without the answer.
+# work on it?". Nothing starts without the answer. Off as shipped - a
+# template has nobody's Jira in it yet. Turn it on in the "Take one task"
+# step's window (Listen), once the Jira variables and token are set.
 triggers:
   - id: new_task
     watch: todo
     every: 300
+    enabled: false
 steps:
   - id: todo
     plugin: jira.issues
     label: Take one task
+    group: Take the task
     with:
       comment_limit: 20
       comments: true
@@ -54,6 +58,7 @@ steps:
   - id: history
     plugin: memory.recall
     label: What earlier runs know
+    group: Take the task
     needs: [todo]
     with:
       field: state
@@ -61,6 +66,7 @@ steps:
   - id: claim
     plugin: memory.claim
     label: Take it for this run
+    group: Take the task
     needs: [history]
     with:
       key: dev/${steps.todo.outputs.key}
@@ -68,6 +74,7 @@ steps:
   - id: spent
     plugin: memory.recall
     label: How much of the budget is gone
+    group: Take the task
     needs: [claim]
     with:
       # Read rather than moved: a gate that judged a number it had just
@@ -80,6 +87,7 @@ steps:
   - id: admit
     plugin: check.gate
     label: Is this ours to do
+    group: Take the task
     needs: [todo, history, spent]
     with:
       checks:
@@ -93,6 +101,7 @@ steps:
   - id: budget
     plugin: memory.remember
     label: Count this attempt
+    group: Take the task
     needs: [admit]
     with:
       # Before the work and after the gate: a run that dies mid-way has still
@@ -104,6 +113,7 @@ steps:
   - id: prepare_branch
     plugin: git.prepare_branch
     label: Prepare the task branch
+    group: Branch
     needs: [budget]
     with:
       base: ${vars.git_base}
@@ -121,6 +131,7 @@ steps:
   - id: reconcile
     plugin: agent.review
     label: Is it already done
+    group: Branch
     needs: [prepare_branch]
     with:
       effort: high
@@ -136,6 +147,7 @@ steps:
   - id: work_remains
     plugin: check.gate
     label: Is there work left
+    group: Branch
     needs: [reconcile]
     with:
       checks:
@@ -144,6 +156,7 @@ steps:
   - id: plan
     plugin: agent.review
     label: Work out the change
+    group: Plan
     needs: [work_remains]
     with:
       effort: high
@@ -165,6 +178,7 @@ steps:
   - id: business
     plugin: agent.review
     label: Review the plan
+    group: Plan
     needs: [plan]
     with:
       effort: medium
@@ -184,6 +198,7 @@ steps:
   - id: settle
     plugin: agent.review
     label: Settle the plan
+    group: Plan
     needs: [business]
     with:
       effort: medium
@@ -206,6 +221,7 @@ steps:
   - id: recheck
     plugin: agent.review
     label: Review the settled plan
+    group: Plan
     needs: [settle]
     with:
       effort: medium
@@ -224,6 +240,7 @@ steps:
   - id: approve
     plugin: approval.gate
     label: Agree to the plan
+    group: Agree
     needs: [recheck, settle, business]
     with:
       detail: "${steps.settle.outputs.summary}\n\nPackages:\n${steps.settle.outputs.issues}\n\nWhere it lands:\n${steps.settle.outputs.recommendations}\n\nRisk: ${steps.settle.outputs.risk}\nFirst review: ${steps.business.outputs.blocking_count} blocking of ${steps.business.outputs.issue_count} note(s).\nAfter the second pass: ${steps.recheck.outputs.blocking_count} blocking of ${steps.recheck.outputs.issue_count} note(s).\nStill open:\n${steps.recheck.outputs.issues}\n\nLeft out of scope - send it back if any of this has to be in:\n${steps.settle.outputs.out_of_scope}\n"
@@ -236,6 +253,7 @@ steps:
   - id: preflight
     plugin: check.gate
     label: Still true just before writing
+    group: Agree
     needs: [approve, claim, todo]
     with:
       checks:
@@ -246,6 +264,7 @@ steps:
   - id: implement
     plugin: agent.implement
     label: Make the change and prove it
+    group: Build
     needs: [preflight]
     with:
       acceptance: ${steps.settle.outputs.summary}
@@ -266,6 +285,7 @@ steps:
   - id: integration
     plugin: command.shell
     label: Check the whole change
+    group: Build
     needs: [implement]
     with:
       command: ${vars.checks}
@@ -276,6 +296,7 @@ steps:
   - id: diff
     plugin: command.shell
     label: Show what changed
+    group: Build
     needs: [implement]
     timeout: 120
     with:
@@ -285,6 +306,7 @@ steps:
   - id: probe
     plugin: agent.edit
     label: Try to break it
+    group: Build
     needs: [implement]
     timeout: 900
     on_failure: continue
@@ -301,6 +323,7 @@ steps:
   - id: probe_run
     plugin: command.shell
     label: Run the probes
+    group: Build
     needs: [probe]
     timeout: 600
     with:
@@ -310,6 +333,7 @@ steps:
   - id: review
     plugin: agent.review
     label: Review the code
+    group: Judge
     needs: [implement, probe_run, diff]
     with:
       effort: high
@@ -331,6 +355,7 @@ steps:
   - id: accept
     plugin: agent.review
     label: Accept it against the task
+    group: Judge
     needs: [integration, review, diff]
     with:
       effort: high
@@ -350,6 +375,7 @@ steps:
   - id: final
     plugin: check.gate
     label: Is it fit to commit
+    group: Judge
     needs: [implement, integration, review, accept]
     with:
       checks:
@@ -362,6 +388,7 @@ steps:
   - id: commit
     plugin: git.commit
     label: Commit the verified tree
+    group: Record
     needs: [final]
     with:
       author_email: cycle@example.invalid
@@ -374,6 +401,7 @@ steps:
   - id: record
     plugin: memory.remember
     label: Remember the commit
+    group: Record
     needs: [commit]
     with:
       fields:
@@ -386,6 +414,7 @@ steps:
   - id: record_reuse
     plugin: memory.remember
     label: Remember it was already done
+    group: Record
     needs: [work_remains, reconcile]
     if: ${steps.work_remains.outputs.passed} == 'false'
     with:
@@ -397,6 +426,7 @@ steps:
   - id: note
     plugin: memory.remember
     label: Where this run got to
+    group: Record
     needs: [commit, implement, approve, admit]
     if: ${run.id}
     with:
@@ -411,6 +441,7 @@ steps:
   - id: report
     plugin: report.html
     label: Save the report
+    group: Record
     needs: [note, record, record_reuse]
     if: ${run.id}
     with:

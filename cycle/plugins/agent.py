@@ -26,7 +26,8 @@ import tempfile
 
 from cycle import registry
 from cycle.plugins import agent_cli, agent_run
-from cycle.operations import Operation, result_document, result_from_document
+from cycle.operations import (Operation, recorded, result_document,
+                              result_from_document)
 from cycle.plugins._process import run_process
 from cycle.plugins.agent_worker import (COMPLEXITY_GUIDE, SCOPE_GUIDE, extract_json,
                                         validate_review)
@@ -141,6 +142,10 @@ class AgentReview(CyclePlugin):
                         "Nothing is stored here; the CLI keeps its own "
                         "credentials."),
         ),
+        # One call, whichever backend: a message reaches it only when sent
+        # before the call starts, and the offer is withdrawn once it has.
+        accepts=(registry.accepts("text", "Clarification",
+                                  when="Before its only agent call starts"),),
     )
 
     def run_action(self, key, settings):
@@ -276,14 +281,31 @@ class AgentReview(CyclePlugin):
         if not os.path.isabs(interpreter) and os.path.dirname(interpreter):
             interpreter = os.path.abspath(os.path.join(context.workspace, interpreter))
         directory = context.step_dir(step.id)
+        # The person's messages go into the task, the one place the worker
+        # reads prose from - see agent_run.run_claude for the same thing on the
+        # CLI, and for why a call made before they were recorded reads none.
+        inbox = context.inbox(step.id)
+        snapshot = inbox.take("agent-worker", last=True, reached=recorded(
+            context, step, "agent-worker", {"request": request, "interpreter": interpreter}))
+        if snapshot:
+            request["task"] = agent_run.with_clarifications(str(request["task"] or ""),
+                                                            snapshot)
         operation = Operation(context, step, "agent-worker",
                               {"request": request, "interpreter": interpreter})
         cached = operation.cached()
+        if cached is not None:
+            if (cached["result"].get("outputs") or {}).get("started") is False:
+                inbox.release(snapshot, "The agent could not be started, so it never read it.")
+            else:
+                inbox.delivered(snapshot, context.relative(operation.directory))
         if cached is None:
+            if operation.uncertain:
+                operation.begin()
             request_path = os.path.join(operation.directory, "request.json")
             result_path = os.path.join(operation.directory, "result.json")
             operation.store.write(request_path, request)
             worker = os.path.join(os.path.dirname(__file__), "agent_worker.py")
+            inbox.bind(snapshot, context.relative(operation.directory))
             operation.begin()
             try:
                 result = run_process(
@@ -301,7 +323,12 @@ class AgentReview(CyclePlugin):
                     result.status, result.message = "failed", "Cannot read agent response: %s" % exc
             cached = {"result": result_document(result), "raw": raw}
             if raw or result.outputs.get("started") is False:
-                operation.complete(cached, bool(raw))
+                operation.complete(cached, bool(raw),
+                                   input_delivered=result.outputs.get("started") is not False)
+            if result.outputs.get("started") is False:
+                inbox.release(snapshot, "The agent could not be started, so it never read it.")
+            elif raw:
+                inbox.delivered(snapshot, context.relative(operation.directory))
         result = result_from_document(cached["result"])
         if not result.ok:
             return result
@@ -367,7 +394,7 @@ def _claude_cli_method(self, context, step):
         model=self.setting(step.settings, "model"),
         effort=agent_run.effort_for(self, step)[0],
         max_turns=self.setting(step.settings, "max_iterations"),
-        add_dir=repository)
+        add_dir=repository, clarify=True, last=True)
     result = reply.result
     if not reply.ok:
         result.status = "failed"

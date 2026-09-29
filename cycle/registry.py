@@ -94,6 +94,14 @@ Action = namedtuple("Action", "key label kind hint")
 
 ACTION_KINDS = ("status", "command")
 
+#: A kind of message a plugin can read while its step runs - see
+#: ``cycle/interactions.py``. ``kind`` is one of that module's ``KINDS``;
+#: ``label`` is what a front-end calls it; ``when`` says, in the plugin's own
+#: words, at which point a message sent now would be read ("Before its next
+#: agent call"). Declared here, like the fields, so a front-end offers only
+#: what the plugin will actually read - never by guessing from its category.
+Accepts = namedtuple("Accepts", "kind label when")
+
 #: Field kinds a front-end is expected to know how to draw.
 KINDS = ("text", "multiline", "number", "check", "args", "env", "file", "dir",
          "choice", "scenario", "service")
@@ -130,6 +138,10 @@ def output(key, kind="string", hint=""):
 
 def action(key, label, kind="status", hint=""):
     return Action(key, label, kind, hint)
+
+
+def accepts(kind, label="", when=""):
+    return Accepts(kind, label, when)
 
 
 @dataclass(frozen=True)
@@ -186,6 +198,10 @@ class PluginMetadata:
     #: ``triggers:`` may watch only such a step. What "a queue" means is the
     #: plugin's own business; the engine only compares keys.
     watchable: bool = False
+    #: The messages a step of this plugin can read while it runs - see
+    #: :data:`Accepts`. Empty for almost everything: a plugin says so only
+    #: when it has points at which a message would actually change its work.
+    accepts: tuple = ()            # tuple[Accepts]
 
     def to_dict(self):
         """What ``--describe`` publishes, so a front-end can build its own form."""
@@ -210,6 +226,8 @@ class PluginMetadata:
                         for one in self.outputs],
             "actions": [{"key": one.key, "label": one.label, "kind": one.kind,
                          "hint": one.hint} for one in self.actions],
+            "accepts": [{"kind": one.kind, "label": one.label, "when": one.when}
+                        for one in self.accepts],
         }
 
 

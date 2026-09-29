@@ -577,3 +577,43 @@ def test_a_step_that_must_run_every_time_waits_if_it_comes_after_the_selection(t
 
     assert partial.ok, [(k, v.status, v.message) for k, v in partial.steps.items()]
     assert partial.steps["note"].status == "skipped"
+
+
+# ---------------------------------------------------- fields added to a step
+# A step's fingerprint is what Resume compares a finished step against. A field
+# added to CycleStep later is part of asdict(step), so without care every run
+# made before it existed would read as "Completed steps changed" and never
+# resume again. These digests were taken before `group` and `retry.backoff`
+# existed; they must not move for a step that uses neither.
+PINNED = {"a": "90744dabfd3c6f225e1f4246c29382870a864129dc401cc2656d96f449e0ff4f",
+          "b": "5fdfb71676ac62654d86970be5f73f5530c05bf54b0e5e18ece7e3a16964c5bd"}
+
+
+def _pinned_cycle(**a_extra):
+    return model.parse_cycle({
+        "id": "pin", "variables": {"x": "1"},
+        "steps": [dict({"id": "a", "plugin": "command.shell",
+                        "with": {"command": "echo ${vars.x}"},
+                        "retry": {"attempts": 2, "delay": 1}}, **a_extra),
+                  {"id": "b", "plugin": "report.json", "needs": ["a"],
+                   "label": "Report"}]}, "pin")
+
+
+def test_a_step_fingerprinted_before_new_fields_existed_still_matches():
+    assert checkpoints.signatures(_pinned_cycle(), {}, registry) == PINNED
+
+
+def test_putting_a_step_in_a_group_is_not_a_change_to_it():
+    """A phase is how the step is shown, like its label."""
+    assert checkpoints.signatures(_pinned_cycle(group="Plan"), {}, registry) == PINNED
+
+
+def test_a_backoff_is_a_change_to_the_step():
+    changed = checkpoints.signatures(
+        _pinned_cycle(retry={"attempts": 2, "delay": 1, "backoff": "exponential"}),
+        {}, registry)
+    assert changed["a"] != PINNED["a"] and changed["b"] == PINNED["b"]
+    fixed = checkpoints.signatures(
+        _pinned_cycle(retry={"attempts": 2, "delay": 1, "backoff": "fixed"}),
+        {}, registry)
+    assert fixed == PINNED, "saying the default out loud changes nothing"

@@ -226,11 +226,57 @@ def test_an_unknown_key_is_only_findable_from_the_raw_mapping():
     assert problems(parse_cycle(raw, "demo")) == []
 
 
-def test_retry_backoff_is_accepted_and_says_it_does_nothing():
-    """Better than behaving as though the file had not asked for it."""
-    raw = build([step("a", retry={"attempts": 2, "backoff": "exponential"})])
+def test_retry_backoff_is_read_and_kept():
+    """It used to be refused with a message saying it was ignored - which also
+    stopped the cycle running and the file being saved at all."""
+    raw = build([step("a", retry={"attempts": 3, "delay": 5,
+                                  "backoff": "exponential"})])
+    cycle = parse_cycle(raw, "demo")
+
+    assert problems(cycle, raw=raw) == []
+    assert cycle.steps[0].retry_backoff == "exponential"
+    assert to_document(cycle)["steps"][0]["retry"] == {
+        "attempts": 3, "delay": 5.0, "backoff": "exponential"}
+
+
+def test_a_fixed_backoff_is_the_default_and_is_not_written_back():
+    cycle = parse_cycle(build([step("a", retry={"attempts": 2})]), "demo")
+    assert cycle.steps[0].retry_backoff == "fixed"
+    assert "backoff" not in to_document(cycle)["steps"][0]["retry"]
+
+
+def test_a_backoff_nobody_implements_is_named():
+    raw = build([step("a", retry={"attempts": 2, "delay": 1, "backoff": "linear"})])
     found = problems(parse_cycle(raw, "demo"), raw=raw)
-    assert any("backoff is not implemented" in message for message in found)
+    assert any("retry.backoff is 'linear'" in message and "exponential" in message
+               for message in found)
+
+
+def test_an_exponential_backoff_with_nothing_to_double_is_reported():
+    raw = build([step("a", retry={"attempts": 3, "backoff": "exponential"})])
+    found = problems(parse_cycle(raw, "demo"), raw=raw)
+    assert any("nothing to double" in message for message in found)
+
+
+def test_the_wait_before_each_try_doubles_under_exponential():
+    cycle = parse_cycle(build([
+        step("a", retry={"attempts": 4, "delay": 5, "backoff": "exponential"}),
+        step("b", retry={"attempts": 4, "delay": 5})]), "demo")
+    doubling, fixed = cycle.steps
+    assert [doubling.retry_wait(n) for n in (1, 2, 3, 4)] == [0.0, 5.0, 10.0, 20.0]
+    assert [fixed.retry_wait(n) for n in (1, 2, 3, 4)] == [0.0, 5.0, 5.0, 5.0]
+
+
+# ---------------------------------------------------------------------- groups
+def test_a_step_may_name_the_phase_it_belongs_to():
+    raw = build([step("a", group="Plan"), step("b", needs=["a"])])
+    cycle = parse_cycle(raw, "demo")
+
+    assert problems(cycle, raw=raw) == [], "group is a known key"
+    assert [one.group for one in cycle.steps] == ["Plan", ""]
+    assert to_document(cycle)["steps"][0]["group"] == "Plan"
+    assert "group" not in to_document(cycle)["steps"][1]
+    assert [node["group"] for node in to_graph(cycle)["nodes"]] == ["Plan", ""]
 
 
 def test_a_bad_on_failure_is_reported_with_what_it_could_be():

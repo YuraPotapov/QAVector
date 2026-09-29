@@ -82,6 +82,18 @@ def settings_for(cycle, trigger, secrets_path=None, env=None, registry=None):
                              "run" % (step.id, path))
     values = {name: secret_store.get(cycle.id, name, secrets_path)
               for name in cycle.secrets}
+    # A secret the query reads and nobody has set is refused here, before the
+    # plugin is asked anything. Resolved, it would be an empty string, and the
+    # listener would send a request with a blank credential every few minutes
+    # to whatever the file names - a template's placeholder site included.
+    unset = sorted({path.split(".")[1] for path in variables.references(step.settings)
+                    if path.startswith("vars.") and len(path.split(".")) > 1
+                    and path.split(".")[1] in cycle.secrets
+                    and not values.get(path.split(".")[1])})
+    if unset:
+        raise WatchError("%s has no value set for %s; set it in Settings -> "
+                         "Cycle secrets. Nothing was asked until then."
+                         % (cycle.id, ", ".join(unset)))
     scope = variables.scope(None, cycle, {}, env=env or {},
                             secrets={k: v for k, v in values.items() if v is not None})
     return variables.resolve(step.settings, scope)

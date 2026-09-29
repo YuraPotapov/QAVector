@@ -1067,3 +1067,106 @@ def test_a_gate_this_run_does_itself_is_not_something_it_is_missing(tmp_path):
                      step("work", needs=["approve"]))
     assert missing_for(cycle, ["work"], _earlier(plan=SUCCESS),
                        _Registry(test_fake=_Fake(), test_gate=gate)) == []
+
+
+# --------------------------------------------------------------------- backoff
+def _record_waits(monkeypatch):
+    """Every retry wait a step asks its token for, without actually waiting."""
+    from cycle import context as context_mod
+    asked = []
+    real = context_mod.CancelToken.wait
+
+    def wait(self, timeout=None):
+        if timeout is not None and timeout > 0 and not self.is_set():
+            asked.append(timeout)
+            return False
+        return real(self, timeout)
+
+    monkeypatch.setattr(context_mod.CancelToken, "wait", wait)
+    return asked
+
+
+def _fails_until(tries_needed):
+    tries = []
+
+    def behaviour(context, step):
+        tries.append(1)
+        return None if len(tries) >= tries_needed else registry_mod.failed("not yet")
+    return behaviour
+
+
+def test_an_exponential_backoff_doubles_the_wait_before_each_try(tmp_path, monkeypatch):
+    asked = _record_waits(monkeypatch)
+    cycle = cycle_of(step("a", retry={"attempts": 4, "delay": 3,
+                                      "backoff": "exponential"}))
+    run, seen = go(cycle, _Registry(test_fake=_Fake(_fails_until(4))), tmp_path)
+
+    assert run.steps["a"].status == SUCCESS
+    assert asked == [3.0, 6.0, 12.0]
+    assert [fields["delay"] for fields in seen.of("step_retry")] == [3.0, 6.0, 12.0]
+
+
+def test_without_a_backoff_every_wait_is_the_same(tmp_path, monkeypatch):
+    asked = _record_waits(monkeypatch)
+    cycle = cycle_of(step("a", retry={"attempts": 4, "delay": 3}))
+    go(cycle, _Registry(test_fake=_Fake(_fails_until(4))), tmp_path)
+    assert asked == [3.0, 3.0, 3.0]
+
+
+@pytest.mark.parametrize("method", ["close", "seal", "finish"])
+def test_message_receipt_failure_still_cleans_up_the_run(tmp_path, monkeypatch, method):
+    from cycle import checkpoints, executor, interactions
+
+    stopped = []
+
+    class Service(_Fake):
+        def execute(self, context, step):
+            context.hold(step.id, self, step.id)
+            return registry_mod.succeeded()
+
+        def stop(self, context, step, handle):
+            stopped.append(handle)
+
+    def fail_receipt(*args, **kwargs):
+        raise checkpoints.CheckpointError("Cannot save execution state: messages: disk full")
+
+    monkeypatch.setattr(interactions.RunInteractions, method, fail_receipt)
+    plugin = Service()
+    run, seen = go(cycle_of(step("a")), _Registry(test_fake=plugin), tmp_path)
+
+    assert run.status == FAILED and "disk full" in run.message
+    assert stopped == ["a"] and plugin.cleaned == ["a"]
+    assert seen.of("run_end") == [{"status": FAILED}]
+    assert checkpoints.Store(str(tmp_path)).load().status == FAILED
+    assert executor.request_stop(run.id) == 0
+    assert "No run" in executor.submit_interaction({
+        "id": "late", "run_id": run.id, "scope": "run",
+        "payload": {"text": "Too late"}})
+
+
+def test_unexpected_message_error_is_reported_to_sender(tmp_path, monkeypatch):
+    from cycle import executor, interactions
+
+    refused = threading.Event()
+
+    class Watch(Recorder):
+        def interaction_refused(self, message_id, reason):
+            super().interaction_refused(message_id, reason)
+            refused.set()
+
+    def broken_accept(self, request):
+        raise RuntimeError("unexpected message failure")
+
+    def send(context, step):
+        assert executor.submit_interaction({
+            "id": "note", "run_id": context.run_id, "scope": "run",
+            "payload": {"text": "Also called from cron"}}) == ""
+        assert refused.wait(5)
+
+    monkeypatch.setattr(interactions.RunInteractions, "accept", broken_accept)
+    run, seen = go(cycle_of(step("a")), _Registry(test_fake=_Fake(send)),
+                   tmp_path, observer=Watch())
+
+    assert run.status == SUCCESS
+    assert seen.of("interaction_refused")[0]["id"] == "note"
+    assert "could not be processed" in seen.of("interaction_refused")[0]["reason"]

@@ -53,11 +53,94 @@ python3 session_launcher.py --cycle-run=nightly --events=-
 Or open it on the **Cycles** page, which draws the whole graph, and press Run.
 The nodes take on their status as it goes; there is no second page to watch.
 
-Right-click a project, a cycle, or empty space in the explorer for its actions.
-There is no button row below the tree. **Rename cycle...** changes the display
-name shown in the tree and page heading; the cycle id and filename stay the same.
-**Change id (...)...** is a separate action that changes the filename and the id
-used by `--cycle-run`. Save and Revert remain in the YAML tab.
+Right-click a project, a cycle, or empty space in the explorer for its actions;
+F2 renames, Delete deletes and the menu key opens the row's menu. **Rename
+cycle...** changes the display name shown in the tree and page heading; the
+cycle id and filename stay the same. **Change id (...)...** is a separate action
+that changes the filename and the id used by `--cycle-run`. **Move to project**
+rewrites the cycle's `project:`.
+
+A cycle belongs to the project its own file names. The projects list is the
+page's list of names - what New Cycle offers, where an empty project lives - so
+a cycle naming a project the list does not have (imported, copied from another
+machine, or shipped with the application) is shown under that name, marked
+*not in your projects list*, with **Add to the projects list** on its menu.
+Deleting a project moves its cycles to Unassigned by rewriting their files.
+
+---
+
+## Editing on the canvas
+
+A cycle is YAML, and the YAML tab is the whole of it. The canvas edits the same
+file: **Step** in the bar over the canvas adds a step - after the selected one,
+when one is selected - and right-clicking a step offers what can be done to it:
+open it, add a step after it, choose what it waits for, put it in a phase,
+duplicate or delete it. A dependency that would make a loop is not offered.
+
+**Links.** A line from one step to another means the second waits for the
+first - its `needs:`. In Design, on a cycle you can edit, a link is made,
+moved or removed on the canvas:
+
+| To | Do |
+|---|---|
+| make B wait for A | drag the **filled dot** under A onto B - or the **hollow dot** on top of B onto A |
+| see what a link is | point at the line: *B waits for A* |
+| move a link | click the line, then drag its **head** to the step that should wait instead, or its **start** to the step to wait for instead |
+| remove a link | click the line and press **Delete** - or right-click it, **Remove this link** |
+| set several at once | right-click a step: **Waits for** (what it starts after) and **Runs before** (what starts after it), ticked on and off |
+
+While a link is dragged, the step under the pointer turns blue if the link can
+land there and red if it cannot, with the reason next to the pointer: it would
+make a loop, or that link is already there. A link that is moved is judged as
+if it were already gone, and a move is one change - one Undo. Links added,
+moved and removed are part of the draft like every other change. A link to or
+from a folded phase stands for several and cannot be picked up; open the
+phase. A step's window keeps the same list as text, under **Depends on**.
+
+**Changes collect until Save.** Almost every state between two good files is
+one the core would refuse - a step whose required field is still empty, a
+dependency on a step not added yet - so the canvas, the Problems tab and the
+YAML tab show the draft as the core sees it (a dry run of the save), and the
+file is written only when you press **Save**. **Undo** and **Redo** walk through
+the changes, **Changes** shows the diff, **Revert** throws them away. Running,
+opening another cycle or opening Properties with unsaved changes asks first,
+because a run reads the file, not the screen.
+
+**A save keeps what you wrote.** A save from the canvas or a step's window is
+applied to the file as edits: the entries that changed are rewritten and
+nothing else is, so comments, the order you put things in and blocks of text
+survive. A change that cannot keep a comment - a step rewritten whole had one
+inside it - shows the diff and asks before dropping it. A file changed on disk
+after it was opened is not written over: the save is refused and Reload shows
+the other change.
+
+**Design and Run.** The switch over the canvas says which graph it is showing:
+**Design** is the file (or your unsaved changes), **Run** is the graph the run
+on screen was started with, with its statuses. They are the same picture until
+the file changes under a run - and then a run's colours are only shown in Run,
+because painting them on a graph that did not run would be a lie about both. A
+run starting switches to Run; an edit switches back.
+
+### Phases
+
+A long cycle is mostly a sequence, and twenty-eight boxes down the page is more
+than anybody takes in at once. A step may name its phase:
+
+```yaml
+  - id: plan
+    plugin: agent.review
+    group: Plan
+```
+
+The canvas frames each phase's steps together under its name, and **Fold
+phases** shows each phase as one box saying how its steps went - failed if one
+failed, running while one runs. Click a phase's heading to fold just that one;
+double-click a folded phase to open it. What is folded is remembered per cycle.
+A phase whose steps are joined through a step outside it cannot be one box
+without waiting for itself, and stays open.
+
+`group` is how a step is shown, like `label`: it is not part of the step's
+fingerprint, so grouping a cycle does not stop its runs from resuming.
 
 ---
 
@@ -70,6 +153,7 @@ what any plugin does.
 - id: backend_tests          # required; letters, digits, _ and - only
   plugin: command.shell      # required; see the plugin list below
   label: Backend tests       # what to call it on the canvas; defaults to the id
+  group: Test                # the phase it is drawn in; changes nothing else
   needs: [odoo, postgres]    # which steps must succeed first
   with:                      # this plugin's own settings
     command: pytest -q
@@ -77,7 +161,8 @@ what any plugin does.
   timeout: 600               # seconds; absent means no deadline
   retry:
     attempts: 3
-    delay: 5                 # seconds between tries
+    delay: 5                 # seconds before the second try
+    backoff: exponential     # fixed (default) | exponential: 5, 10, 20...
   on_failure: continue       # stop (default) | continue
   disabled: false
 ```
@@ -158,8 +243,8 @@ appears to the left of something it depends on.
 | `report.html` | Writes a readable page describing the run. |
 
 What each takes and produces is published by `--describe` under `cycle_plugins`,
-which is where the Cycles page's Inspector gets its fields — so this table can
-go out of date but the application cannot.
+which is where a step's window gets its fields — so this table can go out of
+date but the application cannot.
 
 Git checkout and agent setup, including a complete cycle example, are described
 in [Git and agent plugins](cycle-agents.md). The default agent backend needs
@@ -554,6 +639,8 @@ queue, so turning a listener on does not greet you with a question per open
 task. It asks one task at a time, and never while a run is going: a task that
 turns up during a run is offered when it finishes. A check that fails - the
 source unreachable, a secret not set - is retried on schedule without a dialog.
+A secret the watched step reads and nobody has set is refused before anything
+is asked, so a template's placeholder site is never sent a blank credential.
 
 The step's settings are resolved from the cycle's variables and secrets; they
 cannot read another step's outputs, since no step has run. What the plugin does
@@ -561,6 +648,10 @@ with them is its own: `jira.issues` runs the step's query - project, JQL,
 ordering - with `issue` ignored, since a listener pinned to one key would never
 see another. What has been seen is kept in the memory store under
 `watch/<cycle>/<trigger>`.
+
+The development cycles that ship with the application carry their trigger
+switched off (`enabled: false`): a template has nobody's Jira in it yet. Set the
+Jira variables and the token, then turn listening on as below.
 
 **Turning it on and off.** Double-click the watched step: a step whose plugin
 can be listened to has a *Listen for new work* section with **Listen** and
@@ -957,14 +1048,51 @@ the step it mentions is evaluated before that step has run, so it silently never
 fires. This is reported when the cycle is read, rather than left to be
 discovered at three in the morning.
 
+**Choosing a route.** When a step decides which way the work goes, route on
+one of its outputs: a condition on the first step of each route, and a step
+after both routes that carries its own `if:` so it is not skipped with the
+route not taken:
+
+```yaml
+- id: size
+  plugin: agent.review
+  with:
+    task: How much work is this change?
+    assess: complexity              # outputs.complexity: low, medium, high...
+
+- id: quick_fix
+  plugin: agent.edit
+  needs: [size]
+  if: "${steps.size.outputs.complexity} == 'low'"
+  with: {...}
+
+- id: full_plan
+  plugin: agent.review
+  needs: [size]
+  if: "${steps.size.outputs.complexity} != 'low'"
+  with: {...}
+
+- id: report
+  plugin: report.html
+  needs: [quick_fix, full_plan]
+  if: ${run.id}
+```
+
+Route on an output rather than on a gate failing: a `check.gate` with
+`on_failure: continue` does let the other branch run, but the run then ends
+`failed`, which reads wrong when the gate only chose a route.
+
+A plan that grows new steps while it runs is not this; see
+[the adaptive cycle design](cycle-adaptive-design.md).
+
 ---
 
 ## Failure
 
 The main **Run** button becomes **Resume** after failure, Stop or interruption.
 Resume continues the displayed execution using its saved successful results.
-**Hard Run** in the dropdown starts the graph from the beginning and calls paid
-services again. Resume is also available as
+**Start over (new run)** in the dropdown starts the graph from the beginning and
+calls paid services again. Resume is also available as
 `--cycle-run=ID --cycle-resume=RUN_ID`. It validates retained results and stops
 on changed inputs or uncertain external effects instead of silently repeating
 paid work. See [execution and recovery](cycle-recovery.md) for the persistence,
@@ -988,8 +1116,14 @@ and the run still ends `failed`.
 timeout: 300          # seconds for the whole step, retries included
 retry:
   attempts: 3         # total tries, not extra tries
-  delay: 5            # seconds between them
+  delay: 5            # seconds before the second try
+  backoff: exponential  # doubles the delay before each further try
 ```
+
+`backoff: exponential` waits 5, then 10, then 20 seconds; `fixed`, the default,
+waits 5 every time. The step's `timeout:` still bounds the whole of it, so a
+long run of doublings ends where the deadline says. Exponential with no delay
+has nothing to double and is reported.
 
 Stopping is **cooperative**, and it is worth knowing why. Python cannot kill a
 thread, so a timeout sets the step's cancel token and every built-in plugin
@@ -1011,6 +1145,164 @@ timeout is part of what they do.
 
 Ctrl+C is a cancellation, not a crash: the run still gets its cleanup pass, its
 record and its verdict.
+
+---
+
+## Watching a run: Stages and artifacts
+
+**Stages** is the run's account, one row per thing a step reported. It can
+live in a window of its own: the mark at the right end of the tab strip (it
+has no label - hover it for one) moves the feed, with the message box under it,
+into a separate window that you can minimize, maximize or put on another
+screen. The tab stays where it was and says where Stages went; **Show window**
+brings the window forward, and the mark beside it - or closing the window -
+puts Stages back in the tab. **View -> Stages in a separate window** does the
+same.
+
+The window lives only as long as the application: closing the main window
+closes it too. Whether Stages is in its own window is remembered, with the
+window's size and place, so it opens the same way next time.
+
+**Ctrl+Shift+S** (View -> Go to Stages) goes to Stages from any window of the
+application: it brings the Stages window forward - back from the taskbar if it
+was minimized - or opens the Cycles page on the Stages tab, unfolding the
+bottom panel if it had been dragged shut.
+
+**The files a run wrote** are one click from the step that wrote them. Right-
+click a step -> **Artifacts** lists its files and its folder; **Artifacts**
+above the Output tab does the same for the selected step (the run's folder with
+nothing selected, or when the step wrote nothing); and every run in the
+Subjects list has an **artifacts** link. Each opens the Artifacts page on that run with the file
+selected. These are offered only while a run of the cycle that is open is on
+screen.
+
+---
+
+## Talking to a running cycle
+
+Open **Stages** and write in the box under the feed. **To** shows who reads it,
+and it is chosen for you from who is working:
+
+- **One step is working** that takes clarifications: that step, marked
+  **AUTO**. Only that execution of it reads the message; a plan revision that
+  sends the step round again does not silently redirect it.
+- **No step is working**: **Further work of this run** - every compatible step
+  still to come reads it at its next supported point.
+- **Two or more are working at once**: nothing is guessed. **To** asks you to
+  choose; selecting one of them on the graph, or picking it from the list,
+  settles it.
+
+To choose yourself, pick any recipient from the **To** list: a working step, a
+step marked **(not started)** - which reads it when it starts - or the rest of
+the run. **Back to automatic** returns to following who is working.
+
+The recipient never changes under a draft. It is fixed once you start typing,
+or, if nobody could be named then, the moment somebody first can. New stages,
+another step starting and a different node selected on the graph do not move
+it. If the step it is for stops taking messages, the draft stays, says so, and
+offers **Send to ... instead** in one click - it is never sent elsewhere on its
+own. The plugin says when it will next read text, and the composer shows that
+beside the recipient.
+
+**Enter** sends; **Shift+Enter** starts a new line. There is no Send button.
+**Ctrl+Shift+M** (Run -> Clarify the running cycle) opens the same composer
+over whichever window of the application is in front, so you do not have to go
+to Cycles -> Stages first. It keeps its draft when closed with **Esc**, closes
+by itself once the run has saved the message, and stays open with the reason if
+the run refuses it. A modal dialog keeps the keyboard to itself, as usual.
+
+**What a step was told reaches the steps that judge its work.** A message to a
+step is for that step, but a later step that reviews or accepts its work has to
+know it - otherwise it judges work that followed you against the task as it
+stood before, and sends it back for following you. So once a message has
+**arrived** at a step, every step after it in the graph that takes
+clarifications reads it too, at its next point, marked as said to that earlier
+step. In the development cycles, a clarification sent to `implement` therefore
+also reaches `review` and `accept` (and `probe` where there is one). A message
+that never arrived is not handed on, a step running beside it does not get it,
+and a plan revision that sends the step round again leaves it behind with the
+old work. The message's row lists those later steps as "Also shown to".
+
+For example, send **This method is also called from cron** to an implementation
+step while its first call is running. The message waits for the next supported
+call, where it is added to the original task as a separate clarification.
+Sending text does not interrupt a running CLI call or force another iteration.
+If the step finishes before reading it, the message says it was not delivered.
+
+Messages appear in the stages feed with their recipient and delivery status.
+**Sending** means the GUI wrote a request; sending again reuses the same ID, so
+it can never become a second message. **Saved - waiting for delivery** means
+the core saved it.
+**Delivered** means the plugin confirmed which call received it; it does not
+claim the suggestion was followed. **Rejected**, **Not delivered** and
+**Uncertain** give the reason. A clarification for the whole run lists delivery
+to individual steps: one reader does not consume it for everyone else.
+
+The current agent adapters read before each external call. Review and edit
+have one call; implementation has attempt and review boundaries. Once a known
+last call begins, that step no longer accepts text. Other plugins can declare
+the same capability without the core or GUI knowing they are agents.
+
+Messages, snapshots of each call's input, and confirmations live in
+`.execution/interactions.json`. Resume retains them and reconstructs the
+same inputs for recorded calls. New clarifications apply at later supported
+points; completed work remains completed. Start over and partial runs start
+a new message history. Reading an old run shows saved messages and disables
+sending, even if diagnostic stage events were lost.
+
+### The control protocol
+
+Run with `--events=- --control=-`. The event
+`cycle.interaction.offers` publishes the current `version`, a `run` offer
+and `steps` keyed by step ID. Each step offer includes `execution`,
+`kinds`, `state` and `when`. Send one JSON line, using that run's ID and
+the execution from the offer:
+
+```json
+{"command":"cycle.message","id":"note-1","run_id":"<run-id>","scope":"step","step":"implement","execution":1,"offer":3,"kind":"text","payload":{"text":"This method is also called from cron."}}
+```
+
+For the rest of the run use `"scope":"run"` and omit `step` and
+`execution`. A `cycle.interaction` event carries the complete `message`
+record, including its ID, state, reason and per-consumer `deliveries`.
+`cycle.interaction.refused` identifies a request that could not be recorded.
+Queueing a request is not an acceptance: wait for the record. Repeating the
+same ID and content returns the existing record; reusing the ID with different
+content is refused. The current limits are 8,000 characters per clarification
+and 200 message records per run.
+
+Only `text` is supported in this release. The format reserves `answer`
+and `action`; those are rejected until an implementation handles them.
+Approval answers still use `ask.result`, and stopping still uses
+`cycle.stop`. Free text does not become a shell command.
+
+### Adding message support to a plugin
+
+Declare `accepts=(accepts("text", "Clarification", when="Before its next call"),)`
+in `PluginMetadata`. During execution use `context.inbox(step.id)`:
+
+1. Call `take(point, last=False)` with a stable point name, such as
+   `"attempt-2"`. The returned snapshot is saved and immutable; taking the
+   same point after Resume returns the same messages, including an empty set.
+2. Include `snapshot.items` in the operation's real input so its receipt key
+   reflects the clarification. Preserve the original task. Each item carries
+   `scope`, `text`, `to` (the step it was addressed to) and `earlier` - true
+   for a message said to a step upstream of this one, which the plugin should
+   present as what that step's work was asked to follow.
+3. Before a new external call, `bind(snapshot, relative_operation_directory)`.
+   Record the operation before starting it and its response before confirming
+   delivery. A known outcome from a process that could not start should call
+   `Operation.complete(..., input_delivered=False)`.
+4. Confirm with `delivered(snapshot, relative_operation_directory)` when
+   there is evidence of delivery, or `release(snapshot, reason)` when the
+   call never started. An unresolved external call remains uncertain.
+5. Use `take(..., last=True)` before the known final call to withdraw the
+   offer, and `offer(when)` to update the timing while another point remains.
+
+The scheduler owns request acceptance and the run record. Snapshot and
+confirmation writes go through the thread-safe inbox store on plugin workers.
+The GUI and diagnostic observers never own accepted messages. See
+[execution and recovery](cycle-recovery.md) for uncertain external outcomes.
 
 ---
 
@@ -1037,18 +1329,19 @@ and the step it got to - which is what the sessions are grouped from.
 
 ## Tags, and what is not here yet
 
-Deliberately absent for now, so nobody looks for them: triggers and event
-sources (a cycle is started by hand or from the page), analytics
-plugins, nested cycles, and editing on the canvas — the graph is drawn and its
-runtime shown, but a cycle is written in YAML.
+Deliberately absent for now, so nobody looks for them: event sources other
+than a watched step (see *Starting when a new task appears*), analytics
+plugins, nested cycles, loops in the graph, and a plan that changes itself
+during a run - see [the adaptive cycle design](cycle-adaptive-design.md) for
+where that is going.
 
 A wait lives **inside one run**: the process stays up for it, so it suits
 minutes and hours rather than days. Suspending a run to disk and resuming it in
 a later process is a different feature and is not here — though the record a run
 already writes at every step would be most of what it needs.
 
-`retry.backoff` is accepted and says it does nothing, rather than behaving as
-though the file had not asked for it.
+Stopping is cooperative (see *Timeouts, retries and stopping*): a step is asked
+to stop and every built-in plugin does, but nothing can kill a thread.
 
 ---
 
@@ -1059,7 +1352,7 @@ forget:
 
 1. A module in `cycle/plugins/` — a class with a `metadata` (a
    `PluginMetadata`) and an `execute`. Declare every setting as a `field(...)`
-   and every output as an `output(...)`: the Inspector's form and
+   and every output as an `output(...)`: the step window's form and
    `problems()`'s validation both read that table, which is why they cannot
    disagree.
 2. `cycle/plugins/__init__.py` — the class in the `BUILTIN` tuple. Nothing

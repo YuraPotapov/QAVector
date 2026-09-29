@@ -104,6 +104,10 @@ class AgentEdit(CyclePlugin):
         # The same two the review offers, and for the same reason: signing in
         # belongs to the plugin that needs it, not to a row in Settings.
         actions=AgentReview.metadata.actions,
+        # One call, so one point: a message reaches it only if it is sent
+        # before that call starts. After that the offer is withdrawn.
+        accepts=(registry.accepts("text", "Clarification",
+                                  when="Before its only agent call starts"),),
     )
 
     def run_action(self, key, settings):
@@ -179,7 +183,8 @@ class AgentEdit(CyclePlugin):
             mode=PERMISSION_MODE, add_dir=readable or where,
             model=self.setting(step.settings, "model"),
             effort=agent_run.effort_for(self, step)[0],
-            max_turns=self.setting(step.settings, "max_iterations"))
+            max_turns=self.setting(step.settings, "max_iterations"),
+            clarify=True, last=True)
 
         # What it changed is reported whether or not the run went well. A step
         # that failed halfway has still edited whatever it edited, and leaving

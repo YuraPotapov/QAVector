@@ -23,7 +23,8 @@ when the checks agree.
 
 import os
 
-from cycle.operations import Operation, result_document, result_from_document
+from cycle.operations import (Operation, recorded, result_document,
+                              result_from_document)
 
 from cycle.plugins import agent_stream
 from cycle.plugins._process import run_process
@@ -132,7 +133,8 @@ class Reply(object):
 
 
 def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
-               max_turns=None, add_dir="", name="agent", effort=""):
+               max_turns=None, add_dir="", name="agent", effort="",
+               clarify=False, last=False):
     """Run the CLI on ``prompt`` in ``cwd``. Returns a :class:`Reply`.
 
     ``binary`` is the resolved path from ``agent_cli.auth_status`` - resolving
@@ -152,32 +154,49 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     more of them than a guess would allow - and an attempt cut off by it
     stops halfway with its edits applied and unchecked. The step's own
     ``timeout:`` is what bounds a run that goes on too long.
+
+    ``clarify`` makes this call a point at which the step reads what the
+    person running the cycle has said to it (``cycle/interactions.py``): the
+    messages that apply now are added to the prompt as a section of their own,
+    and are confirmed as delivered when the CLI returns a recorded result
+    for them - to this call, by the key its receipt is filed under. ``name`` is the
+    point, so a call made again after Resume reads the same messages it read
+    the first time and finds the answer it already paid for. ``last`` says no
+    call of this step comes after this one, so a message sent from now on is
+    refused rather than accepted for a point that never comes.
     """
-    argv = [binary, "-p", prompt,
-            # stream-json rather than json: the same answer arrives at the end,
-            # but every turn is announced as it happens, so the step can show
-            # what it is doing instead of going quiet and then printing a wall
-            # of JSON. --verbose is what makes the CLI emit the turns at all.
-            "--output-format", "stream-json", "--verbose",
-            "--allowedTools", " ".join(tools)]
-    if max_turns not in (None, ""):
-        argv += ["--max-turns", str(int(max_turns))]
-    if mode:
-        argv += ["--permission-mode", mode]
-    model = str(model or "").strip()
-    if model:
-        argv += ["--model", model]
-    effort = str(effort or "").strip()
-    if effort:
-        argv += ["--effort", effort]
-    if add_dir:
-        argv += ["--add-dir", add_dir]
+    options = dict(tools=tools, mode=mode, model=model, max_turns=max_turns,
+                   add_dir=add_dir, effort=effort)
+    inbox, snapshot = None, None
+    if clarify:
+        inbox = context.inbox(step.id)
+        # A call already made with the plain prompt - by a version from
+        # before messages were recorded - read nothing, and reading something
+        # now would turn its saved answer into a second paid request.
+        reached = recorded(context, step, name,
+                           {"argv": _argv(binary, prompt, **options), "cwd": cwd})
+        snapshot = inbox.take(name, last=last, reached=reached)
+        prompt = with_clarifications(prompt, snapshot)
+    argv = _argv(binary, prompt, **options)
 
     operation = Operation(context, step, name, {"argv": argv, "cwd": cwd})
     cached = operation.cached()
     if cached is not None:
-        return Reply(result_from_document(cached["result"]), cached["written"],
-                     cached["answer"], cached["problem"])
+        result = result_from_document(cached["result"])
+        if snapshot:
+            if result.outputs.get("started") is False:
+                inbox.release(snapshot, "The agent could not be started, so it never read it.")
+            else:
+                # The call ran with these messages; only its confirmation may
+                # have been lost before Resume.
+                inbox.delivered(snapshot, context.relative(operation.directory))
+        return Reply(result, cached["written"], cached["answer"], cached["problem"])
+    if operation.uncertain:
+        # Raise before binding: a replay must not overwrite an uncertain
+        # delivery with a claim that another call is about to start.
+        operation.begin()
+    if snapshot:
+        inbox.bind(snapshot, context.relative(operation.directory))
     operation.begin()
     written = []
     result = run_process(operation.process_context(), step, argv, cwd, name,
@@ -208,8 +227,80 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     if answer is not None or result.outputs.get("started") is False:
         operation.complete({"result": result_document(result), "written": changed,
                             "answer": reply.answer, "problem": reply.problem},
-                           bool(answer is not None and not answer.get("is_error")))
+                           bool(answer is not None and not answer.get("is_error")),
+                           input_delivered=result.outputs.get("started") is not False)
+    if snapshot:
+        # After the receipt, so a confirmation never claims more than it holds.
+        if result.outputs.get("started") is False:
+            inbox.release(snapshot, "The agent could not be started, so it never read it.")
+        elif answer is not None:
+            inbox.delivered(snapshot, context.relative(operation.directory))
     return reply
+
+
+def _argv(binary, prompt, tools, mode="", model="", max_turns=None, add_dir="",
+          effort=""):
+    """The command line for one call. Built in one place, because the prompt
+    with and without a person's messages must differ in nothing else."""
+    argv = [binary, "-p", prompt,
+            # stream-json rather than json: the same answer arrives at the end,
+            # but every turn is announced as it happens, so the step can show
+            # what it is doing instead of going quiet and then printing a wall
+            # of JSON. --verbose is what makes the CLI emit the turns at all.
+            "--output-format", "stream-json", "--verbose",
+            "--allowedTools", " ".join(tools)]
+    if max_turns not in (None, ""):
+        argv += ["--max-turns", str(int(max_turns))]
+    if mode:
+        argv += ["--permission-mode", mode]
+    model = str(model or "").strip()
+    if model:
+        argv += ["--model", model]
+    effort = str(effort or "").strip()
+    if effort:
+        argv += ["--effort", effort]
+    if add_dir:
+        argv += ["--add-dir", add_dir]
+    return argv
+
+
+#: The heading of the section a person's messages are given under. One place,
+#: so a test and a reader of a saved prompt can find it.
+CLARIFICATIONS = "# Clarifications from the person running this"
+
+
+def with_clarifications(prompt, snapshot):
+    """``prompt`` with the messages of ``snapshot`` added as their own section.
+
+    After everything else and unchanged in wording between calls, so the task
+    as it was first given still reads first, and the same messages always make
+    the same prompt. Nothing is added when there is nothing to add: a prompt
+    with no messages is byte for byte the prompt this step always sent.
+    """
+    if not snapshot:
+        return prompt
+    lines = ["", "", CLARIFICATIONS, "",
+             "They were written while this run was going, and they are part of "
+             "the task. Where one differs from the task above, it takes "
+             "precedence; whatever they do not mention still stands as "
+             "written. Keep to the form of answer asked for above.", ""]
+    if any(item.get("earlier") for item in snapshot.items):
+        # A reviewer after the work, told only the task, would judge a change
+        # that followed the person against the task as it stood before - and
+        # send it back for following them.
+        lines[-1:-1] = ["One said to an earlier step is what that step's work was "
+                        "asked to follow, so the work reaching you may differ from "
+                        "the task above because of it. Judge and build on that work "
+                        "with it in mind."]
+    for number, item in enumerate(snapshot.items, 1):
+        if item.get("earlier"):
+            whom = "to the earlier step %s" % item.get("to", "")
+        elif item.get("scope") == "step":
+            whom = "to this step"
+        else:
+            whom = "to the whole run"
+        lines.append("%d. (%s) %s" % (number, whom, str(item.get("text") or "").strip()))
+    return prompt.rstrip("\n") + "\n".join(lines)
 
 
 def _reader(context, step, written):
