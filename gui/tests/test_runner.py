@@ -457,6 +457,22 @@ def test_a_cycle_run_announces_itself_with_its_graph():
     assert state.cycle["graph"] == _diamond()
 
 
+def test_a_cycle_run_keeps_the_directory_the_launcher_announced():
+    """run.dir comes before cycle.run.start, and the run keeps it as its own:
+    the model's run_dir is whatever ran last, which a later scenario moves."""
+    state = RunState()
+    state.handle({"kind": "run.dir", "dir": "/data/runs/demo"})
+    _started(state)
+    assert state.cycle["run_dir"] == "/data/runs/demo"
+    state.handle({"kind": "run.dir", "dir": "/data/runs/scenario"})
+    assert state.cycle["run_dir"] == "/data/runs/demo"
+
+
+def test_a_cycle_run_with_no_announced_directory_falls_back_to_its_workspace():
+    state = _started(RunState())
+    assert state.cycle["run_dir"] == "/runs/demo"
+
+
 def test_the_graph_is_handed_on_so_a_page_can_draw_it():
     state = RunState()
     seen = []

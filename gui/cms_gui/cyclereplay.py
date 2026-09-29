@@ -96,14 +96,42 @@ def events_of(run_dir, limit=MAX_EVENTS):
     return found
 
 
-def restore(run_dir, state, limit=MAX_EVENTS):
+def saved_interactions(run_dir, run_id):
+    """The durable record wins over missing or stale diagnostic events.
+
+    None means an older run or unreadable file: keep the events we did see.
+    An empty list is authoritative too, and removes phantom event-only rows.
+    """
+    path = os.path.join(run_dir, ".execution", "interactions.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        if (not isinstance(document, dict) or document.get("schema") != 1
+                or document.get("run_id") != run_id
+                or not isinstance(document.get("messages"), list)):
+            return None
+        messages = document["messages"]
+        if any(not isinstance(one, dict) or not one.get("id")
+               or one.get("run_id") != run_id for one in messages):
+            return None
+        return sorted(messages, key=lambda one: one.get("seq") or 0)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def restore(run_dir, state, limit=MAX_EVENTS, events=None):
     """Replay ``run_dir`` into ``state``. True when there was a run to restore.
 
     The model's signals are held back while the events go in and sent once at
     the end: a page listening to them would otherwise repaint itself several
     thousand times to arrive at the one view the reader is about to see.
+
+    ``events`` is what :func:`events_of` read, when it was read somewhere else
+    - on a thread, so a long stream does not stop the window while it is
+    parsed. Feeding the model stays here, on the thread the model lives on.
     """
-    events = events_of(run_dir, limit)
+    if events is None:
+        events = events_of(run_dir, limit)
     if not events:
         return False
     state.reset_cycle()
@@ -111,6 +139,11 @@ def restore(run_dir, state, limit=MAX_EVENTS):
     try:
         for event in events:
             state.handle(event)
+        if state.cycle is not None:
+            messages = saved_interactions(run_dir, state.cycle.get("run_id"))
+            if messages is not None:
+                state.restore_interactions(messages)
+            state.cycle["interaction_offers"] = {}
     finally:
         state.blockSignals(False)
     if state.cycle is None:
@@ -124,6 +157,7 @@ def restore(run_dir, state, limit=MAX_EVENTS):
     # as well. Known from the history rather than from the stream: run.dir is
     # the launcher's event, not the cycle's, so it is not in this file.
     state.run_dir = run_dir
+    state.cycle["run_dir"] = run_dir
     state.run_dir_known.emit(run_dir)
     state.cycle_graph_known.emit((state.cycle or {}).get("graph") or {})
     state.cycle_subject_changed.emit()

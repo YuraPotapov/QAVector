@@ -41,6 +41,17 @@ CANVAS_GRID_MAJOR = "#cfd2d8"
 DIVIDER = "#cfcfd0"
 DIVIDER_STRONG = "#a8a8ab"
 
+# --- a selected row -----------------------------------------------------------
+# What a picked row, menu entry or list item is painted in, and the ink on it:
+# its own tokens rather than the accent ramp by name, because the ramp is the
+# brand and stays pale in both themes - and a pale band with dark ink is the
+# brightest thing on a dark page, the row looking cut out of it rather than
+# picked. set_dark_mode swaps these for a deep accent band with light ink.
+SELECT_BG = ACCENT_RAMP[200]
+SELECT_INK = ACCENT_RAMP[900]
+#: The second, quieter line on a selected row (the Cycles explorer's).
+SELECT_MUTED = ACCENT_RAMP[800]
+
 # --- title bar --------------------------------------------------------------
 # The head of the window, drawn in place of the desktop's (cms_gui/titlebar.py).
 # The icon's own ground rather than the page: it is the band that says which
@@ -60,6 +71,17 @@ OK = ACCENT_RAMP[700]
 WARN = "#a8712a"
 BAD = "#a33a2e"
 BAD_TINT = "#f7e7e5"
+#: The wash behind an amber mark - something that may or may not have happened.
+WARN_TINT = "#f7efe2"
+#: A small mark that states a fact rather than a verdict - "chosen for you",
+#: "delivered" - as a pill: its ground and its ink. Their own pair rather than
+#: the accent ramp, which is the brand and stays pale in the dark theme, where
+#: a pale pill is the brightest thing on the screen.
+MARK_TINT = ACCENT_RAMP[200]
+MARK_INK = ACCENT_RAMP[800]
+#: Red and amber as text, which the marks above can carry on either ground.
+BAD_INK = BAD
+WARN_INK = WARN
 
 # --- what a cycle step is ----------------------------------------------------
 # Keyed by the family of the plugin - the part of its id before the dot. A wash
@@ -110,7 +132,8 @@ LOG_CRITICAL_BG = "#f7ddda"
 
 def set_dark_mode(enabled: bool):
     global BG, SURFACE, TEXT, ACCENT, NEUTRAL, ACCENT_RAMP, DIVIDER, DIVIDER_STRONG, OK, WARN, BAD, BAD_TINT
-    global LOG_LEVEL, LOG_CRITICAL_BG
+    global WARN_TINT, MARK_TINT, MARK_INK, BAD_INK, WARN_INK, LOG_LEVEL, LOG_CRITICAL_BG
+    global SELECT_BG, SELECT_INK, SELECT_MUTED
     global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
 
     if enabled:
@@ -128,6 +151,17 @@ def set_dark_mode(enabled: bool):
         }
         
         BAD_TINT = "#4a2522" # Darker wash behind red marks
+        WARN_TINT = "#3d3322"
+        MARK_TINT = ACCENT_RAMP[800]
+        MARK_INK = ACCENT_RAMP[300]
+        # A band a few steps into the accent, light ink on it: plainly the
+        # picked row, and lighter than a table's header so the two are never
+        # read as each other.
+        SELECT_BG = ACCENT_RAMP[700]
+        SELECT_INK = ACCENT_RAMP[100]
+        SELECT_MUTED = ACCENT_RAMP[300]
+        BAD_INK = "#ef6a5e"
+        WARN_INK = "#e0a33f"
 
         # The same nine families, as inks for a dark ground rather than washes
         # for paper. The light values are pale tints and would be blinding
@@ -178,6 +212,14 @@ def set_dark_mode(enabled: bool):
         }
         
         BAD_TINT = "#f7e7e5"
+        WARN_TINT = "#f7efe2"
+        MARK_TINT = ACCENT_RAMP[200]
+        MARK_INK = ACCENT_RAMP[800]
+        SELECT_BG = ACCENT_RAMP[200]
+        SELECT_INK = ACCENT_RAMP[900]
+        SELECT_MUTED = ACCENT_RAMP[800]
+        BAD_INK = BAD
+        WARN_INK = WARN
 
         PLUGIN_TINT = {
             "agent": "#efe9fb",
@@ -324,6 +366,8 @@ QLabel[role="emptytitle"] {{
 QLabel[role="error"] {{ font-size: 12px; color: {bad}; }}
 QLabel[role="error-bold"] {{ font-size: 11px; color: {bad}; font-weight: bold; }}
 QLabel[role="preview"] {{ font-family: {mono}; font-size: 11px; color: {n600}; }}
+/* Where something went while a separate window has it (widgets.Elsewhere). */
+QLabel[role="elsewhere"] {{ font-size: 12px; color: {n700}; }}
 
 /* --- buttons ------------------------------------------------------------- */
 QPushButton {{
@@ -366,7 +410,7 @@ QPushButton[variant="nav"] {{
 }}
 QPushButton[variant="nav"]:hover {{ background: {n200}; }}
 QPushButton[variant="nav"][active="true"] {{
-    background: {a200}; color: {a900}; border-left: 3px solid {accent};
+    background: {select_bg}; color: {select_ink}; border-left: 3px solid {accent};
 }}
 /* The rail is built from tool buttons - the one widget Qt lays out flush left
    when it carries both an icon and a label - so the nav rules above are
@@ -380,7 +424,7 @@ QToolButton[variant="nav"] {{
 }}
 QToolButton[variant="nav"]:hover {{ background: {n200}; }}
 QToolButton[variant="nav"][active="true"] {{
-    background: {a200}; color: {a900}; border-left: 3px solid {accent};
+    background: {select_bg}; color: {select_ink}; border-left: 3px solid {accent};
 }}
 /* The handle that collapses the rail. The base QToolButton rule below puts a
    hairline box around every tool button, which around a lone chevron reads as a
@@ -390,6 +434,15 @@ QToolButton[variant="railhandle"] {{
     padding: 4px 6px; min-height: 0;
 }}
 QToolButton[variant="railhandle"]:hover {{ background: {n200}; }}
+/* A control that is only its mark - putting Stages in a window of its own and
+   back. No box, for the rail handle's reason; the ink is in the icon, and the
+   words are in the tooltip. */
+QToolButton[variant="icon"] {{
+    background: transparent; border: none; border-radius: 0;
+    padding: 3px 5px; min-height: 0;
+}}
+QToolButton[variant="icon"]:hover {{ background: {a100}; }}
+QToolButton[variant="icon"]:pressed {{ background: {a200}; }}
 /* RUN is a QToolButton so it can carry a menu, and Qt styles that as a separate
    class - left to itself it paints in Fusion's default while the identical
    button in the footer paints in the design. These mirror the QPushButton rules
@@ -478,7 +531,7 @@ QComboBox::down-arrow {{
 }}
 QComboBox QAbstractItemView {{
     background: {bg}; border: 1px solid {divider}; color: {text};
-    selection-background-color: {a200}; selection-color: {a900};
+    selection-background-color: {select_bg}; selection-color: {select_ink};
     outline: none;
 }}
 /* Tick boxes and radio dots are painted by :class:`IndicatorStyle`, not styled
@@ -516,7 +569,7 @@ QPushButton[variant="step"][edge="right"] {{ border-left: none; }}
 QTableView, QTreeView, QListView {{
     background: {bg}; alternate-background-color: {bg};
     border: none; gridline-color: {n200};
-    selection-background-color: {a200}; selection-color: {a900};
+    selection-background-color: {select_bg}; selection-color: {select_ink};
     outline: none;
 }}
 QTableView::item, QTreeView::item {{
@@ -525,9 +578,12 @@ QTableView::item, QTreeView::item {{
 /* A selected row looks the same whether or not the table has the keyboard.
    Without this Qt paints the current cell in the active colour and the rest of
    its row in the inactive one, so a row selected by clicking a button in it
-   came out two-tone - one bright cell and four dim ones. */
+   came out two-tone - one bright cell and four dim ones. Both states, not only
+   the inactive one: with the ::item rule above, an active window's tree left
+   the row itself unpainted and marked only the branch column beside it. */
+QTableView::item:selected, QTreeView::item:selected,
 QTableView::item:selected:!active, QTreeView::item:selected:!active {{
-    background: {a200}; color: {a900};
+    background: {select_bg}; color: {select_ink};
 }}
 /* Rows that carry their own buttons mark selection with a quiet band instead of
    the accent flood. A widget put in a cell paints its own background and cannot
@@ -619,7 +675,7 @@ QMenuBar::item {{ padding: 4px 9px; background: transparent; }}
 QMenuBar::item:selected {{ background: {n200}; }}
 QMenu {{ background: {bg}; border: 1px solid {divider}; padding: 3px; }}
 QMenu::item {{ padding: 5px 22px 5px 12px; }}
-QMenu::item:selected {{ background: {a200}; color: {a900}; }}
+QMenu::item:selected {{ background: {select_bg}; color: {select_ink}; }}
 QMenu::separator {{ height: 1px; background: {divider}; margin: 4px 6px; }}
 
 QSplitter::handle {{ background: {divider}; }}
@@ -628,6 +684,86 @@ QSplitter::handle:vertical {{ height: 1px; }}
 
 QStatusBar {{ background: {n200}; border-top: 1px solid {divider}; }}
 QStatusBar::item {{ border: none; }}
+
+/* --- messages to a running cycle (cycleinteractions.py, stages.py) ------- */
+/* The composer is a footer to the stages feed: the feed's own ground a shade
+   off, capped by a hairline, so it reads as the place you write rather than as
+   one more row of what the run said. */
+QFrame[role="composer"] {{
+    background: {n100}; border: none; border-top: 1px solid {divider};
+}}
+QFrame[role="composer"] QPlainTextEdit {{ background: {bg}; }}
+/* Who the message goes to. A field, not a command: the page's own ink on the
+   page's ground with a hairline, the name in the body face - the tool-button
+   default is the condensed mono of RUN, which would make a step name read
+   like a control. */
+QToolButton[variant="recipient"] {{
+    font-family: {body}; font-size: 13px; font-weight: 600; letter-spacing: 0px;
+    background: {bg}; color: {text}; border: 1px solid {divider};
+    padding: 3px 24px 3px 8px; min-height: 18px; text-align: left;
+}}
+QToolButton[variant="recipient"]:hover {{ border-color: {divider_strong}; background: {bg}; }}
+/* Its caret is painted by the button (cycleinteractions._RecipientButton);
+   the style's own indicator would be a second one. */
+QToolButton[variant="recipient"]::menu-indicator {{ image: none; width: 0; height: 0; }}
+QToolButton[variant="recipient"]:disabled {{ color: {n500}; border-color: {n300}; }}
+/* Several steps are running and the page will not guess between them. */
+QToolButton[variant="recipient"][attention="true"] {{
+    color: {warn_ink}; border-color: {warn_ink}; background: {warn_tint};
+}}
+/* Said beside the recipient when the page picked it - the step that is
+   running - so it is never mistaken for something somebody chose. */
+QLabel[role="modetag"] {{
+    font-family: {mono}; font-size: 10px; letter-spacing: 0.6px;
+    color: {mark_ink}; background: {mark_tint}; padding: 1px 6px;
+}}
+/* Which keys do what, where there is no button to say it. */
+QLabel[role="keys"] {{ font-family: {mono}; font-size: 10px; color: {n500}; }}
+/* The composer over another window (Ctrl+Shift+M): a hard edge, because it
+   floats over whatever is there, and a head band saying what it is for. */
+QFrame[role="clarifypopup"] {{ background: {bg}; border: 1px solid {divider_strong}; }}
+QFrame[role="clarifyhead"] {{
+    background: {n200}; border: none; border-bottom: 1px solid {divider};
+}}
+QFrame[role="clarifypopup"] QFrame[role="composer"] {{ border-top: none; }}
+QLabel[role="composernote"] {{ font-size: 11px; color: {n700}; }}
+QLabel[role="composernote"][bad="true"] {{ color: {bad_ink}; }}
+
+/* One message in the feed. The stripe down its left edge is what became of
+   it, in the same three inks a step's stripe uses on the canvas. */
+QFrame[role="message"] {{
+    background: {n100}; border: 1px solid {divider};
+    border-left: 3px solid {accent};
+}}
+QFrame[role="message"][state="delivered"] {{ border-left-color: {ok}; }}
+QFrame[role="message"][state="undelivered"],
+QFrame[role="message"][state="rejected"] {{ border-left-color: {bad}; }}
+QFrame[role="message"][state="uncertain"],
+QFrame[role="message"][state="unconfirmed"] {{ border-left-color: {warn}; }}
+QLabel[role="msgkind"] {{
+    font-family: {heading}; font-size: 10px; font-weight: 600;
+    letter-spacing: 1.6px; color: {n600};
+}}
+QLabel[role="msgto"] {{ font-size: 12px; font-weight: 600; color: {text}; }}
+QLabel[role="msgmeta"] {{ font-family: {mono}; font-size: 10px; color: {n600}; }}
+QLabel[role="msgtext"] {{ font-size: 13px; color: {text}; }}
+QLabel[role="msgdetail"] {{ font-size: 11px; color: {n700}; }}
+QLabel[role="msgdetail"][bad="true"] {{ color: {bad_ink}; }}
+/* The state as a pill: outlined while it is still on its way, filled once
+   it has come to something - the Tag pill's own rule. */
+QLabel[role="msgstate"] {{
+    font-family: {mono}; font-size: 10px; letter-spacing: 0.6px;
+    padding: 1px 6px; color: {mark_ink}; background: {mark_tint};
+    border: 1px solid transparent;
+}}
+QLabel[role="msgstate"][state="pending"],
+QLabel[role="msgstate"][state="sending"] {{
+    color: {accent}; background: transparent; border-color: {accent};
+}}
+QLabel[role="msgstate"][state="undelivered"],
+QLabel[role="msgstate"][state="rejected"] {{ color: {bad_ink}; background: {bad_tint}; }}
+QLabel[role="msgstate"][state="uncertain"],
+QLabel[role="msgstate"][state="unconfirmed"] {{ color: {warn_ink}; background: {warn_tint}; }}
 
 /* --- title bar ----------------------------------------------------------- */
 /* The window's own head, in place of the desktop's - see cms_gui/titlebar.py.
@@ -645,7 +781,8 @@ QLabel[role="brandtag"] {{ font-family: {mono}; font-size: 10px; color: {tb_mute
 def stylesheet():
     return STYLESHEET.format(
         bg=BG, surface=SURFACE, text=TEXT, accent=ACCENT,
-        bad=BAD, bad_tint=BAD_TINT,
+        bad=BAD, bad_tint=BAD_TINT, warn=WARN, warn_tint=WARN_TINT, ok=OK,
+        mark_tint=MARK_TINT, mark_ink=MARK_INK, bad_ink=BAD_INK, warn_ink=WARN_INK,
         divider=DIVIDER, divider_strong=DIVIDER_STRONG,
         body=BODY_CSS, heading=HEADING_CSS, mono=MONO_CSS,
         n100=NEUTRAL[100], n200=NEUTRAL[200], n300=NEUTRAL[300], n400=NEUTRAL[400],
@@ -656,6 +793,7 @@ def stylesheet():
         a900=ACCENT_RAMP[900],
         cell_v=CELL_INSET_V, cell_h=CELL_INSET_H,
         tb_bg=TITLEBAR_BG, tb_text=TITLEBAR_TEXT, tb_muted=TITLEBAR_MUTED,
+        select_bg=SELECT_BG, select_ink=SELECT_INK,
     )
 
 

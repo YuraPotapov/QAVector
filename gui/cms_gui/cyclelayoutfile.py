@@ -23,6 +23,10 @@ That is what makes this safe to keep stale and safe to delete.
 are the same kind of fact as a dragged node - work somebody did to be able to
 read the thing - and they used to last exactly as long as the scene did. They
 sit beside the places, per cycle, under ``view``.
+
+**Which phases were folded**, under ``folded``, for the same reason: folding a
+twenty-eight step cycle down to its seven phases is work done to read it, and
+the cycle file is no place for how one person likes to look at it.
 """
 
 import json
@@ -85,9 +89,17 @@ def load(path=None):
             if spot is not None:
                 kept[str(step_id)] = spot
         view = _view(entry.get("view"))
-        if kept or view:
-            found[str(cycle_id)] = {"places": kept, "view": view}
+        folded = _folded(entry.get("folded"))
+        if kept or view or folded:
+            found[str(cycle_id)] = {"places": kept, "view": view, "folded": folded}
     return found
+
+
+def _folded(value):
+    """The folded phases' names, or [] for anything that is not a list of them."""
+    if not isinstance(value, list):
+        return []
+    return [str(one) for one in value if isinstance(one, str) and one.strip()]
 
 
 def _place(value):
@@ -132,6 +144,16 @@ def view_for(cycle_id, path=None):
     return (load(path).get(str(cycle_id or "")) or {}).get("view")
 
 
+def folded_for(cycle_id, path=None):
+    """Which of this cycle's phases were last folded, or []."""
+    return (load(path).get(str(cycle_id or "")) or {}).get("folded") or []
+
+
+def remember_folded(cycle_id, names, path=None):
+    """Write which phases are folded. An empty list forgets it."""
+    _keep(cycle_id, path, folded=sorted(set(names or ())))
+
+
 def remember(cycle_id, places, path=None):
     """Write where this cycle's nodes sit now, leaving other cycles alone.
 
@@ -161,7 +183,9 @@ def _keep(cycle_id, path=None, **changed):
                            for step_id, (x, y) in (changed["places"] or {}).items()}
     if "view" in changed:
         entry["view"] = _view(changed["view"])
-    if entry.get("places") or entry.get("view"):
+    if "folded" in changed:
+        entry["folded"] = _folded(list(changed["folded"] or ()))
+    if entry.get("places") or entry.get("view") or entry.get("folded"):
         document[cycle_id] = entry
     else:
         # Arranging a cycle back to its computed layout and pressing Fit forget
@@ -191,6 +215,8 @@ def _entry(entry):
     if entry.get("view"):
         written["view"] = {"zoom": entry["view"]["zoom"],
                            "center": list(entry["view"]["center"])}
+    if entry.get("folded"):
+        written["folded"] = list(entry["folded"])
     return written
 
 

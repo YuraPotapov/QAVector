@@ -807,3 +807,134 @@ def test_new_controls_and_replaced_editors_are_guarded_when_shown(qapp, dispose)
     finally:
         filter_.stop()
         dispose(dialog)
+
+
+def test_an_elided_heading_asks_for_its_new_text_s_width(qapp, dispose):
+    """The Cycles page heading started as "Cycles" and every cycle's name was
+    then cut to that width - with half the header empty beside it."""
+    from PySide6.QtWidgets import QHBoxLayout, QWidget
+    from cms_gui import widgets
+
+    holder = QWidget()
+    line = QHBoxLayout(holder)
+    label = widgets.elided_line("Cycles")
+    line.addWidget(label)
+    line.addStretch(1)
+    holder.resize(900, 60)
+    holder.show()
+    label.setText("Development cycle (In Progress)")
+    qapp.processEvents()
+    try:
+        assert label.width() >= label.fontMetrics().horizontalAdvance(label.text())
+        assert label.toolTip() == "Development cycle (In Progress)"
+    finally:
+        dispose(holder) if callable(dispose) else None
+
+
+# ----------------------------------------------------------------- skeleton
+def _host(qapp, dispose_list):
+    from PySide6.QtWidgets import QWidget
+    host = QWidget()
+    host.resize(420, 300)
+    host.show()
+    dispose_list.append(host)
+    return host
+
+
+def _pump(qapp, seconds):
+    import time
+    end = time.time() + seconds
+    while time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+
+def test_a_skeleton_waits_before_it_shows_so_a_quick_answer_never_flickers(qapp, dispose):
+    from cms_gui import widgets
+    made = []
+    host = _host(qapp, made)
+    try:
+        skeleton = widgets.Skeleton(host, "rows")
+        skeleton.start()
+        qapp.processEvents()
+        assert skeleton.active() and not skeleton.isVisible()
+        skeleton.stop()
+        _pump(qapp, 0.3)
+        assert not skeleton.isVisible() and not skeleton.active()
+    finally:
+        for one in made:
+            dispose(one)
+
+
+def test_a_slow_answer_shows_the_skeleton_over_the_whole_region(qapp, dispose):
+    from cms_gui import widgets
+    made = []
+    host = _host(qapp, made)
+    try:
+        skeleton = widgets.Skeleton(host, "graph")
+        skeleton.start(delay=0)
+        _pump(qapp, 0.1)
+        assert skeleton.isVisible() and skeleton.geometry() == host.rect()
+        host.resize(600, 500)
+        qapp.processEvents()
+        assert skeleton.geometry() == host.rect(), "it follows the region's size"
+        assert skeleton.bars(), "there is something drawn to look at"
+        skeleton.stop()
+        assert not skeleton.isVisible()
+    finally:
+        for one in made:
+            dispose(one)
+
+
+def test_a_skeleton_can_leave_part_of_its_region_uncovered(qapp, dispose):
+    """The output panel's tabs stay readable while its pages wait."""
+    from cms_gui import widgets
+    made = []
+    host = _host(qapp, made)
+    try:
+        skeleton = widgets.Skeleton(host, "lines",
+                                    area=lambda: host.rect().adjusted(0, 30, 0, 0))
+        skeleton.start(delay=0)
+        _pump(qapp, 0.1)
+        assert skeleton.geometry().top() == 30
+    finally:
+        for one in made:
+            dispose(one)
+
+
+def test_every_shape_draws_something_and_nothing_outside_itself(qapp, dispose):
+    from cms_gui import widgets
+    made = []
+    host = _host(qapp, made)
+    try:
+        for shape in widgets.Skeleton.SHAPES:
+            skeleton = widgets.Skeleton(host, shape)
+            skeleton.start(delay=0)
+            _pump(qapp, 0.05)
+            bars = skeleton.bars()
+            assert bars, shape
+            assert all(skeleton.rect().contains(one.toRect()) for one in bars), shape
+            skeleton.grab()                  # paints without raising
+            skeleton.stop()
+    finally:
+        for one in made:
+            dispose(one)
+
+
+def test_a_skeleton_breathes_slowly_and_each_row_a_little_behind(qapp, dispose):
+    from cms_gui import widgets
+    made = []
+    host = _host(qapp, made)
+    try:
+        skeleton = widgets.Skeleton(host, "rows")
+        levels = []
+        for frame in range(0, widgets.Skeleton.PERIOD_MS // widgets.Skeleton.FRAME_MS + 1):
+            skeleton._frame = frame
+            levels.append(skeleton.level(0))
+        assert min(levels) < 0.05 and max(levels) > 0.95, "dark to light and back"
+        assert widgets.Skeleton.PERIOD_MS >= 1500, "slowly"
+        skeleton._frame = 5
+        assert skeleton.level(0) != skeleton.level(1), "rows are staggered"
+    finally:
+        for one in made:
+            dispose(one)

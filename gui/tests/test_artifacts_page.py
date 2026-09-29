@@ -174,3 +174,49 @@ def test_preview_blocks_remote_and_outside_resources_and_handles_web_links(page,
     anchor = QUrl(report.document_url)
     anchor.setFragment("section")
     assert report.acceptNavigationRequest(anchor, htmlpreview.QWebEnginePage.NavigationTypeLinkClicked, True)
+
+
+# ------------------------------------------------------------------- reveal
+def a_cycle_run(tmp_path):
+    run = tmp_path / "cycle-runs" / "20260929-101500-dev"
+    (run / "steps" / "fetch").mkdir(parents=True)
+    (run / "steps" / "fetch" / "jira.json").write_text("{}", encoding="utf-8")
+    (run / "reports").mkdir()
+    return run
+
+
+def test_reveal_opens_the_run_and_selects_a_path_it_records_relatively(page, tmp_path):
+    """A cycle records its files relative to its own directory."""
+    run = a_cycle_run(tmp_path)
+    assert page.reveal(str(run), "steps/fetch/jira.json")
+    assert page._shown_dir == str(run)
+    assert page._selected_path() == str(run / "steps" / "fetch" / "jira.json")
+    assert page.path_label.text() == str(run / "steps" / "fetch" / "jira.json")
+
+
+def test_reveal_selects_a_folder_too(page, tmp_path):
+    run = a_cycle_run(tmp_path)
+    assert page.reveal(str(run), "steps/fetch")
+    assert page._selected_path() == str(run / "steps" / "fetch")
+
+
+def test_reveal_with_nothing_to_select_shows_the_folder(page, tmp_path):
+    run = a_cycle_run(tmp_path)
+    assert not page.reveal(str(run))
+    assert page._shown_dir == str(run)
+    assert page._selected_path() == ""
+
+
+def test_reveal_of_a_file_that_has_gone_leaves_the_folder_and_says_so(page, tmp_path):
+    run = a_cycle_run(tmp_path)
+    assert not page.reveal(str(run), "steps/fetch/deleted.html")
+    assert page._shown_dir == str(run)
+    assert page._selected_path() == ""
+    assert "no longer there" in page.path_label.text()
+
+
+def test_reveal_of_the_folder_already_shown_picks_up_new_files(page, tmp_path):
+    run = a_cycle_run(tmp_path)
+    page.reveal(str(run))
+    (run / "reports" / "run.html").write_text("<p>done</p>", encoding="utf-8")
+    assert page.reveal(str(run), "reports/run.html")

@@ -34,13 +34,14 @@ it.
 import contextlib
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath, QPen,
-                           QPolygonF)
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
+                           QPainterPathStroker, QPen, QPolygonF)
 from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsObject,
-                               QGraphicsPathItem, QGraphicsScene, QGraphicsView)
+                               QGraphicsPathItem, QGraphicsPolygonItem,
+                               QGraphicsScene, QGraphicsView, QToolTip)
 
-from . import icons, theme
+from . import icons, theme, widgets
 
 #: Everything the canvas looks like, in one place. A redesign changes values
 #: here; it does not change layout_graph, the items, or the page. Colours are
@@ -48,7 +49,11 @@ from . import icons, theme
 #: moves when dark mode is set.
 SPEC = {
     "node": {"w": 208, "h": 76, "radius": 8, "border": 1, "border_selected": 2,
-             "status_bar": 3, "pad_x": 12, "pad_y": 10, "badge": 13},
+             "status_bar": 3, "pad_x": 12, "pad_y": 10, "badge": 13,
+             # The dots a link is dragged out of while a cycle is edited: the
+             # radius drawn, and how far off it a press still takes one - a
+             # five-pixel target is a target missed.
+             "port": 5, "port_reach": 10},
     # The graph runs **down** the page, the way the workflow diagrams it is
     # drawn from are. A cycle of any size is mostly a sequence - a twenty-step
     # chain is an ordinary shape - and twenty nodes across is a line nobody can
@@ -77,6 +82,9 @@ SPEC = {
              # pick out at the size a long cycle opens at, where a difference
              # of half a pixel is no difference at all.
              "lit_width": 3.2,
+             # How wide a line is to the pointer - a right-click on it - which
+             # is far wider than it is drawn, or nobody would ever hit one.
+             "hit": 10,
              # None is a solid line. A dash pattern is in pen units.
              "dash": {"dependency": None, "success": None, "failure": (4, 3)}},
     "text": {"title": 12, "plugin": 10, "meta": 10},
@@ -229,6 +237,163 @@ def scene_size(places, spec=None):
     return (right, bottom)
 
 
+# -- phases -------------------------------------------------------------------
+# A long cycle is mostly a sequence, and twenty-eight boxes down the page is a
+# list nobody can take in at once. A step may name the phase it belongs to
+# (`group:` in the file); the canvas frames each phase's steps together and can
+# fold a phase into one box. Folding is a way of looking at the graph and
+# nothing else: the core's layers are for the whole graph, so a folded view is
+# arranged here, by the same longest-path rule the core uses.
+
+#: A folded phase's node id. A prefix no step id can carry - a colon is not
+#: allowed in one - so the two can never collide.
+GROUP_PREFIX = "group:"
+
+#: What a folded phase's box says it is doing, from what its steps are doing.
+#: Earlier entries win: a phase with one step running and one failed is
+#: failed, because that is the thing somebody watching has to act on.
+_PHASE_ORDER = ("failed", "timeout", "running", "waiting", "cancelled")
+
+
+def groups_of(nodes):
+    """``{phase: [step ids]}`` in the order the steps are written."""
+    found = {}
+    for node in nodes or ():
+        name = (node.get("group") or "").strip()
+        if name:
+            found.setdefault(name, []).append(node["id"])
+    return found
+
+
+def phase_status(statuses):
+    """One status for a phase, from its steps' statuses."""
+    statuses = [one or "pending" for one in statuses]
+    if not statuses:
+        return "pending"
+    for one in _PHASE_ORDER:
+        if one in statuses:
+            return one
+    if all(one == "success" for one in statuses):
+        return "success"
+    if all(one in ("skipped", "cancelled") for one in statuses):
+        return "skipped"
+    if "success" in statuses:
+        return "running" if "pending" in statuses else "success"
+    return "pending"
+
+
+def fold_graph(graph, folded):
+    """``(graph, refused)``: ``graph`` with each phase in ``folded`` as one node.
+
+    Pure, like :func:`layout_graph`. A phase is folded only if drawing it as
+    one box keeps the graph a graph: when a path leaves the phase and comes
+    back into it, one box would have to wait for itself, and that phase is
+    left open and named in ``refused`` instead.
+    """
+    nodes = list((graph or {}).get("nodes") or [])
+    phases = groups_of(nodes)
+    owner = {}
+    refused = []
+    for name in [one for one in phases if one in set(folded or ())]:
+        trial = dict(owner, **{step: GROUP_PREFIX + name for step in phases[name]})
+        if _acyclic(nodes, trial):
+            owner = trial
+        else:
+            refused.append(name)
+    if not owner:
+        return graph, refused
+
+    order, merged = [], {}
+    for node in nodes:
+        into = owner.get(node["id"])
+        if into is None:
+            order.append(dict(node, needs=_mapped(node.get("needs"), owner, node["id"])))
+            continue
+        if into not in merged:
+            members = [one["id"] for one in nodes if owner.get(one["id"]) == into]
+            merged[into] = {
+                "id": into, "label": into[len(GROUP_PREFIX):], "plugin": "",
+                "group": into[len(GROUP_PREFIX):], "members": members,
+                "needs": [], "disabled": all(one.get("disabled") for one in nodes
+                                             if one["id"] in members),
+                "condition": "", "timeout": None, "retry": 1,
+                "on_failure": "stop"}
+            order.append(merged[into])
+        merged[into]["needs"] = _mapped(
+            list(merged[into]["needs"]) + list(node.get("needs") or []), owner, into)
+
+    depth = {}
+
+    def walk(node_id, seen=()):
+        if node_id in depth:
+            return depth[node_id]
+        node = next(one for one in order if one["id"] == node_id)
+        needs = [walk(need, seen + (node_id,)) for need in node["needs"]
+                 if need not in seen and any(one["id"] == need for one in order)]
+        depth[node_id] = 1 + max(needs) if needs else 0
+        return depth[node_id]
+
+    rows = {}
+    for node in order:
+        node["layer"] = walk(node["id"])
+        node["row"] = rows.get(node["layer"], 0)
+        rows[node["layer"]] = node["row"] + 1
+    edges = [{"from": need, "to": node["id"], "kind": "dependency"}
+             for node in order for need in node["needs"]]
+    return dict(graph, nodes=order, edges=edges), refused
+
+
+def _steps_only(nodes):
+    """The nodes that are steps - not a folded phase standing in for some."""
+    return [node for node in nodes or () if not str(node.get("id", "")).startswith(GROUP_PREFIX)]
+
+
+def _mapped(needs, owner, itself):
+    """``needs`` with every folded step replaced by its phase, once each."""
+    found = []
+    for need in needs or ():
+        need = owner.get(need, need)
+        if need != itself and need not in found:
+            found.append(need)
+    return found
+
+
+def _acyclic(nodes, owner):
+    """Whether the graph, with ``owner``'s steps merged, has no loop."""
+    after = {}
+    for node in nodes:
+        into = owner.get(node["id"], node["id"])
+        for need in node.get("needs") or ():
+            need = owner.get(need, need)
+            if need != into:
+                after.setdefault(need, set()).add(into)
+    state = {}
+
+    def visit(one):
+        state[one] = 1
+        for nxt in after.get(one, ()):
+            if state.get(nxt) == 1 or (state.get(nxt) is None and not visit(nxt)):
+                return False
+        state[one] = 2
+        return True
+
+    return all(state.get(one) == 2 or visit(one) for one in list(after))
+
+
+def problems_by_step(problems, step_ids):
+    """``({step id: [messages]}, [the rest])`` - the core says ``id: what``."""
+    known = set(step_ids or ())
+    mine, rest = {}, []
+    for message in problems or ():
+        text = str(message)
+        head, _sep, _tail = text.partition(":")
+        if head in known:
+            mine.setdefault(head, []).append(text)
+        else:
+            rest.append(text)
+    return mine, rest
+
+
 # -- items --------------------------------------------------------------------
 class CycleNodeItem(QGraphicsObject):
     """One step: what it is, what it runs, and how it went.
@@ -246,6 +411,8 @@ class CycleNodeItem(QGraphicsObject):
         self._status = "pending"
         self._duration_ms = None
         self._attempts = 0
+        #: What the core says is wrong with this step, as its own lines.
+        self._problems = []
         self.edges = []              # every edge with this node at either end
         #: What to call when this node moves. The canvas sets it, because a
         #: move changes the routing of edges that are nothing to do with this
@@ -253,6 +420,13 @@ class CycleNodeItem(QGraphicsObject):
         self.on_moved = None
         self._pressed_at = QPointF()
         self._dragging = False
+        #: Whether links can be dragged out of this step - a cycle being
+        #: edited. The dots show while the pointer is over it or it is selected.
+        self._ports = False
+        self._hover = False
+        #: While a link is dragged over this step: "ok" if it can be dropped
+        #: here, "no" if it would make a loop, "" otherwise.
+        self._drop = ""
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         # Movable, because a computed layout is a starting point rather than an
         # answer: on a real cycle there is always one node somebody wants a
@@ -345,14 +519,114 @@ class CycleNodeItem(QGraphicsObject):
     def status(self):
         return self._status
 
+    @property
+    def is_phase(self):
+        """True for a folded phase standing in for its steps."""
+        return self.step_id.startswith(GROUP_PREFIX)
+
+    def set_problems(self, problems):
+        """What is wrong with this step. Drawn as a mark; read in the tooltip."""
+        self._problems = list(problems or ())
+        self.setToolTip(self._tooltip())
+        self.update()
+
+    # -- linking --------------------------------------------------------------
+    # Two dots, one on the side a step's links leave by and one on the side
+    # they arrive at. Dragging the bottom one onto another step makes that step
+    # wait for this one; dragging the top one onto another step makes this one
+    # wait for that. The canvas does the dragging - see CycleCanvas.
+    def set_ports(self, on):
+        on = bool(on) and not self.is_phase
+        if on == self._ports:
+            return
+        self.prepareGeometryChange()          # the shape takes the dots in
+        self._ports = on
+        self.setToolTip(self._tooltip())
+        self.update()
+
+    @property
+    def has_ports(self):
+        return self._ports
+
+    def ports_shown(self):
+        return self._ports and (self._hover or self.isSelected() or bool(self._drop))
+
+    def port_point(self, which):
+        """The middle of the ``"out"`` (bottom) or ``"in"`` (top) dot."""
+        node = self._spec["node"]
+        return QPointF(node["w"] / 2.0, node["h"] if which == "out" else 0.0)
+
+    def port_at(self, point):
+        """Which dot ``point`` (in this item's terms) takes, or ""."""
+        if not self._ports:
+            return ""
+        reach = self._spec["node"]["port_reach"]
+        for which in ("out", "in"):
+            centre = self.port_point(which)
+            if (abs(point.x() - centre.x()) <= reach
+                    and abs(point.y() - centre.y()) <= reach):
+                return which
+        return ""
+
+    def set_drop(self, drop):
+        if drop != self._drop:
+            self._drop = drop
+            self.update()
+
+    def hoverEnterEvent(self, event):
+        self._hover = True
+        self.update()
+        QGraphicsObject.hoverEnterEvent(self, event)
+
+    def hoverMoveEvent(self, event):
+        # The dots say what dragging them does; the rest of the step says what
+        # the step is. One tooltip per item, so it is swapped as the pointer
+        # moves between them.
+        port = self.port_at(event.pos())
+        tip = (PORT_TIP[port] if port else self._tooltip())
+        if tip != self.toolTip():
+            self.setToolTip(tip)
+        QGraphicsObject.hoverMoveEvent(self, event)
+
+    def hoverLeaveEvent(self, event):
+        self._hover = False
+        self.setToolTip(self._tooltip())
+        self.update()
+        QGraphicsObject.hoverLeaveEvent(self, event)
+
     # -- painting -------------------------------------------------------------
     def boundingRect(self):
         node = self._spec["node"]
         # Half the border on each side, so a selected node's thicker outline is
-        # not clipped by its own rectangle.
-        bleed = node["border_selected"]
+        # not clipped by its own rectangle - and a folded phase's second card,
+        # which sits a few pixels off the first - and the link dots, which sit
+        # across the top and bottom edges.
+        bleed = max(node["border_selected"] + (STACK if self.is_phase else 0),
+                    node["port_reach"])
         return QRectF(-bleed, -bleed, node["w"] + bleed * 2,
                       node["h"] + bleed * 2)
+
+    def shape(self):
+        """The card, and the dots while links can be drawn from them.
+
+        Not the bounding rect: that is padded for the dots, and a press just
+        under a step that is not being edited belongs to the ground.
+        """
+        node = self._spec["node"]
+        bleed = node["border_selected"] + (STACK if self.is_phase else 0)
+        path = QPainterPath()
+        # Winding, so where a dot overlaps the card is still inside rather
+        # than a hole - the default rule makes overlaps holes.
+        path.setFillRule(Qt.WindingFill)
+        path.addRect(QRectF(-bleed / 2.0, -bleed / 2.0, node["w"] + bleed,
+                            node["h"] + bleed))
+        if self._ports:
+            reach = node["port_reach"]
+            for which in ("out", "in"):
+                centre = self.port_point(which)
+                path.addRect(QRectF(centre.x() - reach, centre.y() - reach,
+                                    reach * 2, reach * 2))
+        return path
 
     def paint(self, painter, option, widget=None):
         spec = self._spec["node"]
@@ -366,20 +640,46 @@ class CycleNodeItem(QGraphicsObject):
         # "disabled" where the status word goes.
         fill = QColor(ink("NEUTRAL200") if disabled
                       else tint_of(self.node.get("plugin", "")))
-        edge = QColor(ink("ACCENT" if self.isSelected() else "DIVIDER"))
+        # A link dragged over it says first whether it can land here.
+        edge = QColor(ink("ACCENT" if self._drop == "ok"
+                          else "BAD" if self._drop == "no"
+                          else "ACCENT" if self.isSelected()
+                          else "BAD" if self._problems else "DIVIDER"))
+        heavy = bool(self._drop) or self.isSelected() or bool(self._problems)
 
         path = QPainterPath()
         path.addRoundedRect(body, spec["radius"], spec["radius"])
+        if self.is_phase:
+            # A card behind the card: several steps under one box, which is
+            # what folding a phase is, said without a word.
+            behind = QPainterPath()
+            behind.addRoundedRect(body.translated(STACK, STACK), spec["radius"],
+                                  spec["radius"])
+            painter.setBrush(QBrush(QColor(ink("NEUTRAL200"))))
+            painter.setPen(QPen(QColor(ink("DIVIDER"))))
+            painter.drawPath(behind)
         painter.setBrush(QBrush(fill))
         pen = QPen(edge)
-        pen.setWidthF(spec["border_selected"] if self.isSelected()
-                      else spec["border"])
+        pen.setWidthF(spec["border_selected"] if heavy else spec["border"])
         painter.setPen(pen)
         painter.drawPath(path)
 
         self._paint_status_bar(painter, body, path)
         self._paint_text(painter, spec, text, disabled)
         self._paint_badges(painter, spec)
+        if self.ports_shown():
+            self._paint_ports(painter, spec)
+
+    def _paint_ports(self, painter, spec):
+        """The two dots a link is dragged out of: hollow in, filled out."""
+        pen = QPen(QColor(ink("ACCENT")))
+        pen.setWidthF(1.5)
+        painter.setPen(pen)
+        radius = spec["port"]
+        for which in ("in", "out"):
+            painter.setBrush(QBrush(QColor(ink("ACCENT" if which == "out"
+                                               else "CANVAS_BG"))))
+            painter.drawEllipse(self.port_point(which), radius, radius)
 
     def _paint_status_bar(self, painter, body, path):
         """The stripe down the left edge, clipped to the rounded corner."""
@@ -420,11 +720,14 @@ class CycleNodeItem(QGraphicsObject):
         # text: it is the channel somebody reads when they cannot tell two of
         # the family colours apart.
         painter.setPen(QPen(QColor(ink("NEUTRAL700"))))
+        members = self.node.get("members") or []
+        second = (self.node.get("plugin") or "" if not self.is_phase
+                  else "phase - %d step%s" % (len(members),
+                                              "" if len(members) == 1 else "s"))
         painter.drawText(
             QRectF(left, spec["pad_y"] + text["title"] + 6, width,
                    text["plugin"] + 4),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            _elide(painter, self.node.get("plugin") or "", width))
+            Qt.AlignLeft | Qt.AlignVCenter, _elide(painter, second, width))
 
         painter.setFont(QFont(theme.FONT_BODY[0], -1))
         meta = QFont(theme.FONT_BODY[0])
@@ -448,27 +751,41 @@ class CycleNodeItem(QGraphicsObject):
                 Qt.AlignRight | Qt.AlignVCenter, _duration(self._duration_ms))
 
     def _paint_badges(self, painter, spec):
-        """Small marks along the top right: retry, a condition, a long-runner."""
+        """Small marks along the top right: trouble, retry, a condition."""
         size = spec["badge"]
         x = spec["w"] - spec["pad_x"] - size
         y = spec["pad_y"]
-        for name in self._badges():
+        for name, colour in self._badges():
             painter.drawPixmap(QRectF(x, y, size, size).toRect(),
-                               icons.pixmap(name, size, ink("NEUTRAL500")))
+                               icons.pixmap(name, size, ink(colour)))
             x -= size + 4
 
     def _badges(self):
         found = []
+        if self._problems:
+            found.append(("warn", "BAD"))
+        if self.is_phase:
+            found.append(("unfold", "NEUTRAL500"))
+            return found
         if self.node.get("condition"):
-            found.append("group")
+            found.append(("group", "NEUTRAL500"))
         if int(self.node.get("retry") or 1) > 1 or self._attempts > 1:
-            found.append("refresh")
+            found.append(("refresh", "NEUTRAL500"))
         return found
 
     def _tooltip(self):
         """Everything that will not fit on the node itself."""
+        if self.is_phase:
+            rows = ["Phase %s: %s" % (self.node.get("label") or "",
+                                      ", ".join(self.node.get("members") or [])),
+                    "Double-click to open it back out."]
+            if self._status != "pending":
+                rows.append("status: %s" % self._status)
+            return "\n".join(rows + self._problems)
         rows = ["%s  (%s)" % (self.node.get("label") or self.step_id,
                               self.node.get("plugin") or "")]
+        if self.node.get("group"):
+            rows.append("phase: %s" % self.node["group"])
         if self.node.get("needs"):
             rows.append("after: %s" % ", ".join(self.node["needs"]))
         if self.node.get("condition"):
@@ -483,7 +800,9 @@ class CycleNodeItem(QGraphicsObject):
             rows.append("disabled")
         if self._status != "pending":
             rows.append("status: %s" % self._status)
-        return "\n".join(rows)
+        if self._ports:
+            rows.append("Drag a dot on its edge to another step to link them.")
+        return "\n".join(rows + self._problems)
 
 
 class CycleEdgeItem(QGraphicsPathItem):
@@ -520,8 +839,70 @@ class CycleEdgeItem(QGraphicsPathItem):
         self._lane = None
         #: Drawn heavier, because the node it belongs to is selected.
         self._lit = False
+        #: Where the line starts and where its head points - the two ends a
+        #: selected link is re-pointed by.
+        self._start = QPointF()
+        self._tip = QPointF()
         self.setZValue(EDGE_Z)      # under the nodes, always
+        if not self.is_phase_link:
+            self.setToolTip("%s waits for %s" % (self.target, self.source))
         self.reroute()
+
+    @property
+    def is_phase_link(self):
+        """True for a line to or from a folded phase - several links at once."""
+        return (self.source.startswith(GROUP_PREFIX)
+                or self.target.startswith(GROUP_PREFIX))
+
+    def set_editable(self, on):
+        """Whether a click selects it, to be re-pointed or deleted."""
+        on = bool(on) and not self.is_phase_link
+        if not on and self.isSelected():
+            self.setSelected(False)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, on)
+        if not self.is_phase_link:
+            said = "%s waits for %s" % (self.target, self.source)
+            self.setToolTip(said + ("\nClick it, then drag an end to another "
+                                    "step, or press Delete." if on else ""))
+
+    def end_at(self, point):
+        """Which end of a selected link ``point`` takes - "from", "to" or ""."""
+        if not self.isSelected():
+            return ""
+        reach = self._spec["node"]["port_reach"]
+        for which, centre in (("to", self._tip), ("from", self._start)):
+            if (abs(point.x() - centre.x()) <= reach
+                    and abs(point.y() - centre.y()) <= reach):
+                return which
+        return ""
+
+    def shape(self):
+        """The line as wide as a pointer needs, its head, and - selected - the
+        two ends it is dragged by."""
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self._spec["edge"]["hit"])
+        found = stroker.createStroke(self.path())
+        found.addPolygon(self._head)
+        if self.isSelected():
+            reach = self._spec["node"]["port_reach"]
+            for centre in (self._start, self._tip):
+                found.addRect(QRectF(centre.x() - reach, centre.y() - reach,
+                                     reach * 2, reach * 2))
+        found.setFillRule(Qt.WindingFill)
+        return found
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.prepareGeometryChange()        # the ends join its shape
+        elif change == QGraphicsItem.ItemSelectedHasChanged:
+            self._restack()
+        return QGraphicsPathItem.itemChange(self, change, value)
+
+    def _restack(self):
+        # A selected link is lifted over the nodes as well, so the ends it is
+        # dragged by are on top where they overlap a step's own dots.
+        self.setZValue(EDGE_SELECTED_Z if self.isSelected()
+                       else EDGE_LIT_Z if self._lit else EDGE_Z)
 
     def set_lit(self, lit):
         """Draw this one heavier, or stop. Cheap: one repaint, no re-routing.
@@ -534,7 +915,7 @@ class CycleEdgeItem(QGraphicsPathItem):
         if lit == self._lit:
             return
         self._lit = lit
-        self.setZValue(EDGE_LIT_Z if lit else EDGE_Z)
+        self._restack()
         self.update()
 
     def set_routing(self, out_slot=(0, 1), into_slot=(0, 1), lane=None):
@@ -582,18 +963,21 @@ class CycleEdgeItem(QGraphicsPathItem):
         path = QPainterPath(start)
         for point in points:
             path.lineTo(point)
+        self.prepareGeometryChange()
         self.setPath(path)
         self._head = _arrow_head(tip, edge["arrow"], into)
-        self.prepareGeometryChange()
+        self._start, self._tip = start, tip
 
     def boundingRect(self):
         # The head lives outside the path, so the rect has to cover both or the
         # tip is clipped away as the view scrolls. The margin is half the
         # heaviest pen this edge can be drawn with, plus one: a path's own rect
         # is the line through its middle and knows nothing about how thick it
-        # is, so a fixed margin would clip a lit edge along its length.
+        # is, so a fixed margin would clip a lit edge along its length. Or the
+        # ends a selected link is dragged by, if those reach further.
         edge = self._spec["edge"]
-        margin = max(edge["width"], edge["lit_width"]) / 2.0 + 1.0
+        margin = max(max(edge["width"], edge["lit_width"]) / 2.0 + 1.0,
+                     self._spec["node"]["port_reach"] + 1.0)
         return QGraphicsPathItem.boundingRect(self).united(
             self._head.boundingRect()).adjusted(-margin, -margin,
                                                 margin, margin)
@@ -601,9 +985,10 @@ class CycleEdgeItem(QGraphicsPathItem):
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.Antialiasing, True)
         edge = self._spec["edge"]
-        colour = QColor(ink("ACCENT" if self._lit else "NEUTRAL500"))
+        lit = self._lit or self.isSelected()
+        colour = QColor(ink("ACCENT" if lit else "NEUTRAL500"))
         pen = QPen(colour)
-        pen.setWidthF(edge["lit_width"] if self._lit else edge["width"])
+        pen.setWidthF(edge["lit_width"] if lit else edge["width"])
         pen.setCapStyle(Qt.RoundCap)
         dash = self._spec["edge"]["dash"].get(self.kind)
         if dash:
@@ -619,6 +1004,17 @@ class CycleEdgeItem(QGraphicsPathItem):
         painter.setBrush(QBrush(colour))
         painter.drawPolygon(self._head)
 
+        if self.isSelected():
+            # The two ends it can be dragged by: hollow, like a step's own
+            # dots, so what can be picked up looks the same everywhere.
+            ring = QPen(colour)
+            ring.setWidthF(1.5)
+            painter.setPen(ring)
+            painter.setBrush(QBrush(QColor(ink("CANVAS_BG"))))
+            radius = self._spec["node"]["port"]
+            for centre in (self._start, self._tip):
+                painter.drawEllipse(centre, radius, radius)
+
 
 #: The four sides of a node, as the outward direction of each. An edge leaves
 #: and arrives along one of these, so there is no diagonal case to reason about
@@ -632,6 +1028,174 @@ SIDES = {"right": (1.0, 0.0), "left": (-1.0, 0.0),
 #: busy graph without losing it under the next one.
 EDGE_Z = -2.0
 EDGE_LIT_Z = -1.0
+#: The one link somebody has clicked, while a cycle is edited: over the nodes,
+#: because its two ends are handles and a handle under a step cannot be taken.
+EDGE_SELECTED_Z = 1.0
+#: A phase's frame is the ground its steps and their links stand on.
+FRAME_Z = -3.0
+
+#: How far a folded phase's second card sits off the first.
+STACK = 4
+
+#: What each link dot does, said where the pointer is.
+PORT_TIP = {
+    "out": "Drag onto another step: that step will wait for this one.",
+    "in": "Drag onto another step: this step will wait for that one.",
+}
+#: A link being drawn: over the nodes, under nothing.
+LINK_Z = 5.0
+
+#: A phase frame: the band its name sits in, and the room round its steps.
+FRAME = {"header": 22, "pad": 12, "radius": 10, "label": 11}
+
+
+def frame_islands(rects, pad, header, gap):
+    """The ground a phase is drawn on: ``[(band rects, heading rect)]``.
+
+    Pure, like the layout. ``rects`` are the phase's steps, ``(x, y, w, h)``.
+    Steps side by side make a band; bands one layer apart are joined where
+    they overlap across; bands further apart - a phase with one step early on
+    and the rest at the end - are separate islands, each with its own heading.
+    A bounding box would have been one line of code and would have drawn one
+    phase over three others, and over any step of another phase that happened
+    to share one of its layers.
+    """
+    bands = {}
+    for x, y, w, h in rects:
+        key = round(y)
+        left, top, right, bottom = bands.get(key, (x, y, x + w, y + h))
+        bands[key] = (min(left, x), min(top, y), max(right, x + w), max(bottom, y + h))
+    islands, current, last = [], [], None
+    for key in sorted(bands):
+        left, top, right, bottom = bands[key]
+        joined = (last is not None and top - last[3] <= gap * 1.5
+                  and min(right, last[2]) > max(left, last[0]))
+        if current and not joined:
+            islands.append(current)
+            current = []
+        if joined:
+            # The link between two bands: as wide as they both are.
+            current.append((max(left, last[0]) - pad, last[3], min(right, last[2]) + pad,
+                            top))
+        current.append((left - pad, top - pad, right + pad, bottom + pad))
+        last = (left, top, right, bottom)
+    if current:
+        islands.append(current)
+    found = []
+    for island in islands:
+        first = island[0]
+        heading = (first[0], first[1] - header, first[2], first[1])
+        found.append((island + [heading], heading))
+    return found
+
+
+class CycleGroupFrame(QGraphicsObject):
+    """One phase's steps, framed together, its name in a band across the top.
+
+    Only the band takes a click - it folds the phase - so a press anywhere
+    else inside the frame still reaches the canvas and pans it, the way empty
+    ground does everywhere else.
+    """
+
+    def __init__(self, name, spec=None):
+        QGraphicsObject.__init__(self)
+        self._spec = spec or SPEC
+        self.name = name
+        self._path = QPainterPath()
+        self._headings = []
+        self._count = 0
+        self._state = "pending"
+        self._current = False
+        #: Called with the phase's name when its band is clicked.
+        self.on_fold = None
+        self.setZValue(FRAME_Z)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def place(self, islands, count):
+        """Take the ground :func:`frame_islands` worked out, and redraw."""
+        self.prepareGeometryChange()
+        path = QPainterPath()
+        path.setFillRule(Qt.WindingFill)
+        self._headings = []
+        for pieces, heading in islands:
+            for left, top, right, bottom in pieces:
+                path.addRoundedRect(QRectF(left, top, right - left, bottom - top),
+                                    FRAME["radius"], FRAME["radius"])
+            self._headings.append(QRectF(heading[0], heading[1],
+                                         heading[2] - heading[0],
+                                         heading[3] - heading[1]))
+        self._path = path.simplified()
+        self._count = count
+        self.setToolTip("Phase %s - %d step%s. Click the band to fold it into "
+                        "one box." % (self.name, count, "" if count == 1 else "s"))
+        self.update()
+
+    def set_state(self, state, current):
+        """How the phase is going, and whether the run is in it now."""
+        if (state, current) != (self._state, self._current):
+            self._state, self._current = state, current
+            self.update()
+
+    def band(self):
+        """The first heading: where the phase's name is read from."""
+        return self._headings[0] if self._headings else QRectF()
+
+    def boundingRect(self):
+        return self._path.boundingRect().adjusted(-2, -2, 2, 2)
+
+    def shape(self):
+        path = QPainterPath()
+        for heading in self._headings:
+            path.addRect(heading)
+        return path
+
+    def paint(self, painter, option, widget=None):
+        if self._path.isEmpty():
+            return
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        edge = QColor(ink("ACCENT" if self._current else "NEUTRAL400"))
+        pen = QPen(edge)
+        pen.setWidthF(2.0 if self._current else 1.2)
+        painter.setPen(pen)
+        # Lighter than the paper, so a phase reads as a sheet laid on it -
+        # and a little see-through, so the ruling still shows it is paper.
+        ground = QColor(ink("NEUTRAL100"))
+        ground.setAlpha(210)
+        painter.setBrush(QBrush(ground))
+        painter.drawPath(self._path)
+
+        font = QFont(theme.FONT_BODY[0])
+        font.setPixelSize(FRAME["label"])
+        font.setBold(True)
+        painter.setFont(font)
+        word = STATUS_WORD.get(self._state, "")
+        label = "%s  -  %d step%s%s" % (self.name.upper(), self._count,
+                                        "" if self._count == 1 else "s",
+                                        ("  -  " + word) if word else "")
+        for heading in self._headings:
+            band = heading.adjusted(10, 0, -10, 0)
+            painter.setPen(QPen(QColor(ink("ACCENT" if self._current
+                                           else "NEUTRAL700"))))
+            # Half the band at most: the link into the phase's first step
+            # comes down the middle, and a label under it would be crossed out.
+            room = max(40.0, band.width() / 2.0 + 30)
+            painter.drawText(QRectF(band.left(), band.top(), room, band.height()),
+                             Qt.AlignLeft | Qt.AlignVCenter,
+                             _elide(painter, label, room))
+            size = 12
+            painter.drawPixmap(QRectF(band.right() - size,
+                                      band.center().y() - size / 2.0,
+                                      size, size).toRect(),
+                               icons.pixmap("fold", size, ink("NEUTRAL600")))
+
+    def mousePressEvent(self, event):
+        if (any(one.contains(event.pos()) for one in self._headings)
+                and self.on_fold is not None):
+            event.accept()
+            self.on_fold(self.name)
+            return
+        event.ignore()
 
 
 def _sides(source, target, node):
@@ -806,6 +1370,23 @@ class CycleCanvas(QGraphicsView):
     #: somebody had been looking should forget it: Fit is the way back, and a
     #: remembered view surviving it would undo it on the next open.
     view_reset = Signal()
+    #: A phase was folded or opened; ask :meth:`folded` which are folded now.
+    folds_changed = Signal()
+    #: Right-click on a step: (step id, where on screen). The page decides
+    #: what can be done to it - the canvas draws, it does not edit.
+    node_menu = Signal(str, QPoint)
+    #: Right-click on empty ground: where on screen.
+    canvas_menu = Signal(QPoint)
+    #: Right-click on a link: (the step waited for, the step waiting, where).
+    edge_menu = Signal(str, str, QPoint)
+    #: A link was drawn by dragging a dot: (the step waited for, the step
+    #: that should wait for it). Only ever one :meth:`set_linking` allowed.
+    link_made = Signal(str, str)
+    #: One end of a selected link was dragged to another step: (old waited
+    #: for, old waiting, new waited for, new waiting).
+    link_moved = Signal(str, str, str, str)
+    #: Delete on a selected link: (waited for, waiting).
+    link_removed = Signal(str, str)
 
     def __init__(self, parent=None, spec=None):
         QGraphicsView.__init__(self, parent)
@@ -813,6 +1394,31 @@ class CycleCanvas(QGraphicsView):
         self._nodes = {}
         self._edges = []
         self._graph = None
+        #: The graph as drawn: ``_graph`` with the folded phases folded.
+        self._drawn = None
+        #: Which phases are folded into one box each - see fold_graph.
+        self._folded = set()
+        #: phase name -> its frame, for the phases that are open.
+        self._frames = {}
+        #: Where nodes were put by hand, kept across folding and opening.
+        self._places = {}
+        #: step id -> (status, duration, attempts). Kept here as well as on
+        #: the items, because folding rebuilds the items and a run's colours
+        #: must survive somebody tidying the view.
+        self._statuses = {}
+        #: step id -> what the core says is wrong with it.
+        self._problems = {}
+        #: The phases and which one each step is in - read once per graph,
+        #: because a run asks on every event it sends.
+        self._phases, self._phase_of = {}, {}
+        #: True while many nodes are moved at once, so the lines are worked
+        #: out once at the end rather than once per node.
+        self._batch = False
+        #: ``why_not(waited_for, waiting)`` while links may be drawn - "" when
+        #: one may - or None. The page owns the answer: the canvas draws.
+        self._linking = None
+        #: The link being dragged, while one is: see _start_link.
+        self._link = None
         self._fitted = False
         self._floor = SPEC["zoom"]["min"]
         #: The view this cycle was opened with, kept until there is a viewport
@@ -861,7 +1467,7 @@ class CycleCanvas(QGraphicsView):
             bar.valueChanged.connect(self._scrolled)
 
     # -- content --------------------------------------------------------------
-    def set_graph(self, graph, places=None, view=None):
+    def set_graph(self, graph, places=None, view=None, folded=()):
         """Build the scene from a ``cycle.model.to_graph`` payload.
 
         The only thing that rebuilds. Everything a run does afterwards goes
@@ -875,12 +1481,17 @@ class CycleCanvas(QGraphicsView):
 
         ``view`` is where they were last looking at it from. Without one the
         cycle opens the way every cycle opens - see :meth:`reset_view`.
+
+        ``folded`` names the phases to show folded, each as one box.
         """
+        self._folded = set(folded or ())
+        self._places = dict(places or {})
+        self._statuses, self._problems = {}, {}
         # Building a scene scrolls: items appearing move the scene rect under
         # the view. Held as a placement from end to end so none of that reads
         # as somebody choosing to look somewhere.
         with self._placing_view():
-            self._build(graph, places, view)
+            self._build(graph, self._places, view)
 
     def _build(self, graph, places, view):
         """The scene itself. Split out only so the placement above wraps it."""
@@ -890,41 +1501,64 @@ class CycleCanvas(QGraphicsView):
         # round it walks items whose C++ half has just gone, which is a
         # RuntimeError out of a paint path rather than anything a reader of
         # this method would expect.
-        self._nodes, self._edges = {}, []
+        self._nodes, self._edges, self._frames = {}, [], {}
+        self._link = None                 # its line goes with the scene
         self.scene().clear()
         self._graph = graph or None
         self._fitted = False
         self._placed = None
         self._wanted_view = view if _view_of(view)[0] is not None else None
         if not graph:
+            self._drawn = None
+            self._phases, self._phase_of = {}, {}
             self.scene().setSceneRect(QRectF(0, 0, 1, 1))
             return
 
-        nodes = graph.get("nodes") or []
+        self._phases = groups_of(graph.get("nodes") or [])
+        self._phase_of = {step: name for name, steps in self._phases.items()
+                          for step in steps}
+        self._drawn, refused = fold_graph(graph, self._folded)
+        self._folded -= set(refused)
+        nodes = self._drawn.get("nodes") or []
         computed = layout_graph(nodes, self._spec)
-        remembered = dict(places or {})
+        # A folded view is laid out afresh: places somebody dragged steps to
+        # are about the open graph, and half of them would land on a phase.
+        remembered = {} if self._folded else dict(places or {})
 
         for node in nodes:
             item = CycleNodeItem(node, self._spec)
             x, y = remembered.get(node["id"],
                                   computed.get(node["id"], (0.0, 0.0)))
             item.setPos(x, y)
-            item.on_moved = self.route
+            item.on_moved = self._moved_one
+            # Folded, the view is for reading; moving boxes about is for the
+            # open graph, where where they go can be remembered.
+            item.setFlag(QGraphicsItem.ItemIsMovable, not self._folded)
+            item.set_ports(self._linking is not None)
             self.scene().addItem(item)
             self._nodes[node["id"]] = item
 
-        for edge in graph.get("edges") or []:
+        for edge in self._drawn.get("edges") or []:
             source = self._nodes.get(edge.get("from"))
             target = self._nodes.get(edge.get("to"))
             if source is None or target is None:
                 continue          # an edge to a step that is not in the graph
             item = CycleEdgeItem(source, target,
                                  edge.get("kind", "dependency"), self._spec)
+            item.set_editable(self._linking is not None)
             source.edges.append(item)
             target.edges.append(item)
             self.scene().addItem(item)
             self._edges.append(item)
 
+        for name in groups_of(_steps_only(nodes)):
+            frame = CycleGroupFrame(name, self._spec)
+            frame.on_fold = self._fold_later
+            self.scene().addItem(frame)
+            self._frames[name] = frame
+
+        self._repaint_statuses()
+        self._repaint_problems()
         self.route()
         self._resize_scene()
         # A cycle opened with a remembered arrangement is already "moved", so
@@ -933,6 +1567,142 @@ class CycleCanvas(QGraphicsView):
         self._moved = bool(remembered)
         if not self.apply_view(self._wanted_view):
             self.reset_view()
+
+    # -- phases -----------------------------------------------------------------
+    def phases(self):
+        """``{phase: [step ids]}`` for the whole graph, folded or not."""
+        return dict(self._phases)
+
+    def folded(self):
+        return sorted(self._folded)
+
+    def set_folded(self, names):
+        """Fold exactly these phases. Statuses and problems are carried over."""
+        names = set(names or ()) & set(self.phases())
+        if names == self._folded:
+            return
+        if not self._folded and self._moved:
+            # What somebody arranged by hand, so opening the phases again
+            # puts the steps back where they had them.
+            self._places = self.places()
+        statuses, problems = dict(self._statuses), dict(self._problems)
+        self._folded = names
+        with self._placing_view():
+            self._build(self._graph, self._places, None)
+        self._statuses, self._problems = statuses, problems
+        self._repaint_statuses()
+        self._repaint_problems()
+        self.folds_changed.emit()
+
+    def fold(self, name):
+        self.set_folded(self._folded | {name})
+
+    def unfold(self, name):
+        self.set_folded(self._folded - {name})
+
+    @contextlib.contextmanager
+    def _moving_many(self):
+        """Hold the lines still while several nodes move; route once after.
+
+        Every move of a node re-routes every line, which is right for a hand
+        dragging one node and wasteful for Arrange putting back twenty-eight
+        - twenty-eight full routings for one picture.
+        """
+        was, self._batch = self._batch, True
+        try:
+            yield
+        finally:
+            self._batch = was
+
+    def _moved_one(self):
+        if not self._batch:
+            self.route()
+
+    def _fold_later(self, name):
+        """Fold from inside an item's own mouse handler, once it has returned.
+
+        Folding rebuilds the scene, and deleting the item whose event is still
+        being delivered is how a Qt application falls over.
+        """
+        QTimer.singleShot(0, lambda: self.fold(name))
+
+    def current_phases(self):
+        """The phases the run is in now: a step of theirs running or waiting."""
+        found = []
+        for name, members in self._phases.items():
+            if any((self._statuses.get(one) or ("",))[0] in ("running", "waiting")
+                   for one in members):
+                found.append(name)
+        return found
+
+    def _place_frames(self):
+        """Fit each open phase's frame round its steps, wherever they are now."""
+        if not self._frames:
+            return
+        pad, header = FRAME["pad"], FRAME["header"]
+        width, height = self._spec["node"]["w"], self._spec["node"]["h"]
+        members = groups_of(_steps_only((self._drawn or {}).get("nodes") or []))
+        for name, frame in self._frames.items():
+            rects = [(item.pos().x(), item.pos().y(), width, height)
+                     for item in (self._nodes.get(one) for one in members.get(name) or [])
+                     if item is not None]
+            if rects:
+                frame.place(frame_islands(rects, pad, header,
+                                          self._spec["grid"]["layer_gap"]),
+                            len(members.get(name) or []))
+        self._repaint_frames()
+
+    def _repaint_frames(self, names=None):
+        for name in (names if names is not None else list(self._frames)):
+            frame = self._frames.get(name)
+            if frame is None:
+                continue
+            states = [(self._statuses.get(one) or ("",))[0]
+                      for one in self._phases.get(name, [])]
+            frame.set_state(phase_status(states),
+                            any(one in ("running", "waiting") for one in states))
+
+    # -- problems ---------------------------------------------------------------
+    def set_problems(self, problems):
+        """Mark the steps the core has something to say about. Returns the rest.
+
+        The core names a step's problem ``id: what is wrong``; those land on
+        the step's own box. What names no step - a loop, the subject - is
+        handed back for the caller to say somewhere else.
+        """
+        step_ids = [node.get("id") for node in (self._graph or {}).get("nodes") or []]
+        self._problems, rest = problems_by_step(problems, step_ids)
+        self._repaint_problems()
+        return rest
+
+    def _repaint_problems(self):
+        owner = {step: GROUP_PREFIX + name for name, steps in self.phases().items()
+                 if name in self._folded for step in steps}
+        found = {}
+        for step_id, messages in self._problems.items():
+            found.setdefault(owner.get(step_id, step_id), []).extend(messages)
+        for step_id, item in self._nodes.items():
+            item.set_problems(found.get(step_id, []))
+
+    def _repaint_statuses(self):
+        for step_id, item in self._nodes.items():
+            if item.is_phase:
+                continue
+            status, duration, attempts = self._statuses.get(step_id,
+                                                            ("pending", None, 0))
+            item.set_status(status, duration, attempts)
+        for name in self._folded:
+            self._repaint_phase(name)
+
+    def _repaint_phase(self, name):
+        item = self._nodes.get(GROUP_PREFIX + name)
+        if item is None:
+            return
+        members = self._phases.get(name) or []
+        item.set_status(phase_status([(self._statuses.get(one) or ("",))[0]
+                                      for one in members]),
+                        sum((self._statuses.get(one) or (None, 0, 0))[1] or 0
+                            for one in members) or None)
 
     def update_graph(self, graph):
         """Take a fresh payload of the graph that is already drawn.
@@ -947,7 +1717,8 @@ class CycleCanvas(QGraphicsView):
         if not graph:
             return
         self._graph = graph
-        for node in graph.get("nodes") or []:
+        self._drawn, _refused = fold_graph(graph, self._folded)
+        for node in self._drawn.get("nodes") or []:
             item = self._nodes.get(node.get("id"))
             if item is not None:
                 item.set_node(node)
@@ -967,6 +1738,7 @@ class CycleCanvas(QGraphicsView):
         nodes, not thousands, and the alternative is edges that settle into
         place only after the mouse is released.
         """
+        self._place_frames()
         if not self._edges:
             return
         node = self._spec["node"]
@@ -1055,7 +1827,7 @@ class CycleCanvas(QGraphicsView):
         so the answer can be compared and stored as it is.
         """
         return {step_id: (item.pos().x(), item.pos().y())
-                for step_id, item in self._nodes.items()}
+                for step_id, item in self._nodes.items() if not item.is_phase}
 
     def _resize_scene(self):
         """Give the scene the graph plus room to roam around it.
@@ -1097,7 +1869,9 @@ class CycleCanvas(QGraphicsView):
         if not self._nodes:
             return QRectF()
         rect = QRectF()
-        for item in self._nodes.values():
+        # The phases' frames too: a cycle opens at its top, and the top of a
+        # framed cycle is the band naming its first phase, not its first box.
+        for item in list(self._nodes.values()) + list(self._frames.values()):
             rect = rect.united(item.sceneBoundingRect())
         return rect.adjusted(-margin, -margin, margin, margin)
 
@@ -1140,13 +1914,16 @@ class CycleCanvas(QGraphicsView):
         """
         if not self._graph:
             return
-        places = layout_graph(self._graph.get("nodes") or [], self._spec)
-        for step_id, item in self._nodes.items():
-            if step_id in places:
-                item.setPos(*places[step_id])
+        places = layout_graph((self._drawn or self._graph).get("nodes") or [],
+                              self._spec)
+        with self._moving_many():
+            for step_id, item in self._nodes.items():
+                if step_id in places:
+                    item.setPos(*places[step_id])
         self.route()
         self._resize_scene()
         self._moved = False
+        self._places = {}
         # So whatever remembered the old arrangement forgets it: Arrange is how
         # somebody says they want the computed layout back, and a file that
         # kept the mess would give it to them again on the next open.
@@ -1160,7 +1937,8 @@ class CycleCanvas(QGraphicsView):
         return self._nodes.get(step_id)
 
     def node_ids(self):
-        return list(self._nodes)
+        """Every step of the cycle, whether it has a box of its own or not."""
+        return [node.get("id") for node in (self._graph or {}).get("nodes") or []]
 
     # -- live state -----------------------------------------------------------
     def set_status(self, step_id, status, duration_ms=None, attempts=0):
@@ -1169,13 +1947,27 @@ class CycleCanvas(QGraphicsView):
         Ignored rather than raising: a run may be of a cycle that has since been
         edited, and a stale event is not worth an exception in a paint path.
         """
+        was = self._statuses.get(step_id) or (None, None, 0)
+        self._statuses[step_id] = (status, duration_ms if duration_ms is not None
+                                   else was[1], attempts or was[2])
         item = self._nodes.get(step_id)
         if item is not None:
             item.set_status(status, duration_ms, attempts)
+        phase = self._phase_of.get(step_id)
+        if phase is not None:
+            if phase in self._folded:
+                self._repaint_phase(phase)
+            self._repaint_frames((phase,))
+
+    def status_of(self, step_id):
+        """What the canvas last heard about a step, whether it is drawn or not."""
+        return (self._statuses.get(step_id) or ("pending",))[0]
 
     def clear_status(self):
+        self._statuses = {}
         for item in self._nodes.values():
             item.clear_status()
+        self._repaint_frames()
 
     # -- looking at it --------------------------------------------------------
     @contextlib.contextmanager
@@ -1363,12 +2155,17 @@ class CycleCanvas(QGraphicsView):
         if item is not None:
             self.centerOn(item)
 
-    def select(self, step_id):
+    def select(self, step_id, center=True):
+        if step_id not in self._nodes:
+            for name, members in self.phases().items():
+                if step_id in members and name in self._folded:
+                    self.unfold(name)
         self.scene().clearSelection()
         item = self._nodes.get(step_id)
         if item is not None:
             item.setSelected(True)
-            self.center_on(step_id)
+            if center:
+                self.center_on(step_id)
 
     def selected(self):
         """Which step is selected, or "".
@@ -1379,7 +2176,7 @@ class CycleCanvas(QGraphicsView):
         inside a signal handler, where there is nothing useful to do with it.
         """
         for step_id, item in self._nodes.items():
-            if _alive(item) and item.isSelected():
+            if _alive(item) and item.isSelected() and not item.is_phase:
                 return step_id
         return ""
 
@@ -1389,6 +2186,155 @@ class CycleCanvas(QGraphicsView):
         for item in list(self._nodes.values()) + list(self._edges):
             item.update()
         self.viewport().update()
+
+    # -- drawing links --------------------------------------------------------
+    def set_linking(self, why_not):
+        """Let links be drawn between steps, or stop.
+
+        ``why_not(waited_for, waiting)`` is asked of every step a link is
+        dragged over and answers "" when it may land there, or the reason it
+        may not - a loop, a link that is already there. None: no dots at all,
+        which is every cycle not open for editing.
+        """
+        if self._link is not None and why_not is None:
+            self._end_link(drop=False)
+        self._linking = why_not
+        for item in self._nodes.values():
+            item.set_ports(why_not is not None)
+        for edge in self._edges:
+            edge.set_editable(why_not is not None)
+
+    def linking(self):
+        return self._linking is not None
+
+    def selected_link(self):
+        """``(waited for, waiting)`` of the selected link, or None."""
+        for edge in self._edges:
+            if _alive(edge) and edge.isSelected():
+                return edge.source, edge.target
+        return None
+
+    def select_link(self, waited_for, waiting):
+        """Select one link, if it is drawn and links can be edited."""
+        edge = next((one for one in self._edges
+                     if (one.source, one.target) == (waited_for, waiting)), None)
+        if edge is None or not (edge.flags() & QGraphicsItem.ItemIsSelectable):
+            return False
+        self.scene().clearSelection()
+        edge.setSelected(True)
+        return True
+
+    def _start_relink(self, edge, end, at):
+        """Pick up one end of a selected link; the other stays where it is.
+
+        Dragging its head moves which step waits; dragging where it starts
+        moves which step is waited for. Either way it is the same drag as a
+        new link out of the end that stays - one that replaces this one.
+        """
+        if end == "to":
+            self._start_link(edge.source_item, "out", at, edge)
+        else:
+            self._start_link(edge.target_item, "in", at, edge)
+
+    def _start_link(self, item, port, at, edge=None):
+        """A link out of ``item``'s ``port`` dot, following the pointer.
+
+        ``edge`` is the link being re-pointed, if this is one: hidden while
+        its replacement is dragged, and back as it was if that is let go of
+        nowhere.
+        """
+        pen = QPen(QColor(ink("ACCENT")))
+        pen.setWidthF(self._spec["edge"]["lit_width"])
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setDashPattern([3, 2])
+        line = QGraphicsPathItem()
+        line.setPen(pen)
+        line.setZValue(LINK_Z)
+        head = QGraphicsPolygonItem()
+        head.setPen(QPen(Qt.NoPen))
+        head.setBrush(QBrush(QColor(ink("ACCENT"))))
+        head.setZValue(LINK_Z)
+        self.scene().addItem(line)
+        self.scene().addItem(head)
+        self._link = {"from": item, "port": port, "line": line, "head": head,
+                      "over": None, "why": "", "edge": edge,
+                      "replacing": (edge.source, edge.target) if edge else None}
+        if edge is not None:
+            edge.setVisible(False)
+        item.set_drop("ok")               # keeps its dots up while dragging
+        self._drag_link(at, None)
+
+    def _link_ends(self, over):
+        """(waited for, waiting) if the link were dropped on ``over``."""
+        mine = self._link["from"].step_id
+        return (mine, over.step_id) if self._link["port"] == "out" \
+            else (over.step_id, mine)
+
+    def _drag_link(self, at, global_at):
+        link = self._link
+        here = self.mapToScene(at)
+        over = next((one for one in self.scene().items(here)
+                     if isinstance(one, CycleNodeItem) and not one.is_phase
+                     and one is not link["from"]), None)
+        if over is not link["over"]:
+            if link["over"] is not None:
+                link["over"].set_drop("")
+            link["over"] = over
+            link["why"] = ""
+            if over is not None:
+                link["why"] = self._linking(*self._link_ends(over),
+                                            replacing=link["replacing"]) or ""
+                over.set_drop("no" if link["why"] else "ok")
+            if global_at is not None:
+                self._say_link(global_at)
+        source = link["from"]
+        mine = source.mapToScene(source.port_point(link["port"]))
+        # Snapped to the dot it would join when it can land, so what is on
+        # screen is the link that letting go would make.
+        other = here
+        if over is not None and not link["why"]:
+            other = over.mapToScene(over.port_point(
+                "in" if link["port"] == "out" else "out"))
+        start, end = (mine, other) if link["port"] == "out" else (other, mine)
+        path = QPainterPath(start)
+        path.lineTo(end)
+        link["line"].setPath(path)
+        length = math.hypot(end.x() - start.x(), end.y() - start.y())
+        if length > 1:
+            into = ((start.x() - end.x()) / length, (start.y() - end.y()) / length)
+            link["head"].setPolygon(_arrow_head(end, self._spec["edge"]["arrow"],
+                                                into))
+
+    def _say_link(self, global_at):
+        """What letting go here would do, next to the pointer."""
+        link = self._link
+        if link["over"] is None:
+            QToolTip.hideText()
+            return
+        waited_for, waiting = self._link_ends(link["over"])
+        QToolTip.showText(global_at, link["why"] or "%s will wait for %s"
+                          % (waiting, waited_for), self.viewport())
+
+    def _end_link(self, drop):
+        link = self._link
+        ends = self._link_ends(link["over"]) if link["over"] is not None else ()
+        self._link = None
+        QToolTip.hideText()
+        for item in (link["from"], link["over"]):
+            if item is not None and _alive(item):
+                item.set_drop("")
+        for item in (link["line"], link["head"]):
+            if _alive(item):
+                self.scene().removeItem(item)
+        if link["edge"] is not None and _alive(link["edge"]):
+            link["edge"].setVisible(True)
+        if not (drop and ends and not link["why"]):
+            return
+        # Emitted last: whatever listens rebuilds the scene these items are in.
+        if link["replacing"] is None:
+            self.link_made.emit(*ends)
+        elif tuple(ends) != link["replacing"]:
+            self.link_moved.emit(*(link["replacing"] + tuple(ends)))
 
     # -- input ----------------------------------------------------------------
     def resizeEvent(self, event):
@@ -1427,9 +2373,30 @@ class CycleCanvas(QGraphicsView):
         QGraphicsView.wheelEvent(self, event)
 
     def mousePressEvent(self, event):
-        """Decide, per press, whether this drag moves a node or the view."""
-        on_a_node = isinstance(self.itemAt(event.position().toPoint()),
-                               CycleNodeItem)
+        """Decide, per press, whether this drag moves a node or the view.
+
+        Or draws a link: a press on one of a step's dots while the cycle is
+        being edited starts one, and the step itself stays where it is.
+        """
+        item = self.itemAt(event.position().toPoint())
+        if (event.button() == Qt.LeftButton and self._linking is not None
+                and isinstance(item, CycleEdgeItem)):
+            end = item.end_at(self.mapToScene(event.position().toPoint()))
+            if end:
+                self._touched = True
+                self._start_relink(item, end, event.position().toPoint())
+                event.accept()
+                return
+        if (event.button() == Qt.LeftButton and self._linking is not None
+                and isinstance(item, CycleNodeItem) and item.has_ports):
+            port = item.port_at(item.mapFromScene(self.mapToScene(
+                event.position().toPoint())))
+            if port:
+                self._touched = True
+                self._start_link(item, port, event.position().toPoint())
+                event.accept()
+                return
+        on_a_node = isinstance(item, CycleNodeItem)
         if event.button() == Qt.MiddleButton:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
         elif event.button() == Qt.LeftButton:
@@ -1438,7 +2405,31 @@ class CycleCanvas(QGraphicsView):
         self._touched = True
         QGraphicsView.mousePressEvent(self, event)
 
+    def mouseMoveEvent(self, event):
+        if self._link is not None:
+            self._drag_link(event.position().toPoint(),
+                            event.globalPosition().toPoint())
+            event.accept()
+            return
+        QGraphicsView.mouseMoveEvent(self, event)
+
+    def keyPressEvent(self, event):
+        if self._link is not None and event.key() == Qt.Key_Escape:
+            self._end_link(drop=False)
+            event.accept()
+            return
+        chosen = self.selected_link() if self._linking is not None else None
+        if chosen and event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            event.accept()
+            self.link_removed.emit(*chosen)
+            return
+        QGraphicsView.keyPressEvent(self, event)
+
     def mouseReleaseEvent(self, event):
+        if self._link is not None:
+            self._end_link(drop=event.button() == Qt.LeftButton)
+            event.accept()
+            return
         # Asked of the items rather than assumed from the press: a click that
         # selected a node did not move anything, and Arrange offering itself
         # after one would be a button for a thing that never happened.
@@ -1462,12 +2453,42 @@ class CycleCanvas(QGraphicsView):
         something a panel down the side could offer.
         """
         item = self.itemAt(event.position().toPoint())
+        if isinstance(item, CycleNodeItem) and item.is_phase:
+            # Later, not now: opening it rebuilds the scene this very item
+            # is in, while its event is still being delivered.
+            name = item.step_id[len(GROUP_PREFIX):]
+            QTimer.singleShot(0, lambda: self.unfold(name))
+            event.accept()
+            return
         if isinstance(item, CycleNodeItem):
             self.node_opened.emit(item.step_id)
             event.accept()
             return
+        if isinstance(item, (CycleGroupFrame, CycleEdgeItem)):
+            # Near a line is not empty ground: it is a click that missed
+            # selecting the line by a hair, and fitting the view would throw
+            # away where somebody had got to.
+            event.accept()
+            return
         self.fit()
         QGraphicsView.mouseDoubleClickEvent(self, event)
+
+    def contextMenuEvent(self, event):
+        """Right-click: say which step, or that it was the ground, and where."""
+        item = self.itemAt(event.pos())
+        if isinstance(item, CycleNodeItem) and not item.is_phase:
+            self.scene().clearSelection()
+            item.setSelected(True)
+            self.node_menu.emit(item.step_id, event.globalPos())
+        elif isinstance(item, CycleEdgeItem):
+            # A link between two phases stands for several; there is no one
+            # of them to offer.
+            if not (item.source.startswith(GROUP_PREFIX)
+                    or item.target.startswith(GROUP_PREFIX)):
+                self.edge_menu.emit(item.source, item.target, event.globalPos())
+        elif not isinstance(item, (CycleNodeItem, CycleGroupFrame)):
+            self.canvas_menu.emit(event.globalPos())
+        event.accept()
 
     def moved(self):
         """True once a node has been dragged - what enables Arrange."""
@@ -1498,18 +2519,115 @@ class CycleCanvas(QGraphicsView):
             edge.set_lit(id(edge) in lit)
 
 
+
+class CanvasSkeleton(widgets.Skeleton):
+    """The canvas while a cycle loads: its own paper, and nodes breathing on it.
+
+    Not a generic grey graph: the ruled paper is drawn by the same code and at
+    the same scale the canvas opens a cycle at, and the placeholder nodes have
+    the real nodes' size, spacing and links. So what is on the way looks like
+    what arrives, and the moment it arrives is the boxes filling in rather than
+    one picture being swapped for another.
+    """
+
+    #: How many nodes each layer of the placeholder has, top to bottom, over
+    #: and over: mostly a sequence with the odd fork, like a real cycle.
+    PATTERN = (1, 1, 2, 1, 1, 1, 3, 1)
+
+    def __init__(self, canvas, spec=None):
+        widgets.Skeleton.__init__(self, canvas.viewport(), "graph", ground=None)
+        self._spec = spec or SPEC
+
+    def zoom(self):
+        """The scale a cycle opens at - see CycleCanvas.reset_view."""
+        return self._spec["zoom"]["grid"]
+
+    def layers(self):
+        zoom = self.zoom()
+        node, grid = self._spec["node"], self._spec["grid"]
+        width, height = node["w"] * zoom, node["h"] * zoom
+        pitch = (node["h"] + grid["layer_gap"]) * zoom
+        beside = grid["sibling_gap"] * zoom
+        found, y, index = [], grid["margin"] * zoom, 0
+        while y < self.height():
+            count = self.PATTERN[index % len(self.PATTERN)]
+            span = count * width + (count - 1) * beside
+            left = (self.width() - span) / 2.0
+            found.append([QRectF(left + one * (width + beside), y, width, height)
+                          for one in range(count)])
+            y += pitch
+            index += 1
+        return found
+
+    def paint_ground(self, painter):
+        painter.fillRect(self.rect(), QColor(ink("CANVAS_BG")))
+        zoom = self.zoom()
+        painter.save()
+        painter.scale(zoom, zoom)
+        _rule(painter, QRectF(0, 0, self.width() / zoom, self.height() / zoom),
+              self._spec["canvas"], QColor(ink("CANVAS_GRID")),
+              QColor(ink("CANVAS_GRID_MAJOR")))
+        painter.restore()
+
+    def paint_shapes(self, painter):
+        zoom = self.zoom()
+        node, edge = self._spec["node"], self._spec["edge"]
+        layers = self.layers()
+        ink_line = QColor(ink("NEUTRAL500"))
+        pen = QPen(ink_line)
+        pen.setWidthF(max(1.0, edge["width"] * zoom))
+        # The links first, under the nodes, bent the way the canvas bends them.
+        for above, below in zip(layers, layers[1:]):
+            for one in above:
+                for two in below:
+                    start = QPointF(one.center().x(), one.bottom())
+                    tip = QPointF(two.center().x(), two.top() - edge["gap"] * zoom)
+                    end = QPointF(tip.x(), tip.y() - edge["arrow"] * zoom * 0.8)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    path = QPainterPath(start)
+                    for point in _elbow(start, end, SIDES["bottom"], edge["stub"] * zoom):
+                        path.lineTo(point)
+                    painter.drawPath(path)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(ink_line)
+                    painter.drawPolygon(_arrow_head(tip, edge["arrow"] * zoom, SIDES["top"]))
+        border = QPen(QColor(ink("DIVIDER")))
+        border.setWidthF(1.0)
+        for row, layer in enumerate(layers):
+            body = self.colour(row, ink("NEUTRAL300"), ink("NEUTRAL100"))
+            text = self.colour(row, ink("NEUTRAL400"), ink("NEUTRAL300"))
+            for box in layer:
+                painter.setPen(border)
+                painter.setBrush(body)
+                painter.drawRoundedRect(box, node["radius"] * zoom, node["radius"] * zoom)
+                # Where the title and the plugin will be written, and the
+                # status stripe down the left edge.
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(text)
+                left = box.left() + (node["status_bar"] + node["pad_x"]) * zoom
+                inner = box.width() - (node["status_bar"] + node["pad_x"] * 2) * zoom
+                top = box.top() + node["pad_y"] * zoom
+                painter.drawRoundedRect(QRectF(left, top, inner * 0.62, 12 * zoom), 2, 2)
+                painter.drawRoundedRect(QRectF(left, top + 20 * zoom, inner * 0.38,
+                                               10 * zoom), 2, 2)
+
 # -- shared helpers -----------------------------------------------------------
 def _same_view(one, other):
     """Whether two views are the same place, give or take a rounding.
 
-    A scroll bar is whole pixels, so a view placed and then read back differs
-    in the last decimal of a scene coordinate. Half a scene unit is well inside
-    "nobody moved anything" at every zoom this canvas allows.
+    A scroll bar is whole pixels, so a view placed and then read back - or
+    re-centred by Qt as the viewport changes size - can be a pixel out. A
+    pixel is one scene unit at full size and more zoomed out: 1 / zoom of
+    them, so that is the allowance. Half a unit, as it was, was less than a
+    pixel below full size, and a resize after Fit rounding by one read as
+    somebody panning - which stopped the view following the panel.
     """
     if not one or not other:
         return False
+    pixel = 1.0 / max(one["zoom"], 1e-6)
     return (abs(one["zoom"] - other["zoom"]) < 1e-6
-            and all(abs(a - b) < 0.5
+            and all(abs(a - b) <= max(0.5, pixel)
                     for a, b in zip(one["center"], other["center"])))
 
 

@@ -815,3 +815,154 @@ def test_the_file_keeps_an_off_trigger_and_follows_a_renamed_step():
                             {"enabled": True, "every": 300})
     assert fresh["triggers"] == [{"id": "listen_q", "watch": "q", "every": 300}]
     assert "triggers" not in _with_listening({"id": "c"}, "q", "q", None)
+
+
+# ------------------------------------------------ nothing changed, nothing lost
+# Opening a step and pressing Save used to send every value through its
+# widget: a list of options became a list of words, a reference to a list
+# became a list holding one reference, numbers in a mapping became strings,
+# and every default the form showed was written into the file - which also
+# changed the step's fingerprint, so Resume refused runs it had no reason to.
+APPROVAL = {"id": "approval.gate", "name": "Approval", "inputs": [
+    {"key": "question", "label": "What to ask", "kind": "multiline",
+     "required": True, "default": None, "options": [], "hint": ""},
+    {"key": "options", "label": "The answers it takes", "kind": "args",
+     "required": False, "default": None, "options": [], "hint": ""},
+    {"key": "approve", "label": "Which answers mean yes", "kind": "args",
+     "required": False, "default": None, "options": [], "hint": ""},
+    {"key": "max_revisions", "label": "Maximum plan revisions", "kind": "number",
+     "required": False, "default": 3, "options": [], "hint": ""}]}
+
+REVIEW = {"id": "agent.review", "name": "Review", "inputs": [
+    {"key": "task", "label": "Task", "kind": "multiline", "required": True,
+     "default": None, "options": [], "hint": ""},
+    {"key": "files", "label": "Files", "kind": "args", "required": False,
+     "default": None, "options": [], "hint": ""},
+    {"key": "inputs", "label": "Inputs", "kind": "env", "required": False,
+     "default": None, "options": [], "hint": ""},
+    {"key": "scope", "label": "Scope", "kind": "check", "required": False,
+     "default": False, "options": [], "hint": ""}]}
+
+
+def _saved(dialog):
+    dialog._save()
+    assert dialog.saved is not None, dialog.note.text()
+    return dialog.saved
+
+
+def test_an_unchanged_step_comes_back_exactly_as_it_went_in(node):
+    one = {"id": "approve", "plugin": "approval.gate", "label": "Ask",
+           "needs": "plan", "timeout": 1800.0, "on_failure": "continue",
+           "retry": {"attempts": 2, "delay": 5, "backoff": "exponential"},
+           "with": {"question": "Start?", "options": ["Start work", "Leave it"],
+                    "approve": ["Start work"]}}
+    assert _saved(node(dict(one), APPROVAL)) == one
+
+
+def test_the_form_s_defaults_are_not_written_into_a_step_that_never_said_them(node):
+    """Otherwise the step's fingerprint moves and Resume refuses the run."""
+    saved = _saved(node(step()))
+    assert saved["with"] == {"command": "make all"}
+
+
+def test_an_option_with_a_space_in_it_is_still_one_option(node):
+    dialog = node({"id": "approve", "plugin": "approval.gate",
+                   "with": {"question": "Start?", "options": ["Start work", "Leave it"]}},
+                  APPROVAL)
+    box = dialog._widgets["with.options"]
+    assert box.text() == '"Start work" "Leave it"'
+
+    box.setText('"Start work" "Leave it" "Ask me later"')
+    assert _saved(dialog)["with"]["options"] == ["Start work", "Leave it", "Ask me later"]
+
+
+def test_a_backslash_in_a_list_item_survives_editing(node):
+    dialog = node({"id": "r", "plugin": "agent.review",
+                   "with": {"task": "t", "files": ["a.log"]}}, REVIEW)
+    dialog._widgets["with.files"].setText(r'C:\logs\a.log "C:\My logs\b.log"')
+    assert _saved(dialog)["with"]["files"] == [r"C:\logs\a.log", r"C:\My logs\b.log"]
+
+
+def test_an_open_quote_is_refused_rather_than_guessed_at(node):
+    dialog = node({"id": "r", "plugin": "agent.review",
+                   "with": {"task": "t", "files": ["a.log"]}}, REVIEW)
+    dialog._widgets["with.files"].setText('"half open')
+    dialog._save()
+    assert dialog.saved is None and "quote" in dialog.note.text()
+
+
+def test_a_reference_to_a_list_stays_a_reference(node):
+    one = {"id": "r", "plugin": "agent.review",
+           "with": {"task": "t", "files": "${steps.todo.outputs.images}"}}
+    assert _saved(node(dict(one), REVIEW))["with"]["files"] == \
+        "${steps.todo.outputs.images}"
+
+
+def test_a_reference_where_a_flag_goes_is_shown_as_text_not_ticked(node):
+    one = {"id": "r", "plugin": "agent.review",
+           "with": {"task": "t", "scope": "${vars.scope}"}}
+    dialog = node(dict(one), REVIEW)
+    assert isinstance(dialog._widgets["with.scope"], QLineEdit)
+    assert _saved(dialog)["with"]["scope"] == "${vars.scope}"
+
+
+def test_numbers_and_flags_in_a_mapping_keep_their_type(node):
+    one = {"id": "r", "plugin": "agent.review",
+           "with": {"task": "t", "inputs": {"runs": 3, "ok": True, "who": "me"}}}
+    assert _saved(node(dict(one), REVIEW))["with"]["inputs"] == \
+        {"runs": 3, "ok": True, "who": "me"}
+
+
+def test_a_mapping_no_box_can_show_is_kept_as_written(node):
+    nested = {"matrix": [{"python": "3.12"}], "notes": {"a": {"b": 1}}}
+    one = {"id": "r", "plugin": "agent.review",
+           "with": {"task": "t", "inputs": nested}}
+    dialog = node(dict(one), REVIEW)
+    assert "with.inputs" not in dialog._widgets
+    dialog._widgets["with.task"].setPlainText("changed")
+    assert _saved(dialog)["with"] == {"task": "changed", "inputs": nested}
+
+
+def test_a_setting_the_plugin_does_not_declare_is_kept_and_mentioned(node):
+    one = {"id": "build", "plugin": "command.shell",
+           "with": {"command": "make", "comand": "typo"}}
+    dialog = node(dict(one))
+    assert "comand" in " ".join(label.text() for label in
+                                dialog.findChildren(type(dialog.note)))
+    assert _saved(dialog)["with"]["comand"] == "typo"
+
+
+def test_a_changed_field_is_still_read_through_its_widget(node):
+    dialog = node(step(timeout=60))
+    dialog._widgets["timeout"].setText("90")
+    dialog._widgets["with.expect_exit"].setText("2")
+    saved = _saved(dialog)
+    assert saved["timeout"] == 90 and saved["with"]["expect_exit"] == 2
+
+
+def test_a_step_can_be_put_in_a_phase_the_cycle_already_has(qapp, dispose):
+    dialog = NodeDialog(step(), SHELL, None, True, groups=("Prepare", "Plan"))
+    try:
+        box = dialog._widgets["group"]
+        assert [box.itemText(index) for index in range(box.count())] == ["", "Prepare", "Plan"]
+        box.setCurrentText("Plan")
+        assert _saved(dialog)["group"] == "Plan"
+    finally:
+        dispose(dialog)
+
+
+def test_a_backoff_can_be_chosen(node):
+    dialog = node(step(retry={"attempts": 3, "delay": 2}))
+    box = dialog._widgets["retry.backoff"]
+    box.setCurrentIndex(box.findData("exponential"))
+    assert _saved(dialog)["retry"] == {"attempts": 3, "delay": 2,
+                                       "backoff": "exponential"}
+
+
+def test_a_variable_nobody_changed_keeps_its_type(properties):
+    dialog = properties({"id": "demo", "name": "Demo",
+                         "variables": {"runs": 3, "flag": False, "branch": "main"}})
+    _set(dialog, "branch", "release")
+    dialog._save()
+    assert dialog.saved["variables"] == {"runs": 3, "flag": False,
+                                         "branch": "release"}

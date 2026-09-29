@@ -178,6 +178,27 @@ def test_a_run_in_the_details_can_be_opened(panel):
     assert opened == [("dev", "r1")]
 
 
+def test_each_run_in_the_details_links_to_its_artifacts():
+    html = cs.details_html(session())
+    assert "href='files:r1'" in html
+
+
+def test_a_run_with_no_folder_offers_no_artifacts_link():
+    one = session(runs=[{"id": "r1", "run_dir": "", "started_at": 1000.0,
+                         "state": "success", "resume_count": 0}])
+    assert "files:" not in cs.details_html(one)
+
+
+def test_the_artifacts_link_asks_for_that_runs_files(panel):
+    panel.set_sessions([session()])
+    panel.set_live({"run_id": "r1", "cycle": "dev"})
+    asked = []
+    panel.files_picked.connect(lambda *args: asked.append(args))
+    from PySide6.QtCore import QUrl
+    panel._link(QUrl("files:r1"))
+    assert asked == [("dev", "r1")]
+
+
 # ---------------------------------------------------------------- the splitter
 @pytest.fixture
 def splitter(qapp, dispose):
@@ -358,3 +379,44 @@ def test_an_approval_nobody_answered_is_resumed_from_the_plan(panel):
     assert "Start work on QA-4?" in panel.details.toPlainText()
     panel.new_button.click()
     assert started[0]["run"] == "r1"
+
+
+def test_several_changes_at_once_are_drawn_once(qapp, dispose, monkeypatch):
+    """A hundred and fifty sessions take a fifth of a second to draw; opening
+    a cycle used to draw them four times over."""
+    from cms_gui.cyclesubjects import SubjectsPanel
+    panel = SubjectsPanel()
+    try:
+        drawn = []
+        real = panel._rebuild
+        monkeypatch.setattr(panel, "_rebuild", lambda: drawn.append(1) or real())
+        panel.set_state(cycle="demo", graph={}, sessions=[
+            {"id": "demo:QA-1", "cycle": "demo", "subject": {"key": "QA-1"},
+             "status": "failed", "runs": [{"id": "r1"}]}],
+            planned=[], live={"run_id": "r1", "cycle": "demo"})
+        assert drawn == [1]
+        assert panel.picked()["id"] == "demo:QA-1"
+    finally:
+        dispose(panel)
+
+
+def test_a_long_list_is_drawn_a_screenful_first_and_the_rest_after(qapp, dispose):
+    from cms_gui import cyclesubjects
+    from cms_gui.cyclesubjects import SubjectsPanel
+    panel = SubjectsPanel()
+    try:
+        many = [{"id": "demo:QA-%d" % one, "cycle": "demo",
+                 "subject": {"key": "QA-%d" % one}, "status": "success",
+                 "runs": [{"id": "r%d" % one}]} for one in range(100)]
+        panel.set_state(cycle="demo", graph={}, sessions=many)
+        now = len(panel.row_ids())
+        assert now == 1 + cyclesubjects.ROWS_AT_ONCE, "+ New run, then a screenful"
+        for _ in range(10):
+            qapp.processEvents()
+        assert len(panel.row_ids()) == 101
+        panel.set_state(sessions=many[:3])
+        for _ in range(10):
+            qapp.processEvents()
+        assert len(panel.row_ids()) == 4, "a newer drawing drops the older's rest"
+    finally:
+        dispose(panel)

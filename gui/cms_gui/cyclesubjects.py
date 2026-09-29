@@ -29,7 +29,7 @@ The text is built by plain functions so it can be tested without a window.
 import html
 import time
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QPushButton,
                                QSplitter, QTextBrowser, QVBoxLayout, QWidget)
@@ -297,18 +297,31 @@ def details_html(session, live=None, graph_subject=None, labels=None):
 
     runs = session.get("runs") or []
     if runs:
+        # Each run's own files beside it, on the Artifacts page: where an
+        # agent's transcript or a Jira step's reading copy is waiting.
         parts.append("<h4>Runs</h4><ul>%s</ul>" % "".join(
-            "<li><a href='run:%s'>%s</a> - %s%s</li>" % (
+            "<li><a href='run:%s'>%s</a> - %s%s%s</li>" % (
                 _escape(one.get("id")), _escape(when(one.get("started_at"))),
                 _escape(status_word(dict(one, status=one.get("state"),
                                          memory={}))),
                 " (resumed %d)" % one["resume_count"]
-                if one.get("resume_count") else "")
+                if one.get("resume_count") else "",
+                " &nbsp;<a href='files:%s'>artifacts</a>" % _escape(one.get("id"))
+                if one.get("run_dir") else "")
             for one in runs))
     return "".join(parts)
 
 
 # -- the sidebar --------------------------------------------------------------
+#: "Leave this as it is" for :meth:`SubjectsPanel.set_state` - None is a value.
+KEEP = object()
+
+#: Session rows built straight away, and then per turn of the event loop: more
+#: than fill the pane, and few enough that building them is not a pause.
+ROWS_AT_ONCE = 40
+ROWS_LATER = 30
+
+
 class _Row(QWidget):
     """One session: what it is about on top, where it is underneath, and a bin."""
 
@@ -351,6 +364,8 @@ class SubjectsPanel(QWidget):
     activated = Signal(dict)
     #: One run of a session was picked from the pane: (cycle id, run id).
     run_picked = Signal(str, str)
+    #: That run's files were asked for, on the Artifacts page: (cycle id, run id).
+    files_picked = Signal(str, str)
     new_requested = Signal()
     delete_requested = Signal(dict)
     #: A planned task: start work on it, or take it off the plan.
@@ -359,6 +374,9 @@ class SubjectsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        #: Which drawing of the list is current - see _rebuild. A newer one
+        #: makes the rows an older one still had to add pointless.
+        self._drawing = 0
         self._sessions = []
         self._planned = []
         self._cycle = ""
@@ -432,12 +450,39 @@ class SubjectsPanel(QWidget):
 
     def set_live(self, live):
         """The run on screen. Its session becomes the picked row."""
+        self._take_live(live)
+        self._rebuild()
+
+    def _take_live(self, live):
         self._live = live or None
         found = self.session_of_run((live or {}).get("run_id", ""))
         if found is not None:
             self._picked = found["id"]
         elif live and (live.get("subject") or {}).get("key"):
             self._picked = "%s:%s" % (live.get("cycle", ""), live["subject"]["key"])
+
+    def set_state(self, cycle=KEEP, graph=None, sessions=KEEP, planned=KEEP,
+                  live=KEEP):
+        """Several of the above at once, drawn once.
+
+        Each setter redraws the whole list, and a list of a hundred and fifty
+        sessions takes a fifth of a second to draw - so opening a cycle, which
+        used to set the cycle, the sessions, the plan and the live run one
+        after another, drew it four times over to arrive at one picture.
+        """
+        if cycle is not KEEP:
+            graph = graph or {}
+            self._cycle = cycle or ""
+            self._graph_subject = graph.get("subject")
+            self._labels = {node.get("id"): node.get("label") or node.get("id")
+                            for node in graph.get("nodes") or [] if node.get("id")}
+        if sessions is not KEEP:
+            self._sessions = [one for one in sessions or [] if isinstance(one, dict)]
+        if planned is not KEEP:
+            self._planned = [one for one in planned or [] if isinstance(one, dict)]
+            if self._picked.startswith(PLAN_PREFIX) and self.planned_item() is None:
+                self._picked = ""
+        self._take_live(self._live if live is KEEP else live)
         self._rebuild()
 
     def set_busy(self, busy):
@@ -506,7 +551,19 @@ class SubjectsPanel(QWidget):
             row.bin.clicked.connect(lambda _checked=False, one=item:
                                     self.planned_remove.emit(one))
             self._add(plan_id(item), row)
-        for session in self.ordered():
+        self._drawing += 1
+        sessions = self.ordered()
+        self._add_sessions(sessions[:ROWS_AT_ONCE])
+        self.list.blockSignals(False)
+        self._paint_details()
+        if len(sessions) > ROWS_AT_ONCE:
+            # A row is a handful of widgets, and a hundred and fifty of them
+            # built in one go held the window still for a fifth of a second.
+            # What is on screen is built now; the rest follows between frames.
+            self._more(self._drawing, sessions[ROWS_AT_ONCE:])
+
+    def _add_sessions(self, sessions):
+        for session in sessions:
             detail = " - ".join(part for part in row_detail(session, self._cycle)
                                 if part)
             row = _Row(subject_title(session), detail, status_colour(session),
@@ -514,8 +571,17 @@ class SubjectsPanel(QWidget):
             row.bin.clicked.connect(lambda _checked=False, one=session:
                                     self.delete_requested.emit(one))
             self._add(session.get("id"), row)
-        self.list.blockSignals(False)
-        self._paint_details()
+
+    def _more(self, drawing, rest):
+        def next_batch():
+            if drawing != self._drawing:
+                return                  # redrawn since; these rows are stale
+            self.list.blockSignals(True)
+            self._add_sessions(rest[:ROWS_LATER])
+            self.list.blockSignals(False)
+            if rest[ROWS_LATER:]:
+                self._more(drawing, rest[ROWS_LATER:])
+        QTimer.singleShot(0, next_batch)
 
     def _paint_details(self):
         picked = self.picked()
@@ -570,6 +636,8 @@ class SubjectsPanel(QWidget):
         picked = self.picked()
         if target.startswith("run:") and picked is not None:
             self.run_picked.emit(picked.get("cycle", ""), target[len("run:"):])
+        elif target.startswith("files:") and picked is not None:
+            self.files_picked.emit(picked.get("cycle", ""), target[len("files:"):])
         elif target.startswith(("http://", "https://")):
             from PySide6.QtGui import QDesktopServices
             QDesktopServices.openUrl(url)

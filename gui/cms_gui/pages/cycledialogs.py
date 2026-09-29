@@ -17,9 +17,21 @@ metadata carries kinds at all.
 Nothing here parses YAML or knows what any plugin does. The dialog is handed a
 document, gives back a changed one, and the page sends it to the core - which is
 the only thing that decides whether it may be written.
+
+**A field nobody touched is given back exactly as it came.** A form is a
+narrower thing than the file: a checkbox cannot hold ``${vars.offline}``, a
+line of words cannot say where one option ends and the next begins, and a box
+of ``name = value`` lines cannot tell ``3`` from ``"3"``. Converting every
+value through its widget on every save meant opening a step and pressing Save
+turned ``options: [Start work, Leave it]`` into four options and a list of
+files into a list holding one reference. So each field remembers what it showed,
+and only one that now shows something else is read back through its widget.
+A value its widget cannot show at all is offered as an expression, or kept as
+written with a pointer to the YAML tab - never quietly reshaped.
 """
 
 import os
+import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
@@ -38,6 +50,14 @@ WATCH_EVERY_MIN = 60
 #: What a step carries regardless of plugin. Kept here rather than read off the
 #: node payload so the order is the order somebody reads them in.
 ON_FAILURE = ("stop", "continue")
+
+#: How the wait between tries grows - the core's domain.cycle.BACKOFF.
+BACKOFF = ("fixed", "exponential")
+
+#: A value that is one ``${...}`` reference and nothing else. The core resolves
+#: it to whatever type it points at, so no widget but a line of text can hold
+#: it without changing what it means.
+_WHOLE_REFERENCE = re.compile(r"^\s*\$\{[^}]*\}\s*$")
 
 #: How tall a generated multi-line box is. Enough for a command or a task
 #: paragraph without the dialog becoming a page of text areas.
@@ -122,13 +142,28 @@ class NodeDialog(_Editor):
     """
 
     def __init__(self, step, plugin, parent=None, writable=True, live=None,
-                 ask_plugin=None, trigger=None):
+                 ask_plugin=None, trigger=None, groups=(), apply_label="",
+                 read_only_note=""):
         super().__init__(step.get("label") or step.get("id", "Step"), parent,
                          writable)
+        if apply_label:
+            # "Apply" when the change goes into an unsaved draft rather than
+            # straight into the file: the button says which it is.
+            self.save_button.setText(apply_label)
+        if read_only_note and not writable:
+            self.note.setText(read_only_note)
         self._step = dict(step)
         self._plugin = dict(plugin or {})
         self._ask_plugin = ask_plugin
+        self._groups = [one for one in groups if one]
         self._widgets = {}
+        #: What each field showed when the dialog opened, by key - so Save can
+        #: tell a field somebody changed from one they only looked at.
+        self._shown = {}
+        #: Fields whose value no widget here can hold; given back as they came.
+        self._kept = set()
+        #: Fields shown as a line of text because the value is an expression.
+        self._as_text = set()
         self.saved = None            # the changed step, once Save was pressed
         #: The trigger watching this step, as the file has it, or None.
         self._trigger = dict(trigger) if trigger else None
@@ -147,6 +182,9 @@ class NodeDialog(_Editor):
         self._add_actions()
         self._add_live(live)
         self.body_layout.addStretch(1)
+        # Taken once everything is built: what each field shows now is what
+        # "untouched" means at Save.
+        self._shown = {key: self._value(key) for key in self._widgets}
 
     # -- the step's own -------------------------------------------------------
     def _add_step_fields(self):
@@ -155,21 +193,31 @@ class NodeDialog(_Editor):
                    "Letters, digits, _ and -. Other steps name it in needs.")
         self._line("label", "Label", self._step.get("label", ""),
                    "What the node is called on the canvas. Blank uses the id.")
+        self._group_field()
+        needs = self._step.get("needs") or []
         self._line("needs", "Depends on",
-                   ", ".join(self._step.get("needs") or []),
+                   ", ".join(needs) if isinstance(needs, list) else _text(needs),
                    "Step ids, comma separated. They must succeed first.")
         self._line("if", "Runs if", self._step.get("if", ""),
                    "${steps.x.status} == 'failed', or blank for always. A step "
-                   "with a condition must also depend on what it reads.")
+                   "with a condition runs even when what it needs did not "
+                   "succeed - it decides for itself - and must also depend on "
+                   "what it reads.")
         self._line("timeout", "Timeout",
                    _text(self._step.get("timeout")),
-                   "Seconds for the whole step, retries included. Blank means "
-                   "no deadline.")
+                   "Seconds for the whole step, retries and waits included. "
+                   "Blank means no deadline. Stopping is cooperative: the step "
+                   "is asked to stop, and a person watching may give it more "
+                   "time.")
         retry = self._step.get("retry") or {}
         self._line("retry.attempts", "Tries", _text(retry.get("attempts")),
                    "Total tries, not extra ones. Blank means one.")
         self._line("retry.delay", "Delay between tries",
-                   _text(retry.get("delay")), "Seconds.")
+                   _text(retry.get("delay")), "Seconds before the second try.")
+        self._choice("retry.backoff", "Backoff",
+                     _text(retry.get("backoff")) or "fixed", BACKOFF,
+                     "fixed waits the same delay every time; exponential "
+                     "doubles it before each further try.")
         self._choice("on_failure", "On failure",
                      self._step.get("on_failure") or "stop", ON_FAILURE,
                      "stop cancels the rest of the run; continue lets "
@@ -178,12 +226,30 @@ class NodeDialog(_Editor):
                     "A disabled step is skipped, and so is anything that needs "
                     "it.")
 
+    def _group_field(self):
+        """The phase the step is drawn in: typed, or one the cycle already has."""
+        widget = QComboBox()
+        widget.setEditable(True)
+        widget.addItem("")
+        for name in self._groups:
+            widget.addItem(name)
+        widget.setCurrentText(_text(self._step.get("group")))
+        widget.setEnabled(self._writable)
+        self._widgets["group"] = widget
+        self.body_layout.addWidget(widgets.field(
+            "Phase", widget,
+            "Which part of the cycle this belongs to. The canvas frames a "
+            "phase's steps together and can fold them into one box. It does "
+            "not change when the step runs."))
+
     # -- whatever the plugin declares ----------------------------------------
     def _add_plugin_fields(self):
         fields = self._plugin.get("inputs") or []
-        if not fields:
-            return
         settings = self._step.get("with") or {}
+        declared = {spec.get("key") for spec in fields}
+        undeclared = sorted(key for key in settings if key not in declared)
+        if not fields and not undeclared:
+            return
         self.body_layout.addWidget(widgets.kicker("Settings"))
         for spec in fields:
             key = "with." + spec.get("key", "")
@@ -194,11 +260,33 @@ class NodeDialog(_Editor):
             if spec.get("required"):
                 label += " *"
             self._by_kind(key, label, spec, value)
+        if undeclared:
+            # Kept, not dropped: a typo the core reports is still the author's
+            # to fix, and a dialog that deleted it would fix it by losing it.
+            note = widgets.lede("Also in the file, and not something %s takes: "
+                                "%s. Kept as written - the Problems tab says "
+                                "why; change them in the YAML tab."
+                                % (self._plugin.get("id") or "this plugin",
+                                   ", ".join(undeclared)))
+            note.setWordWrap(True)
+            self.body_layout.addWidget(note)
 
     def _by_kind(self, key, label, spec, value):
         """One widget for one declared field. The kind decides, not the key."""
         kind = spec.get("kind", "text")
         hint = spec.get("hint", "")
+        if value is not None and not _fits(kind, value):
+            if isinstance(value, str):
+                # An expression where a structure or a flag was expected:
+                # resolved when the step runs, so text is the honest widget.
+                self._as_text.add(key)
+                self._line(key, label, value,
+                           (hint + " " if hint else "")
+                           + "This is an expression, resolved when the step "
+                           "runs; it is kept as text.")
+                return
+            self._keep(key, label, value, hint)
+            return
         if kind == "check":
             self._check(key, label, bool(value), hint)
         elif kind == "choice":
@@ -218,9 +306,11 @@ class NodeDialog(_Editor):
                             + "One per line, name = value.")
         elif kind == "args":
             self._line(key, label,
-                       " ".join(value) if isinstance(value, list) else _text(value),
-                       (hint + " " if hint else "") + "Split the way a shell "
-                       "would split it.")
+                       _join_args(value) if isinstance(value, (list, tuple))
+                       else _text(value),
+                       (hint + " " if hint else "") + "Separated by spaces; "
+                       "put an item with a space in it in quotes, "
+                       "\"like this one\".")
         elif kind in ("file", "dir"):
             self._path(key, label, _text(value), hint, kind)
         else:
@@ -346,6 +436,17 @@ class NodeDialog(_Editor):
                 "The names above are what a later step can reference."))
 
     # -- building the widgets -------------------------------------------------
+    def _keep(self, key, label, value, hint=""):
+        """A value no widget here can hold without changing it: shown, kept."""
+        self._kept.add(key)
+        shown = widgets.mono(_short(_output_value(value) if not isinstance(value, str)
+                                    else value))
+        shown.setWordWrap(True)
+        shown.setToolTip(str(value))
+        self.body_layout.addWidget(widgets.field(
+            label, shown, (hint + " " if hint else "")
+            + "Kept exactly as written; change it in the YAML tab."))
+
     def _line(self, key, label, value, hint=""):
         widget = QLineEdit(value)
         widget.setEnabled(self._writable)
@@ -413,7 +514,7 @@ class NodeDialog(_Editor):
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         if isinstance(widget, QComboBox):
-            return widget.currentData()
+            return widget.currentText() if widget.isEditable() else widget.currentData()
         if isinstance(widget, QPlainTextEdit):
             return widget.toPlainText()
         return widget.text() if widget is not None else ""
@@ -428,8 +529,15 @@ class NodeDialog(_Editor):
         found = {}
         for spec in self._plugin.get("inputs") or []:
             key = spec.get("key", "")
+            if "with." + key in self._kept:
+                found[key] = (self._step.get("with") or {}).get(key)
+                continue
             raw = self._value("with." + key)
             kind = spec.get("kind", "text")
+            if "with." + key in self._as_text:
+                if str(raw).strip():
+                    found[key] = str(raw).strip()
+                continue
             if kind == "check":
                 found[key] = bool(raw)
                 continue
@@ -439,7 +547,7 @@ class NodeDialog(_Editor):
                     found[key] = pairs
                 continue
             if kind == "args":
-                parts = str(raw).split()
+                parts = _split_args(str(raw))
                 if parts:
                     found[key] = parts
                 continue
@@ -453,6 +561,10 @@ class NodeDialog(_Editor):
                 found[key] = text
         return found
 
+    def _touched(self, key):
+        """Whether the field now shows something other than it opened with."""
+        return key not in self._kept and self._value(key) != self._shown.get(key)
+
     def _save(self):
         step = {"id": self._value("id").strip(),
                 "plugin": self._step.get("plugin", "")}
@@ -463,6 +575,9 @@ class NodeDialog(_Editor):
         label = self._value("label").strip()
         if label:
             step["label"] = label
+        group = str(self._value("group") or "").strip()
+        if group:
+            step["group"] = group
         needs = [one.strip() for one in self._value("needs").split(",")
                  if one.strip()]
         if needs:
@@ -472,7 +587,7 @@ class NodeDialog(_Editor):
             step["if"] = condition
 
         timeout = self._value("timeout").strip()
-        if timeout:
+        if timeout and self._touched("timeout"):
             number = _number(timeout)
             if number is None or number <= 0:
                 problems.append("Timeout must be a positive number of seconds.")
@@ -482,13 +597,15 @@ class NodeDialog(_Editor):
         retry = {}
         for key, name in (("retry.attempts", "attempts"), ("retry.delay", "delay")):
             text = self._value(key).strip()
-            if not text:
+            if not text or not self._touched(key):
                 continue
             number = _number(text)
             if number is None:
                 problems.append("%s must be a number." % name.title())
             else:
                 retry[name] = int(number) if name == "attempts" else number
+        if self._value("retry.backoff") not in ("", "fixed", None):
+            retry["backoff"] = self._value("retry.backoff")
         if retry:
             step["retry"] = retry
 
@@ -497,6 +614,13 @@ class NodeDialog(_Editor):
         if self._value("disabled"):
             step["disabled"] = True
 
+        for spec in self._plugin.get("inputs") or []:
+            key = "with." + spec.get("key", "")
+            if (spec.get("kind") == "args" and key not in self._as_text
+                    and self._touched(key)
+                    and _split_args(str(self._value(key))) is None):
+                problems.append("%s: a quote is not closed."
+                                % (spec.get("label") or spec.get("key")))
         settings = self._settings()
         if settings:
             step["with"] = settings
@@ -505,11 +629,36 @@ class NodeDialog(_Editor):
         if problems:
             self._complain(problems)
             return
+        # Anything nobody changed goes back exactly as it came - value, type,
+        # and whether it was written at all - and so does whatever the form
+        # has no field for.
+        step = self._untouched_as_they_were(step)
         # Everything else the core decides. A second opinion here is a second
         # thing to keep in step with the validator that actually runs.
         self.saved = step
         self.saved_trigger = listening
         self.accept()
+
+    def _untouched_as_they_were(self, step):
+        """``step`` with every field nobody changed put back as it came."""
+        original = self._step
+        for key in self._widgets:
+            if key.startswith("listen.") or self._touched(key):
+                continue
+            path = key.split(".", 1) if key.startswith(("with.", "retry.")) else [key]
+            _put(step, path, _get(original, path))
+        declared = {spec.get("key") for spec in self._plugin.get("inputs") or []}
+        for name, value in (original.get("with") or {}).items():
+            if name not in declared:
+                _put(step, ["with", name], value)
+        for name in ("with", "retry"):
+            if name in step and not step[name]:
+                del step[name]
+        # Keys the dialog has no field for at all, which a newer file may have.
+        for name, value in original.items():
+            if name not in step and name not in _STEP_FIELDS:
+                step[name] = value
+        return step
 
 
 class _VariablesTable(QWidget):
@@ -547,6 +696,7 @@ class _VariablesTable(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.original = {}
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
@@ -595,14 +745,31 @@ class _VariablesTable(QWidget):
         """
         stored = set(stored or ())
         self.table.setRowCount(0)
+        #: name -> (kind, what the row showed, the value as the file had it),
+        #: so a row nobody changed gives back ``3`` rather than ``"3"`` and
+        #: ``false`` rather than an empty string.
+        self.original = {}
         for name in sorted(variables or {}):
             value = (variables or {})[name]
             if isinstance(value, dict) and value.get("kind") == PATH:
-                self.add_row(name, _text(value.get("value", "")), PATH)
+                shown, kind = _text(value.get("value", "")), PATH
+                self.add_row(name, shown, PATH)
             elif isinstance(value, dict):
+                shown, kind = "", SECRET
                 self.add_row(name, "", SECRET, stored=name in stored)
             else:
-                self.add_row(name, _text(value), TEXT)
+                shown, kind = ("false" if value is False else _text(value)), TEXT
+                self.add_row(name, shown, TEXT)
+            self.original[name] = (kind, shown, value)
+
+    def value_of(self, row):
+        """What a row means for the file: as it came, when nobody changed it."""
+        kind, shown, value = self.original.get(row["name"], (None, None, None))
+        if kind == row["kind"] and shown == row["value"] and kind != SECRET:
+            return value
+        if row["kind"] == PATH:
+            return {"kind": PATH, "value": row["value"]}
+        return row["value"]
 
     def add_row(self, name="", value="", kind=TEXT, stored=False):
         """One row of three inputs, the same height and the same edges.
@@ -778,10 +945,8 @@ class CycleDialog(_Editor):
                 variables[row["name"]] = {"secret": True}
                 if row["value"]:
                     values[row["name"]] = row["value"]
-            elif row["kind"] == PATH:
-                variables[row["name"]] = {"kind": PATH, "value": row["value"]}
             else:
-                variables[row["name"]] = row["value"]
+                variables[row["name"]] = self.variables.value_of(row)
 
         self.secret_values = values
         # A secret that is gone, or is now text or a path, leaves a value behind in
@@ -798,6 +963,104 @@ class CycleDialog(_Editor):
 
 
 # -- reading and writing the small formats ------------------------------------
+#: Every key of a step the dialog has a field for. Anything else a step carries
+#: is passed through untouched.
+_STEP_FIELDS = ("id", "plugin", "label", "group", "needs", "if", "with",
+                "timeout", "retry", "on_failure", "disabled")
+
+#: Stands for "not in the step", which None cannot: None is a value.
+_ABSENT = object()
+
+
+def _get(mapping, path):
+    for part in path:
+        if not isinstance(mapping, dict) or part not in mapping:
+            return _ABSENT
+        mapping = mapping[part]
+    return mapping
+
+
+def _put(mapping, path, value):
+    """Set ``path`` to ``value``, or take it out when the value is absent."""
+    for part in path[:-1]:
+        if value is _ABSENT and not isinstance(mapping.get(part), dict):
+            return
+        mapping = mapping.setdefault(part, {})
+    if value is _ABSENT:
+        mapping.pop(path[-1], None)
+    else:
+        mapping[path[-1]] = value
+
+
+_SCALARS = (str, int, float, bool, type(None))
+
+
+def _fits(kind, value):
+    """Whether a widget of ``kind`` can show ``value`` and give it back whole."""
+    if kind == "check":
+        return isinstance(value, bool)
+    if kind == "env":
+        return isinstance(value, dict) and all(
+            isinstance(one, _SCALARS) and "=" not in str(key) and "\n" not in str(key)
+            for key, one in value.items())
+    if kind == "args":
+        return (isinstance(value, (list, tuple))
+                and all(isinstance(one, _SCALARS) for one in value)
+                and _join_args(value) is not None)
+    if isinstance(value, str) and _WHOLE_REFERENCE.match(value):
+        return kind not in ("check", "env", "args")
+    return isinstance(value, _SCALARS)
+
+
+def _join_args(items):
+    """A list as one line: items apart by spaces, one with a space in quotes.
+
+    None when an item holds both kinds of quote - no quoting here could bring
+    it back whole, so the caller keeps the list as written instead.
+    """
+    parts = []
+    for item in items:
+        text = _text(item) if item is not True else "true"
+        if text and not any(one in text for one in " \t\"'"):
+            parts.append(text)
+        elif '"' not in text:
+            parts.append('"%s"' % text)
+        elif "'" not in text:
+            parts.append("'%s'" % text)
+        else:
+            return None
+    return " ".join(parts)
+
+
+def _split_args(text):
+    """The reverse of :func:`_join_args`. None when a quote is left open.
+
+    Quotes group, and nothing else is special - a backslash in particular is
+    left alone, because the paths people type here are Windows paths as often
+    as not, and a shell's escaping would eat half of every one.
+    """
+    parts, current, quote, started = [], [], None, False
+    for character in text or "":
+        if quote:
+            if character == quote:
+                quote = None
+            else:
+                current.append(character)
+        elif character in "\"'":
+            quote, started = character, True
+        elif character.isspace():
+            if current or started:
+                parts.append("".join(current))
+            current, started = [], False
+        else:
+            current.append(character)
+    if quote:
+        return None
+    if current or started:
+        parts.append("".join(current))
+    return parts
+
+
 def _text(value):
     """A value as the string a line edit shows. None and False become blank."""
     if value is None or value is False:

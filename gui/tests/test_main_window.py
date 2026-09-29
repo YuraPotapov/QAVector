@@ -1321,3 +1321,97 @@ def test_reloading_the_configuration_does_not_leave_a_stale_count(window, qapp):
     window._update_nav_badges()
     assert _badges(window, "logsources") == [(0, "ok"), (0, "bad")]
     assert window.services_label.text() == ""
+
+
+# ------------------------------------------------ Stages, wherever they are
+@pytest.fixture
+def forget_stages():
+    """Whether Stages is detached is a QSettings value every later test reads."""
+    yield
+    Settings().stages_detached = False
+
+
+def _pump(qapp, ms=50):
+    import time
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        qapp.processEvents()
+
+
+def test_go_to_stages_is_one_key_from_any_window_of_the_application(window):
+    from PySide6.QtCore import Qt
+    assert window.go_stages_action.shortcut().toString() == "Ctrl+Shift+S"
+    assert window.go_stages_action.shortcutContext() == Qt.ApplicationShortcut
+
+
+def test_go_to_stages_opens_the_cycles_page_on_its_stages_tab(window, forget_stages):
+    from cms_gui.pages.cycles import TAB_STAGES
+    window.show_page("launch")
+    window.go_to_stages()
+    assert window._page_key == "cycles"
+    assert window.cycles.output.tabs.currentIndex() == TAB_STAGES
+
+
+def test_go_to_stages_brings_a_detached_window_back_from_the_taskbar(
+        window, forget_stages):
+    from PySide6.QtCore import Qt
+    window.show_page("launch")
+    stages = window.cycles.detach_stages()
+    stages.showMinimized()
+    window.go_to_stages()
+    assert not stages.windowState() & Qt.WindowMinimized
+    assert window._page_key == "launch", "the window is where Stages is now"
+
+
+def test_the_view_switch_and_the_page_s_icon_agree(window, forget_stages):
+    window.stages_window_action.setChecked(True)
+    assert window.cycles.is_stages_detached()
+    window.cycles.output.dock_button.click()
+    assert not window.cycles.is_stages_detached()
+    assert not window.stages_window_action.isChecked()
+    window.cycles.output.detach_button.click()
+    assert window.stages_window_action.isChecked()
+
+
+def test_closing_the_application_closes_stages_and_keeps_it_detached(
+        window, monkeypatch, forget_stages):
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+    stages = window.cycles.detach_stages()
+    window.close()
+    assert stages.closed()
+    assert Settings().stages_detached, "it opens detached next time"
+
+
+def test_stages_left_detached_comes_back_detached_on_the_first_show(
+        qapp, dispose, forget_stages):
+    Settings().stages_detached = True
+    win = main_window_mod.MainWindow()
+    try:
+        assert not win.cycles.is_stages_detached(), "not before it is on screen"
+        win.show()
+        _pump(qapp)
+        assert win.cycles.is_stages_detached()
+        assert win.stages_window_action.isChecked()
+    finally:
+        win.cycles.dock_stages()
+        dispose(win)
+
+
+def test_a_window_never_shown_never_opens_stages(qapp, dispose, forget_stages):
+    """A headless --launch: the main window is not shown, so neither is this."""
+    Settings().stages_detached = True
+    win = main_window_mod.MainWindow(headless=True)
+    try:
+        _pump(qapp)
+        assert not win.cycles.is_stages_detached()
+    finally:
+        dispose(win)
+
+
+def test_a_step_s_file_opens_on_the_artifacts_page_with_it_selected(window, tmp_path):
+    run = tmp_path / "20260929-101500-demo"
+    (run / "steps" / "a").mkdir(parents=True)
+    (run / "steps" / "a" / "stdout.log").write_text("hi", encoding="utf-8")
+    window.cycles.artifacts_requested.emit(str(run), "steps/a/stdout.log")
+    assert window._page_key == "artifacts"
+    assert window.artifacts._selected_path() == str(run / "steps" / "a" / "stdout.log")

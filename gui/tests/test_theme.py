@@ -257,3 +257,38 @@ def test_the_header_and_the_selection_step_away_from_the_page_in_both_modes(qapp
         finally:
             theme.set_dark_mode(False)
             qapp.setStyleSheet(theme.stylesheet())
+
+
+def test_a_selected_row_in_the_dark_theme_is_a_deep_band_with_light_ink(qapp, dispose):
+    """The accent ramp is the brand and stays pale in both themes. Selection
+    painted from it put a pale band with dark ink on a dark page - the row
+    looked cut out of the page rather than picked."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
+
+    theme.set_dark_mode(True)
+    qapp.setStyleSheet(theme.stylesheet())
+    tree = QTreeWidget()
+    try:
+        tree.setHeaderHidden(True)
+        item = QTreeWidgetItem(["picked"])
+        tree.addTopLevelItem(item)
+        tree.resize(200, 80)
+        tree.setCurrentItem(item)
+        tree.show()
+        qapp.processEvents()
+        rect = tree.visualItemRect(item)
+        band = tree.viewport().grab().toImage().pixelColor(rect.right() - 4,
+                                                           rect.center().y())
+        assert band.name() == QColor(theme.SELECT_BG).name()
+        assert band.lightness() < 128, "a deep band, not a pale one"
+        assert QColor(theme.SELECT_INK).lightness() > band.lightness() + 100
+    finally:
+        dispose(tree)
+        theme.set_dark_mode(False)
+        qapp.setStyleSheet(theme.stylesheet())
+
+
+def test_the_light_theme_selection_is_what_it_always_was():
+    assert (theme.SELECT_BG, theme.SELECT_INK) == (theme.ACCENT_RAMP[200],
+                                                   theme.ACCENT_RAMP[900])

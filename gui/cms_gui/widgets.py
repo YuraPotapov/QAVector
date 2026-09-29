@@ -7,10 +7,13 @@ layout rather than as widget configuration.
 """
 
 import itertools
+import math
 import os
 import weakref
 
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, Signal
+from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPointF,
+                            QPropertyAnimation, QRectF, Qt, QTimer, Signal)
+from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
                                QApplication, QComboBox, QDialog,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
@@ -317,6 +320,16 @@ class Segmented(QWidget):
         if button is not None:
             button.setText(text)
 
+    def set_enabled(self, option, enabled, why=""):
+        """Offer ``option`` or not, saying why not in its tooltip."""
+        button = self._buttons.get(option)
+        if button is not None:
+            button.setEnabled(bool(enabled))
+            button.setToolTip("" if enabled else why)
+
+    def button(self, option):
+        return self._buttons.get(option)
+
     def current(self):
         return self._current
 
@@ -427,6 +440,11 @@ class ElidedLabel(QLabel):
     def setText(self, text):
         self._full = "" if text is None else str(text)
         self.setToolTip(self._full)
+        # The size it asks for is its text's, so a new text is a new request.
+        # Without this the layout kept the width of the first text it ever
+        # had - a page heading that started as "Cycles" stayed that wide, and
+        # every cycle's name was cut to it with room to spare beside it.
+        self.updateGeometry()
         self._elide()
 
     def text(self):
@@ -438,8 +456,11 @@ class ElidedLabel(QLabel):
         # Only read under a policy other than Ignored - see elided_line.
         hint = super().sizeHint()
         margins = self.contentsMargins()
-        hint.setWidth(self.fontMetrics().horizontalAdvance(self._full) + 2
-                      + margins.left() + margins.right())
+        # Measured with the fractional metrics and rounded up, with a few
+        # pixels over: _elide keeps two back, and a text 184.4 pixels wide in
+        # a label asked for at exactly 186 was cut short with room to spare.
+        advance = math.ceil(QFontMetricsF(self.font()).horizontalAdvance(self._full))
+        hint.setWidth(advance + 6 + margins.left() + margins.right())
         return hint
 
     def minimumSizeHint(self):
@@ -814,6 +835,293 @@ class EmptyNote(QLabel):
 def empty_note(table, text):
     """Say what an empty table means. Returns the note, which follows the table."""
     return EmptyNote(table, text)
+
+
+class Elsewhere(QWidget):
+    """What sits where something was, while a separate window has it.
+
+    A blank space would read as "it stopped". A pulse reads as "it is still
+    coming, just not here" - which is the one thing this has to say, and it
+    says it without a second copy of the content rendered off screen. Made
+    for the Run page's server log and used by the Cycles page's Stages too;
+    whatever else belongs on the line goes in with :meth:`add_widget`.
+    """
+
+    show_requested = Signal()
+
+    def __init__(self, text, show_text="Show window", parent=None):
+        super().__init__(parent)
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(0, 6, 0, 6)
+        self._row.setSpacing(10)
+
+        self._dot = PulseDot(self)
+        self._row.addWidget(self._dot, 0, Qt.AlignVCenter)
+        self.label = QLabel(text)
+        self.label.setProperty("role", "elsewhere")
+        self._row.addWidget(self.label)
+        self._row.addStretch(1)
+        self.show_button = QPushButton(show_text)
+        self.show_button.setProperty("variant", "ghost")
+        self.show_button.clicked.connect(self.show_requested)
+        self._row.addWidget(self.show_button)
+
+    def add_widget(self, widget):
+        """One more control at the end of the line."""
+        self._row.addWidget(widget)
+
+    def set_text(self, text):
+        self.label.setText(text)
+
+    def start(self):
+        self._dot.start()
+
+    def stop(self):
+        # Stopped whenever it is not on screen: an animation nobody can see is a
+        # timer waking the process up for nothing.
+        self._dot.stop()
+
+
+class PulseDot(QWidget):
+    """A dot that breathes. Its opacity is the animated property."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(10, 10)
+        self._opacity = 1.0
+        self._animation = QPropertyAnimation(self, b"pulse", self)
+        self._animation.setDuration(1100)
+        self._animation.setStartValue(1.0)
+        self._animation.setEndValue(0.2)
+        self._animation.setEasingCurve(QEasingCurve.InOutSine)
+        self._animation.setLoopCount(-1)
+        # Back down and up again rather than snapping to full brightness.
+        self._animation.setDirection(QPropertyAnimation.Forward)
+        self._animation.finished.connect(self._flip)
+
+    def _flip(self):
+        self._animation.setDirection(
+            QPropertyAnimation.Backward
+            if self._animation.direction() == QPropertyAnimation.Forward
+            else QPropertyAnimation.Forward)
+
+    def start(self):
+        if self._animation.state() != QPropertyAnimation.Running:
+            self._animation.start()
+
+    def stop(self):
+        self._animation.stop()
+        self._set_pulse(1.0)
+
+    def running(self):
+        return self._animation.state() == QPropertyAnimation.Running
+
+    def _get_pulse(self):
+        return self._opacity
+
+    def _set_pulse(self, value):
+        self._opacity = value
+        self.update()
+
+    pulse = Property(float, _get_pulse, _set_pulse)
+
+    def paintEvent(self, _event):             # noqa: N802 - Qt's own spelling
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        # Read now, not captured: dark mode rewrites theme.ACCENT in place.
+        colour = QColor(theme.ACCENT)
+        colour.setAlphaF(max(0.0, min(1.0, self._opacity)))
+        painter.setBrush(colour)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+
+
+class Skeleton(QWidget):
+    """The shape of what is on its way, pulsing slowly, until it arrives.
+
+    A region that stays as it was while its data loads looks exactly like a
+    program that has stopped; one that goes blank looks like one that lost
+    the data. This lays grey shapes where the rows, the lines or the graph
+    will be, breathing slowly from dark to light, so a wait reads as a wait.
+    Each row runs a little behind the one above it, which reads as calm rather
+    than as blinking.
+
+    It sits over its host and follows its size. It appears only after
+    :data:`DELAY_MS`: an answer quicker than that is on screen before anybody
+    could have wondered, and a skeleton flashed for a moment before it is
+    only a flicker. While it shows it takes the clicks, because what is under
+    it is about to be replaced and acting on it would act on the old thing.
+
+    A region nobody can see - a panel folded shut - costs nothing: the host
+    has no size, so there is nothing to paint.
+
+    Colours are read from ``theme`` at paint time, never kept, so dark mode
+    moves them with everything else. A region with a look of its own - the
+    cycle canvas's ruled paper - subclasses :meth:`paint_ground` and
+    :meth:`paint_shapes`.
+    """
+
+    #: What it can look like: the rows of a list, lines of text, or a graph.
+    SHAPES = ("rows", "lines", "graph")
+    #: How long an answer may take before the skeleton is worth showing.
+    DELAY_MS = 180
+    #: How often it is repainted, and how long one breath takes.
+    FRAME_MS = 40
+    PERIOD_MS = 1800
+    #: How far behind the one before each row breathes, as part of a breath.
+    STAGGER = 0.08
+
+    def __init__(self, host, shape="lines", ground="BG", area=None):
+        super().__init__(host)
+        self._host = host
+        #: Which part of the host to cover, when not all of it - a tab
+        #: widget's pages without its row of tabs, say.
+        self._area = area or host.rect
+        self._shape = shape if shape in self.SHAPES else "lines"
+        self._ground = ground
+        self._frame = 0
+        self._delay = QTimer(self)
+        self._delay.setSingleShot(True)
+        self._delay.timeout.connect(self._appear)
+        self._frames = QTimer(self)
+        self._frames.setInterval(self.FRAME_MS)
+        self._frames.timeout.connect(self._advance)
+        self.setAccessibleName("Loading")
+        self.setToolTip("Loading...")
+        self.hide()
+        host.installEventFilter(self)
+
+    # -- showing it -------------------------------------------------------------
+    def start(self, delay=None):
+        """Show it once the delay has passed, unless :meth:`stop` comes first."""
+        if self.isVisible() or self._delay.isActive():
+            return
+        self._delay.start(self.DELAY_MS if delay is None else int(delay))
+
+    def stop(self):
+        self._delay.stop()
+        self._frames.stop()
+        self.hide()
+
+    def active(self):
+        """Waiting to appear, or showing."""
+        return self._delay.isActive() or self.isVisible()
+
+    def _appear(self):
+        self._frame = 0
+        self.setGeometry(self._area())
+        self.raise_()
+        self.show()
+        self._frames.start()
+
+    def _advance(self):
+        self._frame += 1
+        self.update()
+
+    def eventFilter(self, watched, event):
+        if watched is self._host and event.type() == QEvent.Resize and self.isVisible():
+            self.setGeometry(self._area())
+        return False
+
+    # -- the breath ----------------------------------------------------------------
+    def level(self, row=0):
+        """How light row ``row`` is now, from 0 (dark) to 1 (light)."""
+        breath = self._frame * self.FRAME_MS / float(self.PERIOD_MS) - row * self.STAGGER
+        return (1.0 - math.cos(2.0 * math.pi * breath)) / 2.0
+
+    def colour(self, row=0, dark=None, light=None):
+        """The shade row ``row`` is painted in now, between ``dark`` and ``light``."""
+        dark = QColor(dark or theme.NEUTRAL[300])
+        light = QColor(light or theme.NEUTRAL[100])
+        mix = self.level(row)
+        return QColor(round(dark.red() + (light.red() - dark.red()) * mix),
+                      round(dark.green() + (light.green() - dark.green()) * mix),
+                      round(dark.blue() + (light.blue() - dark.blue()) * mix))
+
+    # -- drawing it -------------------------------------------------------------
+    def shapes(self):
+        """``[(rectangle, row)]`` - where the grey goes, and which row it is in."""
+        width, height = self.width(), self.height()
+        if self._shape == "graph":
+            return [(box, row) for row, layer in enumerate(self.layers()) for box in layer]
+        found = []
+        if self._shape == "rows":
+            y, index = 10.0, 0
+            while y + 30 < height:
+                found.append((QRectF(12, y + 2, 14, 14), index))
+                found.append((QRectF(34, y, (width - 46) * (0.55 + 0.3 * _spread(index)), 11),
+                              index))
+                found.append((QRectF(34, y + 17,
+                                     (width - 46) * (0.3 + 0.2 * _spread(index + 7)), 8), index))
+                y += 42
+                index += 1
+            return found
+        y, index = 12.0, 0
+        while y + 10 < height:
+            found.append((QRectF(14, y, (width - 28) * (0.35 + 0.6 * _spread(index)), 9), index))
+            y += 20
+            index += 1
+        return found
+
+    def bars(self):
+        """Where the grey goes, as rectangles - worked out from the size alone."""
+        return [rect for rect, _row in self.shapes()]
+
+    def layers(self):
+        """The graph shape's boxes, one list per layer, top to bottom."""
+        width, height = self.width(), self.height()
+        box_w, box_h, gap = min(200.0, width * 0.42), 40.0, 26.0
+        found, y, row = [], 24.0, 0
+        while y + box_h < height and row < 12:
+            if row % 3 == 2 and width > box_w * 2 + 36:
+                # Every third layer forks, so it reads as a graph and not as a
+                # list: two boxes side by side.
+                found.append([QRectF(x, y, box_w, box_h)
+                              for x in (width / 2.0 - box_w - 12, width / 2.0 + 12)])
+            else:
+                found.append([QRectF((width - box_w) / 2.0, y, box_w, box_h)])
+            y += box_h + gap
+            row += 1
+        return found
+
+    def paint_ground(self, painter):
+        """What the region looks like with nothing in it."""
+        if self._ground:
+            painter.fillRect(self.rect(), QColor(getattr(theme, self._ground, theme.BG)))
+
+    def paint_shapes(self, painter):
+        """The shapes, each in its row's shade of the breath."""
+        if self._shape == "graph":
+            # Every box of a layer joined to every box of the next, the way a
+            # fork and a join are drawn on the real canvas.
+            painter.setPen(QPen(QColor(theme.NEUTRAL[400]), 1.2))
+            layers = self.layers()
+            for above, below in zip(layers, layers[1:]):
+                for one in above:
+                    for two in below:
+                        painter.drawLine(QPointF(one.center().x(), one.bottom()),
+                                         QPointF(two.center().x(), two.top()))
+        painter.setPen(Qt.NoPen)
+        radius = 6 if self._shape == "graph" else 3
+        for rect, row in self.shapes():
+            painter.setBrush(QBrush(self.colour(row)))
+            painter.drawRoundedRect(rect, radius, radius)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        self.paint_ground(painter)
+        self.paint_shapes(painter)
+        painter.end()
+
+
+def _spread(index):
+    """A width between 0 and 1 that varies from row to row, the same every time.
+
+    Deterministic, so a skeleton does not jitter between repaints; varied, so
+    it reads as text of different lengths rather than as a ruled grid.
+    """
+    return ((index * 7919) % 97) / 97.0
 
 
 def start_dir(hint, fallback="~"):
@@ -1208,6 +1516,17 @@ def choose(parent, title, message, detail="", choices=(), agree="OK",
 def output(parent, title, message, text="", kind=""):
     """What a command printed, in a box somebody can select a line out of."""
     return _shown(Message(parent, title, message, "", kind, output=text))
+
+
+def confirm_output(parent, title, question, detail="", text="", agree="Yes",
+                   refuse="Cancel", kind="warn"):
+    """Ask, with the thing being agreed to shown in full - a diff, say.
+
+    For the questions whose honest answer depends on reading something: "save
+    this?" means little until the lines that change are in front of you.
+    """
+    return _shown(Message(parent, title, question, detail, kind, agree, refuse,
+                          output=text))
 
 
 def _shown(dialog):

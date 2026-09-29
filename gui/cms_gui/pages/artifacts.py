@@ -181,6 +181,32 @@ class ArtifactsPage(QWidget):
                                       and os.path.isdir(self._shown_dir)))
         self.rescan()
 
+    def reveal(self, run_dir, path=""):
+        """Show ``run_dir`` with ``path`` selected in it. True when it was found.
+
+        ``path`` is what a cycle records: relative to the run's own directory,
+        because the directory describes itself and may have been copied from
+        another machine. An absolute path is taken as it is. Nothing to select,
+        or a file that has since gone, leaves the folder on show - which is
+        still the right place to have arrived - and the path line says which.
+        """
+        if run_dir and os.path.normpath(run_dir) != os.path.normpath(
+                self._shown_dir or os.sep):
+            self.show_dir(run_dir)
+        else:
+            self.rescan()
+        if not path:
+            self.tree.clearSelection()
+            return False
+        wanted = os.path.normpath(path if os.path.isabs(path)
+                                  else os.path.join(run_dir or self._shown_dir, path))
+        if self._select_path(wanted):
+            self.tree.scrollToItem(self.tree.currentItem())
+            return True
+        self.tree.clearSelection()
+        self.path_label.setText("%s is no longer there" % wanted)
+        return False
+
     def note_artifacts(self, _event):
         """A scenario finished writing; the cheapest correct answer is a rescan."""
         self.rescan()
@@ -293,7 +319,9 @@ class ArtifactsPage(QWidget):
     def _select_path(self, path):
         iterator = self.tree.findItems("", Qt.MatchContains | Qt.MatchRecursive, 0)
         for item in iterator:
-            if item.data(0, Qt.UserRole) == path:
+            # Normalised on both sides: the tree's paths are joined from the
+            # shown directory as it was given, which may end in a separator.
+            if os.path.normpath(item.data(0, Qt.UserRole) or "") == os.path.normpath(path):
                 self.tree.setCurrentItem(item)
                 return True
         return False

@@ -129,6 +129,9 @@ def test_where_the_run_wrote_its_files_comes_back_too(tmp_path, qapp):
     where = a_run(tmp_path)
     cyclereplay.restore(where, state)
     assert state.run_dir == where
+    # And on the run itself, which is what the Cycles page reads: a scenario
+    # started later moves state.run_dir, and must not move this run's files.
+    assert state.cycle["run_dir"] == where
 
 
 # ------------------------------------------------------------- what it skips
@@ -236,3 +239,12 @@ def test_restoring_survives_a_history_that_cannot_be_read(qapp):
             raise OSError("no")
 
     assert cyclereplay.restore_last(Broken(), RunState()) == ""
+
+
+def test_events_read_elsewhere_are_fed_in_the_same_way(tmp_path, qapp):
+    """The window reads a long stream on a thread and feeds it here."""
+    run = a_run(tmp_path)
+    events = cyclereplay.events_of(run)
+    state = RunState()
+    assert cyclereplay.restore(run, state, events=events)
+    assert state.cycle is not None and state.cycle.get("cycle") == "demo"

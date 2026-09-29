@@ -726,3 +726,144 @@ def test_edges_sit_below_every_node_lit_or_not():
     from cms_gui.cyclegraph import EDGE_LIT_Z, EDGE_Z
 
     assert EDGE_Z < EDGE_LIT_Z < 0
+
+
+# -------------------------------------------------------------------- phases
+# Folding is pure too: which steps go into one box, what the box waits for, and
+# where it goes, worked out from the payload alone. The core's `group:` names
+# the phase; nothing here decides what belongs together.
+from cms_gui.cyclegraph import (GROUP_PREFIX, fold_graph, groups_of,  # noqa: E402
+                                phase_status, problems_by_step)
+
+
+def payload(*spec):
+    """``("a", [], "P")`` - id, needs, phase - into a graph payload."""
+    made = []
+    for name, needs, group in spec:
+        made.append({"id": name, "needs": list(needs), "group": group,
+                     "layer": 0, "row": 0, "plugin": "command.shell"})
+    return {"id": "demo", "nodes": made,
+            "edges": [{"from": need, "to": one["id"], "kind": "dependency"}
+                      for one in made for need in one["needs"]]}
+
+
+PHASED = payload(("a", [], "Take"), ("b", ["a"], "Take"), ("c", ["b"], "Plan"),
+                 ("d", ["c"], "Plan"), ("e", ["d", "a"], ""))
+
+
+def test_phases_are_read_in_the_order_the_steps_are_written():
+    assert groups_of(PHASED["nodes"]) == {"Take": ["a", "b"], "Plan": ["c", "d"]}
+
+
+def test_a_folded_phase_is_one_node_waiting_on_what_its_steps_waited_on():
+    drawn, refused = fold_graph(PHASED, ["Plan"])
+    assert refused == []
+    ids = [node["id"] for node in drawn["nodes"]]
+    assert ids == ["a", "b", GROUP_PREFIX + "Plan", "e"]
+    plan = drawn["nodes"][2]
+    assert plan["members"] == ["c", "d"] and plan["needs"] == ["b"]
+    assert drawn["nodes"][3]["needs"] == [GROUP_PREFIX + "Plan", "a"]
+
+
+def test_a_folded_graph_is_laid_out_again_from_its_own_shape():
+    drawn, _refused = fold_graph(PHASED, ["Take", "Plan"])
+    layers = {node["id"]: node["layer"] for node in drawn["nodes"]}
+    assert layers == {GROUP_PREFIX + "Take": 0, GROUP_PREFIX + "Plan": 1, "e": 2}
+
+
+def test_no_edge_is_drawn_twice_or_from_a_phase_to_itself():
+    drawn, _refused = fold_graph(PHASED, ["Take", "Plan"])
+    pairs = [(edge["from"], edge["to"]) for edge in drawn["edges"]]
+    assert sorted(pairs) == sorted({(GROUP_PREFIX + "Take", GROUP_PREFIX + "Plan"),
+                                    (GROUP_PREFIX + "Plan", "e"),
+                                    (GROUP_PREFIX + "Take", "e")})
+
+
+def test_a_phase_that_would_wait_on_itself_is_left_open():
+    """x -> outside -> y with x and y in one phase: one box cannot wait for
+    something that waits for it."""
+    looped = payload(("x", [], "P"), ("out", ["x"], ""), ("y", ["out"], "P"))
+    drawn, refused = fold_graph(looped, ["P"])
+    assert refused == ["P"]
+    assert [node["id"] for node in drawn["nodes"]] == ["x", "out", "y"]
+
+
+def test_folding_nothing_gives_the_graph_back_as_it_was():
+    assert fold_graph(PHASED, []) == (PHASED, [])
+
+
+def test_a_phase_says_what_its_steps_say_worst_first():
+    assert phase_status(["success", "failed", "running"]) == "failed"
+    assert phase_status(["success", "running"]) == "running"
+    assert phase_status(["success", "success"]) == "success"
+    assert phase_status(["success", "skipped"]) == "success"
+    assert phase_status(["skipped", "cancelled"]) == "cancelled"
+    assert phase_status(["pending", "pending"]) == "pending"
+    assert phase_status([]) == "pending"
+
+
+def test_a_problem_lands_on_the_step_it_names():
+    mine, rest = problems_by_step(
+        ["a: needs 'ghost'", "b: timeout is -1", "a -> b wait for each other"],
+        ["a", "b"])
+    assert mine == {"a": ["a: needs 'ghost'"], "b": ["b: timeout is -1"]}
+    assert rest == ["a -> b wait for each other"]
+
+
+from cms_gui.cyclegraph import frame_islands  # noqa: E402
+
+
+def _covers(pieces, x, y):
+    return any(left <= x <= right and top <= y <= bottom
+               for left, top, right, bottom in pieces)
+
+
+def test_a_phase_down_one_column_is_one_island_with_one_heading():
+    rects = [(0, 0, 100, 50), (0, 100, 100, 50), (0, 200, 100, 50)]
+    islands = frame_islands(rects, pad=10, header=20, gap=50)
+    assert len(islands) == 1
+    pieces, heading = islands[0]
+    assert heading == (-10, -30, 110, -10)
+    assert _covers(pieces, 50, 75), "the link between two layers is ground too"
+
+
+def test_a_step_far_from_the_rest_of_its_phase_gets_an_island_of_its_own():
+    """The development cycle's Record: one step beside the plan, the rest at
+    the very end. One box round all of it covered four other phases."""
+    rects = [(200, 0, 100, 50), (0, 900, 100, 50), (0, 1000, 100, 50)]
+    islands = frame_islands(rects, pad=10, header=20, gap=50)
+    assert len(islands) == 2
+    assert not any(_covers(pieces, 50, 500) for pieces, _h in islands)
+
+
+def test_another_phase_s_step_on_the_same_layer_is_not_covered():
+    """plan (left, layer 9) then the rest of Plan down the middle; the Record
+    step to the right of plan must stay outside Plan's frame."""
+    plan = [(-60, 0, 100, 50), (0, 100, 100, 50), (0, 200, 100, 50)]
+    islands = frame_islands(plan, pad=10, header=20, gap=50)
+    assert len(islands) == 1
+    pieces, _heading = islands[0]
+    assert not _covers(pieces, 150, 25), "the neighbour to the right, at x 60-160"
+    assert _covers(pieces, -50, 25) and _covers(pieces, 50, 150)
+
+
+def test_the_canvas_skeleton_uses_the_canvas_s_own_sizes(qapp):
+    """Placeholder nodes the size real ones open at, a layer apart as real
+    layers are - so what arrives fills in what was waiting."""
+    from cms_gui.cyclegraph import SPEC, CanvasSkeleton, CycleCanvas
+    canvas = CycleCanvas()
+    canvas.resize(600, 400)
+    try:
+        skeleton = CanvasSkeleton(canvas)
+        skeleton.resize(600, 400)
+        zoom = SPEC["zoom"]["grid"]
+        layers = skeleton.layers()
+        box = layers[0][0]
+        assert abs(box.width() - SPEC["node"]["w"] * zoom) < 0.01
+        assert abs(box.height() - SPEC["node"]["h"] * zoom) < 0.01
+        pitch = layers[1][0].top() - layers[0][0].top()
+        assert abs(pitch - (SPEC["node"]["h"] + SPEC["grid"]["layer_gap"]) * zoom) < 0.01
+        assert any(len(layer) > 1 for layer in layers), "a fork somewhere"
+        skeleton.grab()
+    finally:
+        canvas.deleteLater()

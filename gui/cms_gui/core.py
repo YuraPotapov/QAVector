@@ -239,6 +239,10 @@ class Core:
     settings change rather than mutating a shared object.
     """
 
+    #: Every call starts a process and waits for it, so a page that wants to
+    #: keep painting while it waits asks on a thread - see ``background``.
+    offload = True
+
     def __init__(self, script=None, interpreter=None, config=None,
                  log_sources=None, flows_dir=None, cycles_dir=None,
                  secrets_path="",
@@ -458,8 +462,27 @@ class Core:
         """One cycle: its text, the graph its steps make, and its problems."""
         return self._flow_json("--cycle-show=" + cycle_id)
 
-    def cycle_save(self, cycle_id, document):
-        """Write a cycle from ``document`` ({"yaml": ...} or the document itself)."""
+    def cycle_save(self, cycle_id, document, base="", allow_loss=False,
+                   dry_run=False, source=""):
+        """Write a cycle from ``document`` ({"yaml": ...} or the document itself).
+
+        ``base`` is the digest the file had when it was opened, so a file
+        changed since is not written over; ``allow_loss`` agrees to comments
+        a form's save cannot keep; ``dry_run`` answers without writing - what a
+        draft is checked with; ``source`` is the cycle a duplicate was made
+        from. See ``cycle/cyclefile.save``. They travel in an envelope only
+        when one is used, so a plain save is sent the way it always was.
+        """
+        options = {key: value for key, value in (
+            ("base", base), ("allow_loss", allow_loss), ("dry_run", dry_run),
+            ("source", source)) if value}
+        if options:
+            wrapped = dict(options)
+            if "yaml" in document:
+                wrapped["yaml"] = document["yaml"]
+            else:
+                wrapped["document"] = document
+            document = wrapped
         return self._with_document("--cycle-save=" + cycle_id, document,
                                    prefix="cms-cycle-")
 

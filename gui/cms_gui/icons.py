@@ -353,8 +353,128 @@ def _delete(painter, ink):
 
 #: name -> drawing. The names are the ones the interface already asked for, so
 #: every call site reads the same as it did before the marks were characters.
+def _warn(painter, ink):
+    """A triangle with a mark in it: something to read before going on."""
+    _stroke(painter, ink)
+    path = QPainterPath()
+    path.moveTo(12, 3.5)
+    path.lineTo(21, 19.5)
+    path.lineTo(3, 19.5)
+    path.closeSubpath()
+    painter.drawPath(path)
+    painter.drawLine(QPointF(12, 9), QPointF(12, 13.5))
+    _fill(painter, ink)
+    painter.drawRect(QRectF(11, 15.5, 2, 2))
+
+
+def _fold(painter, ink):
+    """Two chevrons meeting: fold what is between them into one."""
+    _stroke(painter, ink)
+    for top, bottom in ((3.5, 9.5), (20.5, 14.5)):
+        path = QPainterPath()
+        path.moveTo(6.5, top)
+        path.lineTo(12, bottom)
+        path.lineTo(17.5, top)
+        painter.drawPath(path)
+
+
+def _unfold(painter, ink):
+    """Two chevrons parting: open a folded group back out."""
+    _stroke(painter, ink)
+    for top, bottom in ((9.5, 3.5), (14.5, 20.5)):
+        path = QPainterPath()
+        path.moveTo(6.5, top)
+        path.lineTo(12, bottom)
+        path.lineTo(17.5, top)
+        painter.drawPath(path)
+
+
+def _fit(painter, ink):
+    """Four corners: show all of it."""
+    _stroke(painter, ink)
+    for x, y, dx, dy in ((4.5, 4.5, 1, 1), (19.5, 4.5, -1, 1),
+                         (4.5, 19.5, 1, -1), (19.5, 19.5, -1, -1)):
+        painter.drawLine(QPointF(x, y), QPointF(x + 5 * dx, y))
+        painter.drawLine(QPointF(x, y), QPointF(x, y + 5 * dy))
+
+
+def _window_open_at_the_corner(painter):
+    """A window with its top-right corner left open, for an arrow to pass."""
+    path = QPainterPath()
+    path.moveTo(11, 6.5)
+    path.lineTo(4.5, 6.5)
+    path.lineTo(4.5, 19.5)
+    path.lineTo(17.5, 19.5)
+    path.lineTo(17.5, 13)
+    painter.drawPath(path)
+
+
+def _popout(painter, ink):
+    """An arrow leaving a window through its corner: into a window of its own.
+
+    The mark every desktop uses for "open this separately", and drawn rather
+    than lettered because the button carries no text - the tooltip says it.
+    """
+    _stroke(painter, ink)
+    _window_open_at_the_corner(painter)
+    painter.drawLine(QPointF(10.5, 13.5), QPointF(19.5, 4.5))
+    head = QPainterPath()
+    head.moveTo(13.5, 4.5)
+    head.lineTo(19.5, 4.5)
+    head.lineTo(19.5, 10.5)
+    painter.drawPath(head)
+
+
+def _dock(painter, ink):
+    """The same arrow coming back in: put it back where it came from."""
+    _stroke(painter, ink)
+    _window_open_at_the_corner(painter)
+    painter.drawLine(QPointF(19.5, 4.5), QPointF(10.5, 13.5))
+    head = QPainterPath()
+    head.moveTo(10.5, 7.5)
+    head.lineTo(10.5, 13.5)
+    head.lineTo(16.5, 13.5)
+    painter.drawPath(head)
+
+
+def _turn(painter, ink, back):
+    """Half a loop with a head on it; ``back`` points it the other way."""
+    _stroke(painter, ink)
+    sign = -1 if back else 1
+    path = QPainterPath()
+    path.moveTo(12 - 7 * sign, 17.5)
+    path.lineTo(12 + 2 * sign, 17.5)
+    path.cubicTo(12 + 9 * sign, 17.5, 12 + 9 * sign, 7.5, 12 + 2 * sign, 7.5)
+    path.lineTo(12 - 7 * sign, 7.5)
+    painter.drawPath(path)
+    head = QPainterPath()
+    head.moveTo(12 - 4 * sign, 4)
+    head.lineTo(12 - 7.5 * sign, 7.5)
+    head.lineTo(12 - 4 * sign, 11)
+    painter.drawPath(head)
+
+
+def _undo(painter, ink):
+    _turn(painter, ink, back=False)
+
+
+def _redo(painter, ink):
+    _turn(painter, ink, back=True)
+
+
 DRAWINGS = {
     "run": _run,
+    # A project in the Cycles explorer: a folder of cycles. The same drawing
+    # as artifacts, named for what it marks there.
+    "folder": _artifacts,
+    "warn": _warn,
+    "fold": _fold,
+    "unfold": _unfold,
+    "fit": _fit,
+    "popout": _popout,
+    "dock": _dock,
+    "undo": _undo,
+    "redo": _redo,
     "run-step": _run_step,
     "run-from": _run_from,
     "stop": _stop,

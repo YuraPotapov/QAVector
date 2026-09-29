@@ -27,12 +27,16 @@ the right rule: a glyph that depends on the font is not a drawing. The dot and
 the line between dots are a ``QPainter`` call each.
 """
 
+import copy
+import time
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from . import icons, theme
+from . import icons, theme, widgets
+from .cycleinteractions import recipient_label
 
 #: Everything the column looks like, in one place - the habit ``cyclegraph.py``
 #: keeps, and for the same reason: a redesign changes values here rather than
@@ -58,6 +62,22 @@ LOOK = {
     # check held, and red through the failed status every other row uses.
     "gate": "OK",
     "result": "OK",
+    # Something that may or may not have happened - a message handed to a call
+    # whose outcome was never recorded. Neither a success nor a failure.
+    "caution": "WARN",
+}
+
+#: How a person's message is marked, by what became of it - so one that did not
+#: arrive is findable in a long run without reading a word. Written as the
+#: stage a marker already knows how to draw.
+MESSAGE_MARK = {
+    "sending": {"status": "running"},
+    "pending": {"status": "running"},
+    "unconfirmed": {"kind": "caution"},
+    "uncertain": {"kind": "caution"},
+    "delivered": {"kind": "result"},
+    "undelivered": {"status": "failed"},
+    "rejected": {"status": "failed"},
 }
 
 #: How a review's own verdict is coloured, by the same rule its risk is read.
@@ -347,6 +367,166 @@ def _trimmed(text):
     return "\n".join(lines[:limit] + ["... %d more lines" % (len(lines) - limit)])
 
 
+#: What a message's state is called on its pill. Short, because it is a pill;
+#: the sentence that says why sits under the text.
+STATE_WORDS = {
+    "sending": "SENDING",
+    "pending": "WAITING",
+    "delivered": "DELIVERED",
+    "undelivered": "NOT DELIVERED",
+    "rejected": "REJECTED",
+    "uncertain": "UNCERTAIN",
+    "unconfirmed": "NOT CONFIRMED",
+}
+
+#: Said once, on the pill, rather than under every message: delivered is a
+#: fact about a call's input, never a claim about what the work then did.
+DELIVERED_MEANS = ("Delivered means it went into the input of that call - not "
+                   "that what it asks for was done. The work and its checks "
+                   "show that.")
+
+
+class InteractionRow(QFrame):
+    """One message in the feed, redrawn in place as what became of it changes.
+
+    Laid out as a message rather than as one more stage: a card with the state
+    down its left edge (the stylesheet's ``QFrame[role="message"]``), who it
+    was for and when on top, what was said in the page's own type, and one
+    line on where it got to. The marker column is kept so the feed still reads
+    as one sequence.
+    """
+
+    def __init__(self, stage, first=False, last=False, labels=None):
+        super().__init__()
+        self.stage = {}
+        self.step_id = ""
+        self._message = None
+        self._labels = labels or {}
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 3, 6, 3)
+        row.setSpacing(0)
+        self.marker = _Marker(MESSAGE_MARK["pending"], first, last)
+        row.addWidget(self.marker, 0)
+
+        self.card = QFrame()
+        self.card.setProperty("role", "message")
+        column = QVBoxLayout(self.card)
+        column.setContentsMargins(10, 6, 10, 7)
+        column.setSpacing(3)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        kind = QLabel("CLARIFICATION")
+        kind.setProperty("role", "msgkind")
+        head.addWidget(kind)
+        self.title = QLabel("")
+        self.title.setProperty("role", "msgto")
+        head.addWidget(self.title, 1)
+        self.meta = QLabel("")
+        self.meta.setProperty("role", "msgmeta")
+        head.addWidget(self.meta)
+        self.state = QLabel("")
+        self.state.setProperty("role", "msgstate")
+        self.state.setToolTip(DELIVERED_MEANS)
+        head.addWidget(self.state)
+        column.addLayout(head)
+        self.detail = QLabel("")
+        self.detail.setProperty("role", "msgtext")
+        self.delivery = QLabel("")
+        self.delivery.setProperty("role", "msgdetail")
+        for label in (self.title, self.meta, self.detail, self.delivery):
+            # What somebody wrote and what a plugin explained are text, always.
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(label is not self.meta)
+        self.detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(self.detail)
+        column.addWidget(self.delivery)
+        row.addWidget(self.card, 1)
+        self.set_stage(stage)
+
+    def set_stage(self, stage):
+        message = stage.get("body") or {}
+        if message == self._message:
+            return
+        self._message = copy.deepcopy(message)
+        self.stage = dict(stage)
+        status = message.get("state", "pending")
+        run_wide = message.get("scope") == "run"
+        self.title.setText("to %s" % recipient_label(
+            message.get("scope", ""), message.get("step", ""),
+            message.get("execution"), self._labels))
+        timestamp = message.get("accepted_at")
+        stamp = time.strftime("%H:%M", time.localtime(timestamp)) if timestamp else ""
+        self.meta.setText("  ".join(part for part in (message.get("who") or "", stamp)
+                                    if part))
+        self.detail.setText(str((message.get("payload") or {}).get("text") or ""))
+        read = [one for one in message.get("deliveries") or []
+                if one.get("state") == "delivered"]
+        words = STATE_WORDS.get(status, status.upper())
+        if run_wide and status == "delivered":
+            # One reader does not use it up, so "delivered" alone would claim
+            # more than happened. How many have read it, and who, instead.
+            words = "READ BY %d" % len({(one.get("step"), one.get("execution"))
+                                        for one in read})
+        self.state.setText(words)
+        self.delivery.setText(self._where_it_got(message, status, read))
+        self.delivery.setVisible(bool(self.delivery.text()))
+        for widget, name, value in ((self.card, "state", status),
+                                    (self.state, "state", status),
+                                    (self.delivery, "bad", "true" if status in (
+                                        "undelivered", "rejected") else "false")):
+            if widget.property(name) != value:
+                widget.setProperty(name, value)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+        self.marker._stage = MESSAGE_MARK.get(status, MESSAGE_MARK["pending"])
+        self.marker.update()
+
+    def _where_it_got(self, message, status, read):
+        """One line: where the message got to, or why it did not."""
+        lines = []
+        if message.get("scope") == "run":
+            readers = []
+            for one in read:
+                name = recipient_label("step", one.get("step", ""),
+                                       one.get("execution"), self._labels)
+                readers.append("%s (%s)" % (name, one["point"]) if one.get("point")
+                               else name)
+            missed = [recipient_label("step", one.get("step", ""), one.get("execution"),
+                                      self._labels)
+                      for one in message.get("deliveries") or []
+                      if one.get("state") == "undelivered"]
+            if readers:
+                lines.append("Read by %s." % ", ".join(readers))
+            if missed:
+                lines.append("Not read by %s: it ended first." % ", ".join(missed))
+            if status == "pending" and not readers:
+                lines.append("Every step still to come that takes messages reads "
+                             "it at its next point.")
+        elif status == "delivered":
+            points, later = [], []
+            for one in read:
+                if one.get("step") != message.get("step"):
+                    # A step after it, judging its work: told what it was told.
+                    name = recipient_label("step", one.get("step", ""),
+                                           one.get("execution"), self._labels)
+                    if name not in later:
+                        later.append(name)
+                elif one.get("point") and one["point"] not in points:
+                    points.append(one["point"])
+            lines.append("Read at %s." % ", ".join(points) if points else "Read.")
+            if later:
+                lines.append("Also shown to %s, which came after it." % ", ".join(later))
+        elif status == "pending":
+            lines.append("Waiting for the step's next point.")
+        elif status == "sending":
+            lines.append("Not saved by the run yet.")
+        if message.get("reason") and status not in ("delivered", "pending"):
+            lines.append(str(message["reason"]))
+        if message.get("request_error"):
+            lines.append("Sending it again was refused: %s" % message["request_error"])
+        return " ".join(lines)
+
+
 class StageList(QScrollArea):
     """Every stage, top to bottom, following the newest as they arrive.
 
@@ -396,7 +576,10 @@ class StageList(QScrollArea):
         bar.rangeChanged.connect(self._grew)
         self._body = QWidget()
         self._body.setAutoFillBackground(True)
-        self._body.setStyleSheet("background: %s;" % theme.BG)
+        # Scoped to the body itself: a bare rule here reaches every row inside
+        # it and outranks the application sheet, which painted a message
+        # card and its state pill in the page ground whatever they asked for.
+        widgets.scoped_style(self._body, "background: %s;" % theme.BG)
         self._column = QVBoxLayout(self._body)
         self._column.setContentsMargins(6, 6, 6, 6)
         self._column.setSpacing(0)
@@ -425,6 +608,9 @@ class StageList(QScrollArea):
             self._rebuild(incoming, named, labels)
         else:
             self._extend(incoming, moved)
+            for row, entry in zip(self._rows, incoming):
+                if isinstance(row, InteractionRow):
+                    row.set_stage(entry[1] if isinstance(entry, tuple) else entry)
         self._drawn = incoming
         self._empty.setText("" if incoming else EMPTY)
         self._empty.setVisible(not incoming)
@@ -478,9 +664,11 @@ class StageList(QScrollArea):
     def _add(self, entry, first, last):
         """One row at the bottom of the column, above the stretch."""
         step_id, stage = entry if isinstance(entry, tuple) else ("", entry)
-        row = StageRow(stage, first=first, last=last,
-                       step_id=step_id if self._named else "",
-                       label=self._labels.get(step_id, ""))
+        row = (InteractionRow(stage, first=first, last=last, labels=self._labels)
+               if stage.get("kind") == "interaction" else
+               StageRow(stage, first=first, last=last,
+                        step_id=step_id if self._named else "",
+                        label=self._labels.get(step_id, "")))
         self._rows.append(row)
         self._column.insertWidget(self._column.count() - 1, row)
 

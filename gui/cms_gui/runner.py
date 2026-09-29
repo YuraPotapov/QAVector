@@ -11,6 +11,7 @@ launcher that hangs leaves the GUI perfectly responsive (and stoppable).
 """
 
 import collections
+import copy
 import json
 import os
 import re
@@ -244,6 +245,7 @@ class RunState(QObject):
     #: The cycle run found out what it works on, or said how it began. The
     #: page's Subjects tab repaints on it; nothing else has to.
     cycle_subject_changed = Signal()
+    cycle_interactions_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -354,6 +356,12 @@ class RunState(QObject):
             "cycle": event.get("cycle", ""),
             "name": event.get("name", ""),
             "workspace": event.get("workspace", ""),
+            # Where this run's files are, kept with the run rather than read off
+            # ``self.run_dir``: that one is the last run of any kind, and a
+            # scenario started afterwards would point a cycle's artifacts at
+            # its own folder. The launcher says run.dir before the cycle
+            # starts, so it is already known here.
+            "run_dir": self.run_dir or event.get("workspace", ""),
             "jobs": event.get("jobs"),
             "variables": dict(event.get("variables") or {}),
             "graph": graph,
@@ -375,6 +383,8 @@ class RunState(QObject):
             # And the stages of every step that has any, as (step id, stage).
             # Most plugins emit none; an agent emits one per turn.
             "stages": [],
+            "interactions": {},
+            "interaction_offers": {},
             # What the run works on, once it has found out - see
             # _on_cycle_subject. Empty until then, and for a cycle that
             # declares none.
@@ -507,11 +517,102 @@ class RunState(QObject):
                  # Whatever structure this row has beyond its text - a parsed
                  # review, today. Absent for every other stage.
                  "body": dict(event.get("body") or {})}
+        if event.get("ts"):
+            stage["ts"] = event["ts"]
         step["stages"].append(stage)
         del step["stages"][:-CYCLE_STAGES]
         self.cycle["stages"].append((step_id, stage))
         del self.cycle["stages"][:-CYCLE_STAGES]
         self.cycle_step_changed.emit(step_id)
+
+    def _interaction_run(self, event):
+        return bool(self.cycle is not None and
+                    event.get("run_id", self.cycle.get("run_id")) ==
+                    self.cycle.get("run_id"))
+
+    def _on_cycle_interaction_offers(self, event, _name):
+        if self._interaction_run(event):
+            self.cycle["interaction_offers"] = copy.deepcopy({
+                key: event.get(key) for key in ("version", "run", "steps")})
+            self.cycle_interactions_changed.emit()
+
+    def _on_cycle_interaction(self, event, _name):
+        message = event.get("message") or {}
+        if (self._interaction_run(event) and isinstance(message, dict)
+                and message.get("id")
+                and message.get("run_id") == self.cycle.get("run_id")):
+            self._put_interaction(message)
+            self.cycle_interactions_changed.emit()
+
+    def _put_interaction(self, message):
+        """One identity in the model and timeline, however many receipts arrive."""
+        messages = self.cycle.setdefault("interactions", {})
+        message_id = message["id"]
+        first = message_id not in messages
+        messages[message_id] = copy.deepcopy(message)
+        for _step, stage in self.cycle.setdefault("stages", []):
+            if stage.get("interaction_id") == message_id:
+                stage["body"] = messages[message_id]
+                return
+        if first:
+            self.cycle["stages"].append(("", {
+                "kind": "interaction", "interaction_id": message_id,
+                "ts": message.get("accepted_at", 0), "body": messages[message_id]}))
+            del self.cycle["stages"][:-CYCLE_STAGES]
+
+    def interaction_sending(self, request):
+        """A pipe write is not an acknowledgement of durable acceptance."""
+        if not self._interaction_run(request):
+            return
+        previous = self.cycle.get("interactions", {}).get(request.get("id"))
+        if previous and previous.get("state") != "unconfirmed":
+            return
+        self._put_interaction(dict(request, state="sending", accepted_at=time.time(),
+                                   deliveries=[]))
+        self.cycle_interactions_changed.emit()
+        self.changed.emit()
+
+    def _on_cycle_interaction_refused(self, event, _name):
+        if not self._interaction_run(event):
+            return
+        message = self.cycle.get("interactions", {}).get(event.get("id"))
+        if message is not None:
+            # A conflicting retry must not overwrite an accepted original.
+            if message.get("state") == "sending":
+                self._put_interaction(dict(message, state="rejected",
+                                           reason=event.get("reason", "")))
+            else:
+                self._put_interaction(dict(message, request_error=event.get("reason", "")))
+            self.cycle_interactions_changed.emit()
+
+    def restore_interactions(self, messages):
+        """Saved messages supersede diagnostic events, including missing events."""
+        if self.cycle is None:
+            return
+        self.cycle["stages"] = [(step, stage) for step, stage in
+                                self.cycle.get("stages", [])
+                                if stage.get("kind") != "interaction"]
+        self.cycle["interactions"] = {}
+        for message in messages:
+            if message.get("run_id") != self.cycle.get("run_id"):
+                continue
+            self.cycle["interactions"][message["id"]] = copy.deepcopy(message)
+            self.cycle["stages"].append(("", {
+                "kind": "interaction", "interaction_id": message["id"],
+                "ts": message.get("accepted_at", 0), "body": copy.deepcopy(message)}))
+        self.cycle["stages"].sort(key=lambda entry: entry[1].get("ts") or 0)
+        del self.cycle["stages"][:-CYCLE_STAGES]
+
+    def _stop_interaction_input(self):
+        if self.cycle is None:
+            return
+        self.cycle["interaction_offers"] = {}
+        for message in list(self.cycle.get("interactions", {}).values()):
+            if message.get("state") == "sending":
+                self._put_interaction(dict(message, state="unconfirmed", reason=(
+                    "The run ended before acceptance was confirmed. "
+                    "The saved interaction history may have more information.")))
+        self.cycle_interactions_changed.emit()
 
     def _on_cycle_artifact(self, event, _name):
         step = self._cycle_step(event.get("step"))
@@ -525,6 +626,7 @@ class RunState(QObject):
 
     def _on_cycle_run_end(self, event, _name):
         self.cycle_running = False
+        self._stop_interaction_input()
         if self.cycle is None:
             return
         self.cycle["status"] = event.get("status", "")
@@ -547,6 +649,7 @@ class RunState(QObject):
         are marked stopped rather than left spinning forever.
         """
         self.cycle_running = False
+        self._stop_interaction_input()
         if self.cycle is None:
             return
         if self.cycle.get("status") == "running":

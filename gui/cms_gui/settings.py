@@ -256,6 +256,27 @@ class Settings:
         self._qs.setValue("window/always_on_top", bool(value))
 
     @property
+    def stages_detached(self):
+        """Whether the Cycles page's Stages lives in a window of its own.
+
+        Kept across restarts: somebody who put the feed on a second screen
+        wants it there tomorrow. Only a person closing that window clears it;
+        the application closing it on the way out does not.
+        """
+        return self._qs.value("cycles/stages_detached", False, bool)
+
+    @stages_detached.setter
+    def stages_detached(self, value):
+        self._qs.setValue("cycles/stages_detached", bool(value))
+
+    def stages_geometry(self):
+        """Where the Stages window was, as ``QWidget.saveGeometry`` wrote it."""
+        return self._qs.value("cycles/stages_geometry", None)
+
+    def save_stages_geometry(self, data):
+        self._qs.setValue("cycles/stages_geometry", data)
+
+    @property
     def launch_summary_expanded(self):
         """Whether the Launch page's footer shows its summary, notes and preview."""
         return self._qs.value("launch/summary_expanded", True, bool)

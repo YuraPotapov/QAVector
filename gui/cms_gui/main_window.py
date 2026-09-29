@@ -21,10 +21,10 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QInputDialog, QLab
                                QPushButton, QSizePolicy, QStackedWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
-from . import (commands, core as core_mod, cyclereplay,
+from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
                history as history_mod, icon, icons,
                launch as launch_mod, load as load_mod,
-               logsourcesfile as lsf, theme, titlebar, widgets)
+               logsourcesfile as lsf, stageswindow, theme, titlebar, widgets)
 from .askbridge import AskBridge
 from .cyclewatch import Listener
 from .loader import LoaderThread
@@ -292,6 +292,17 @@ class MainWindow(QMainWindow):
         self.stop_action.triggered.connect(self.stop_run)
         self.stop_action.setEnabled(False)
         run_menu.addAction(self.stop_action)
+        run_menu.addSeparator()
+        # From any window of the application, not only this one: somebody
+        # notices the work heading the wrong way while reading a log window
+        # or another page, and that is where they should be able to say so.
+        # (A modal dialog still keeps the keys to itself, as Qt has it.)
+        self.clarify_action = QAction("&Clarify the running cycle\u2026", self)
+        self.clarify_action.setShortcut(QKeySequence(cycleinteractions.SHORTCUT))
+        self.clarify_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.clarify_action.triggered.connect(self.open_clarify)
+        run_menu.addAction(self.clarify_action)
+        self._clarify = None
 
         view_menu = menu.addMenu("&View")
         self.developer_action = QAction("&Developer mode", self)
@@ -310,6 +321,23 @@ class MainWindow(QMainWindow):
         self.dark_mode_action.setChecked(self.settings.dark_mode)
         self.dark_mode_action.toggled.connect(self.set_dark_mode)
         view_menu.addAction(self.dark_mode_action)
+
+        view_menu.addSeparator()
+        # Where a cycle's stages are, and the way to them from anywhere. Kept in
+        # step with the page's own icon both ways - see _stages_detached_changed.
+        self.stages_window_action = QAction("Stages in a separate &window", self)
+        self.stages_window_action.setCheckable(True)
+        self.stages_window_action.toggled.connect(self.set_stages_detached)
+        view_menu.addAction(self.stages_window_action)
+        # From any window of the application, the detached Stages included: a
+        # person reading a log or another page and wanting the run's account
+        # should not first have to find the window it is in.
+        self.go_stages_action = QAction("Go to &Stages", self)
+        self.go_stages_action.setShortcut(QKeySequence(stageswindow.SHORTCUT))
+        self.go_stages_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.go_stages_action.triggered.connect(self.go_to_stages)
+        view_menu.addAction(self.go_stages_action)
+        self._stages_restored = False
 
         view_menu.addSeparator()
         self.collapse_action = QAction("&Collapse sidebar", self)
@@ -542,9 +570,12 @@ class MainWindow(QMainWindow):
         self.scenarios = ScenariosPage(self.settings)
         self.cycles = CyclesPage(self.settings)
         self.cycles.set_run_state(self.run_state)
+        self.cycles.interaction_requested.connect(self._send_cycle_interaction)
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
         self.cycles.session_opened.connect(self._open_cycle_run)
         self.cycles.planned_started.connect(self._start_planned)
+        self.cycles.artifacts_requested.connect(self._open_artifacts)
+        self.cycles.stages_detached_changed.connect(self._stages_detached_changed)
         self.command = CommandPage(self.settings)
         self.launch = LaunchSessionsPage(self.settings)
         self.run = RunPage(self.run_state)
@@ -928,6 +959,7 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
 
         def _on_error(exc):
+            self.cycles.inventory_loading(False)
             self.describe_label.setText("could not read the configuration")
             self.status_right.setText("the core did not answer")
             self._finish_splash()
@@ -959,6 +991,7 @@ class MainWindow(QMainWindow):
             # than travelling with every call the way --flows-dir does.
             self.cycles.set_projects_path(self.settings.cycle_projects_path)
             self.cycles.set_inventory(self.inventory)
+            self.cycles.inventory_loading(False)
             self.listener.set_core(self.core)
             self.listener.set_inventory(self.inventory)
             
@@ -1006,6 +1039,9 @@ class MainWindow(QMainWindow):
                 self._auto_launch = None
                 
         self.describe_label.setText("reading the configuration …")
+        # The list of cycles is part of what this reads; while there is none
+        # yet, the explorer shows that it is coming rather than that it is empty.
+        self.cycles.inventory_loading(True)
         self.loader_thread = LoaderThread(self.core, self)
         self.loader_thread.progress.connect(_splash_msg)
         self.loader_thread.error.connect(_on_error)
@@ -1013,20 +1049,55 @@ class MainWindow(QMainWindow):
         self.loader_thread.start()
 
     def _restore_selected_cycle(self, cycle_id):
-        if not self.process.is_running():
-            cyclereplay.restore_cycle(self.history, self.run_state, cycle_id)
+        """The cycle's last run, read back when the cycle is opened.
+
+        The stream is read and parsed on a thread - a long one took a quarter
+        of a second on this one - and fed to the model here when it arrives;
+        the page paints it when the model says so.
+        """
+        state = self.run_state
+        if (self.process.is_running() or state.cycle_running
+                or (state.cycle or {}).get("cycle") == cycle_id):
+            return
+        where = cyclereplay.last_run_dir(self.history, cycle_id)
+        if where:
+            self._replay(where)
+
+    def _replay(self, run_dir, then=None):
+        """Read ``run_dir``'s events off the GUI thread, then feed them in."""
+        def done(events, error):
+            if error is not None or self.process.is_running() or self.run_state.cycle_running:
+                self.cycles.show_loading(False)
+                return
+            restored = cyclereplay.restore(run_dir, self.run_state, events=events or [])
+            if then is not None:
+                then(restored)
+
+        work = lambda: cyclereplay.events_of(run_dir)  # noqa: E731
+        if background.offloads(self.core):
+            background.run(work, done, owner=self)
+        else:
+            done(*background.call(work))
 
     def _open_cycle_run(self, cycle_id, run_dir):
         """Put one earlier run on the Cycles page - a session picked on the right.
 
         Replayed first and opened after, the way _restore_last_cycle does it:
         opening a cycle paints whatever the model holds, so the model has to
-        hold the run before the canvas asks.
+        hold the run before the canvas asks. The canvas and the output show
+        their skeletons while the run is read.
         """
         if self.process.is_running() or not run_dir:
             return
-        if cyclereplay.restore(run_dir, self.run_state):
-            self.cycles.open(cycle_id)
+        self.cycles.show_loading(True)
+
+        def opened(restored):
+            if restored:
+                self.cycles.open(cycle_id)
+            else:
+                self.cycles.show_loading(False)
+
+        self._replay(run_dir, opened)
 
     def _restore_last_cycle(self):
         """Bring the last cycle run back onto the Cycles page.
@@ -1043,9 +1114,19 @@ class MainWindow(QMainWindow):
         """
         if self.process.is_running():
             return
-        cycle_id = cyclereplay.restore_last(self.history, self.run_state)
-        if cycle_id:
-            self.cycles.open(cycle_id)
+        try:
+            where = cyclereplay.last_run_dir(self.history)
+        except Exception:                 # noqa: BLE001 - cosmetic state only
+            where = ""
+        if not where:
+            return
+
+        def opened(restored):
+            cycle_id = (self.run_state.cycle or {}).get("cycle", "") if restored else ""
+            if cycle_id:
+                self.cycles.open(cycle_id)
+
+        self._replay(where, opened)
 
     def _warn_about_chrome(self):
         """Say so, once, when the core cannot find a browser to launch.
@@ -1393,6 +1474,37 @@ class MainWindow(QMainWindow):
         self.run_state.mark_stopping(name)
         self.status_right.setText("stopping %s — the others carry on" % name)
 
+    def open_clarify(self):
+        """The clarification popup, over whichever window is in front."""
+        if self._clarify is None:
+            self._clarify = cycleinteractions.ClarifyPopup(self)
+            self._clarify.submitted.connect(self._send_cycle_interaction)
+            self._clarify.sent.connect(self.status_right.setText)
+            # Kept current while it is open, as the Stages composer is: who is
+            # working changes under it, and so does what became of a message.
+            self.run_state.changed.connect(self._refresh_clarify)
+            self.run_state.cycle_interactions_changed.connect(self._refresh_clarify)
+        self._refresh_clarify(force=True)
+        self._clarify.open_over(QApplication.activeWindow() or self)
+
+    def _refresh_clarify(self, force=False):
+        if self._clarify is None or not (force or self._clarify.isVisible()):
+            return
+        self._clarify.set_context(self.run_state.cycle, self.run_state.cycle_running,
+                                  self.cycles.step_labels(),
+                                  selected=self.cycles.selected_step())
+
+    def _send_cycle_interaction(self, request):
+        cycle = self.run_state.cycle or {}
+        if request.get("run_id") != cycle.get("run_id"):
+            return
+        self.run_state.interaction_sending(request)
+        if not self.run_state.cycle_running or not self.process.send_command(**request):
+            self.run_state.handle({"kind": "cycle.interaction.refused",
+                                   "run_id": request.get("run_id"),
+                                   "id": request.get("id"),
+                                   "reason": "The launcher is no longer accepting input."})
+
     def start_cycle_run(self, cycle_id, how="", step="", variables=None):
         """Run one cycle. Modelled on start_run, and deliberately separate.
 
@@ -1612,9 +1724,81 @@ class MainWindow(QMainWindow):
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    def _open_artifacts(self, run_dir):
-        self.artifacts.show_dir(run_dir)
+    def _open_artifacts(self, run_dir, path=""):
+        """A run's folder on the Artifacts page, with ``path`` in it selected.
+
+        ``path`` is relative to the run, the way a cycle records its files.
+        With the Artifacts page switched off in View there is nowhere in the
+        window to show it, so the desktop is handed the folder instead.
+        """
+        if not run_dir:
+            return
+        if not self._offered("artifacts"):
+            where = os.path.join(run_dir, path) if path else run_dir
+            if not os.path.isdir(where):
+                where = os.path.dirname(where)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(where))
+            return
+        self.artifacts.reveal(run_dir, path)
         self.show_page("artifacts")
+
+    # -- Stages, wherever they are ----------------------------------------------
+    def set_stages_detached(self, detached):
+        """Stages in a window of its own, or back in its tab. The View switch."""
+        if detached:
+            self.cycles.detach_stages()
+        else:
+            self.cycles.dock_stages()
+
+    def _stages_detached_changed(self, detached):
+        self.stages_window_action.blockSignals(True)
+        self.stages_window_action.setChecked(bool(detached))
+        self.stages_window_action.blockSignals(False)
+
+    def go_to_stages(self):
+        """Ctrl+Shift+S: Stages in front, whether a tab or a window of its own."""
+        if self.cycles.is_stages_detached():
+            self.cycles.show_stages()
+            return
+        if not self._offered("cycles"):
+            self.status_right.setText("Cycles is switched off in View > Sidebar items")
+            return
+        self._to_front(self)
+        self.show_page("cycles")
+        self.cycles.show_stages()
+
+    @staticmethod
+    def _to_front(window):
+        """Back from the taskbar if minimized, and in front. Keeps maximized."""
+        state = window.windowState()
+        if state & Qt.WindowMinimized:
+            window.setWindowState(state & ~Qt.WindowMinimized)
+        if not window.isVisible():
+            return
+        window.raise_()
+        window.activateWindow()
+
+    def showEvent(self, event):              # noqa: N802 - Qt's own spelling
+        """Stages goes back into its own window if it was left in one.
+
+        On the first show rather than in the constructor, so that neither the
+        splash nor a headless --launch - which never shows this window - opens
+        a window of Stages before the application is on screen, or at all.
+        """
+        super().showEvent(event)
+        if not self._stages_restored:
+            self._stages_restored = True
+            if self.settings.stages_detached:
+                QTimer.singleShot(0, self._restore_stages_window)
+
+    def _restore_stages_window(self):
+        if getattr(self, "_closing", False) or self.cycles.is_stages_detached():
+            return
+        self.cycles.detach_stages()
+        # Opened beside the window, not over it: the application was started,
+        # and it is the main window somebody expects in front.
+        self.raise_()
+        self.activateWindow()
 
     # -- chrome ---------------------------------------------------------------
     def _update_status(self):
@@ -1807,6 +1991,10 @@ class MainWindow(QMainWindow):
             if stopping:
                 QApplication.restoreOverrideCursor()
         self._closing = True
+        # Stages lives only while this window does. Shut, not docked: it was
+        # detached when the application went, so it is detached when it comes
+        # back.
+        self.cycles.shut_stages_window()
         self.listener.shutdown()
         self._listen_timer.stop()
         self._metrics_timer.stop()
@@ -1817,6 +2005,8 @@ class MainWindow(QMainWindow):
         # wait for it rather than pretend it can be stopped.
         if self.loader_thread is not None and self.loader_thread.isRunning():
             self.loader_thread.wait(5000)
+        # The same for the pages' own calls still out - see background.
+        background.wait_all(5000)
         super().closeEvent(event)
 
 

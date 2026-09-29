@@ -8,9 +8,7 @@ an event the launcher sent.
 
 import time
 
-from PySide6.QtCore import (Property, QEasingCurve, QPropertyAnimation, Qt,
-                            QTimer, Signal)
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
                                QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
@@ -47,93 +45,6 @@ STATUS_MARKS = {
     "error": ("fail", theme.BAD),
     "running": ("running", theme.ACCENT),
 }
-
-
-class _StreamingElsewhere(QWidget):
-    """What sits where the log was, while a separate window has it.
-
-    A blank space would read as "the log stopped". A pulse reads as "it is still
-    coming, just not here" - which is the one thing this has to say, and it says
-    it without a second copy of the lines being rendered off screen.
-    """
-
-    show_requested = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._phase = 1.0
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 6, 0, 6)
-        row.setSpacing(10)
-
-        self._dot = _PulseDot(self)
-        row.addWidget(self._dot, 0, Qt.AlignVCenter)
-        label = QLabel("Streaming to a separate window")
-        label.setStyleSheet("font-size: 12px; color: %s;" % theme.NEUTRAL[700])
-        row.addWidget(label)
-        row.addStretch(1)
-        button = QPushButton("Show window")
-        button.setProperty("variant", "ghost")
-        button.clicked.connect(self.show_requested)
-        row.addWidget(button)
-
-    def start(self):
-        self._dot.start()
-
-    def stop(self):
-        # Stopped whenever it is not on screen: an animation nobody can see is a
-        # timer waking the process up for nothing, once per session panel.
-        self._dot.stop()
-
-
-class _PulseDot(QWidget):
-    """A dot that breathes. Its opacity is the animated property."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(10, 10)
-        self._opacity = 1.0
-        self._animation = QPropertyAnimation(self, b"pulse", self)
-        self._animation.setDuration(1100)
-        self._animation.setStartValue(1.0)
-        self._animation.setEndValue(0.2)
-        self._animation.setEasingCurve(QEasingCurve.InOutSine)
-        self._animation.setLoopCount(-1)
-        # Back down and up again rather than snapping to full brightness.
-        self._animation.setDirection(QPropertyAnimation.Forward)
-        self._animation.finished.connect(self._flip)
-
-    def _flip(self):
-        self._animation.setDirection(
-            QPropertyAnimation.Backward
-            if self._animation.direction() == QPropertyAnimation.Forward
-            else QPropertyAnimation.Forward)
-
-    def start(self):
-        if self._animation.state() != QPropertyAnimation.Running:
-            self._animation.start()
-
-    def stop(self):
-        self._animation.stop()
-        self._set_pulse(1.0)
-
-    def _get_pulse(self):
-        return self._opacity
-
-    def _set_pulse(self, value):
-        self._opacity = value
-        self.update()
-
-    pulse = Property(float, _get_pulse, _set_pulse)
-
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        colour = QColor(theme.ACCENT)
-        colour.setAlphaF(max(0.0, min(1.0, self._opacity)))
-        painter.setBrush(colour)
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
 
 
 def format_duration(seconds):
@@ -262,7 +173,7 @@ class SessionPanel(widgets.BlueprintPanel):
 
         self._server_controls = widgets.row(self._server_filter,
                                             self._server_count, None, save)
-        self._server_elsewhere = _StreamingElsewhere()
+        self._server_elsewhere = widgets.Elsewhere("Streaming to a separate window")
         self._server_elsewhere.show_requested.connect(self.open_server_window)
         self._server_elsewhere.setVisible(False)
 

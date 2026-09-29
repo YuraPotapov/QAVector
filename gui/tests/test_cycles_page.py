@@ -86,8 +86,23 @@ class FakeCore:
             raise core_mod.CoreError(self.raise_on_show)
         return self.cycles[cycle_id]
 
-    def cycle_save(self, cycle_id, document):
+    def cycle_save(self, cycle_id, document, **options):
+        if options.get("dry_run"):
+            # What an editor's draft is checked with: nothing is written, and
+            # the answer is the draft's own graph and problems.
+            self.checked = getattr(self, "checked", []) + [(cycle_id, document, options)]
+            made = graph(*[(one["id"], one.get("needs") or [])
+                           for one in document.get("steps") or []])
+            made["id"] = cycle_id
+            return {"ok": not getattr(self, "draft_problems", []),
+                    "problems": list(getattr(self, "draft_problems", [])),
+                    "text": "id: %s\n" % cycle_id, "diff": "--- a\n+++ b\n",
+                    "cycle": made, "document": document}
         self.saved.append((cycle_id, document))
+        self.save_options = getattr(self, "save_options", []) + [options]
+        answers = getattr(self, "answers", [])
+        if answers:
+            return answers.pop(0)
         return {"ok": True, "id": cycle_id, "problems": []}
 
     def cycle_delete(self, cycle_id):
@@ -240,13 +255,20 @@ def test_a_cycle_naming_no_project_shows_as_unassigned(page):
 
 def test_a_cycle_naming_a_project_nobody_knows_is_not_lost(page):
     """Losing sight of a cycle because its project was renamed would be the
-    worst possible answer."""
+    worst possible answer - and so would losing sight of the name it carries.
+    It used to be filed under Unassigned, where "Gone" could not be seen: every
+    cycle that ships with the application names Demo, which a fresh projects
+    list does not have, so on a new install all of them looked unassigned."""
+    from cms_gui.pages.cycles import ROLE_KIND, ROLE_META
     page._projects = projects("Portal")
     page.set_core(FakeCore())
     page.set_inventory(FakeInventory([row(project="Gone")]))
 
     assert "demo" in page.explorer._rows
-    assert page.explorer._rows["demo"].parent().text(0) == "Unassigned"
+    group = page.explorer._rows["demo"].parent()
+    assert group.text(0) == "Gone"
+    assert group.data(0, ROLE_KIND) == "unlisted"
+    assert "not in your projects list" in group.data(0, ROLE_META)
 
 
 def test_an_empty_unassigned_group_is_not_shown_at_all(page):
@@ -768,7 +790,8 @@ def test_hard_run_menu_explicitly_starts_fresh_even_with_a_failed_run(opened):
     opened.run_requested.connect(lambda *args: requests.append(args))
     assert opened.run_button.popupMode() == QToolButton.MenuButtonPopup
     assert opened.run_button.property("hasmenu") == "true"
-    assert [action.text() for action in opened.run_button.menu().actions()] == ["Hard Run"]
+    assert [action.text() for action in opened.run_button.menu().actions()] == [
+        "Start over (new run)"]
     opened.hard_run_action.trigger()
     assert requests == [("demo", "", "")]
 
@@ -2076,7 +2099,7 @@ def test_hard_run_explains_repeated_paid_calls_and_can_be_declined(opened, asked
     requests = []
     opened.run_requested.connect(lambda *args: requests.append(args))
     opened.hard_run_action.trigger()
-    assert asked[0][0] == "Hard Run"
+    assert asked[0][0] == "Start over (new run)"
     assert "beginning" in asked[0][1]
     assert "Paid services will be called again" in asked[0][2]
     assert requests == []
@@ -2411,3 +2434,1296 @@ def test_a_refused_delete_is_said_and_keeps_the_session(opened, monkeypatch):
     opened.subjects.delete_requested.emit(_session())
     assert said and "still running" in said[0][2]
     assert "demo:QA-1" in opened.subjects.row_ids()
+
+
+# --------------------------------------------------------- saving safely
+def test_a_cycle_with_problems_is_refused_before_anybody_is_asked(page, asked,
+                                                                   monkeypatch):
+    """Agreeing to run twenty-eight steps and then hearing it cannot start
+    wastes the one decision the question is for."""
+    page.set_core(FakeCore({"demo": payload(problems=["b: needs 'ghost'"])}))
+    page.set_inventory(FakeInventory([row()]))
+    page.open("demo")
+    monkeypatch.setattr("cms_gui.widgets.note", lambda *a, **k: None)
+    page._run()
+    assert asked == []
+
+
+def _digested(cycle_id="demo", digest="abc"):
+    made = payload(cycle_id)
+    made["digest"] = digest
+    return made
+
+
+def test_a_save_carries_the_digest_the_file_was_opened_with(page):
+    page.set_core(FakeCore({"demo": _digested()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    page._save_yaml("id: demo\nsteps: []\n")
+    assert page.core.save_options[-1] == {"base": "abc"}
+
+
+def test_a_file_changed_on_disk_is_not_overwritten_and_can_be_reloaded(page, monkeypatch):
+    from cms_gui import widgets
+    page.set_core(FakeCore({"demo": _digested()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    page.core.answers = [{"ok": False, "stale": True, "problems": ["changed"]}]
+    questions = []
+    monkeypatch.setattr(widgets, "confirm",
+                        lambda *a, **k: questions.append(a[1]) or True)
+    shown = len(page.core.shown)
+
+    assert page._write_cycle("demo", {"id": "demo", "steps": []}) is False
+    assert questions == ["Changed on disk"]
+    assert len(page.core.saved) == 1, "nothing is sent a second time"
+    assert len(page.core.shown) == shown + 1, "Reload reads the file again"
+
+
+def test_a_save_that_would_drop_comments_is_shown_and_asked_about(page, monkeypatch):
+    from cms_gui import widgets
+    page.set_core(FakeCore({"demo": _digested()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    page.core.answers = [{"ok": False, "confirm": True, "lost": ["# why"],
+                          "diff": "--- a\n+++ b\n", "problems": ["drops 1"]},
+                         {"ok": True, "problems": []}]
+    shown = []
+    monkeypatch.setattr(widgets, "confirm_output",
+                        lambda parent, title, question, detail="", text="", **k:
+                        shown.append((detail, text)) or True)
+
+    assert page._write_cycle("demo", {"id": "demo", "steps": []})
+    assert "# why" in shown[0][0] and shown[0][1].startswith("--- a")
+    assert page.core.save_options == [{"base": "abc"},
+                                      {"base": "abc", "allow_loss": True}]
+
+
+def test_declining_to_drop_comments_writes_nothing(page, monkeypatch):
+    from cms_gui import widgets
+    page.set_core(FakeCore({"demo": _digested()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    page.core.answers = [{"ok": False, "confirm": True, "lost": ["# why"],
+                          "diff": "", "problems": ["drops 1"]}]
+    monkeypatch.setattr(widgets, "confirm_output", lambda *a, **k: False)
+
+    assert page._write_cycle("demo", {"id": "demo", "steps": []}) is False
+    assert len(page.core.saved) == 1
+
+
+def test_a_duplicate_says_which_cycle_it_was_made_from(owning, monkeypatch):
+    _answer(monkeypatch, "demo_copy")
+    owning._duplicate_cycle("demo")
+    assert owning.core.save_options[-1].get("source") == "demo"
+
+
+def test_an_unchanged_file_is_not_read_again_when_the_inventory_is(page):
+    page.set_core(FakeCore({"demo": _digested(digest="same")}))
+    page.set_inventory(FakeInventory([dict(row(), digest="same")], [SHELL_PLUGIN]))
+    page.open("demo")
+    shown = len(page.core.shown)
+
+    page.set_inventory(FakeInventory([dict(row(), digest="same")], [SHELL_PLUGIN]))
+    assert len(page.core.shown) == shown
+
+    page.set_inventory(FakeInventory([dict(row(), digest="moved")], [SHELL_PLUGIN]))
+    assert len(page.core.shown) == shown + 1
+
+
+# ------------------------------------------------------------ the explorer
+def _groups(page):
+    tree = page.explorer.tree
+    return [tree.topLevelItem(index).text(0)
+            for index in range(tree.topLevelItemCount())]
+
+
+def test_a_project_name_matches_whatever_its_case(page):
+    page._projects = projects("Portal")
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row(project="portal")]))
+    assert _groups(page) == ["Portal"]
+
+
+def test_an_unlisted_project_can_be_added_to_the_list(owning):
+    from cms_gui import cycleprojectsfile as cpf
+    owning.set_inventory(FakeInventory([row(project="Demo")], [SHELL_PLUGIN]))
+    assert "Demo" in _groups(owning)
+
+    owning.explorer.project_listed.emit("Demo")
+
+    assert cpf.names(cpf.load(owning._projects_path)) == ["Portal", "Demo"]
+    assert owning.core.saved == [], "no cycle file is touched"
+
+
+def test_moving_a_cycle_rewrites_its_project(owning):
+    owning.explorer.cycle_moved.emit("demo", "Release")
+    cycle_id, document = owning.core.saved[-1]
+    assert cycle_id == "demo" and document["project"] == "Release"
+
+
+def test_moving_a_cycle_out_of_every_project_drops_the_key(owning):
+    owning.explorer.cycle_moved.emit("demo", "")
+    assert "project" not in owning.core.saved[-1][1]
+
+
+def test_a_bundled_cycle_is_not_moved_and_says_why(owning, monkeypatch):
+    said = []
+    monkeypatch.setattr("cms_gui.widgets.note", lambda *a, **k: said.append(a[2]))
+    owning.set_inventory(FakeInventory([row(project="Portal", writable=False)]))
+    owning.explorer.cycle_moved.emit("demo", "Release")
+    assert owning.core.saved == [] and "Duplicate" in said[0]
+
+
+def test_deleting_a_project_moves_its_cycles_to_unassigned(owning, monkeypatch):
+    _agree(monkeypatch)
+    owning._delete_project("Portal")
+    assert owning._projects == []
+    assert owning.core.deleted == []
+    assert "project" not in owning.core.saved[-1][1]
+
+
+def test_a_row_says_how_big_it_is_and_where_it_came_from(page):
+    from cms_gui.pages.cycles import ROLE_META
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row(writable=False)]))
+    assert page.explorer._rows["demo"].data(0, ROLE_META) == \
+        "4 steps - built in"
+
+
+def test_a_row_leads_with_its_problems(page):
+    from cms_gui.pages.cycles import ROLE_ALERT, ROLE_META
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row(problems=["x", "y"])]))
+    item = page.explorer._rows["demo"]
+    assert item.data(0, ROLE_META).startswith("2 problems")
+    assert item.data(0, ROLE_ALERT) == "bad"
+
+
+def test_a_row_says_how_its_last_run_went(opened):
+    import time
+    from cms_gui.pages.cycles import ROLE_ALERT, ROLE_META
+    opened.core.sessions = [{"id": "s", "cycle": "demo", "status": "failed",
+                             "updated_at": time.time() - 7200, "runs": []}]
+    opened.refresh_sessions()
+    item = opened.explorer._rows["demo"]
+    assert item.data(0, ROLE_META).endswith("2h ago failed")
+    assert item.data(0, ROLE_ALERT) == "warn"
+
+
+def test_the_filter_reads_the_project_and_the_description(page):
+    page._projects = projects("Portal")
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([
+        row("a", "Alpha", project="Portal"),
+        dict(row("b", "Beta"), description="nightly smoke run")]))
+    page.explorer.search.setText("portal")
+    assert not page.explorer._rows["a"].isHidden()
+    assert page.explorer._rows["b"].isHidden()
+    page.explorer.search.setText("smoke")
+    assert page.explorer._rows["b"].isHidden() is False
+    assert "1 of 2 cycles" in page.explorer.count.text()
+
+
+def _key(widget, key, modifiers=None):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    QApplication.sendEvent(widget, QKeyEvent(QKeyEvent.KeyPress, key,
+                                             modifiers or Qt.NoModifier))
+
+
+def test_f2_renames_and_delete_deletes_the_selected_cycle(opened, monkeypatch):
+    from PySide6.QtCore import Qt
+    _cancel(monkeypatch)          # the page's own rename asks for a name
+    renamed, deleted = [], []
+    opened.explorer.cycle_renamed.connect(renamed.append)
+    opened.explorer.cycle_deleted.connect(deleted.append)
+    opened.explorer.select("demo")
+    _key(opened.explorer.tree, Qt.Key_F2)
+    _key(opened.explorer.tree, Qt.Key_Delete)
+    assert renamed == ["demo"] and deleted == ["demo"]
+
+
+def test_the_menu_key_opens_the_row_s_menu_where_the_row_is(opened, monkeypatch):
+    from PySide6.QtCore import Qt
+    opened.explorer.select("demo")
+    asked = []
+    monkeypatch.setattr(opened.explorer, "_menu", asked.append)
+    _key(opened.explorer.tree, Qt.Key_Menu)
+    rect = opened.explorer.tree.visualItemRect(opened.explorer._rows["demo"])
+    assert asked == [rect.bottomLeft()]
+
+
+def test_with_nothing_at_all_the_explorer_says_how_to_start(page):
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([]))
+    assert page.explorer.stack.currentWidget() is page.explorer.empty
+
+
+def test_a_folded_project_stays_folded_when_the_tree_is_rebuilt(page):
+    page._projects = projects("Portal")
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row(project="Portal")]))
+    page.explorer._projects["Portal"].setExpanded(False)
+    page.set_inventory(FakeInventory([row(project="Portal")]))
+    assert not page.explorer._projects["Portal"].isExpanded()
+
+
+def test_an_unreadable_projects_file_is_said_beside_the_tree(page, tmp_path):
+    path = tmp_path / "broken.json"
+    path.write_text("{not json", encoding="utf-8")
+    page.set_projects_path(str(path))
+    assert not page.explorer.error.isHidden()
+    assert "could not be read" in page.explorer.error.text()
+
+
+# ------------------------------------------------------------------ phases
+def _phased():
+    made = graph(("a", []), ("b", ["a"]), ("c", ["b"]), ("d", ["c"]))
+    for node, group in zip(made["nodes"], ("Take", "Take", "Plan", "Plan")):
+        node["group"] = group
+    return made
+
+
+@pytest.fixture
+def phased(page, layout_file):
+    page.set_core(FakeCore({"demo": payload(cycle=_phased())}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    return page
+
+
+def test_a_cycle_with_phases_offers_to_fold_them(phased):
+    assert not phased.fold_button.isHidden()
+
+
+def test_a_cycle_without_phases_has_nothing_to_fold(opened):
+    assert opened.fold_button.isHidden()
+
+
+def test_folding_draws_each_phase_as_one_box(phased):
+    phased.fold_button.click()
+    assert sorted(phased.canvas._nodes) == ["group:Plan", "group:Take"]
+    assert sorted(phased.canvas.node_ids()) == ["a", "b", "c", "d"], \
+        "the cycle still has its four steps"
+    assert phased.fold_button.text() == "Open phases"
+
+
+def test_a_run_s_colours_survive_folding_and_opening(phased):
+    phased.canvas.set_status("a", "success", 10, 1)
+    phased.canvas.set_status("b", "running", None, 1)
+    phased.fold_button.click()
+    assert phased.canvas.node("group:Take").status == "running"
+    phased.fold_button.click()
+    assert phased.canvas.node("a").status == "success"
+    assert phased.canvas.node("b").status == "running"
+
+
+def test_a_step_that_moves_while_folded_moves_its_phase(phased):
+    phased.fold_button.click()
+    phased.canvas.set_status("c", "failed")
+    assert phased.canvas.node("group:Plan").status == "failed"
+
+
+def test_which_phases_are_folded_is_remembered_for_next_time(phased, layout_file):
+    from cms_gui import cyclelayoutfile as clf
+    phased.fold_button.click()
+    assert clf.folded_for("demo", layout_file) == ["Plan", "Take"]
+
+    phased.canvas.set_graph(None)
+    phased.open("demo")
+    phased.canvas.set_graph(phased._open["cycle"], {}, None,
+                            folded=phased._remembered_folded("demo"))
+    assert "group:Take" in phased.canvas._nodes
+
+
+def test_selecting_a_folded_step_opens_its_phase(phased):
+    phased.fold_button.click()
+    phased.canvas.select("c")
+    assert "c" in phased.canvas._nodes and "group:Take" in phased.canvas._nodes
+
+
+def test_the_run_says_which_phase_it_is_in(phased):
+    state = RunState()
+    phased.set_run_state(state)
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo",
+                  "graph": phased._open["cycle"]})
+    state.handle({"kind": "cycle.step.start", "run_id": "r", "step": "c"})
+    settled()
+    assert phased.canvas.current_phases() == ["Plan"]
+    assert "in Plan" in phased.state.text()
+
+
+def test_a_step_with_a_problem_is_marked_on_the_canvas(page):
+    page.set_core(FakeCore({"demo": payload(problems=["b: needs 'ghost'",
+                                                      "a -> b loop"])}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    assert page.canvas.node("b")._problems == ["b: needs 'ghost'"]
+    assert page.canvas.node("a")._problems == []
+    assert "needs 'ghost'" in page.canvas.node("b").toolTip()
+    assert page.validity.text() == "2 problems"
+
+
+def test_a_clean_cycle_says_it_is_ready_and_the_chip_opens_the_list(opened):
+    from cms_gui.pages.cycles import TAB_PROBLEMS
+    assert opened.validity.text() == "Ready to run"
+    opened.validity.click()
+    assert opened.output.tabs.currentIndex() == TAB_PROBLEMS
+
+
+def test_the_help_text_gives_its_room_to_the_canvas_once_a_cycle_is_open(page):
+    page.set_core(FakeCore({"demo": payload()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    assert not page.intro.isHidden()
+    page.open("demo")
+    assert page.intro.isHidden()
+    assert not hasattr(page, "run_hint"), "Resume explains itself in its tooltip"
+
+
+def test_nothing_that_comes_and_goes_changes_the_page_s_height(editing):
+    """A line that appeared with Resume moved the page and resized the window.
+    The help, the Resume explanation and the unsaved-changes bar all sit over
+    the canvas or in a tooltip now."""
+    column = editing.layout()
+    before = [column.itemAt(index).widget() for index in range(column.count())]
+    assert editing.intro.parent() is editing.canvas.viewport()
+    assert editing.draft_bar.parent() is editing.canvas.viewport()
+    editing._add_step("command.shell", after="d")
+    assert not editing.draft_bar.isHidden()
+    after = [column.itemAt(index).widget() for index in range(column.count())]
+    assert before == after
+
+
+def test_the_resume_tooltip_says_what_the_line_under_the_header_used_to(opened):
+    state = RunState()
+    opened.set_run_state(state)
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo",
+                  "graph": DIAMOND})
+    state.handle({"kind": "cycle.run.end", "run_id": "r", "status": "failed"})
+    opened._update_buttons()
+    assert opened.run_button.text() == "Resume"
+    tip = opened.run_button.toolTip()
+    assert "what succeeded is kept" in tip and "Start over (new run)" in tip
+
+
+# ------------------------------------------------------------------ the editor
+# Changes made on the canvas collect in a draft. The file is written only on
+# Save - by the core, which checks the lot - and every state in between is
+# shown with the core's own verdict on it.
+@pytest.fixture
+def editing(page, monkeypatch):
+    """A writable cycle with a real document, and step windows that apply."""
+    from cms_gui.pages.cycledialogs import NodeDialog
+    document = {"id": "demo", "name": "Demo cycle", "steps": [
+        {"id": "a", "plugin": "command.shell", "with": {"command": "x"}},
+        {"id": "b", "plugin": "command.shell", "needs": ["a"], "with": {"command": "y"}},
+        {"id": "c", "plugin": "command.shell", "needs": ["a"], "with": {"command": "z"}},
+        {"id": "d", "plugin": "command.shell", "needs": ["b", "c"], "with": {"command": "w"}}]}
+    made = payload(document=document)
+    made["digest"] = "on-disk"
+    page.set_core(FakeCore({"demo": made}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    applied = {"yes": True}
+
+    def exec_(dialog):
+        if not applied["yes"]:
+            return 0
+        dialog._save()
+        return 1 if dialog.saved is not None else 0
+
+    monkeypatch.setattr(NodeDialog, "exec", exec_)
+    page.applied = applied
+    return page
+
+
+def test_a_step_changed_in_its_window_is_not_written_yet(editing, monkeypatch):
+    from cms_gui.pages.cycledialogs import NodeDialog
+    real = NodeDialog._save
+
+    def change_and_save(dialog):
+        dialog._widgets["label"].setText("Build it")
+        real(dialog)
+
+    monkeypatch.setattr(NodeDialog, "_save", change_and_save)
+    editing.open_step("b")
+
+    assert editing.core.saved == [], "nothing reaches the file before Save"
+    assert editing._draft.step("b")["label"] == "Build it"
+    assert not editing.draft_bar.isHidden()
+    assert editing.core.checked[-1][2]["dry_run"] and \
+        editing.core.checked[-1][2]["base"] == "on-disk"
+
+
+def test_a_new_step_goes_after_the_selected_one(editing):
+    editing._add_step("command.shell", after="b")
+    assert editing._draft.step("shell")["needs"] == ["b"]
+    assert "shell" in editing.canvas.node_ids()
+    assert editing.canvas.selected() == "shell"
+
+
+def test_closing_a_new_step_s_window_takes_the_step_back_out(editing):
+    editing.applied["yes"] = False
+    editing._add_step("command.shell", after="b")
+    assert editing._draft.step("shell") is None and not editing._draft.dirty
+    assert editing.draft_bar.isHidden()
+
+
+def test_undo_and_redo_walk_the_canvas_back_and_forward(editing):
+    editing._add_step("command.shell", after="d")
+    editing._undo()
+    assert "shell" not in editing.canvas.node_ids()
+    editing._redo()
+    assert "shell" in editing.canvas.node_ids()
+
+
+def test_a_dependency_is_set_from_the_step(editing):
+    editing._set_need("d", "a", True)
+    assert editing._draft.step("d")["needs"] == ["b", "c", "a"]
+    editing._set_need("b", "d", True)
+    assert editing._draft.step("b")["needs"] == ["a"], "a loop is refused"
+
+
+# ------------------------------------------------------------------ links
+# A link is drawn on the canvas by dragging one of a step's two dots onto
+# another step: the bottom one (out) makes that step wait for this one, the top
+# one (in) makes this one wait for that. The node menu offers both directions,
+# and a right-click on a link removes it.
+from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
+
+
+def _mouse(canvas, kind, scene_point, button=None):
+    """One mouse event at a point of the scene, straight into the canvas."""
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+    local = QPointF(canvas.mapFromScene(scene_point))
+    here = QPointF(canvas.viewport().mapToGlobal(local.toPoint()))
+    if kind == "press":
+        event = QMouseEvent(QEvent.MouseButtonPress, local, here,
+                            button or Qt.LeftButton, button or Qt.LeftButton,
+                            Qt.NoModifier)
+        canvas.mousePressEvent(event)
+    elif kind == "move":
+        event = QMouseEvent(QEvent.MouseMove, local, here, Qt.NoButton,
+                            Qt.LeftButton, Qt.NoModifier)
+        canvas.mouseMoveEvent(event)
+    else:
+        event = QMouseEvent(QEvent.MouseButtonRelease, local, here,
+                            button or Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+        canvas.mouseReleaseEvent(event)
+
+
+def _dot(canvas, step_id, which):
+    item = canvas.node(step_id)
+    return item.mapToScene(item.port_point(which))
+
+
+def _middle(canvas, step_id):
+    item = canvas.node(step_id)
+    return item.mapToScene(item.boundingRect().center())
+
+
+def _drag_link(canvas, step_id, which, onto, let_go=True):
+    _mouse(canvas, "press", _dot(canvas, step_id, which))
+    _mouse(canvas, "move", _middle(canvas, onto))
+    if let_go:
+        _mouse(canvas, "release", _middle(canvas, onto))
+
+
+def _menus(monkeypatch, exec_):
+    """Menus the page opens answer through ``exec_`` instead of waiting.
+
+    A subclass handed to the page's module rather than a patched
+    ``QMenu.exec``: PySide6 does not look a patched method of its own class
+    up, and the real menu opened and waited for a click that never came.
+    """
+    from PySide6.QtWidgets import QMenu
+
+    from cms_gui.pages import cycles as cycles_module
+
+    class Answered(QMenu):
+        def exec(self, *_args):
+            return exec_(self)
+
+    monkeypatch.setattr(cycles_module, "QMenu", Answered)
+
+
+def _pick(monkeypatch, *path):
+    """Answer the next menu by triggering the action at ``path``."""
+    def exec_(menu):
+        # Each level's list of actions is held until the end. PySide6 6.11
+        # hands back a dead submenu from QAction.menu() once the list the
+        # action came from has been let go of.
+        held = [menu.actions()]
+        for name in path[:-1]:
+            submenu = next(a for a in held[-1] if a.text() == name).menu()
+            held.append(submenu.actions())
+        chosen = next(a for a in held[-1] if a.text() == path[-1])
+        assert chosen.isEnabled(), "%s is offered" % (path,)
+        chosen.trigger()
+        return None
+
+    _menus(monkeypatch, exec_)
+
+
+def test_a_cycle_open_for_editing_offers_dots_to_draw_links_from(editing):
+    assert editing.canvas.linking()
+    assert all(editing.canvas.node(step).has_ports
+               for step in editing.canvas.node_ids())
+
+
+def test_no_dots_on_a_cycle_that_cannot_be_edited_or_in_run(page):
+    page.set_core(FakeCore({"demo": payload(writable=False)}))
+    page.set_inventory(FakeInventory([row(writable=False)], [SHELL_PLUGIN]))
+    page.open("demo")
+    assert not page.canvas.linking()
+    assert not page.canvas.node("a").has_ports
+
+
+def test_run_is_for_reading_so_its_steps_have_no_dots(editing):
+    editing._context_changed("Run")
+    assert not editing.canvas.linking()
+    assert not editing.canvas.node("a").has_ports
+    editing._context_changed("Design")
+    assert editing.canvas.node("a").has_ports
+
+
+def test_a_press_off_the_dots_still_moves_the_step_rather_than_linking(editing):
+    canvas = editing.canvas
+    _mouse(canvas, "press", _middle(canvas, "b"))
+    assert canvas._link is None
+    _mouse(canvas, "release", _middle(canvas, "b"))
+
+
+def test_the_bottom_dot_dragged_onto_a_step_makes_that_step_wait(editing):
+    _drag_link(editing.canvas, "b", "out", onto="c")
+    assert editing._draft.step("c")["needs"] == ["a", "b"]
+    assert editing.core.saved == [], "a draft, not the file"
+    assert not editing.draft_bar.isHidden()
+    assert editing.canvas.selected_link() == ("b", "c"), "picked out, ready to move"
+
+
+def test_the_top_dot_dragged_onto_a_step_makes_this_one_wait_for_it(editing):
+    _drag_link(editing.canvas, "c", "in", onto="b")
+    assert editing._draft.step("c")["needs"] == ["a", "b"]
+
+
+def test_a_link_that_would_loop_says_so_and_is_not_made(editing):
+    canvas = editing.canvas
+    _drag_link(canvas, "d", "out", onto="a", let_go=False)
+    assert canvas.node("a")._drop == "no"
+    assert "loop" in canvas._link["why"]
+    _mouse(canvas, "release", _middle(canvas, "a"))
+    assert editing._draft is None or not editing._draft.dirty
+    assert canvas.node("a")._drop == "", "nothing is left marked"
+    assert canvas._link is None
+
+
+def test_a_link_that_is_already_there_is_not_made_twice(editing):
+    canvas = editing.canvas
+    _drag_link(canvas, "a", "out", onto="b", let_go=False)
+    assert canvas._link["why"] == "b already waits for a."
+    _mouse(canvas, "release", _middle(canvas, "b"))
+    assert editing._draft is None or not editing._draft.dirty
+
+
+def test_a_link_can_land_on_a_step_that_may_take_it(editing):
+    canvas = editing.canvas
+    _drag_link(canvas, "b", "out", onto="c", let_go=False)
+    assert canvas.node("c")._drop == "ok" and canvas._link["why"] == ""
+    assert canvas.scene().items().count(canvas._link["line"]) == 1
+
+
+def test_escape_or_letting_go_on_the_ground_draws_nothing(editing):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    canvas = editing.canvas
+    _drag_link(canvas, "b", "out", onto="c", let_go=False)
+    line = canvas._link["line"]
+    canvas.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    assert canvas._link is None and line.scene() is None
+    assert canvas.node("c")._drop == ""
+    _mouse(canvas, "press", _dot(canvas, "b", "out"))
+    far = canvas.content_rect().bottomRight() + QPointF(300, 300)
+    _mouse(canvas, "move", far)
+    _mouse(canvas, "release", far)
+    assert editing._draft is None or not editing._draft.dirty
+
+
+def test_a_step_says_what_its_dots_do(editing):
+    from cms_gui.cyclegraph import PORT_TIP
+    item = editing.canvas.node("b")
+    assert item.port_at(item.port_point("out")) == "out"
+    assert item.port_at(item.port_point("in")) == "in"
+    assert item.port_at(item.boundingRect().center()) == ""
+    assert "Drag a dot" in item.toolTip()
+    assert "wait for this one" in PORT_TIP["out"]
+    assert "wait for that one" in PORT_TIP["in"]
+
+
+def test_the_node_menu_sets_links_in_both_directions(editing, monkeypatch):
+    _pick(monkeypatch, "Runs before", "c")
+    editing._node_menu("b", QPoint())
+    assert editing._draft.step("c")["needs"] == ["a", "b"], "c now waits for b"
+    _pick(monkeypatch, "Runs before", "d")
+    editing._node_menu("b", QPoint())
+    assert editing._draft.step("d")["needs"] == ["c"], "ticked off again"
+
+
+def test_the_node_menu_will_not_offer_a_loop_either_way(editing, monkeypatch):
+    seen = {}
+
+    def exec_(menu):
+        actions = menu.actions()              # held: see _pick
+        for action in actions:
+            if action.menu() is not None:
+                seen[action.text()] = {one.text(): (one.isEnabled(), one.toolTip())
+                                       for one in action.menu().actions()}
+
+    _menus(monkeypatch, exec_)
+    editing._node_menu("b", QPoint())
+    assert seen["Runs before"]["a"][0] is False
+    assert "loop" in seen["Runs before"]["a"][1]
+    assert seen["Waits for"]["d"][0] is False
+    assert seen["Runs before"]["d"][0] is True, "a link that is there can go"
+
+
+def test_right_click_on_a_link_names_both_ends(editing, monkeypatch):
+    from PySide6.QtGui import QContextMenuEvent
+    _menus(monkeypatch, lambda menu: None)     # the page's menu, left unanswered
+    canvas = editing.canvas
+    edge = next(one for one in canvas._edges
+                if (one.source, one.target) == ("a", "b"))
+    spot = canvas.mapFromScene(edge.path().pointAtPercent(0.5))
+    heard = []
+    canvas.edge_menu.connect(lambda *args: heard.append(args[:2]))
+    canvas.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, spot,
+                                              canvas.viewport().mapToGlobal(spot)))
+    assert heard == [("a", "b")]
+    assert edge.toolTip().startswith("b waits for a\n")
+
+
+def test_a_link_is_removed_from_its_own_menu(editing, monkeypatch):
+    _pick(monkeypatch, "Remove this link")
+    editing._edge_menu("b", "d", QPoint())
+    assert editing._draft.step("d")["needs"] == ["c"]
+
+
+def test_a_link_on_a_read_only_cycle_cannot_be_removed(page, monkeypatch):
+    page.set_core(FakeCore({"demo": payload(writable=False)}))
+    page.set_inventory(FakeInventory([row(writable=False)], [SHELL_PLUGIN]))
+    page.open("demo")
+    offered = []
+    _menus(monkeypatch, lambda menu: offered.extend(
+        action.text() for action in menu.actions()))
+    page._edge_menu("a", "b", QPoint())
+    assert "Remove this link" not in offered and "Go to a" in offered
+
+
+def _edge(canvas, waited_for, waiting):
+    return next(one for one in canvas._edges
+                if (one.source, one.target) == (waited_for, waiting))
+
+
+def _drag_end(canvas, waited_for, waiting, end, onto, let_go=True):
+    """Select a link, then drag its head ("to") or its start ("from")."""
+    assert canvas.select_link(waited_for, waiting)
+    edge = _edge(canvas, waited_for, waiting)
+    _mouse(canvas, "press", edge._tip if end == "to" else edge._start)
+    assert canvas._link is not None, "the end was picked up"
+    _mouse(canvas, "move", _middle(canvas, onto))
+    if let_go:
+        _mouse(canvas, "release", _middle(canvas, onto))
+    return edge
+
+
+def test_a_click_on_a_link_selects_it_with_its_two_ends_on_top(editing):
+    canvas = editing.canvas
+    edge = _edge(canvas, "a", "b")
+    middle = edge.path().pointAtPercent(0.5)
+    _mouse(canvas, "press", middle)
+    _mouse(canvas, "release", middle)
+    assert canvas.selected_link() == ("a", "b")
+    assert edge.zValue() > canvas.node("b").zValue(), "its ends are not under b"
+    assert edge.end_at(edge._tip) == "to" and edge.end_at(edge._start) == "from"
+    assert edge.end_at(middle) == ""
+
+
+def test_dragging_a_link_s_head_moves_which_step_waits(editing):
+    _drag_end(editing.canvas, "b", "d", "to", onto="c")
+    assert editing._draft.step("d")["needs"] == ["c"]
+    assert editing._draft.step("c")["needs"] == ["a", "b"]
+    assert editing.canvas.selected_link() == ("b", "c")
+    editing._undo()
+    assert editing._draft.step("d")["needs"] == ["b", "c"], "one move, one Undo"
+    assert editing._draft.step("c")["needs"] == ["a"]
+
+
+def test_dragging_where_a_link_starts_moves_which_step_is_waited_for(editing):
+    _drag_end(editing.canvas, "b", "d", "from", onto="a")
+    assert editing._draft.step("d")["needs"] == ["a", "c"], "in b's place"
+
+
+def test_a_link_moved_into_a_loop_is_refused_and_put_back(editing):
+    canvas = editing.canvas
+    edge = _drag_end(canvas, "a", "b", "from", onto="d", let_go=False)
+    assert not edge.isVisible(), "the old line is lifted while it moves"
+    assert "loop" in canvas._link["why"] and canvas.node("d")._drop == "no"
+    _mouse(canvas, "release", _middle(canvas, "d"))
+    assert editing._draft is None or not editing._draft.dirty
+    assert _edge(canvas, "a", "b").isVisible()
+
+
+def test_a_link_let_go_where_it_was_changes_nothing(editing):
+    canvas = editing.canvas
+    _drag_end(canvas, "a", "b", "to", onto="c", let_go=False)
+    assert canvas._link["why"] == "c already waits for a."
+    _mouse(canvas, "move", _middle(canvas, "b"))
+    assert canvas._link["why"] == ""
+    _mouse(canvas, "release", _middle(canvas, "b"))
+    assert editing._draft is None or not editing._draft.dirty
+
+
+def test_delete_removes_the_selected_link(editing):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    assert editing.canvas.select_link("b", "d")
+    editing.canvas.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Delete,
+                                           Qt.NoModifier))
+    assert editing._draft.step("d")["needs"] == ["c"]
+
+
+def test_links_cannot_be_picked_up_where_they_cannot_be_edited(page):
+    page.set_core(FakeCore({"demo": payload(writable=False)}))
+    page.set_inventory(FakeInventory([row(writable=False)], [SHELL_PLUGIN]))
+    page.open("demo")
+    assert not page.canvas.select_link("a", "b")
+    assert page.canvas.selected_link() is None
+
+
+def test_deleting_a_step_asks_then_takes_it_out_of_what_waits_for_it(editing):
+    editing._delete_step("b")
+    assert editing._draft.step("b") is None
+    assert editing._draft.step("d")["needs"] == ["c"]
+    assert editing.core.saved == []
+
+
+def test_save_writes_the_draft_against_the_file_it_was_made_from(editing):
+    editing._add_step("command.shell", after="d")
+    assert editing._save_draft()
+    cycle_id, document = editing.core.saved[-1]
+    assert cycle_id == "demo" and document["steps"][-1]["id"] == "shell"
+    assert editing.core.save_options[-1]["base"] == "on-disk"
+    assert editing._draft is None and editing.draft_bar.isHidden()
+
+
+def test_a_draft_with_problems_cannot_be_saved(editing):
+    editing.core.draft_problems = ["shell: Command is required."]
+    editing._add_step("command.shell", after="d")
+    assert not editing.save_draft_button.isEnabled()
+    assert "1 problem" in editing.draft_note.text()
+    assert "Command is required" in editing.output.problems.toPlainText()
+    assert editing.validity.text() == "1 problem"
+
+
+def test_revert_puts_the_file_s_graph_back(editing):
+    editing._add_step("command.shell", after="d")
+    editing._revert_draft()
+    assert "shell" not in editing.canvas.node_ids()
+    assert editing._draft is None
+
+
+def test_leaving_a_draft_asks_and_cancel_stays(editing, monkeypatch):
+    from cms_gui import widgets
+    editing.core.cycles["other"] = payload("other")
+    editing._add_step("command.shell", after="d")
+    monkeypatch.setattr(widgets, "choose", lambda *a, **k: "")
+    editing.open("other")
+    assert editing.current_id() == "demo" and editing._draft.dirty
+    monkeypatch.setattr(widgets, "choose", lambda *a, **k: "Discard")
+    editing.open("other")
+    assert editing.current_id() == "other" and editing._draft is None
+
+
+def test_running_with_unsaved_changes_asks_which_version(editing, monkeypatch):
+    from cms_gui import widgets
+    editing._add_step("command.shell", after="d")
+    asked = []
+    editing.run_requested.connect(lambda *args: asked.append(args))
+    monkeypatch.setattr(widgets, "choose", lambda *a, **k: "Cancel")
+    editing._run()
+    assert asked == []
+    monkeypatch.setattr(widgets, "choose", lambda *a, **k: "Run the saved version")
+    editing._run()
+    assert asked == [("demo", "", "")]
+    assert editing._draft.dirty, "the changes are still there, unsaved"
+
+
+def test_the_yaml_tab_shows_what_save_would_write_and_cannot_be_typed_in(editing):
+    editing._add_step("command.shell", after="d")
+    assert editing.output.yaml.isReadOnly()
+    assert editing.output.yaml.toPlainText() == "id: demo\n"
+    assert not editing.output.yaml_note.isHidden()
+
+
+def test_a_bundled_cycle_offers_no_editing(page):
+    page.set_core(FakeCore({"demo": payload(writable=False)}))
+    page.set_inventory(FakeInventory([row(writable=False)], [SHELL_PLUGIN]))
+    page.open("demo")
+    assert page.add_button.isHidden()
+
+
+# --------------------------------------------------------- design and run
+def test_a_run_of_another_version_is_not_painted_on_the_file(opened):
+    """The file gained a step after the run started: Design shows the file,
+    without the run's colours; Run shows the run's own graph with them."""
+    state = RunState()
+    opened.set_run_state(state)
+    older = graph(("a", []), ("b", ["a"]))
+    older["id"] = "demo"
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo",
+                  "graph": older})
+    state.handle({"kind": "cycle.step.end", "run_id": "r", "step": "a",
+                  "status": "success"})
+    assert opened.context_switch.current() == "Run"
+    assert sorted(opened.canvas.node_ids()) == ["a", "b"]
+    assert opened.canvas.node("a").status == "success"
+
+    opened.context_switch.set_current("Design")
+    assert sorted(opened.canvas.node_ids()) == ["a", "b", "c", "d"]
+    assert opened.canvas.node("a").status == "pending"
+
+    opened.context_switch.set_current("Run")
+    assert opened.canvas.node("a").status == "success"
+
+
+def test_the_run_view_is_for_reading(opened):
+    state = RunState()
+    opened.set_run_state(state)
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo",
+                  "graph": DIAMOND})
+    assert opened._context == "Run"
+    assert opened.add_button.isHidden()
+
+
+def test_run_is_offered_only_when_there_is_a_run_to_show(opened):
+    assert not opened.context_switch.button("Run").isEnabled()
+
+
+def test_arrange_works_the_lines_out_once_not_once_per_node(opened, monkeypatch):
+    from PySide6.QtCore import QPointF
+    for item in opened.canvas._nodes.values():
+        item.setPos(item.pos() + QPointF(40, 0))
+    calls = []
+    real = opened.canvas.route
+    monkeypatch.setattr(opened.canvas, "route", lambda: calls.append(1) or real())
+    opened.canvas.arrange()
+    assert len(calls) == 1
+
+
+def test_a_step_moved_to_another_phase_is_framed_again(phased):
+    moved = _phased()
+    moved["nodes"][1]["group"] = "Plan"
+    phased.core.cycles["demo"] = payload(cycle=moved)
+    phased.open("demo")
+    assert phased.canvas.phases() == {"Take": ["a"], "Plan": ["b", "c", "d"]}
+
+
+# ------------------------------------------------------- loading in the background
+# A real core starts a process per call; with a few hundred runs behind a
+# cycle, opening it froze the window long enough to look like a hang. The
+# calls go to a thread, and what is waiting shows a skeleton.
+import threading  # noqa: E402
+
+
+class SlowCore(FakeCore):
+    """A core whose calls block, held until a test lets each one through."""
+
+    offload = True
+
+    def __init__(self, cycles=None):
+        FakeCore.__init__(self, cycles)
+        self.gate = threading.Event()
+
+    def cycle_show(self, cycle_id):
+        self.gate.wait(5)
+        return FakeCore.cycle_show(self, cycle_id)
+
+    def cycle_sessions(self, cycle_id=""):
+        self.gate.wait(5)
+        return FakeCore.cycle_sessions(self, cycle_id)
+
+
+def _settle(qapp, timeout=5.0):
+    """Until every call is answered and every answer delivered."""
+    import time
+    from cms_gui import background
+    end = time.time() + timeout
+    while time.time() < end:
+        qapp.processEvents()
+        if not background.busy():
+            # An answer delivered just now may have asked for the next thing -
+            # opening a cycle asks for its sessions - so idle means idle twice.
+            qapp.processEvents()
+            if not background.busy():
+                return
+        time.sleep(0.01)
+    raise AssertionError("a background call never came back")
+
+
+@pytest.fixture
+def slow(page, qapp):
+    core = SlowCore({"demo": payload(), "other": payload("other")})
+    page.set_core(core)
+    page.set_inventory(FakeInventory([row(), row("other", "Other cycle")], [SHELL_PLUGIN]))
+    yield page
+    core.gate.set()
+    _settle(qapp)
+
+
+def test_opening_answers_at_once_and_the_canvas_waits_under_its_skeleton(slow, qapp):
+    slow.open("demo")
+    assert slow.title.text() == "Demo cycle", "named straight away, from the list"
+    assert slow.state.text() == "loading..."
+    assert slow.skeletons["canvas"].active() and slow.skeletons["output"].active()
+    assert slow.canvas.node_ids() == [], "nothing drawn before the answer"
+
+    slow.core.gate.set()
+    _settle(qapp)
+
+    assert sorted(slow.canvas.node_ids()) == ["a", "b", "c", "d"]
+    assert not slow.skeletons["canvas"].active()
+    assert not slow.skeletons["output"].active()
+
+
+def test_the_first_list_of_sessions_waits_under_a_skeleton_too(slow, qapp):
+    slow.open("demo")
+    slow.core.gate.set()
+    _settle(qapp)
+    assert slow._sessions_loaded and not slow.skeletons["subjects"].active()
+
+
+def test_a_second_click_wins_over_a_slower_first_answer(slow, qapp):
+    slow.open("demo")
+    slow.core.gate.set()          # both answers are let through...
+    slow.open("other")            # ...but "other" was asked for last
+    _settle(qapp)
+    assert slow.current_id() == "other"
+
+
+def test_a_refresh_keeps_the_rows_it_has_rather_than_flashing_grey(slow, qapp):
+    slow.core.gate.set()
+    slow.open("demo")
+    _settle(qapp)
+    slow.core.gate.clear()
+    slow.refresh_sessions()
+    assert not slow.skeletons["subjects"].active()
+    slow.core.gate.set()
+
+
+def test_what_properties_had_to_say_survives_the_reopen(owning, monkeypatch):
+    """Secrets that failed to save are shown after the cycle is read again."""
+    from cms_gui.pages import cycles as page_module
+    owning.open("demo")
+    shown = []
+    monkeypatch.setattr(page_module.CycleDialog, "exec", lambda self: 1)
+
+    def saved(self):
+        self.saved = {"name": "Demo", "description": "", "project": "Portal",
+                      "variables": {}}
+        self.secret_values, self.dropped_secrets = {"token": "x"}, []
+
+    monkeypatch.setattr(page_module.CycleDialog, "_save", saved)
+    monkeypatch.setattr(page_module.CycleDialog, "saved", None, raising=False)
+    owning.core.cycle_secret_set = lambda *a: {"ok": False, "problems": ["locked"]}
+    real = page_module.CycleDialog.__init__
+
+    def init(self, *a, **k):
+        real(self, *a, **k)
+        saved(self)
+
+    monkeypatch.setattr(page_module.CycleDialog, "__init__", init)
+    owning.open_properties()
+    assert "locked" in owning.output.problems.toPlainText()
+
+
+def test_the_explorer_shows_the_list_is_coming_only_while_it_is_empty(page):
+    page.inventory_loading(True)
+    assert page.skeletons["explorer"].active()
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row()]))
+    page.inventory_loading(False)
+    assert not page.skeletons["explorer"].active()
+    page.inventory_loading(True)
+    assert not page.skeletons["explorer"].active(), "a refresh keeps the tree"
+
+
+def test_nothing_about_the_old_cycle_is_claimed_while_the_new_one_loads(slow, qapp):
+    slow.core.gate.set()
+    slow.open("demo")
+    _settle(qapp)
+    assert slow.validity.isVisibleTo(slow)
+    slow.core.gate.clear()
+    slow.open("other")
+    assert not slow.validity.isVisibleTo(slow), "the chip was the old cycle's"
+    slow.core.gate.set()
+    _settle(qapp)
+    assert slow.validity.isVisibleTo(slow)
+
+
+def test_the_subjects_detail_waits_with_its_list(page):
+    page._loading(("subjects",), True)
+    assert page.skeletons["subjects"].active()
+    assert page.skeletons["subjects_detail"].active()
+    page._loading(("subjects",), False)
+    assert not page.skeletons["subjects_detail"].active()
+
+
+# ---------------------------------------------------- Stages in its own window
+@pytest.fixture
+def detachable(page):
+    """The page, with the remembered window and splitter put back afterwards:
+    they are QSettings, which every later test in the run would read."""
+    changes = []
+    page.stages_detached_changed.connect(changes.append)
+    page.changes = changes
+    yield page
+    if page.is_stages_detached():
+        page.dock_stages()
+    page.settings.stages_detached = False
+    page.settings.save_splitter("cycles/down", {})
+
+
+def test_detach_and_bring_back_are_marks_with_no_words(page):
+    for button in (page.output.detach_button, page.output.dock_button):
+        assert not button.icon().isNull()
+        assert button.text() == ""
+        assert button.toolButtonStyle() == Qt.ToolButtonIconOnly
+        assert button.toolTip()
+    assert "Ctrl+Shift+S" in page.output.detach_button.toolTip()
+
+
+def test_the_detach_mark_is_on_the_tab_strip_only_while_stages_is_showing(page):
+    page.output.tabs.setCurrentIndex(TAB_OUTPUT)
+    assert page.output.detach_button.isHidden()
+    page.output.tabs.setCurrentIndex(TAB_STAGES)
+    assert not page.output.detach_button.isHidden()
+
+
+def test_detaching_moves_the_same_feed_into_a_window(detachable):
+    page = detachable
+    feed, composer = page.output.stages, page.output.composer
+    window = page.detach_stages()
+    assert page.is_stages_detached()
+    assert feed.window() is window and composer.window() is window
+    assert page.output.stages is feed, "moved, not copied"
+    assert not page.output.stages_elsewhere.isHidden()
+    assert page.output.detach_button.isHidden()
+    assert page.output.tabs.count() == 4, "the tab stays where it is"
+    assert page.settings.stages_detached
+    assert page.changes == [True]
+
+
+def test_detaching_twice_brings_the_one_window_forward(detachable):
+    first = detachable.detach_stages()
+    assert detachable.detach_stages() is first
+
+
+def test_a_person_closing_the_window_puts_stages_back_in_the_tab(detachable):
+    page = detachable
+    feed = page.output.stages
+    window = page.detach_stages()
+    window.close()
+    assert not page.is_stages_detached()
+    assert feed.window() is page.window()
+    assert page.output.stages_elsewhere.isHidden()
+    assert not page.settings.stages_detached
+    assert page.changes == [True, False]
+
+
+def test_bring_back_in_the_tab_closes_the_window(detachable):
+    page = detachable
+    window = page.detach_stages()
+    page.output.dock_button.click()
+    assert window.closed()
+    assert not page.is_stages_detached()
+    assert not page.settings.stages_detached
+
+
+def test_the_application_closing_leaves_stages_remembered_as_detached(detachable):
+    page = detachable
+    window = page.detach_stages()
+    page.shut_stages_window()
+    assert window.closed()
+    assert page.settings.stages_detached, "it opens detached next time"
+    assert page.changes == [True]
+
+
+def test_the_placeholder_breathes_only_while_a_run_feeds_the_window(detachable):
+    page = detachable
+    state = RunState()
+    page.set_run_state(state)
+    page.detach_stages()
+    dot = page.output.stages_elsewhere._dot
+    assert not dot.running()
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "graph": DIAMOND})
+    settled()
+    assert dot.running()
+    state.handle({"kind": "cycle.run.end", "run_id": "r", "status": "success"})
+    settled()
+    assert not dot.running()
+
+
+def test_the_window_is_named_after_the_run_s_cycle(detachable):
+    page = detachable
+    state = RunState()
+    page.set_run_state(state)
+    window = page.detach_stages()
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo",
+                  "name": "Demo cycle", "graph": DIAMOND})
+    settled()
+    assert window.windowTitle() == "Stages - Demo cycle"
+
+
+def test_going_to_stages_opens_a_folded_output_and_picks_its_tab(detachable, qapp):
+    page = detachable
+    page.resize(1200, 800)
+    page.show()
+    settled()
+    page._down.setSizes([800, 0])
+    output = page._down.indexOf(page.output)
+    assert output in page._down.folded()
+    page.output.tabs.setCurrentIndex(TAB_OUTPUT)
+    page.show_stages()
+    assert page.output.tabs.currentIndex() == TAB_STAGES
+    assert output not in page._down.folded()
+
+
+def test_going_to_stages_while_detached_brings_the_window_back(detachable):
+    page = detachable
+    window = page.detach_stages()
+    window.showMinimized()
+    page.show_stages()
+    assert not window.windowState() & Qt.WindowMinimized
+    assert window.isVisible()
+
+
+# ------------------------------------------------------------ to the artifacts
+def _ran(page, tmp_path, cycle="demo"):
+    """A finished run of ``cycle`` on the page, whose step a wrote one file."""
+    run = tmp_path / "20260929-101500-demo"
+    (run / "steps" / "a").mkdir(parents=True)
+    state = RunState()
+    page.set_run_state(state)
+    state.handle({"kind": "run.dir", "dir": str(run)})
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": cycle,
+                  "name": "Demo cycle", "graph": DIAMOND})
+    state.handle({"kind": "cycle.artifact", "step": "a", "type": "log",
+                  "name": "stdout", "path": "steps/a/stdout.log", "bytes": 3})
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success"})
+    state.handle({"kind": "cycle.run.end", "run_id": "r", "status": "success"})
+    settled()
+    return str(run)
+
+
+def _asked(page):
+    asked = []
+    page.artifacts_requested.connect(lambda *args: asked.append(args))
+    return asked
+
+
+def test_a_step_s_file_is_opened_from_its_menu(opened, monkeypatch, tmp_path):
+    run = _ran(opened, tmp_path)
+    asked = _asked(opened)
+    _pick(monkeypatch, "Artifacts", "stdout")
+    opened._node_menu("a", QPoint())
+    assert asked == [(run, "steps/a/stdout.log")]
+
+
+def test_a_step_s_folder_is_offered_after_its_files(opened, monkeypatch, tmp_path):
+    run = _ran(opened, tmp_path)
+    asked = _asked(opened)
+    _pick(monkeypatch, "Artifacts", "Step folder")
+    opened._node_menu("a", QPoint())
+    assert asked == [(run, os.path.join("steps", "a"))]
+
+
+def test_with_no_run_of_this_cycle_the_menu_says_there_is_nothing(opened, monkeypatch,
+                                                                  tmp_path):
+    _ran(opened, tmp_path, cycle="another")
+    seen = {}
+
+    def exec_(menu):
+        actions = menu.actions()              # held: see _pick
+        for action in actions:
+            if action.text() == "Artifacts":
+                seen["enabled"] = action.isEnabled()
+                seen["tip"] = action.toolTip()
+
+    _menus(monkeypatch, exec_)
+    opened._node_menu("a", QPoint())
+    assert seen["enabled"] is False
+    assert "No run of this cycle" in seen["tip"]
+
+
+def test_the_output_panel_opens_the_run_or_the_picked_step_s_file(opened, tmp_path):
+    run = _ran(opened, tmp_path)
+    asked = _asked(opened)
+    button = opened.output.artifacts_button
+    assert not button.isHidden()
+    assert button.text() == "Artifacts"
+    button.click()
+    assert asked[-1] == (run, ""), "nothing picked: the run's folder"
+    opened._node_selected("a")
+    settled()
+    assert button.text() == "Artifacts (1)"
+    button.click()
+    assert asked[-1] == (run, "steps/a/stdout.log")
+    labels = [action.text() for action in opened.output.artifacts_menu.actions()]
+    assert labels == ["stdout", "Step folder"], "the run's folder is where both land"
+
+
+def test_a_picked_step_that_wrote_nothing_leaves_the_way_to_the_run(opened, tmp_path):
+    run = _ran(opened, tmp_path)
+    asked = _asked(opened)
+    opened._node_selected("d")
+    settled()
+    button = opened.output.artifacts_button
+    assert not button.isHidden()
+    assert button.text() == "Artifacts"
+    button.click()
+    assert asked[-1] == (run, "")
+
+
+def test_a_step_that_wrote_nothing_says_so_in_its_menu(opened, monkeypatch, tmp_path):
+    _ran(opened, tmp_path)
+    seen = {}
+
+    def exec_(menu):
+        actions = menu.actions()              # held: see _pick
+        for action in actions:
+            if action.text() == "Artifacts":
+                seen["enabled"] = action.isEnabled()
+                seen["tip"] = action.toolTip()
+
+    _menus(monkeypatch, exec_)
+    opened._node_menu("d", QPoint())
+    assert seen["enabled"] is False
+    assert "wrote nothing" in seen["tip"]
+
+
+def test_the_output_panel_offers_nothing_for_another_cycle_s_run(opened, tmp_path):
+    _ran(opened, tmp_path, cycle="another")
+    assert opened.output.artifacts_button.isHidden()
+
+
+def test_a_run_s_artifacts_link_in_subjects_opens_its_folder(opened):
+    asked = _asked(opened)
+    opened.subjects.set_sessions([{
+        "id": "demo:QA-1", "cycle": "demo", "subject": {"key": "QA-1"},
+        "status": "success", "runs": [{"id": "r1", "run_dir": "/runs/r1",
+                                       "state": "success"}]}])
+    opened._open_run_files("demo", "r1")
+    assert asked == [("/runs/r1", "")]

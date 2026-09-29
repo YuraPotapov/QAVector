@@ -30,26 +30,30 @@ plain which task a run is about, and going back to one is a click. See
 import os
 import subprocess
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QInputDialog,
-                               QLineEdit, QMenu, QPlainTextEdit,
-                               QPushButton, QStackedWidget, QTabWidget,
-                               QTextBrowser, QToolButton, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
+from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QInputDialog,
+                               QLabel, QLineEdit, QMenu,
+                               QPlainTextEdit, QPushButton, QStackedWidget,
+                               QTabWidget, QTextBrowser, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .. import (core as core_mod, cyclelayoutfile as clf,
                 cycleprojectsfile as cpf, icons, theme, widgets)
-from ..cyclegraph import STATUS_LOOK, CycleCanvas
+from .. import background, stageswindow
+from ..cycledraft import Draft
+from ..cyclesubjects import KEEP
+# The explorer lives in its own module; its roles are re-exported here, where
+# the page's callers and tests have always found them.
+from ..cycleexplorer import (ROLE_ALERT, ROLE_ID, ROLE_KIND, ROLE_META,  # noqa: F401
+                             ROLE_ROW, UNASSIGNED, Explorer as _Explorer)
+from ..cyclegraph import STATUS_LOOK, CanvasSkeleton, CycleCanvas
 from ..cycleoutput import implementation_html
 from ..cyclesubjects import SPEC as SUBJECTS_SPEC, SubjectsPanel
 from ..stages import StageList
+from ..cycleinteractions import InteractionComposer
 from .cycledialogs import CycleDialog, NodeDialog
 
-#: Roles on an explorer row. Qt's user role plus one, so the two things a row
-#: has to carry - what kind of row it is and which cycle it names - do not have
-#: to be encoded into its text.
-ROLE_KIND = Qt.UserRole
-ROLE_ID = Qt.UserRole + 1
 
 #: How long the canvas has to sit still before where it is looking is written
 #: down. Long enough that a wheel spun through half a dozen steps, or a hand
@@ -75,11 +79,12 @@ VISIBLE_LINES = 400
 #: How far off the bottom of the output still counts as being at it.
 LOG_SLACK = 2
 
-#: What the group holding cycles that name no project - or one nothing knows -
-#: is called. Named rather than hidden, the way the Services page handles a log
-#: whose stack has gone: losing sight of a cycle because its project was
-#: renamed would be the worst possible answer.
-UNASSIGNED = "Unassigned"
+#: The two things the canvas can be showing - see CyclesPage.context_switch.
+DESIGN, RUN = "Design", "Run"
+
+#: The action that starts a cycle again from nothing, whatever the last run did.
+START_OVER = "Start over (new run)"
+
 
 #: The starting point a new cycle is written with. It has to compile - the core
 #: refuses to write anything that does not - so it is one real step rather than
@@ -121,7 +126,13 @@ class CyclesPage(QWidget):
     #: A planned task, to start work on: the window knows how to run it.
     planned_started = Signal(dict)
     stop_requested = Signal()
+    interaction_requested = Signal(dict)
     saved = Signal()
+    #: Show this on the Artifacts page: (run directory, path relative to it -
+    #: "" for the directory itself).
+    artifacts_requested = Signal(str, str)
+    #: Stages went into a window of its own (True) or came back (False).
+    stages_detached_changed = Signal(bool)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -139,6 +150,7 @@ class CyclesPage(QWidget):
         self._buttons_pending = False
         self._sessions_pending = False
         self._sessions_loaded = False
+        self._stages_window = None       # stageswindow.StagesWindow, while detached
         self._build()
         self.load_projects()
 
@@ -158,9 +170,11 @@ class CyclesPage(QWidget):
             lambda: self._run("resume" if self._resume_available() else ""))
         self.run_menu = QMenu(self.run_button)
         self.run_menu.setToolTipsVisible(True)
-        self.hard_run_action = self.run_menu.addAction("Hard Run")
+        # Named for what it does. "Hard Run" said it was forceful without
+        # saying what it forced; what it does is start again from nothing.
+        self.hard_run_action = self.run_menu.addAction(START_OVER)
         self.hard_run_action.setToolTip(
-            "Start the entire cycle from the beginning in a new run.\n"
+            "A new run from the first step, taking nothing from earlier runs.\n"
             "Paid services will be called again; previous runs remain saved.")
         self.hard_run_action.triggered.connect(lambda: self._run("hard"))
         self.run_button.setMenu(self.run_menu)
@@ -170,13 +184,14 @@ class CyclesPage(QWidget):
         # question of where the others' results come from.
         self.step_button = icons.button(QPushButton(), "run-step")
         self.step_button.setToolTip(
-            "Run only the selected step.\n"
-            "Reuse the displayed run, or the last run of this cycle if none is displayed.")
+            "Run this step only - a new run that takes every other step's\n"
+            "results from the run on screen, or the last run if none is.")
         self.step_button.clicked.connect(lambda: self._run("only"))
         self.from_button = icons.button(QPushButton(), "run-from")
         self.from_button.setToolTip(
-            "Run the selected step and everything that waits on it.\n"
-            "Reuse the displayed run, or the last run of this cycle if none is displayed.")
+            "Run from here - this step and everything after it, in a new run\n"
+            "that takes the steps before it from the run on screen, or the\n"
+            "last run if none is.")
         self.from_button.clicked.connect(lambda: self._run("from"))
         self.stop_button = icons.button(QPushButton(), "stop", "Stop")
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -189,14 +204,78 @@ class CyclesPage(QWidget):
         self.arrange_button.setToolTip(
             "Put every step back where the layout says it belongs.\n"
             "Nothing about moving a node is permanent.")
-        self.fit_button = QPushButton("Fit")
+        self.fit_button = icons.button(QPushButton(), "fit", "Fit")
         self.fit_button.setToolTip("Show all of it.")
         self.zoom_out_button = icons.button(QPushButton(), "minus")
+        self.zoom_out_button.setToolTip("Zoom out (Ctrl+wheel).")
         self.zoom_in_button = icons.button(QPushButton(), "plus")
+        self.zoom_in_button.setToolTip("Zoom in (Ctrl+wheel).")
+        # Folding is how a long cycle is read: twenty-eight steps become the
+        # handful of phases they are grouped into, each one box that says how
+        # it went. Offered only when the cycle has phases to fold.
+        self.fold_button = icons.button(QPushButton(), "fold", "Fold phases")
+        self.fold_button.setToolTip(
+            "Show each phase as one box. Double-click a folded phase, or click "
+            "a phase's heading, to open or fold just that one.")
+        self.fold_button.clicked.connect(self._toggle_folding)
+        # What the core thinks of the file, where the file is drawn - and a
+        # way to the list of what is wrong with it.
+        self.validity = QPushButton("")
+        self.validity.setToolTip("Show the Problems tab.")
+        self.validity.clicked.connect(
+            lambda: self.output.tabs.setCurrentIndex(TAB_PROBLEMS))
+        # Which graph the canvas is: the one being written (Design) or the one
+        # a run is going through (Run). They are the same picture until the
+        # file changes under a run, or a change is not saved yet - and then
+        # painting one's colours on the other would be a lie about both.
+        self.context_switch = widgets.Segmented([DESIGN, RUN], DESIGN)
+        self.context_switch.changed.connect(self._context_changed)
+        self._context = DESIGN
+        self.add_button = icons.button(QPushButton(), "plus", "Step")
+        self.add_button.setToolTip(
+            "Add a step - after the selected one, when one is selected.\n"
+            "Right-click a step for what else can be done to it.")
+        self.add_button.clicked.connect(self._add_step_from_bar)
         for button in (self.properties_button, self.arrange_button,
                        self.fit_button, self.zoom_out_button,
-                       self.zoom_in_button):
+                       self.zoom_in_button, self.fold_button, self.validity,
+                       self.add_button):
             button.setProperty("variant", "ghost")
+
+        # What a change made on the canvas and not saved yet looks like, and
+        # the ways out of it. Hidden while there is nothing unsaved.
+        self._draft = None
+        self.draft_note = widgets.mono("")
+        self.undo_button = icons.button(QPushButton(), "undo", "Undo")
+        self.undo_button.setToolTip("Undo the last change (Ctrl+Z).")
+        self.undo_button.clicked.connect(self._undo)
+        self.redo_button = icons.button(QPushButton(), "redo", "Redo")
+        self.redo_button.setToolTip("Redo it (Ctrl+Shift+Z).")
+        self.redo_button.clicked.connect(self._redo)
+        self.changes_button = QPushButton("Changes")
+        self.changes_button.setToolTip("What saving would change in the file.")
+        self.changes_button.clicked.connect(self._show_changes)
+        self.revert_draft_button = QPushButton("Revert")
+        self.revert_draft_button.setToolTip("Throw the unsaved changes away.")
+        self.revert_draft_button.clicked.connect(self._revert_draft)
+        self.save_draft_button = QPushButton("Save")
+        self.save_draft_button.setProperty("variant", "primary")
+        self.save_draft_button.setToolTip("Write the changes to the cycle file (Ctrl+S).")
+        self.save_draft_button.clicked.connect(self._save_draft)
+        for button in (self.undo_button, self.redo_button, self.changes_button,
+                       self.revert_draft_button):
+            button.setProperty("variant", "ghost")
+        self.draft_bar = _FloatingBar(self.draft_note, None, self.undo_button,
+                                      self.redo_button, self.changes_button,
+                                      self.revert_draft_button,
+                                      self.save_draft_button)
+        self.draft_bar.setVisible(False)
+        for keys, slot in ((QKeySequence.Undo, self._undo),
+                           (QKeySequence.Redo, self._redo),
+                           (QKeySequence.Save, self._save_shortcut)):
+            shortcut = QShortcut(keys, self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
         # Not ghost, deliberately. Ghost means a transparent border, which is
         # right for the view controls beside them and wrong for these: they
         # start work, the way Run and Stop do, and a button that starts
@@ -207,24 +286,39 @@ class CyclesPage(QWidget):
 
         layout.addWidget(widgets.row(
             self.title, None, self.state, self.properties_button,
-            self.arrange_button, self.zoom_out_button, self.zoom_in_button,
-            self.fit_button, self.step_button, self.from_button,
+            self.step_button, self.from_button,
             self.stop_button, self.run_button))
-        layout.addWidget(widgets.lede(
+        # Said while nothing is open, on the empty canvas - not as lines over
+        # it, which took room from a long cycle and moved the page when they
+        # went away.
+        self.intro = widgets.lede(
             "A cycle runs services, scenarios, commands and reports as one "
             "graph. Steps that do not depend on each other run at the same "
             "time. Pick one on the left to see all of it - drag the canvas to "
             "move around it, drag a step to shift it, and Arrange puts them "
-            "all back. Double-click a step to open it."))
-        self.run_hint = widgets.lede("")
-        layout.addWidget(self.run_hint)
+            "all back. Double-click a step to open it.")
 
         self.canvas = CycleCanvas(self)
+        # Over the canvas rather than in the page's column: the help while
+        # nothing is open, and the bar for unsaved changes while there are
+        # some. Neither changes how tall anything is when it comes or goes.
+        self.intro.setParent(self.canvas.viewport())
+        self.intro.setAlignment(Qt.AlignCenter)
+        _Pinned(self.intro, self.canvas.viewport(), _centred)
+        self.draft_bar.setParent(self.canvas.viewport())
+        _Pinned(self.draft_bar, self.canvas.viewport(), _along_the_foot)
         self.canvas.node_selected.connect(self._node_selected)
         self.canvas.node_opened.connect(self.open_step)
+        self.canvas.node_menu.connect(self._node_menu)
+        self.canvas.canvas_menu.connect(self._canvas_menu)
+        self.canvas.edge_menu.connect(self._edge_menu)
+        self.canvas.link_made.connect(self._link_made)
+        self.canvas.link_moved.connect(self._link_moved)
+        self.canvas.link_removed.connect(self._remove_link)
         self.canvas.nodes_moved.connect(self._remember_places)
         self.canvas.view_changed.connect(self._view_moved)
         self.canvas.view_reset.connect(self._view_reset)
+        self.canvas.folds_changed.connect(self._folds_changed)
         # What makes a zoom and a pan cheap to remember: the canvas says it
         # moved as often as it likes, and the file is written once the moving
         # has stopped. See _view_moved.
@@ -249,8 +343,15 @@ class CyclesPage(QWidget):
         self.explorer.cycle_reidentified.connect(self._change_cycle_id)
         self.explorer.cycle_deleted.connect(self._delete_cycle)
         self.explorer.cycle_imported.connect(self._import_cycle)
+        self.explorer.cycle_moved.connect(self._move_cycle)
+        self.explorer.project_listed.connect(self._list_project)
         self.output = _Output(self)
+        self.output.composer.submitted.connect(self.interaction_requested.emit)
         self.output.save_requested.connect(self._save_yaml)
+        self.output.detach_requested.connect(self.detach_stages)
+        self.output.dock_requested.connect(self.dock_stages)
+        self.output.show_window_requested.connect(self.show_stages)
+        self.output.artifact_picked.connect(self._reveal)
         self.subjects = SubjectsPanel(self)
         self.subjects.activated.connect(self._open_session)
         self.subjects.run_picked.connect(self._open_session_run)
@@ -258,12 +359,21 @@ class CyclesPage(QWidget):
         self.subjects.delete_requested.connect(self._delete_session)
         self.subjects.planned_start.connect(self.planned_started.emit)
         self.subjects.planned_remove.connect(self._remove_planned)
+        self.subjects.files_picked.connect(self._open_run_files)
 
         # Folding splitters: any panel dragged shut leaves a bold line where
         # it went, and clicking the line brings it back.
+        # The view's own controls sit on the view, not in the page's header:
+        # they act on what is drawn, and the header is for the cycle itself
+        # and for running it - which is also what lets its name be read.
+        self.view_bar = widgets.row(
+            self.context_switch, self.validity, None, self.add_button,
+            self.fold_button, self.arrange_button,
+            self.zoom_out_button, self.zoom_in_button, self.fit_button,
+            spacing=2)
         across = widgets.FoldingSplitter(Qt.Horizontal)
         across.addWidget(self.explorer)
-        across.addWidget(_framed(self.canvas))
+        across.addWidget(_framed(self.canvas, self.view_bar))
         across.addWidget(self.subjects)
         across.setStretchFactor(1, 1)
         across.setSizes([EXPLORER_WIDTH, 900, SUBJECTS_WIDTH])
@@ -276,6 +386,26 @@ class CyclesPage(QWidget):
         down.setSizes([500, OUTPUT_HEIGHT])
         down.remember_in(self.settings, "cycles/down")
         layout.addWidget(down, 1)
+        # Kept to open the output again when somebody goes to Stages with it
+        # folded shut - see show_stages.
+        self._down = down
+
+        # Where a region is waiting for its data - see open and
+        # refresh_sessions. Each sits over its own region only.
+        self._asked = {}
+        tabs = self.output.tabs
+        self.skeletons = {
+            # The canvas's own paper and node sizes, not a generic grey graph.
+            "canvas": CanvasSkeleton(self.canvas),
+            "output": widgets.Skeleton(tabs, "lines", area=lambda: tabs.rect().adjusted(
+                0, tabs.tabBar().height(), 0, 0)),
+            "subjects": widgets.Skeleton(self.subjects.list.viewport(), "rows"),
+            # And the pane under the list, which would otherwise say "Nothing
+            # has run yet" about runs it has not been told of yet.
+            "subjects_detail": widgets.Skeleton(self.subjects.details.viewport(),
+                                                "lines"),
+            "explorer": widgets.Skeleton(self.explorer.tree.viewport(), "rows"),
+        }
 
         self._update_buttons()
 
@@ -289,17 +419,33 @@ class CyclesPage(QWidget):
         self.explorer.fill(self._cycles, self._projects)
         if getattr(self, "_pending_open", ""):
             self._open_pending()
-        elif self._open:
+        elif self._open and self._changed_since_opened():
             # Keep whatever was open across a refresh, so saving a scenario
             # elsewhere does not close the cycle somebody was reading.
             self.open(self._open.get("id", ""))
         self._update_buttons()
+
+    def _changed_since_opened(self):
+        """Whether the open cycle's file says something new, by its digest.
+
+        Every save refreshes the inventory, and the page used to read the open
+        cycle again each time - a second trip to the core, on this thread,
+        for the file it had read a moment before. The inventory carries each
+        file's digest, so an unchanged file is not read twice. No digest (an
+        older core) means "ask", as it always did.
+        """
+        cycle_id = (self._open or {}).get("id", "")
+        row = next((one for one in self._cycles if one.get("id") == cycle_id), None)
+        if row is None:
+            return True
+        return not row.get("digest") or row.get("digest") != self._open.get("digest")
 
     def set_run_state(self, run_state):
         """Follow a live run. Connected once; the window owns the model."""
         self.run_state = run_state
         run_state.cycle_graph_known.connect(self._graph_known)
         run_state.cycle_step_changed.connect(self._step_changed)
+        run_state.cycle_interactions_changed.connect(self._schedule_paint)
         # A run found its subject, said how it began, was sent back, or
         # ended: the list on the right has something new to say.
         run_state.cycle_subject_changed.connect(self._subject_changed)
@@ -319,9 +465,15 @@ class CyclesPage(QWidget):
             getattr(self.settings, "cycle_projects_path", ""))
         try:
             self._projects = cpf.load(self._projects_path)
+            self.explorer.set_error("")
         except cpf.CycleProjectsFileError as exc:
             self._projects = []
             self.output.set_problems([str(exc)])
+            # Beside the tree as well, because a tree of cycles with every
+            # project gone looks like the projects were lost, not unreadable.
+            self.explorer.set_error("The projects list could not be read, so "
+                                    "cycles are grouped by what their files say. "
+                                    "%s" % exc)
 
     def _write_projects(self):
         """Save the projects file; returns True when it went."""
@@ -343,17 +495,49 @@ class CyclesPage(QWidget):
         # of one run start disagreeing.
 
     # -- opening one ----------------------------------------------------------
-    def open(self, cycle_id):
-        """Read one cycle and draw all of it."""
+    def open(self, cycle_id, then=None):
+        """Read one cycle and draw all of it. ``then`` runs once it is drawn.
+
+        The read is a process started and waited for; with a few hundred runs
+        behind a cycle it took long enough to look like a hang. It is asked on
+        a thread when the core is a real one (see ``background``), the cycle's
+        name goes up at once, and the regions about to be replaced show their
+        skeletons until the answer arrives. A click on another cycle meanwhile
+        wins: the older answer is dropped when it comes.
+        """
         if not cycle_id or self.core is None:
             return
-        try:
-            payload = self.core.cycle_show(cycle_id)
-        except core_mod.CoreError as exc:
+        if (self._draft is not None and self._draft.cycle_id != cycle_id
+                and not self._leave_draft()):
+            # Stayed: the explorer's selection goes back to what is open.
+            self.explorer.select(self.current_id())
+            return
+        if cycle_id != self.current_id():
+            row = next((one for one in self._cycles if one.get("id") == cycle_id), {})
+            self.title.setText(row.get("name") or cycle_id)
+            self.state.setText("loading...")
+            # What the chip says is about the cycle that was open; until the
+            # new one is read there is nothing true to say.
+            self.validity.setVisible(False)
+            self.explorer.select(cycle_id)
+            self._loading(("canvas", "output"), True)
+        core = self.core
+        self._call("open", lambda: core.cycle_show(cycle_id),
+                   lambda payload, error: self._opened(cycle_id, payload, error, then))
+        if not self._sessions_loaded:
+            # Asked beside the cycle rather than after it: the two do not
+            # depend on each other, and the list shows it is coming at once.
+            self.refresh_sessions()
+
+    def _opened(self, cycle_id, payload, error, then=None):
+        """The core's answer to :meth:`open`: draw it."""
+        self._loading(("canvas", "output"), False)
+        if error is not None:
             self._open = None
             self.canvas.set_graph(None)
-            self.output.set_problems([str(exc)])
+            self.output.set_problems([str(error)])
             self.state.setText("could not read %s" % cycle_id)
+            self._update_buttons()
             return
 
         # Which cycle is on the canvas, asked before the new payload replaces
@@ -363,14 +547,102 @@ class CyclesPage(QWidget):
         drawn = self._drawn_id()
         self._flush_view()
         self._open = payload
-        writable = bool(payload.get("writable"))
+        if self._draft is not None and (self._draft.cycle_id != cycle_id
+                                        or not self._draft.dirty):
+            self._draft = None
+        if self._context == RUN and (self._live_cycle() or {}).get("cycle") != cycle_id:
+            # A run of another cycle is nothing to show this one by.
+            self._set_context(DESIGN)
         self.title.setText(_name_of(payload) or "Cycles")
-        # The same cycle, unchanged, is not a reason to rebuild anything. A
-        # click on the cycle already open, a Refresh, closing Settings and
-        # saving something on another page all land here, and rebuilding threw
-        # away the statuses of a run that was still going, the selection, and
-        # wherever the canvas had been zoomed and dragged to.
-        graph = payload.get("cycle")
+        self._redraw(drawn)
+        # And what it said, not only what it did. Without this, a run restored
+        # after a restart came back as a coloured graph beside an empty panel:
+        # the model had the stages and the output, and nothing asked for them.
+        self._paint_log()
+        self._show_text()
+        self.explorer.select(cycle_id)
+        self.subjects.set_state(cycle=cycle_id, graph=payload.get("cycle"),
+                                live=self._live_cycle())
+        self._describe_state(payload)
+        self._update_buttons()
+        if then is not None:
+            then()
+
+    # -- asking the core without stopping the window --------------------------
+    def _call(self, kind, work, done):
+        """Run ``work``; ``done(result, error)`` with its answer - the latest only.
+
+        On a thread when the core's calls block, directly when they do not
+        (the fakes the tests use). Asked again before the answer came, the
+        earlier answer is dropped: it is about something nobody is looking at
+        any more. An error that is not the core's own is raised after
+        ``done`` has had its say, so a bug is still a traceback.
+        """
+        self._asked[kind] = self._asked.get(kind, 0) + 1
+        mine = self._asked[kind]
+
+        def answer(result, error):
+            if self._asked.get(kind) != mine:
+                return
+            done(result, error)
+            if error is not None and not isinstance(error, core_mod.CoreError):
+                raise error
+
+        if background.offloads(self.core):
+            background.run(work, answer, owner=self)
+        else:
+            answer(*background.call(work))
+
+    def _loading(self, zones, on):
+        """Skeletons on, or off, in these regions. A region folded shut shows
+        nothing either way - it has no room to show it in."""
+        for zone in zones:
+            for name in (zone, zone + "_detail"):
+                skeleton = self.skeletons.get(name)
+                if skeleton is not None:
+                    skeleton.start() if on else skeleton.stop()
+
+    def show_loading(self, on=True):
+        """For the window: the canvas and the output are about to be replaced."""
+        self._loading(("canvas", "output"), on)
+
+    def inventory_loading(self, on=True):
+        """For the window: the list of cycles is being read. Shown only while
+        there is nothing in the tree yet - a refresh keeps what is there."""
+        if on and not self._cycles:
+            self._loading(("explorer",), True)
+        elif not on:
+            self._loading(("explorer",), False)
+
+    # -- what the canvas shows ----------------------------------------------------
+    def _graph_now(self):
+        """The graph the canvas should be: the run's, the draft's, or the file's."""
+        if self._context == RUN:
+            live = self._live_cycle() or {}
+            if live.get("graph"):
+                return live["graph"]
+        if self._draft is not None and self._draft.dirty:
+            return ((self._draft.check or {}).get("cycle")
+                    or (self._open or {}).get("cycle"))
+        return (self._open or {}).get("cycle")
+
+    def _problems_now(self):
+        if self._draft is not None and self._draft.dirty:
+            return list((self._draft.check or {}).get("problems") or [])
+        return list((self._open or {}).get("problems") or [])
+
+    def _redraw(self, drawn=None):
+        """Put what the context says on the canvas, keeping the scene if it can.
+
+        The same picture is not a reason to rebuild anything. A click on the
+        cycle already open, a Refresh, closing Settings and saving something
+        on another page all land here, and rebuilding threw away the statuses
+        of a run that was still going, the selection, and wherever the canvas
+        had been zoomed and dragged to.
+        """
+        graph = self._graph_now()
+        cycle_id = (graph or {}).get("id") or self.current_id()
+        drawn = self._drawn_id() if drawn is None else drawn
         if cycle_id == drawn and _same_shape(graph, self.canvas.graph()):
             self.canvas.update_graph(graph)
         else:
@@ -379,26 +651,59 @@ class CyclesPage(QWidget):
             # a cycle never arranged - goes where the layout computes, so a
             # remembered arrangement never has to be thrown away.
             self.canvas.set_graph(graph, self._remembered(cycle_id),
-                                  self._remembered_view(cycle_id))
-            self._selected = ""
+                                  self._remembered_view(cycle_id),
+                                  folded=self._remembered_folded(cycle_id))
+            if self._selected and self.canvas.node(self._selected) is None:
+                self._selected = ""
+        self.canvas.set_problems(self._problems_now())
         # The canvas is drawn from the file, which knows nothing about a run.
         # Whatever the model knows about this cycle is painted back on, so a
         # run still going - or one that finished while somebody was elsewhere -
         # is still there to read.
         self._apply_run_state()
-        # And what it said, not only what it did. Without this, a run restored
-        # after a restart came back as a coloured graph beside an empty panel:
-        # the model had the stages and the output, and nothing asked for them.
-        self._paint_log()
-        self.output.set_problems(payload.get("problems") or [])
-        self.output.set_yaml(payload.get("yaml") or "", writable)
-        self.explorer.select(cycle_id)
-        self.subjects.set_cycle(cycle_id, graph)
-        self.subjects.set_live(self._live_cycle())
-        if not self._sessions_loaded:
-            self.refresh_sessions()
-        self._describe_state(payload)
-        self._update_buttons()
+
+    def _show_text(self):
+        """The Problems and YAML tabs: the draft's while there is one."""
+        if self._draft is not None and self._draft.dirty:
+            check = self._draft.check or {}
+            self.output.set_problems(self._problems_now())
+            self.output.set_yaml(check.get("text") or "", writable=False)
+            self.output.set_yaml_note(
+                "This is what Save would write. Save or Revert the changes "
+                "made on the canvas to edit the file as text.")
+        else:
+            self.output.set_problems(self._problems_now())
+            self.output.set_yaml((self._open or {}).get("yaml") or "",
+                                 bool((self._open or {}).get("writable")))
+            self.output.set_yaml_note("")
+        self.draft_bar.setVisible(bool(self._draft is not None and self._draft.dirty))
+        if self._draft is not None and self._draft.dirty:
+            problems = self._problems_now()
+            # Short, because it sits on a bar over the canvas; the whole
+            # sentence is its tooltip.
+            self.draft_note.setText("Unsaved - %d problem%s" % (
+                len(problems), "" if len(problems) == 1 else "s")
+                if problems else "Unsaved changes")
+            self.draft_note.setToolTip(
+                "Changes made on the canvas, not in the file yet. %s"
+                % ("Fix the %d problem(s) in the Problems tab before saving."
+                   % len(problems) if problems else "Save writes them."))
+            self.draft_note.setStyleSheet("color: %s;" % (theme.BAD if problems
+                                                           else theme.WARN))
+
+    def _statuses_hidden(self):
+        """Whether a run's colours would be painted on a graph that did not run.
+
+        In Design the canvas is the file - or changes not saved yet - and a
+        run's statuses belong on it only while it is the picture that ran.
+        Otherwise they are held back, and Run shows the run's own graph.
+        """
+        if self._context == RUN:
+            return False
+        if self._draft is not None and self._draft.dirty:
+            return True
+        ran = ((self.run_state.cycle or {}) if self.run_state else {}).get("graph")
+        return bool(ran) and not _same_shape(ran, self.canvas.graph())
 
     def _apply_run_state(self):
         """Paint what the run model knows onto the canvas, if it is this cycle.
@@ -413,35 +718,380 @@ class CyclesPage(QWidget):
         drawn = (self.canvas.graph() or {}).get("id") or self.current_id()
         if state.get("cycle") and drawn and state.get("cycle") != drawn:
             return
+        if self._statuses_hidden():
+            self.canvas.clear_status()
+            return
         for step_id, step in (state.get("steps") or {}).items():
             self.canvas.set_status(step_id, step.get("status"),
                                    step.get("duration_ms"), step.get("attempt"))
 
-    def open_step(self, step_id):
-        """Open one step for editing. Double-clicking a node is what calls this."""
-        document = (self._open or {}).get("document")
-        if not document or not step_id:
+    def _context_changed(self, name):
+        self._context = name
+        self._redraw()
+        self._describe_state(self._open or {})
+        self._update_buttons()
+
+    def _set_context(self, name):
+        """Switch without being asked - a run started, an edit was made."""
+        if name != self._context:
+            self.context_switch.set_current(name, notify=False)
+            self._context = name
+
+    # -- editing: changes collect in a draft until Save ----------------------------
+    def _can_edit_graph(self):
+        """Whether the open cycle's graph may be changed here at all."""
+        return bool(self._open and self._open.get("writable")
+                    and self._open.get("document") is not None)
+
+    def _document_now(self):
+        """The document edits start from: the draft's, or the file's."""
+        if self._draft is not None:
+            return self._draft.document
+        return (self._open or {}).get("document") or {}
+
+    def _ensure_draft(self):
+        if self._draft is None or self._draft.cycle_id != self.current_id():
+            self._draft = Draft(self.current_id(), (self._open or {}).get("document"),
+                                (self._open or {}).get("digest", ""))
+        return self._draft
+
+    def _draft_changed(self):
+        """Something about the draft moved: ask the core, and show the answer.
+
+        A dry run of a save, so the problems, the graph and the text are the
+        core's own - the same validator, layout and writer a real save uses,
+        and no second copy of any of them here.
+        """
+        draft = self._draft
+        if draft is None:
             return
+        self._set_context(DESIGN)
+        if draft.dirty:
+            try:
+                draft.check = self.core.cycle_save(draft.cycle_id, draft.document,
+                                                   dry_run=True, base=draft.base)
+            except core_mod.CoreError as exc:
+                draft.check = {"problems": [str(exc)]}
+        self._redraw()
+        self._show_text()
+        self._describe_state(self._open or {})
+        self._update_buttons()
+
+    def _undo(self):
+        if self._draft is not None and self._draft.undo():
+            self._draft_changed()
+
+    def _redo(self):
+        if self._draft is not None and self._draft.redo():
+            self._draft_changed()
+
+    def _save_shortcut(self):
+        if self._draft is not None and self._draft.dirty:
+            self._save_draft()
+        elif self.output.save_button.isEnabled():
+            self._save_yaml(self.output.yaml.toPlainText())
+
+    def _save_draft(self):
+        """Write the draft through the core. True when it went."""
+        draft = self._draft
+        if draft is None or not draft.dirty:
+            return True
+        if not self._write_cycle(draft.cycle_id, draft.document, base=draft.base):
+            return False
+        self._draft = None
+        self.open(draft.cycle_id)
+        return True
+
+    def _revert_draft(self):
+        if self._draft is None or not self._draft.dirty:
+            return
+        if not widgets.confirm(self, "Revert", "Throw away the unsaved changes?",
+                               "The file is left as it is.", agree="Revert",
+                               refuse="Keep them"):
+            return
+        self._draft = None
+        self._redraw()
+        self._show_text()
+        self._describe_state(self._open or {})
+        self._update_buttons()
+
+    def _leave_draft(self):
+        """Unsaved changes stand in the way of leaving: ask. True to go on."""
+        if self._draft is None or not self._draft.dirty:
+            self._draft = None
+            return True
+        chosen = widgets.choose(
+            self, "Unsaved changes",
+            "Save the changes to %s?" % self._draft.cycle_id,
+            "They were made on the canvas and are not in the file yet.",
+            choices=("Discard",), agree="Save", refuse="Cancel")
+        if chosen == "Save":
+            return self._save_draft()
+        if chosen == "Discard":
+            self._draft = None
+            self._show_text()
+            return True
+        return False
+
+    def _show_changes(self):
+        """What Save would change, as a diff, before it changes it."""
+        check = (self._draft.check or {}) if self._draft is not None else {}
+        widgets.output(self, "Changes", "What Save would write to %s"
+                       % (self._draft.cycle_id if self._draft else ""),
+                       check.get("diff") or "(nothing)")
+
+    def _plugins_menu(self, menu, after=""):
+        """Every plugin the core offers, by category, each adding a step."""
+        plugins = list(getattr(self.inventory, "cycle_plugins", None) or [])
+        by_category = {}
+        for plugin in plugins:
+            by_category.setdefault(plugin.get("category") or "other", []).append(plugin)
+        for category in sorted(by_category):
+            sub = menu.addMenu(category.title())
+            for plugin in sorted(by_category[category], key=lambda one: one.get("id", "")):
+                action = sub.addAction(
+                    "%s  -  %s" % (plugin.get("id", ""), plugin.get("name", "")),
+                    lambda p=plugin.get("id", ""): self._add_step(p, after))
+                action.setToolTip(plugin.get("summary") or "")
+            sub.setToolTipsVisible(True)
+        if not plugins:
+            menu.addAction("No plugins are known yet").setEnabled(False)
+
+    def _add_step_from_bar(self):
+        menu = QMenu(self)
+        self._plugins_menu(menu, after=self._selected)
+        menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
+
+    def _add_step(self, plugin_id, after=""):
+        """A new step, filled in straight away in its own window.
+
+        Closing that window without applying takes the step back out - a
+        box with nothing in it is not something anybody asked for.
+        """
+        if not self._can_edit_graph():
+            return
+        draft = self._ensure_draft()
+        made = draft.add_step(plugin_id, after=after)
+        if not self._edit_step(made, adding=True):
+            draft.undo()
+        self._draft_changed()
+        if self.canvas.node(made) is not None:
+            self.canvas.select(made)
+
+    def _node_menu(self, step_id, where):
+        """What can be done to one step, from the step."""
+        editable = self._can_edit_graph() and self._context == DESIGN
+        document = self._document_now()
+        step = next((one for one in document.get("steps") or []
+                     if one.get("id") == step_id), None)
+        menu = QMenu(self)
+        menu.addAction("Open..." if editable else "Show...",
+                       lambda: self.open_step(step_id))
+        if editable and step is not None:
+            menu.addSeparator()
+            self._plugins_menu(menu.addMenu("Add a step after it"), after=step_id)
+            draft = Draft("", document)
+            # Both directions, from the one step: what it waits for, and what
+            # waits for it. The second is the same link seen from the other
+            # end, and without it making a step come before three others meant
+            # opening each of the three.
+            needs = menu.addMenu("Waits for")
+            before = menu.addMenu("Runs before")
+            for submenu in (needs, before):
+                submenu.setToolTipsVisible(True)
+            needs.setToolTip("The steps this one starts after.")
+            before.setToolTip("The steps that start after this one.")
+            for other in document.get("steps") or []:
+                other_id = other.get("id", "")
+                if other_id == step_id:
+                    continue
+                name = other.get("label") or other_id
+                for submenu, waiting, waited_for in ((needs, step_id, other_id),
+                                                     (before, other_id, step_id)):
+                    action = submenu.addAction(name)
+                    action.setCheckable(True)
+                    action.setChecked(waited_for in draft.needs_of(waiting))
+                    why = draft.why_not_need(waiting, waited_for)
+                    allowed = action.isChecked() or not why
+                    action.setEnabled(allowed)
+                    if not allowed:
+                        action.setToolTip(why)
+                    action.toggled.connect(
+                        lambda on, w=waiting, f=waited_for: self._set_need(w, f, on))
+            phases = menu.addMenu("Phase")
+            current = (step.get("group") or "").strip()
+            for name in [""] + draft.phases():
+                action = phases.addAction(name or "(none)",
+                                          lambda n=name: self._set_group(step_id, n))
+                action.setCheckable(True)
+                action.setChecked(name == current)
+            phases.addSeparator()
+            phases.addAction("New phase...", lambda: self._new_group(step_id))
+            menu.addAction("Duplicate", lambda: self._duplicate_step(step_id))
+            menu.addAction("Delete...", lambda: self._delete_step(step_id))
+        menu.addSeparator()
+        self._artifacts_menu(menu.addMenu("Artifacts"), step_id)
+        running = bool(self.run_state and self.run_state.cycle_running)
+        only = menu.addAction("Run this step only", lambda: self._run("only"))
+        after = menu.addAction("Run from here", lambda: self._run("from"))
+        for action in (only, after):
+            action.setEnabled(not running and not (self._draft and self._draft.dirty))
+        menu.exec(where)
+
+    def _artifacts_menu(self, menu, step_id):
+        """Every file ``step_id`` wrote in the run on screen, and its folder."""
+        menu.setToolTipsVisible(True)
+        targets, _files = self._artifact_targets(step_id)
+        for label, path in targets:
+            action = menu.addAction(label, lambda p=path: self._reveal(p))
+            action.setToolTip(path)
+        if not targets:
+            menu.setEnabled(False)
+            menu.menuAction().setToolTip(
+                "This step wrote nothing in the run on screen." if self._run_dir()
+                else "No run of this cycle is on screen to have written any.")
+
+    def _canvas_menu(self, where):
+        menu = QMenu(self)
+        if self._can_edit_graph() and self._context == DESIGN:
+            self._plugins_menu(menu.addMenu("Add a step"))
+            menu.addSeparator()
+        if self.canvas.phases():
+            menu.addAction("Open phases" if self.canvas.folded() else "Fold phases",
+                           self._toggle_folding)
+        menu.addAction("Fit", self.canvas.fit)
+        menu.exec(where)
+
+    def _edge_menu(self, waited_for, waiting, where):
+        """What can be done to one link, from the link."""
+        menu = QMenu(self)
+        said = menu.addAction("%s waits for %s" % (waiting, waited_for))
+        said.setEnabled(False)
+        menu.addSeparator()
+        if self._can_edit_graph() and self._context == DESIGN:
+            menu.addAction("Remove this link",
+                           lambda: self._remove_link(waited_for, waiting))
+            menu.addSeparator()
+        for step_id in (waited_for, waiting):
+            menu.addAction("Go to %s" % step_id,
+                           lambda s=step_id: self.canvas.select(s))
+        menu.exec(where)
+
+    def _why_not_link(self, waited_for, waiting, replacing=None):
+        """Asked by the canvas of every step a link is dragged over.
+
+        ``replacing`` is the link being re-pointed, if one is - judged as if
+        it were already gone, since it will be.
+        """
+        draft = Draft("", self._document_now())
+        if replacing:
+            return draft.why_not_move(replacing[1], replacing[0], waiting, waited_for)
+        return draft.why_not_need(waiting, waited_for)
+
+    def _link_made(self, waited_for, waiting):
+        """A link dragged from one step's dot to another: keep it in the draft."""
+        self._set_need(waiting, waited_for, True)
+        # Selected, so the new link is picked out - and can be pointed
+        # elsewhere or deleted straight away - without the view jumping.
+        self.canvas.select_link(waited_for, waiting)
+
+    def _link_moved(self, old_waited_for, old_waiting, waited_for, waiting):
+        """One end of a link dragged to another step: one change, one Undo."""
+        if self._ensure_draft().move_need(old_waiting, old_waited_for,
+                                          waiting, waited_for):
+            self._draft_changed()
+            self.canvas.select_link(waited_for, waiting)
+
+    def _remove_link(self, waited_for, waiting):
+        self._set_need(waiting, waited_for, False)
+
+    def _set_need(self, step_id, other, wanted):
+        if self._ensure_draft().set_need(step_id, other, wanted):
+            self._draft_changed()
+
+    def _set_group(self, step_id, name):
+        if self._ensure_draft().set_group(step_id, name):
+            self._draft_changed()
+
+    def _new_group(self, step_id):
+        name = self._ask("New phase", "Phase name:")
+        if name:
+            self._set_group(step_id, name)
+
+    def _duplicate_step(self, step_id):
+        made = self._ensure_draft().duplicate_step(step_id)
+        if made:
+            self._draft_changed()
+
+    def _delete_step(self, step_id):
+        draft = self._ensure_draft()
+        named = draft.references_to(step_id)
+        detail = ("It is taken out of what waits for it. %s still read%s it in "
+                  "their settings; the Problems tab will name what to change."
+                  % (", ".join(named), "" if len(named) != 1 else "s")
+                  if named else "Nothing else names it.")
+        if not widgets.confirm(self, "Delete step", "Delete %s?" % step_id,
+                               detail + "\n\nIt is not saved until you press Save.",
+                               agree="Delete", refuse="Keep"):
+            return
+        if draft.remove_step(step_id):
+            if self._selected == step_id:
+                self._selected = ""
+            self._draft_changed()
+
+    def open_step(self, step_id):
+        """Open one step. Double-clicking a node is what calls this."""
+        self._edit_step(step_id)
+
+    def _edit_step(self, step_id, adding=False):
+        """The step's own window. True when a change was applied.
+
+        What is applied goes into the draft, not the file: Save writes it,
+        with every other change made since, after the core has checked the
+        lot. In Run, or on a cycle that ships with the application, the
+        window only shows the step.
+        """
+        document = self._document_now()
+        if not document or not step_id:
+            return False
         step = self._step_of(step_id)
         if step is None:
-            return
+            return False
         plugin = (self.inventory.cycle_plugin(step.get("plugin", ""))
                   if self.inventory else {})
         state = (self.run_state.cycle or {}) if self.run_state else {}
+        editing = self._can_edit_graph() and self._context == DESIGN
 
         dialog = NodeDialog(
-            step, plugin, self, bool((self._open or {}).get("writable")),
+            step, plugin, self, editing,
             live=(state.get("steps") or {}).get(step_id),
             ask_plugin=lambda key, settings: self._ask_plugin(
                 step.get("plugin", ""), key, settings),
-            trigger=self._trigger_of(step_id))
+            trigger=self._trigger_of(step_id),
+            groups=Draft("", document).phases(),
+            apply_label="Add" if adding else "Apply",
+            read_only_note=("This is the step as the run on screen has it. "
+                            "Switch to Design to change it."
+                            if self._context == RUN else ""))
         if dialog.exec() != QDialog.Accepted or dialog.saved is None:
-            return
-        self._replace_step(step_id, dialog.saved, dialog.saved_trigger)
+            return False
+        draft = self._ensure_draft()
+        probe = Draft("", draft.document)
+        probe.replace_step(step_id, dialog.saved)
+        new_id = dialog.saved.get("id", step_id)
+        # An added step is one change, not an add and then an edit: Undo
+        # takes the whole step back out.
+        draft.change(_with_listening(probe.document, new_id, new_id,
+                                     dialog.saved_trigger), merge=adding)
+        if self._selected == step_id and new_id != step_id:
+            self._selected = new_id
+        if not adding:
+            self._draft_changed()
+        return True
 
     def _trigger_of(self, step_id):
-        """The trigger that watches this step, as the file has it, or None."""
-        document = (self._open or {}).get("document") or {}
+        """The trigger that watches this step, as the draft has it, or None."""
+        document = self._document_now()
         for one in document.get("triggers") or []:
             if isinstance(one, dict) and one.get("watch") == step_id:
                 return one
@@ -451,6 +1101,10 @@ class CyclesPage(QWidget):
         """The cycle's own name, project and variables."""
         document = (self._open or {}).get("document")
         if not document:
+            return
+        if self._draft is not None and self._draft.dirty and not self._leave_draft():
+            # Properties writes the file at once - secrets follow it - so the
+            # canvas's unsaved changes are settled first, one way or the other.
             return
         cycle_id = self.current_id()
         dialog = CycleDialog(document, cpf.names(self._projects), self,
@@ -470,11 +1124,10 @@ class CyclesPage(QWidget):
         # core then refused to write would be a credential belonging to nothing.
         problems = self._write_secrets(cycle_id, dialog.secret_values,
                                        dialog.dropped_secrets)
-        self.open(cycle_id)
-        if problems:
-            # After the reopen, which sets the cycle's own problems and would
-            # otherwise wipe these.
-            self.output.set_problems(problems)
+        # After the reopen, which sets the cycle's own problems and would
+        # otherwise wipe these.
+        self.open(cycle_id, then=(lambda: self.output.set_problems(problems))
+                  if problems else None)
 
     def _stored_secrets(self, cycle_id):
         """Which of this cycle's secrets already have a value. Names only.
@@ -520,32 +1173,10 @@ class CyclesPage(QWidget):
         return []
 
     def _step_of(self, step_id):
-        for step in ((self._open or {}).get("document") or {}).get("steps") or []:
+        for step in self._document_now().get("steps") or []:
             if step.get("id") == step_id:
                 return step
         return None
-
-    def _replace_step(self, step_id, changed, listening=None):
-        """Put an edited step back in the document and write the whole thing.
-
-        The whole document rather than a patch: the core writes a cycle file,
-        not a field, and handing it what is on screen keeps one shape going in
-        and out.
-        """
-        document = dict((self._open or {}).get("document") or {})
-        steps = [dict(one) for one in document.get("steps") or []]
-        for index, step in enumerate(steps):
-            if step.get("id") == step_id:
-                steps[index] = changed
-                break
-        else:
-            return
-        document["steps"] = steps
-        document = _with_listening(document, step_id, changed.get("id", step_id),
-                                   listening)
-        cycle_id = self.current_id()
-        if self._write_cycle(cycle_id, document):
-            self.open(cycle_id)
 
     def _ask_plugin(self, plugin_id, action_key, settings):
         """Put one of a plugin's declared actions to the core."""
@@ -579,6 +1210,9 @@ class CyclesPage(QWidget):
         if subject.get("key"):
             where += " - working on %s %s" % (subject.get("kind") or "",
                                               subject["key"])
+        phases = self.canvas.current_phases()
+        if phases and self.run_state and self.run_state.cycle_running:
+            where += " - in %s" % ", ".join(phases)
         if problems:
             self.state.setText("%d step(s), %d problem(s)%s"
                                % (steps, len(problems), where))
@@ -594,22 +1228,45 @@ class CyclesPage(QWidget):
         return None
 
     def refresh_sessions(self):
-        """Ask the core for the sessions again. Never raises.
+        """Ask the core for the sessions and the plan again. Never raises.
 
         A list that could not be read is left as it was, not a dialog: this
         runs on its own whenever a run moves, and a dialog nobody asked for,
         repeated on every step, would be worse than a list a moment stale.
+        Both answers are drawn at once - see ``SubjectsPanel.set_state``.
         """
         if self.core is None:
             return
-        try:
-            answer = self.core.cycle_sessions()
-        except core_mod.CoreError:
+        if not self._sessions_loaded:
+            # Only the first time: a refresh keeps the rows it has on screen
+            # until the new ones are ready, rather than flashing grey on every
+            # step of a run.
+            self._loading(("subjects",), True)
+        core = self.core
+
+        def work():
+            sessions = core.cycle_sessions()
+            try:
+                planned = core.cycle_watch_planned()
+            except core_mod.CoreError:
+                planned = None
+            return sessions, planned
+
+        self._call("sessions", work, self._sessions_answered)
+
+    def _sessions_answered(self, answer, error):
+        self._loading(("subjects",), False)
+        if error is not None:
             return
+        sessions_answer, planned_answer = answer
         self._sessions_loaded = True
-        self.subjects.set_sessions((answer or {}).get("sessions") or [])
-        self.refresh_planned()
-        self.subjects.set_live(self._live_cycle())
+        sessions = (sessions_answer or {}).get("sessions") or []
+        self.subjects.set_state(
+            sessions=sessions,
+            planned=(KEEP if planned_answer is None
+                     else (planned_answer or {}).get("planned") or []),
+            live=self._live_cycle())
+        self.explorer.set_last_runs(_last_runs(sessions))
         self._update_buttons()
 
     def refresh_planned(self):
@@ -617,11 +1274,13 @@ class CyclesPage(QWidget):
         refresh_sessions does not."""
         if self.core is None:
             return
-        try:
-            answer = self.core.cycle_watch_planned()
-        except core_mod.CoreError:
-            return
-        self.subjects.set_planned((answer or {}).get("planned") or [])
+        core = self.core
+
+        def done(answer, error):
+            if error is None:
+                self.subjects.set_planned((answer or {}).get("planned") or [])
+
+        self._call("planned", core.cycle_watch_planned, done)
 
     def _remove_planned(self, item):
         """Off the plan, and not offered again."""
@@ -748,7 +1407,8 @@ class CyclesPage(QWidget):
                                     "There is already a project called %r." % name)
             return
 
-        moving = [row for row in self._cycles if row.get("project") == old]
+        moving = [row for row in self._cycles
+                  if (row.get("project") or "").casefold() == old.casefold()]
         if moving and not self._confirm(
                 "Rename project",
                 "%d cycle(s) name %r. They will be rewritten to name %r."
@@ -776,14 +1436,65 @@ class CyclesPage(QWidget):
         project = cpf.find(self._projects, name)
         if project is None:
             return
-        orphans = [row for row in self._cycles if row.get("project") == name]
-        extra = ("\n\n%d cycle(s) name it. The files are kept and move to %s."
+        orphans = [row for row in self._cycles
+                   if (row.get("project") or "").casefold() == name.casefold()]
+        extra = ("\n\n%d cycle(s) are in it. The cycles are kept and move to "
+                 "%s - their files stop naming the project."
                  % (len(orphans), UNASSIGNED)) if orphans else ""
         if not self._confirm("Delete project",
                              "Delete the project %r?%s" % (name, extra)):
             return
         self._projects = [one for one in self._projects if one is not project]
-        self._write_projects()
+        if not self._write_projects():
+            return
+        # Their files say where they belong, and the tree believes them - so
+        # a deleted project whose cycles still named it would come straight
+        # back as "not in your projects list". What the question promised is
+        # Unassigned, so that is what the files are made to say.
+        kept = [row["id"] for row in orphans
+                if not row.get("writable")
+                or not self._set_cycle_project(row["id"], "")]
+        if kept:
+            widgets.warn(self, "Delete project",
+                         "Deleted, but these could not be rewritten and still "
+                         "show under %r:\n\n- %s" % (name, "\n- ".join(kept)))
+        if orphans:
+            self.saved.emit()
+
+    def _list_project(self, name):
+        """Put a project cycles already name into the list - nothing else moves."""
+        if not name or cpf.find(self._projects, name) is not None:
+            return
+        import datetime
+        self._projects.append(cpf.ProjectRow(
+            name=name, added=datetime.date.today().isoformat()))
+        if self._write_projects():
+            self.explorer.select_project(name)
+
+    def _settled(self, cycle_id):
+        """Whether a file action on ``cycle_id`` may go ahead of its draft."""
+        if self._draft is None or self._draft.cycle_id != cycle_id:
+            return True
+        return self._leave_draft()
+
+    def _move_cycle(self, cycle_id, project):
+        """Put a cycle in another project, which rewrites its ``project:``."""
+        if not self._settled(cycle_id):
+            return
+        row = next((one for one in self._cycles if one.get("id") == cycle_id), {})
+        if not row.get("writable"):
+            widgets.note(self, "Move to project",
+                         "%s ships with the application, so its file cannot "
+                         "be changed. Duplicate it, and move the copy." % cycle_id)
+            return
+        if not self._set_cycle_project(cycle_id, project):
+            widgets.warn(self, "Move to project",
+                         "%s could not be rewritten; it stays where it was."
+                         % cycle_id)
+            return
+        self.saved.emit()
+        if cycle_id == self.current_id():
+            self.open(cycle_id)
 
     def _set_cycle_project(self, cycle_id, project):
         """Rewrite one cycle's ``project:``. True when it was written."""
@@ -801,7 +1512,8 @@ class CyclesPage(QWidget):
         else:
             document.pop("project", None)
         try:
-            written = self.core.cycle_save(cycle_id, document)
+            written = self.core.cycle_save(cycle_id, document,
+                                           base=payload.get("digest", ""))
         except core_mod.CoreError:
             return False
         return bool(written.get("ok"))
@@ -840,7 +1552,8 @@ class CyclesPage(QWidget):
         document = dict(document, id=new_id)
         if document.get("name"):
             document["name"] += " (copy)"
-        self._write_cycle(new_id, document, then_open=True)
+        # Made from the original's file, so its comments come along.
+        self._write_cycle(new_id, document, then_open=True, source=cycle_id)
 
     def _rename_cycle(self, cycle_id):
         """Change what a cycle is called - the name on the row, not its id.
@@ -849,6 +1562,8 @@ class CyclesPage(QWidget):
         the filename and what ``--cycle-run`` is given; changing that is a
         different and rarer thing, and it has its own entry.
         """
+        if not self._settled(cycle_id):
+            return
         try:
             payload = self.core.cycle_show(cycle_id)
         except core_mod.CoreError as exc:
@@ -863,7 +1578,8 @@ class CyclesPage(QWidget):
         if not name or name == document.get("name"):
             return
         document["name"] = name
-        self._write_cycle(cycle_id, document, then_open=True)
+        self._write_cycle(cycle_id, document, then_open=True,
+                          base=payload.get("digest", ""))
 
     def _change_cycle_id(self, cycle_id):
         """Change the id, which renames the file.
@@ -873,6 +1589,8 @@ class CyclesPage(QWidget):
         script, a note, somebody's memory - stops finding it, which is why this
         is not what Rename does.
         """
+        if not self._settled(cycle_id):
+            return
         try:
             payload = self.core.cycle_show(cycle_id)
         except core_mod.CoreError as exc:
@@ -898,7 +1616,8 @@ class CyclesPage(QWidget):
             return
 
         document = dict(payload.get("document") or {}, id=new_id)
-        if not self._write_cycle(new_id, document, then_open=True):
+        if not self._write_cycle(new_id, document, then_open=True,
+                                 source=cycle_id):
             return
         try:
             self.core.cycle_delete(cycle_id)
@@ -923,6 +1642,8 @@ class CyclesPage(QWidget):
         return True
 
     def _delete_cycle(self, cycle_id):
+        if not self._settled(cycle_id):
+            return
         if not self._confirm("Delete cycle",
                              "Delete %r? The file goes; runs it has already "
                              "made are kept." % cycle_id):
@@ -965,16 +1686,40 @@ class CyclesPage(QWidget):
             return
         self.saved.emit()
 
-    def _write_cycle(self, cycle_id, document, then_open=False):
+    def _write_cycle(self, cycle_id, document, then_open=False, source="",
+                     base=None):
         """Hand a document to the core. Shows what it refused, if it did.
 
         Nothing is validated here: the core writes nothing that does not hold,
         and a second opinion in the GUI is a second thing to keep in step.
+
+        Two refusals are questions rather than errors. **Stale**: the file
+        changed on disk after it was opened here, and writing now would undo
+        that change unseen - so nothing is written until somebody chooses.
+        **Confirm**: the save would drop comments written in the file (a step
+        rewritten whole had one inside it); the diff is shown and the save
+        goes ahead only on a yes. ``base`` is the digest the file was read
+        with - the open cycle's own unless the caller read it separately.
         """
         if self.core is None:
             return False
+        options = {}
+        digest = base if base is not None else (
+            (self._open or {}).get("digest", "") if cycle_id == self.current_id()
+            else "")
+        if digest:
+            options["base"] = digest
+        if source:
+            options["source"] = source
         try:
-            answer = self.core.cycle_save(cycle_id, document)
+            answer = self.core.cycle_save(cycle_id, document, **options)
+            if answer.get("stale"):
+                return self._changed_on_disk(cycle_id, answer)
+            if answer.get("confirm"):
+                if not self._agree_to_lose(answer):
+                    return False
+                answer = self.core.cycle_save(cycle_id, document, allow_loss=True,
+                                              **options)
         except core_mod.CoreError as exc:
             widgets.warn(self, "Save", str(exc))
             return False
@@ -989,6 +1734,30 @@ class CyclesPage(QWidget):
             self._pending_open = cycle_id
         self.saved.emit()
         return True
+
+    def _changed_on_disk(self, cycle_id, answer):
+        """The file moved under us. Reload it, or leave the edit unwritten."""
+        if widgets.confirm(
+                self, "Changed on disk",
+                "%s was changed after it was opened here." % cycle_id,
+                "Nothing was written, so the other change is safe. Reload shows "
+                "the file as it is now; make your change again on top of it.",
+                agree="Reload", refuse="Cancel", kind="warn"):
+            self.open(cycle_id)
+        return False
+
+    def _agree_to_lose(self, answer):
+        """Put a save that would drop comments to the person. True to go ahead."""
+        lost = answer.get("lost") or []
+        shown = "\n".join(lost[:8]) + ("\n..." if len(lost) > 8 else "")
+        return widgets.confirm_output(
+            self, "Save", "This save would drop %d comment(s) from the file."
+            % len(lost),
+            "The change rewrites part of the file that has comments in it, and "
+            "they cannot be carried across:\n\n%s\n\nThe whole change is below. "
+            "To keep them, cancel and make the change in the YAML tab." % shown,
+            text=answer.get("diff") or "", agree="Save without them",
+            refuse="Cancel")
 
     def _save_properties(self, changes):
         """The properties form: name, description, project, variables."""
@@ -1066,11 +1835,11 @@ class CyclesPage(QWidget):
                 "of this cycle if none is displayed.\n\n" + CONSEQUENCE, agree="Run from here")
         if how == "hard":
             return widgets.confirm(
-                self, "Hard Run", "Start %s from the beginning?"
+                self, START_OVER, "Start %s over from the beginning?"
                 % (_name_of(self._open) or self.current_id()),
                 "All steps will be evaluated again in a new run. Paid services "
                 "will be called again. Previous runs remain saved.\n\n" + CONSEQUENCE,
-                agree="Hard Run")
+                agree=START_OVER)
         return widgets.confirm(
             self, "Run",
             "Run all %d step(s) of %s?"
@@ -1094,13 +1863,30 @@ class CyclesPage(QWidget):
                 return
         elif how in ("only", "from") and not self._selected:
             return
-        if not self._agreed(how):
-            return
+        if self._draft is not None and self._draft.dirty:
+            # A run reads the file. Which file that is has to be decided here,
+            # by somebody, not found out afterwards from what ran.
+            chosen = widgets.choose(
+                self, "Unsaved changes",
+                "The run would use the file as saved, without your changes.",
+                "Save first to run the cycle as it is on screen.",
+                choices=("Run the saved version",), agree="Save and run",
+                refuse="Cancel")
+            if chosen == "Save and run":
+                if not self._save_draft():
+                    return
+            elif chosen != "Run the saved version":
+                return
+        # Before the question, not after it: asking somebody to agree to
+        # twenty-eight steps and then telling them it cannot start anyway
+        # wastes the one decision the question exists for.
         problems = (self._open or {}).get("problems") or []
         if problems:
             widgets.note(
                 self, "Run", "Fix this first:\n\n- %s"
                              % "\n- ".join(str(one) for one in problems[:6]))
+            return
+        if not self._agreed(how):
             return
         if how != "resume":
             self.canvas.clear_status()
@@ -1122,13 +1908,23 @@ class CyclesPage(QWidget):
         """
         if not graph:
             return
+        # A run started: the canvas is the run until somebody edits again. A
+        # run read back from disk is not starting, and does not take the
+        # canvas away from somebody working on the file.
+        if self.run_state and self.run_state.cycle_running:
+            self._set_context(RUN)
         if _same_shape(graph, self.canvas.graph()):
             self.canvas.clear_status()
         else:
             self._flush_view()
             self.canvas.set_graph(graph, self._remembered(graph.get("id")),
-                                  self._remembered_view(graph.get("id")))
+                                  self._remembered_view(graph.get("id")),
+                                  folded=self._remembered_folded(graph.get("id")))
             self._selected = ""
+        # A run read back from disk arrives whole, after the canvas was drawn:
+        # what it knows is painted now, since no step event will follow.
+        self._apply_run_state()
+        self._paint_log()
         self._update_buttons()
 
     # -- where the nodes sit, and where somebody was looking -------------------
@@ -1154,6 +1950,31 @@ class CyclesPage(QWidget):
             return clf.view_for(cycle_id or "")
         except Exception:                 # noqa: BLE001 - cosmetic state only
             return None
+
+    def _remembered_folded(self, cycle_id):
+        """Which of this cycle's phases were left folded. Never raises."""
+        try:
+            return clf.folded_for(cycle_id or "")
+        except Exception:                 # noqa: BLE001 - cosmetic state only
+            return []
+
+    def _folds_changed(self):
+        """A phase folded or opened: remember it, and say it on the buttons."""
+        try:
+            clf.remember_folded(self._drawn_id(), self.canvas.folded())
+        except clf.CycleLayoutFileError:
+            pass
+        if self._selected and self.canvas.node(self._selected) is None:
+            # The selected step went into a folded box; it is not a step on
+            # the canvas any more, so nothing may act on it as one.
+            self._selected = ""
+            self._paint_log()
+        self._update_buttons()
+
+    def _toggle_folding(self):
+        """Fold every phase, or open every one if any is folded."""
+        phases = self.canvas.phases()
+        self.canvas.set_folded(() if self.canvas.folded() else phases)
 
     def _remember_places(self):
         """Write the arrangement down, or forget it when Arrange undid it.
@@ -1220,8 +2041,12 @@ class CyclesPage(QWidget):
         if not step:
             return
         # One node, one repaint - this is already cheap enough to do per event.
-        self.canvas.set_status(step_id, step.get("status"),
-                               step.get("duration_ms"), step.get("attempt"))
+        if not self._statuses_hidden():
+            self.canvas.set_status(step_id, step.get("status"),
+                                   step.get("duration_ms"), step.get("attempt"))
+        if self._open and self.canvas.phases():
+            # Which phase the run is in is part of the line under the title.
+            self._describe_state(self._open)
         # Whichever step moved. The panel shows the run, not the selection, so
         # a step nobody has clicked is exactly as much a reason to redraw.
         self._schedule_paint()
@@ -1296,6 +2121,158 @@ class CyclesPage(QWidget):
             self.output.set_summary("", "")
         self.output.set_stages(list(state.get("stages") or []), named=True,
                                labels=self._labels())
+        targets, files = self._artifact_targets(self._selected)
+        if not targets and self._run_dir():
+            # A picked step that wrote nothing: the button stays, as the way
+            # to the run's files, rather than vanishing under the pointer.
+            targets = [("Run folder", "")]
+        self.output.set_artifacts(targets, files)
+        running = bool(self.run_state and self.run_state.cycle_running)
+        self.output.set_streaming(running)
+        if self._stages_window is not None:
+            self._stages_window.set_run_name(state.get("name") or state.get("cycle") or "")
+        # The selection only settles who is written to when several steps
+        # are working at once; otherwise the composer follows whoever is.
+        self.output.composer.set_context(
+            state, bool(self.run_state and self.run_state.cycle_running), self._labels(),
+            selected=self._selected)
+
+    def step_labels(self):
+        """What each step of the drawn cycle is called, by id."""
+        return self._labels()
+
+    def selected_step(self):
+        """The step selected on the canvas, or "" when none is."""
+        return self._selected
+
+    # -- artifacts ------------------------------------------------------------
+    def _run_dir(self):
+        """Where the run on screen keeps its files, if it is this cycle's run.
+
+        "" otherwise: a step on this canvas has written nothing in a run of
+        some other cycle, whatever the step happens to be called there.
+        """
+        return (self._live_cycle() or {}).get("run_dir") or ""
+
+    def _artifact_targets(self, step_id):
+        """``([(label, path)], files)``: what can be opened for ``step_id``.
+
+        The files the step recorded, by name, then the step's own folder; with
+        no step, the run's folder. Paths are relative to the run's directory,
+        as the core records them, and "" is the directory itself. Empty while
+        no run of this cycle is on screen, and for a step that wrote nothing.
+
+        A step's list does not offer the run's folder as well: the Artifacts
+        page always shows the whole run, so the step's folder already lands
+        there - with the step picked out, which is the only thing a second
+        entry could have added.
+        """
+        where = self._run_dir()
+        if not where:
+            return [], 0
+        if not step_id:
+            return [("Run folder", "")], 0
+        step = ((self._live_cycle() or {}).get("steps") or {}).get(step_id) or {}
+        targets, seen = [], set()
+        for one in step.get("artifacts") or []:
+            path = one.get("path") if isinstance(one, dict) else one
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            name = (one.get("name") if isinstance(one, dict) else "") or ""
+            base = os.path.basename(path)
+            targets.append((name if name and name != base else base, path))
+        files = len(targets)
+        folder = os.path.join("steps", step_id)
+        if os.path.isdir(os.path.join(where, folder)):
+            targets.append(("Step folder", folder))
+        return targets, files
+
+    def _reveal(self, path):
+        """Ask for ``path`` of the run on screen on the Artifacts page."""
+        where = self._run_dir()
+        if where:
+            self.artifacts_requested.emit(where, path or "")
+
+    def _open_run_files(self, cycle_id, run_id):
+        """A run's folder on the Artifacts page, from its link in Subjects."""
+        for session in self.subjects.sessions():
+            if session.get("cycle") != cycle_id:
+                continue
+            for one in session.get("runs") or []:
+                if one.get("id") == run_id and one.get("run_dir"):
+                    self.artifacts_requested.emit(one["run_dir"], "")
+                    return
+
+    # -- Stages in a window of its own ----------------------------------------
+    def is_stages_detached(self):
+        return self._stages_window is not None
+
+    def detach_stages(self):
+        """Put Stages in a window of its own, or bring that window forward."""
+        if self._stages_window is not None:
+            self._stages_window.bring_forward()
+            return self._stages_window
+        window = stageswindow.StagesWindow(self.settings)
+        window.hold(self.output.take_stage_panel())
+        state = (self.run_state.cycle or {}) if self.run_state else {}
+        window.set_run_name(state.get("name") or state.get("cycle") or "")
+        window.closed_by_person.connect(self.dock_stages)
+        # Gone with the page, whatever else happens: the window has no parent
+        # to take it down, and a feed nobody can put back is worse than none.
+        self.destroyed.connect(window.deleteLater)
+        self._stages_window = window
+        self.output.set_streaming(bool(self.run_state and self.run_state.cycle_running))
+        self._remember_detached(True)
+        window.bring_forward()
+        self.stages_detached_changed.emit(True)
+        return window
+
+    def dock_stages(self):
+        """Put Stages back in its tab. A person closing the window does this."""
+        window, self._stages_window = self._stages_window, None
+        if window is None:
+            return
+        panel = window.release()
+        if panel is not None:
+            self.output.put_stage_panel(panel)
+        window.closed_by_person.disconnect(self.dock_stages)
+        if not window.closed():
+            # "Bring back" from the tab: the window goes, and it is the page's
+            # doing, so it does not come back round here as a person's close.
+            window.shut()
+        window.deleteLater()
+        self._remember_detached(False)
+        self.stages_detached_changed.emit(False)
+
+    def shut_stages_window(self):
+        """Close the window because the application is closing.
+
+        Unlike :meth:`dock_stages` this leaves Stages remembered as detached,
+        which is what brings the window back on the next start.
+        """
+        if self._stages_window is not None:
+            self._stages_window.shut()
+
+    def show_stages(self):
+        """Stages in front of the person, wherever it is. The caller has put
+        this page on screen when Stages is a tab."""
+        if self._stages_window is not None:
+            self._stages_window.bring_forward()
+        else:
+            self.output.tabs.setCurrentIndex(TAB_STAGES)
+            # The output panel dragged shut is a fold, not a choice to never
+            # see it: going to Stages opens it.
+            if self._down.indexOf(self.output) in self._down.folded():
+                self._down.unfold(self._down.indexOf(self.output))
+        self.output.stages.setFocus(Qt.ShortcutFocusReason)
+
+    def _remember_detached(self, detached):
+        if self.settings is not None:
+            try:
+                self.settings.stages_detached = detached
+            except Exception:            # noqa: BLE001 - a view preference
+                pass
 
     def _labels(self):
         """What each step is called, by id. Empty when nothing is drawn.
@@ -1326,16 +2303,18 @@ class CyclesPage(QWidget):
         self.hard_run_action.setEnabled(has_cycle and not running)
         resume = self._resume_available()
         self.run_button.setText("Resume" if resume else "Run")
+        # Said on the button, not in a line under the header: a line that came
+        # and went with Resume moved everything below it, and in a window not
+        # tall enough to spare it, resized the window.
         self.run_button.setToolTip(
-            "Continue the displayed run using its saved successful results.\n"
-            "Failed or unfinished steps may call paid services again."
-            if resume else "Start a new run of this cycle.")
-        hint = ("Resume keeps successful results and continues unfinished work. "
-                "Hard Run in the menu starts from the beginning and calls paid services again."
-                if resume else "Run starts a new execution. After a failure or stop, "
-                "Resume keeps successful results. Hard Run in the menu starts from the beginning.")
-        self.run_hint.setText(hint)
-        self.run_hint.setVisible(has_cycle)
+            "Resume continues this run: what succeeded is kept, failed or\n"
+            "unfinished steps are done again - and may call paid services again.\n"
+            "%s, in the menu, is a new run from the first step." % START_OVER
+            if resume else
+            "Start a new run of this cycle.\n"
+            "After a failure or a stop this becomes Resume, which continues\n"
+            "that run instead.")
+        self.intro.setVisible(not has_cycle)
         # Only with a step picked: they run the selected one, and offering
         # them with nothing selected would be a button for a thing that has
         # not been decided yet.
@@ -1352,16 +2331,142 @@ class CyclesPage(QWidget):
         # Offered only once there is something to put back, so it reads as the
         # answer to a canvas somebody has rearranged rather than as a button
         # that does nothing.
-        self.arrange_button.setEnabled(drawn and self.canvas.moved())
+        self.arrange_button.setEnabled(drawn and self.canvas.moved()
+                                       and not self.canvas.folded())
+        dirty = bool(self._draft is not None and self._draft.dirty)
+        editing = self._can_edit_graph() and self._context == DESIGN
+        self.add_button.setVisible(editing)
+        # The dots links are dragged out of: on a cycle open for editing, in
+        # Design - never on a run's graph, which is a record of what happened.
+        self.canvas.set_linking(self._why_not_link if editing else None)
+        live = self._live_cycle() or {}
+        self.context_switch.set_enabled(
+            RUN, bool(live.get("graph")),
+            "No run of this cycle is on screen. Pick one in Subjects, or run it.")
+        self.context_switch.setVisible(bool(self._open))
+        self.undo_button.setEnabled(bool(self._draft and self._draft.can_undo()))
+        self.redo_button.setEnabled(bool(self._draft and self._draft.can_redo()))
+        self.save_draft_button.setEnabled(
+            dirty and not ((self._draft.check or {}).get("problems") if dirty else ()))
+        if dirty:
+            # A step run now would run the file, not what is on screen; the
+            # run buttons say so by being unavailable until it is saved.
+            for button in (self.step_button, self.from_button):
+                button.setEnabled(False)
+        folded = bool(self.canvas.folded())
+        self.fold_button.setVisible(bool(self.canvas.phases()))
+        icons.button(self.fold_button, "unfold" if folded else "fold",
+                     "Open phases" if folded else "Fold phases")
+        self._show_validity()
+
+    def _show_validity(self):
+        """The chip over the canvas: whether the file would run, in words."""
+        if not self._open:
+            self.validity.setVisible(False)
+            return
+        # What is on the canvas: the draft's verdict while there is one, since
+        # that is what Save would write - and "ready to run" only of the file,
+        # since the file is what a run reads.
+        problems = self._problems_now()
+        dirty = bool(self._draft is not None and self._draft.dirty)
+        self.validity.setVisible(True)
+        if problems:
+            icons.button(self.validity, "warn", "%d problem%s" % (
+                len(problems), "" if len(problems) == 1 else "s"), theme.BAD)
+            self.validity.setStyleSheet("color: %s;" % theme.BAD)
+        else:
+            icons.button(self.validity, "check",
+                         "No problems" if dirty else "Ready to run", theme.OK)
+            self.validity.setStyleSheet("color: %s;" % theme.OK)
 
 
-def _framed(canvas):
-    """The canvas in a panel, so it sits in the page like every other surface."""
+class _FloatingBar(QFrame):
+    """A row of controls laid over the canvas, on a card of its own.
+
+    Its ground is painted here, from ``theme`` at paint time, so it follows
+    dark mode like the canvas under it does.
+    """
+
+    def __init__(self, *parts):
+        QFrame.__init__(self)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 8, 6)
+        layout.setSpacing(4)
+        for part in parts:
+            if part is None:
+                layout.addStretch(1)
+            else:
+                layout.addWidget(part)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QColor(theme.DIVIDER))
+        painter.setBrush(QColor(theme.BG))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+        painter.end()
+
+
+class _Pinned(QObject):
+    """Keeps ``widget`` where ``place(widget, host)`` says, as ``host`` resizes."""
+
+    def __init__(self, widget, host, place):
+        QObject.__init__(self, widget)
+        self._widget, self._host, self._place = widget, host, place
+        host.installEventFilter(self)
+        widget.installEventFilter(self)
+        self._put()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+            self._put()
+        return False
+
+    def _put(self):
+        self._widget.setGeometry(self._place(self._widget, self._host.rect()))
+        self._widget.raise_()
+
+
+def _centred(widget, room):
+    """The middle of the canvas, at a width that reads as a paragraph."""
+    width = min(room.width() - 48, 520)
+    height = widget.heightForWidth(width) if widget.hasHeightForWidth() else 80
+    return QRect(room.center().x() - width // 2, room.center().y() - height // 2,
+                 max(width, 0), max(height, 0))
+
+
+def _along_the_foot(widget, room):
+    """Across the bottom of the canvas, clear of its edges."""
+    width = min(room.width() - 24, max(widget.sizeHint().width(), 420))
+    height = widget.sizeHint().height()
+    return QRect(room.center().x() - width // 2, room.bottom() - height - 12,
+                 max(width, 0), height)
+
+
+def _last_runs(sessions):
+    """``{cycle id: {"when", "status"}}`` - each cycle's most recent run."""
+    found = {}
+    for session in sessions or ():
+        cycle_id = session.get("cycle") or ""
+        when = session.get("updated_at") or 0
+        if cycle_id and when >= (found.get(cycle_id) or {}).get("when", 0):
+            found[cycle_id] = {"when": when, "status": session.get("status") or ""}
+    return found
+
+
+def _framed(canvas, bar=None):
+    """The canvas in a panel, so it sits in the page like every other surface,
+    with the strip of controls that act on it along its top."""
     holder = QWidget()
     holder.setProperty("role", "panel")
     layout = QVBoxLayout(holder)
     layout.setContentsMargins(1, 1, 1, 1)
-    layout.addWidget(canvas)
+    layout.setSpacing(0)
+    if bar is not None:
+        bar.setContentsMargins(6, 2, 6, 2)
+        layout.addWidget(bar)
+        layout.addWidget(widgets.hline())
+    layout.addWidget(canvas, 1)
     return holder
 
 
@@ -1446,245 +2551,14 @@ def _same_shape(one, other):
         return False
 
     def shape(graph):
+        # The phase too: it decides which frame a node is drawn in.
         return ([(node.get("id"), node.get("layer"), node.get("row"),
-                  node.get("plugin"), node.get("label"))
+                  node.get("plugin"), node.get("label"), node.get("group") or "")
                  for node in graph.get("nodes") or []],
                 [(edge.get("from"), edge.get("to"), edge.get("kind"))
                  for edge in graph.get("edges") or []])
 
     return shape(one) == shape(other)
-
-
-class _Explorer(QWidget):
-    """The projects, and the cycles in them.
-
-    A tree from the start rather than a list, because there will be more in it:
-    Runs and Artifacts belong here too eventually, and a list would have to
-    become a tree later and every call site with it.
-
-    It does not own anything - the page holds the projects and the cycles, and
-    every action here is a signal. That keeps the one thing that writes files in
-    one place, which is what stops two halves of a page disagreeing about what
-    is on disk.
-    """
-
-    opened = Signal(str)                 # a cycle id
-    selection_changed = Signal()
-    project_added = Signal()
-    project_renamed = Signal(str)        # the old name
-    project_deleted = Signal(str)
-    cycle_added = Signal(str)            # the project to put it in
-    cycle_duplicated = Signal(str)
-    cycle_renamed = Signal(str)          # change what it is called
-    cycle_reidentified = Signal(str)     # change the id, which renames the file
-    cycle_deleted = Signal(str)
-    cycle_imported = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._rows = {}                  # cycle id -> item
-        self._projects = {}              # project name -> item
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 12, 0)
-        layout.setSpacing(8)
-
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search cycles")
-        self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._filter)
-        layout.addWidget(self.search)
-
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setRootIsDecorated(True)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.itemActivated.connect(self._activated)
-        self.tree.itemClicked.connect(self._activated)
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._menu)
-        self.tree.setProperty("role", "panel")
-        layout.addWidget(self.tree, 1)
-
-        # No button row: everything here is a right-click away, which is where
-        # a tree's actions belong. The menu is built per row, so it offers what
-        # can actually be done to the thing under the pointer - and on empty
-        # ground it still offers the two that need nothing selected.
-        self.tree.currentItemChanged.connect(lambda *_a: self.selection_changed.emit())
-
-        self.count = widgets.mono("")
-        layout.addWidget(self.count)
-
-    # -- filling it -----------------------------------------------------------
-    def fill(self, cycles, projects):
-        """Rebuild from the cycles and the projects, keeping what was selected.
-
-        Both kinds of selection, not only a cycle. The tree is rebuilt whenever
-        anything is written - including writing the projects file itself - so a
-        project that lost its selection every time meant Rename and Delete went
-        grey the instant you made the project you wanted to rename.
-        """
-        was_cycle, was_project = self.current_id(), self._selected_project()
-        self.tree.clear()
-        self._rows, self._projects = {}, {}
-
-        known = [project.name for project in projects if project.name]
-        grouped = {name: [] for name in known}
-        for row in cycles:
-            name = row.get("project") or ""
-            grouped.setdefault(name if name in grouped else UNASSIGNED,
-                               []).append(row)
-
-        for name in known:
-            self._group(name, grouped.get(name) or [], real=True)
-        # Only when there is something in it: an empty Unassigned group is a
-        # question nobody asked.
-        if grouped.get(UNASSIGNED):
-            self._group(UNASSIGNED, grouped[UNASSIGNED], real=False)
-
-        self.count.setText("%d cycle%s in %d project%s"
-                           % (len(cycles), "" if len(cycles) == 1 else "s",
-                              len(known), "" if len(known) == 1 else "s"))
-        if was_cycle:
-            self.select(was_cycle)
-        elif was_project:
-            self.select_project(was_project)
-        self._filter(self.search.text())
-
-    def _group(self, name, rows, real):
-        item = QTreeWidgetItem(self.tree, [name])
-        item.setData(0, ROLE_KIND, "project" if real else "unassigned")
-        item.setData(0, ROLE_ID, name if real else "")
-        item.setExpanded(True)
-        item.setIcon(0, icons.icon("group", theme.NEUTRAL[600]))
-        item.setToolTip(0, "%d cycle(s)" % len(rows))
-        self._projects[name] = item
-
-        if not rows:
-            empty = QTreeWidgetItem(item, ["No cycles yet"])
-            empty.setData(0, ROLE_KIND, "empty")
-            empty.setFlags(Qt.ItemIsEnabled)
-            return
-
-        for row in sorted(rows, key=lambda one: (one.get("name")
-                                                 or one.get("id", "")).lower()):
-            self._leaf(item, row)
-
-    def _leaf(self, parent, row):
-        item = QTreeWidgetItem(parent, [row.get("name") or row.get("id", "")])
-        item.setData(0, ROLE_KIND, "cycle")
-        item.setData(0, ROLE_ID, row.get("id", ""))
-        if row.get("problems"):
-            item.setIcon(0, icons.icon("fail", theme.BAD))
-            item.setToolTip(0, "\n".join(str(one)
-                                          for one in row["problems"][:6]))
-        else:
-            item.setIcon(0, icons.icon("cycles", theme.NEUTRAL[600]))
-            item.setToolTip(0, row.get("description") or row.get("id", ""))
-        if not row.get("writable"):
-            item.setForeground(0, theme.color(theme.NEUTRAL[500]))
-        self._rows[row.get("id", "")] = item
-
-    # -- what is selected -----------------------------------------------------
-    def select(self, cycle_id):
-        item = self._rows.get(cycle_id)
-        if item is not None and item is not self.tree.currentItem():
-            self.tree.setCurrentItem(item)
-
-    def select_project(self, name):
-        item = self._projects.get(name)
-        if item is not None and item is not self.tree.currentItem():
-            self.tree.setCurrentItem(item)
-
-    def _selected_project(self):
-        """The project row that is selected, if it is a project row itself.
-
-        Not :meth:`current_project`, which walks up from a cycle to the project
-        holding it - restoring that would move the selection off the cycle and
-        onto its group.
-        """
-        item = self.tree.currentItem()
-        if item is not None and item.data(0, ROLE_KIND) == "project":
-            return item.data(0, ROLE_ID) or ""
-        return ""
-
-    def current_id(self):
-        item = self.tree.currentItem()
-        if item is not None and item.data(0, ROLE_KIND) == "cycle":
-            return item.data(0, ROLE_ID) or ""
-        return ""
-
-    def current_project(self):
-        """Which project a New Cycle should go into, from what is selected."""
-        item = self.tree.currentItem()
-        while item is not None:
-            if item.data(0, ROLE_KIND) == "project":
-                return item.data(0, ROLE_ID) or ""
-            item = item.parent()
-        return ""
-
-    def current_kind(self):
-        item = self.tree.currentItem()
-        return item.data(0, ROLE_KIND) if item is not None else ""
-
-    def set_developer_mode(self, enabled):
-        pass          # nothing here is developer-only yet
-
-    # -- acting on it ---------------------------------------------------------
-    def _activated(self, item, _column=0):
-        if item is not None and item.data(0, ROLE_KIND) == "cycle":
-            self.opened.emit(item.data(0, ROLE_ID) or "")
-
-    def _menu(self, point):
-        item = self.tree.itemAt(point)
-        kind = item.data(0, ROLE_KIND) if item is not None else ""
-        menu = QMenu(self)
-
-        if kind == "cycle":
-            cycle_id = item.data(0, ROLE_ID)
-            menu.addAction("Open", lambda: self.opened.emit(cycle_id))
-            menu.addSeparator()
-            menu.addAction("Rename cycle...",
-                           lambda: self.cycle_renamed.emit(cycle_id))
-            # Its own entry, and worded as what it is. The id is the filename
-            # and what --cycle-run is given; renaming is changing the label on
-            # the row you just right-clicked. Offering one as the other is how
-            # somebody ends up with a cycle called "Nightly validation" whose
-            # id is "nightly_validation_2".
-            menu.addAction("Change id (%s)..." % cycle_id,
-                           lambda: self.cycle_reidentified.emit(cycle_id))
-            menu.addAction("Duplicate...",
-                           lambda: self.cycle_duplicated.emit(cycle_id))
-            menu.addAction("Delete...",
-                           lambda: self.cycle_deleted.emit(cycle_id))
-            menu.addSeparator()
-        elif kind == "project":
-            name = item.data(0, ROLE_ID)
-            menu.addAction("New cycle here...",
-                           lambda: self.cycle_added.emit(name))
-            menu.addSeparator()
-            menu.addAction("Rename project...",
-                           lambda: self.project_renamed.emit(name))
-            menu.addAction("Delete project...",
-                           lambda: self.project_deleted.emit(name))
-            menu.addSeparator()
-
-        menu.addAction("New project...", self.project_added.emit)
-        menu.addAction("New cycle...",
-                       lambda: self.cycle_added.emit(self.current_project()))
-        menu.addAction("Import a cycle file...", self.cycle_imported.emit)
-        menu.exec(self.tree.viewport().mapToGlobal(point))
-
-    def _filter(self, text):
-        needle = (text or "").strip().lower()
-        for cycle_id, item in self._rows.items():
-            haystack = "%s %s" % (cycle_id, item.text(0))
-            item.setHidden(bool(needle) and needle not in haystack.lower())
-        # A project whose every cycle is filtered out goes with them, so the
-        # search reads as a shorter tree rather than as a list of empty groups.
-        for item in self._projects.values():
-            shown = any(not item.child(index).isHidden()
-                        for index in range(item.childCount()))
-            item.setHidden(bool(needle) and not shown)
 
 
 class _Output(QWidget):
@@ -1694,9 +2568,20 @@ class _Output(QWidget):
     grow a widget for - conditions, ``needs:``, a step's whole ``with:`` - and
     hiding them would make the editor a worse tool than the text editor it
     replaces. That is the same bargain the Scenarios page already strikes.
+
+    The Stages tab can hand its panel to a window of its own
+    (``stageswindow``). The tab stays where it is, counting the stages, with a
+    line in it saying where they went: the ``TAB_*`` positions are fixed, and
+    a tab that vanished would leave nothing to say so.
     """
 
     save_requested = Signal(str)
+    #: The icon on the tab strip, and the one in the placeholder.
+    detach_requested = Signal()
+    dock_requested = Signal()
+    show_window_requested = Signal()
+    #: One of the targets set_artifacts was given: a path relative to the run.
+    artifact_picked = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1728,7 +2613,21 @@ class _Output(QWidget):
         output_layout = QVBoxLayout(output)
         output_layout.setContentsMargins(0, 0, 0, 0)
         output_layout.setSpacing(0)
-        output_layout.addWidget(widgets.row(None, self.details_button))
+        # Where the files a step wrote can be looked at: the Artifacts page,
+        # on this run, with the file selected. A click goes to the first; the
+        # arrow lists them all. Offered only while a run of this cycle is on
+        # screen - see set_artifacts.
+        self.artifacts_button = icons.button(QToolButton(), "artifacts", "Artifacts")
+        self.artifacts_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.artifacts_button.setPopupMode(QToolButton.MenuButtonPopup)
+        self.artifacts_button.setProperty("hasmenu", "true")
+        self.artifacts_menu = QMenu(self.artifacts_button)
+        self.artifacts_button.setMenu(self.artifacts_menu)
+        self.artifacts_button.clicked.connect(self._first_artifact)
+        self.artifacts_button.hide()
+        self._artifact_targets, self._artifact_files = [], 0
+        output_layout.addWidget(widgets.row(None, self.artifacts_button,
+                                            self.details_button))
         output_layout.addWidget(self.output_views, 1)
         self.problems = QPlainTextEdit()
         self.problems.setReadOnly(True)
@@ -1739,14 +2638,56 @@ class _Output(QWidget):
         self.yaml.setStyleSheet("font-family: %s; font-size: 11px;"
                                 % theme.MONO_CSS)
         self.stages = StageList()
+        self.composer = InteractionComposer()
+        # The feed and the box under it, as one thing: this is what moves to
+        # a window of its own and back, never a copy of it.
+        self.stage_panel = QWidget()
+        stage_layout = QVBoxLayout(self.stage_panel)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.addWidget(self.stages, 1)
+        stage_layout.addWidget(self.composer)
+        # What the tab holds: the panel, or - while a window has it - a line
+        # saying so, with the ways to it and back.
+        self.stage_host = QWidget()
+        self._host_layout = QVBoxLayout(self.stage_host)
+        self._host_layout.setContentsMargins(0, 0, 0, 0)
+        self._host_layout.setSpacing(0)
+        self._host_layout.addWidget(self.stage_panel, 1)
+        self.stages_elsewhere = widgets.Elsewhere("Stages are in a separate window")
+        self.stages_elsewhere.setContentsMargins(12, 4, 8, 4)
+        keys = QLabel(stageswindow.SHORTCUT)
+        keys.setProperty("role", "keys")
+        keys.setToolTip("Goes to Stages from any window of the application.")
+        self.stages_elsewhere.add_widget(keys)
+        self.stages_elsewhere.show_requested.connect(self.show_window_requested)
+        self.dock_button = _icon_button(
+            "dock", "Bring Stages back into this tab.")
+        self.dock_button.clicked.connect(self.dock_requested)
+        self.stages_elsewhere.add_widget(self.dock_button)
+        self.stages_elsewhere.hide()
+        self._host_layout.addWidget(self.stages_elsewhere)
+        self._host_layout.addStretch(0)
         self.tabs.addTab(output, "Output")
-        self.tabs.addTab(self.stages, "Stages")
+        self.tabs.addTab(self.stage_host, "Stages")
         self.tabs.addTab(self.problems, "Problems")
+        # Only its mark, on the tab strip's free end: the words are in the
+        # tooltip. Shown while Stages is the tab on show and is here to move.
+        self.detach_button = _icon_button(
+            "popout", "Detach Stages into a separate window.\n"
+            "%s goes to Stages wherever they are." % stageswindow.SHORTCUT)
+        self.detach_button.clicked.connect(self.detach_requested)
+        self.tabs.setCornerWidget(self.detach_button, Qt.TopRightCorner)
+        self.tabs.currentChanged.connect(lambda _index: self._place_detach())
+        self._detached = False
 
         editor = QWidget()
         editor_layout = QVBoxLayout(editor)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(6)
+        #: Why the text cannot be typed into, when that is not obvious.
+        self.yaml_note = widgets.lede("")
+        self.yaml_note.setVisible(False)
+        editor_layout.addWidget(self.yaml_note)
         editor_layout.addWidget(self.yaml, 1)
         self.revert_button = QPushButton("Revert")
         self.save_button = QPushButton("Save")
@@ -1760,6 +2701,70 @@ class _Output(QWidget):
         self.tabs.addTab(editor, "YAML")
         layout.addWidget(self.tabs)
         self._changed()
+        self._place_detach()
+
+    # -- Stages, here or in a window of its own -------------------------------
+    def take_stage_panel(self):
+        """Hand the stage panel over to a window; the tab says where it went."""
+        self._host_layout.removeWidget(self.stage_panel)
+        self._detached = True
+        self._host_layout.setStretch(self._host_layout.count() - 1, 1)
+        self.stages_elsewhere.show()
+        self._place_detach()
+        return self.stage_panel
+
+    def put_stage_panel(self, panel):
+        """Take the stage panel back from the window it was in."""
+        self._host_layout.insertWidget(0, panel, 1)
+        panel.show()
+        self._detached = False
+        self._host_layout.setStretch(self._host_layout.count() - 1, 0)
+        self.stages_elsewhere.stop()
+        self.stages_elsewhere.hide()
+        self._place_detach()
+
+    def is_detached(self):
+        return self._detached
+
+    def set_streaming(self, live):
+        """Pulse the placeholder while a run is feeding the window, not after."""
+        if self._detached and live:
+            self.stages_elsewhere.start()
+        else:
+            self.stages_elsewhere.stop()
+
+    def _place_detach(self):
+        self.detach_button.setVisible(
+            not self._detached and self.tabs.currentIndex() == TAB_STAGES)
+
+    # -- artifacts ------------------------------------------------------------
+    def set_artifacts(self, targets, files=0):
+        """What the Artifacts button offers: ``[(label, path)]``, or none.
+
+        ``path`` is relative to the run's directory and "" is the directory
+        itself; ``files`` is how many of them are files a step recorded, for
+        the count on the button. Rebuilt only when it changes, because this is
+        asked on every repaint of the panel and a menu is a set of widgets.
+        """
+        targets = list(targets or [])
+        if (targets, files) == (self._artifact_targets, self._artifact_files):
+            return
+        self._artifact_targets, self._artifact_files = targets, files
+        self.artifacts_menu.clear()
+        for label, path in targets:
+            action = self.artifacts_menu.addAction(label)
+            action.setToolTip(path or "The run's folder")
+            action.triggered.connect(
+                lambda _checked=False, p=path: self.artifact_picked.emit(p))
+        self.artifacts_button.setText("Artifacts (%d)" % files if files else "Artifacts")
+        self.artifacts_button.setToolTip(
+            "Open %s on the Artifacts page." % (targets[0][0] if targets else "")
+            + ("\nThe arrow lists every file." if len(targets) > 1 else ""))
+        self.artifacts_button.setVisible(bool(targets))
+
+    def _first_artifact(self):
+        if self._artifact_targets:
+            self.artifact_picked.emit(self._artifact_targets[0][1])
 
     def set_log(self, lines):
         """Repaint the output, following the newest line unless somebody moved.
@@ -1791,6 +2796,7 @@ class _Output(QWidget):
         self._painted = []
         self.set_summary("", "")
         self.set_stages([])
+        self.composer.set_context({}, False)
 
     def set_summary(self, step_id, document):
         if step_id != self._summary_scope:
@@ -1843,6 +2849,10 @@ class _Output(QWidget):
         self._writable = bool(writable)
         self._changed()
 
+    def set_yaml_note(self, text):
+        self.yaml_note.setText(text or "")
+        self.yaml_note.setVisible(bool(text))
+
     def _revert(self):
         self.yaml.setPlainText(self._original)
 
@@ -1853,6 +2863,17 @@ class _Output(QWidget):
         self.save_button.setEnabled(dirty)
         self.revert_button.setEnabled(dirty)
         self.tabs.setTabText(TAB_YAML, "YAML *" if dirty else "YAML")
+
+
+def _icon_button(name, tip):
+    """A control that is only its mark, with the words in its tooltip."""
+    button = icons.button(QToolButton(), name)
+    button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    button.setProperty("variant", "icon")
+    button.setCursor(Qt.PointingHandCursor)
+    button.setToolTip(tip)
+    button.setAccessibleName(tip.split("\n")[0])
+    return button
 
 
 def _status_colour(status):
