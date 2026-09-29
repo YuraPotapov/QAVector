@@ -3674,15 +3674,20 @@ def test_the_output_panel_opens_the_run_or_the_picked_step_s_file(opened, tmp_pa
     button = opened.output.artifacts_button
     assert not button.isHidden()
     assert button.text() == "Artifacts"
+    assert button.menu() is None, "no list whose one entry is the button itself"
     button.click()
     assert asked[-1] == (run, ""), "nothing picked: the run's folder"
     opened._node_selected("a")
     settled()
     assert button.text() == "Artifacts (1)"
+    assert button.menu() is opened.output.artifacts_menu
     button.click()
     assert asked[-1] == (run, "steps/a/stdout.log")
     labels = [action.text() for action in opened.output.artifacts_menu.actions()]
     assert labels == ["stdout", "Step folder"], "the run's folder is where both land"
+    opened._node_selected("")
+    settled()
+    assert button.menu() is None
 
 
 def test_a_picked_step_that_wrote_nothing_leaves_the_way_to_the_run(opened, tmp_path):
@@ -3693,8 +3698,32 @@ def test_a_picked_step_that_wrote_nothing_leaves_the_way_to_the_run(opened, tmp_
     button = opened.output.artifacts_button
     assert not button.isHidden()
     assert button.text() == "Artifacts"
+    assert button.menu() is None
     button.click()
     assert asked[-1] == (run, "")
+
+
+def test_no_list_anywhere_offers_the_run_s_folder_as_an_entry(opened, monkeypatch,
+                                                             tmp_path):
+    """The Artifacts page always shows the whole run: an entry for its folder
+    lands where the step's folder, or the button itself, already does."""
+    _ran(opened, tmp_path)
+    for step in ("", "a", "d"):
+        opened._node_selected(step)
+        settled()
+        labels = [action.text() for action in opened.output.artifacts_menu.actions()]
+        assert "Run folder" not in labels
+    seen = []
+
+    def exec_(menu):
+        actions = menu.actions()              # held: see _pick
+        for action in actions:
+            if action.text() == "Artifacts":
+                seen.extend(one.text() for one in action.menu().actions())
+
+    _menus(monkeypatch, exec_)
+    opened._node_menu("a", QPoint())
+    assert seen == ["stdout", "Step folder"]
 
 
 def test_a_step_that_wrote_nothing_says_so_in_its_menu(opened, monkeypatch, tmp_path):

@@ -2122,11 +2122,9 @@ class CyclesPage(QWidget):
         self.output.set_stages(list(state.get("stages") or []), named=True,
                                labels=self._labels())
         targets, files = self._artifact_targets(self._selected)
-        if not targets and self._run_dir():
-            # A picked step that wrote nothing: the button stays, as the way
-            # to the run's files, rather than vanishing under the pointer.
-            targets = [("Run folder", "")]
-        self.output.set_artifacts(targets, files)
+        # With nothing picked, or a step that wrote nothing, the button is the
+        # way to the run's files by itself - no list holding that one entry.
+        self.output.set_artifacts(targets, files, available=bool(self._run_dir()))
         running = bool(self.run_state and self.run_state.cycle_running)
         self.output.set_streaming(running)
         if self._stages_window is not None:
@@ -2157,21 +2155,19 @@ class CyclesPage(QWidget):
     def _artifact_targets(self, step_id):
         """``([(label, path)], files)``: what can be opened for ``step_id``.
 
-        The files the step recorded, by name, then the step's own folder; with
-        no step, the run's folder. Paths are relative to the run's directory,
-        as the core records them, and "" is the directory itself. Empty while
-        no run of this cycle is on screen, and for a step that wrote nothing.
+        The files the step recorded, by name, then the step's own folder.
+        Paths are relative to the run's directory, as the core records them.
+        Empty with no step, while no run of this cycle is on screen, and for a
+        step that wrote nothing.
 
-        A step's list does not offer the run's folder as well: the Artifacts
-        page always shows the whole run, so the step's folder already lands
-        there - with the step picked out, which is the only thing a second
-        entry could have added.
+        Never the run's folder as an entry of its own: the Artifacts page
+        always shows the whole run, so the step's folder already lands there,
+        with the step picked out - and where there is no step, the Artifacts
+        button goes to the run's folder when it is pressed.
         """
         where = self._run_dir()
-        if not where:
+        if not where or not step_id:
             return [], 0
-        if not step_id:
-            return [("Run folder", "")], 0
         step = ((self._live_cycle() or {}).get("steps") or {}).get(step_id) or {}
         targets, seen = [], set()
         for one in step.get("artifacts") or []:
@@ -2615,17 +2611,19 @@ class _Output(QWidget):
         output_layout.setSpacing(0)
         # Where the files a step wrote can be looked at: the Artifacts page,
         # on this run, with the file selected. A click goes to the first; the
-        # arrow lists them all. Offered only while a run of this cycle is on
-        # screen - see set_artifacts.
+        # arrow lists them all. With no step picked a click opens the run's
+        # folder. Offered only while a run of this cycle is on screen - see
+        # set_artifacts.
         self.artifacts_button = icons.button(QToolButton(), "artifacts", "Artifacts")
         self.artifacts_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.artifacts_button.setPopupMode(QToolButton.MenuButtonPopup)
-        self.artifacts_button.setProperty("hasmenu", "true")
+        self.artifacts_button.setProperty("hasmenu", "false")
+        # Given to the button only while a step has files to list - see
+        # set_artifacts.
         self.artifacts_menu = QMenu(self.artifacts_button)
-        self.artifacts_button.setMenu(self.artifacts_menu)
         self.artifacts_button.clicked.connect(self._first_artifact)
         self.artifacts_button.hide()
         self._artifact_targets, self._artifact_files = [], 0
+        self._artifacts_available = False
         output_layout.addWidget(widgets.row(None, self.artifacts_button,
                                             self.details_button))
         output_layout.addWidget(self.output_views, 1)
@@ -2738,33 +2736,50 @@ class _Output(QWidget):
             not self._detached and self.tabs.currentIndex() == TAB_STAGES)
 
     # -- artifacts ------------------------------------------------------------
-    def set_artifacts(self, targets, files=0):
-        """What the Artifacts button offers: ``[(label, path)]``, or none.
+    def set_artifacts(self, targets, files=0, available=False):
+        """What the Artifacts button opens: ``[(label, path)]`` of one step.
 
-        ``path`` is relative to the run's directory and "" is the directory
-        itself; ``files`` is how many of them are files a step recorded, for
-        the count on the button. Rebuilt only when it changes, because this is
-        asked on every repaint of the panel and a menu is a set of widgets.
+        ``path`` is relative to the run's directory; ``files`` is how many of
+        them are files the step recorded, for the count on the button. With
+        no targets the button has no list at all and a press opens the run's
+        folder - a list whose one entry does what the button does is a second
+        way to the same place. ``available`` is whether there is a run to open
+        anything of. Rebuilt only when it changes, because this is asked on
+        every repaint of the panel and a menu is a set of widgets.
         """
         targets = list(targets or [])
-        if (targets, files) == (self._artifact_targets, self._artifact_files):
+        state = (targets, files, bool(available))
+        if state == (self._artifact_targets, self._artifact_files,
+                     self._artifacts_available):
             return
-        self._artifact_targets, self._artifact_files = targets, files
+        self._artifact_targets, self._artifact_files, self._artifacts_available = state
         self.artifacts_menu.clear()
         for label, path in targets:
             action = self.artifacts_menu.addAction(label)
-            action.setToolTip(path or "The run's folder")
+            action.setToolTip(path)
             action.triggered.connect(
                 lambda _checked=False, p=path: self.artifact_picked.emit(p))
+        listed = bool(targets)
+        self.artifacts_button.setMenu(self.artifacts_menu if listed else None)
+        self.artifacts_button.setPopupMode(QToolButton.MenuButtonPopup if listed
+                                           else QToolButton.DelayedPopup)
+        if self.artifacts_button.property("hasmenu") != ("true" if listed else "false"):
+            self.artifacts_button.setProperty("hasmenu", "true" if listed else "false")
+            self.artifacts_button.style().unpolish(self.artifacts_button)
+            self.artifacts_button.style().polish(self.artifacts_button)
         self.artifacts_button.setText("Artifacts (%d)" % files if files else "Artifacts")
         self.artifacts_button.setToolTip(
-            "Open %s on the Artifacts page." % (targets[0][0] if targets else "")
-            + ("\nThe arrow lists every file." if len(targets) > 1 else ""))
-        self.artifacts_button.setVisible(bool(targets))
+            "Open %s on the Artifacts page." % targets[0][0] if listed
+            else "Open this run's folder on the Artifacts page.")
+        if len(targets) > 1:
+            self.artifacts_button.setToolTip(self.artifacts_button.toolTip()
+                                             + "\nThe arrow lists the rest.")
+        self.artifacts_button.setVisible(bool(available))
 
     def _first_artifact(self):
-        if self._artifact_targets:
-            self.artifact_picked.emit(self._artifact_targets[0][1])
+        """The first of the step's files, or the run's folder when it has none."""
+        self.artifact_picked.emit(self._artifact_targets[0][1]
+                                  if self._artifact_targets else "")
 
     def set_log(self, lines):
         """Repaint the output, following the newest line unless somebody moved.
