@@ -193,6 +193,21 @@ def save(path, presets):
     return path
 
 
+def grouped(presets):
+    """``[(plugin, [preset, ...])]``: by the kind of step, each in saved order.
+
+    One list serves every cycle and every project, so it grows - five Jira
+    columns, a couple of shell commands, an agent - and a long run of names
+    is easier to read by what each one is. Kinds by plugin id; within one, the
+    order they were saved in rather than the alphabet, since one per column of
+    a board is saved in the board's order and the alphabet puts To Do last.
+    """
+    groups = {}
+    for preset in presets:
+        groups.setdefault(preset.plugin, []).append(preset)
+    return [(plugin, groups[plugin]) for plugin in sorted(groups)]
+
+
 def path_beside(projects_path):
     """Where the file goes: beside the projects file, wherever that is.
 

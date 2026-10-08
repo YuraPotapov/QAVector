@@ -3859,7 +3859,46 @@ def test_saved_steps_are_offered_in_the_order_they_were_saved(saving,
 
     seen = _offered(monkeypatch, "Saved")
     saving._add_step_from_bar()
-    assert [text for text, _on in seen][:3] == ["To Do", "In Progress", "Done"]
+    assert [text for text, _on in seen if text][:3] == ["To Do", "In Progress",
+                                                        "Done"]
+
+
+def test_saved_steps_are_grouped_by_kind_under_its_name(saving, monkeypatch):
+    """One list serves every cycle and project, so it grows; it reads by what
+    each step is. The heading is the plugin's name, and is not an item."""
+    from PySide6.QtWidgets import QLabel, QWidgetAction
+
+    from cms_gui import cyclepresetsfile
+    cyclepresetsfile.save(saving._presets_path(), [
+        cyclepresetsfile.Preset("Read To Do", "jira.issues"),
+        cyclepresetsfile.Preset("Build", "command.shell"),
+        cyclepresetsfile.Preset("Read Reopened", "jira.issues")])
+    rows = []
+
+    def exec_(menu):
+        held = [menu.actions()]
+        held.append(next(a for a in held[-1] if a.text() == "Saved")
+                    .menu().actions())
+        for one in held[-1]:
+            if isinstance(one, QWidgetAction):
+                rows.append(("heading", one.defaultWidget().text(),
+                             one.isEnabled()))
+            elif not one.isSeparator() and not one.menu():
+                rows.append(("step", one.text(), one.isEnabled()))
+        assert all(isinstance(one.defaultWidget(), QLabel)
+                   for one in held[-1] if isinstance(one, QWidgetAction))
+        return None
+
+    saving.inventory.cycle_plugins.append(
+        {"id": "jira.issues", "name": "Jira Issues", "category": "action"})
+    _menus(monkeypatch, exec_)
+    saving._add_step_from_bar()
+
+    assert rows[0][0] == "heading" and rows[0][2] is False
+    assert [text for kind, text, _on in rows if kind == "step"] == [
+        "Build", "Read To Do", "Read Reopened"]
+    assert ("heading", "JIRA ISSUES", False) in rows
+    assert rows.index(("heading", "JIRA ISSUES", False)) == 2
 
 
 def test_saving_under_a_name_already_kept_replaces_it_in_place(saving,

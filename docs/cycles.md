@@ -80,8 +80,10 @@ duplicate or delete it. A dependency that would make a loop is not offered.
 **Saved steps.** A step that took a while to set up - a Jira site, an
 account, a status - is kept with right-click, **Save as preset...**, under a
 name; it works on any cycle, including one that ships with the application.
-It then sits under **Step → Saved**, in the order it was saved, and adds a
-copy of itself after the selected step, its id taken from the name. A saved
+It then sits under **Step → Saved** in every cycle, whatever project it is
+in, grouped by the kind of step under the plugin's name - Jira Issues, Shell
+command - and within a kind in the order it was saved. It adds a copy of
+itself after the selected step, its id taken from the name. A saved
 step keeps its settings and label, not its place: no id, no `needs`, no phase,
 and no condition that reads another step. The variables it refers to come
 with it and are added to a cycle that lacks them - a secret as

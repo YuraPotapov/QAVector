@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout,
                                QLabel, QMenu,
                                QPlainTextEdit, QPushButton, QStackedWidget,
                                QTabWidget, QTextBrowser, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QWidgetAction)
 
 from .. import (core as core_mod, cyclelayoutfile as clf,
                 cyclepresetsfile as presets_file, cycleprojectsfile as cpf,
@@ -849,7 +849,8 @@ class CyclesPage(QWidget):
         """
         plugins = list(getattr(self.inventory, "cycle_plugins", None) or [])
         self._saved_menu(menu.addMenu("Saved"), after,
-                         {one.get("id", "") for one in plugins})
+                         {one.get("id", ""): one.get("name") or one.get("id", "")
+                          for one in plugins})
         menu.addSeparator()
         by_category = {}
         for plugin in plugins:
@@ -886,23 +887,26 @@ class CyclesPage(QWidget):
             menu.addAction("Nothing saved yet - right-click a step, "
                            "Save as preset...").setEnabled(False)
             return
-        # In the order they were saved, not by name: a person saving one per
-        # column of a board saves them in the board's order, and the alphabet
-        # puts To Do last.
-        for preset in saved:
-            action = menu.addAction(
-                preset.name, lambda p=preset: self._add_step(p.plugin, after, p))
-            if known and preset.plugin not in known:
-                action.setEnabled(False)
-                action.setToolTip("%s is not a plugin this version knows."
-                                  % preset.plugin)
-            else:
-                action.setToolTip(preset.plugin)
+        # By the kind of step, each kind under its plugin's name - see
+        # cyclepresetsfile.grouped for the order inside one.
+        for plugin, presets in presets_file.grouped(saved):
+            _menu_heading(menu, known.get(plugin) or plugin)
+            for preset in presets:
+                action = menu.addAction(
+                    preset.name,
+                    lambda p=preset: self._add_step(p.plugin, after, p))
+                if known and preset.plugin not in known:
+                    action.setEnabled(False)
+                    action.setToolTip("%s is not a plugin this version knows."
+                                      % preset.plugin)
+                else:
+                    action.setToolTip(preset.plugin)
         menu.addSeparator()
         forget = menu.addMenu("Remove")
-        for preset in saved:
-            forget.addAction(preset.name,
-                             lambda n=preset.name: self._remove_preset(n))
+        for _plugin, presets in presets_file.grouped(saved):
+            for preset in presets:
+                forget.addAction(preset.name,
+                                 lambda n=preset.name: self._remove_preset(n))
 
     def _save_preset(self, step_id):
         """Keep this step, as configured, under a name for the Add step menu."""
@@ -2539,6 +2543,24 @@ def _along_the_foot(widget, room):
     height = widget.sizeHint().height()
     return QRect(room.center().x() - width // 2, room.bottom() - height - 12,
                  max(width, 0), height)
+
+
+def _menu_heading(menu, text):
+    """A group's name in a menu, as the page's own small capitals.
+
+    ``QMenu.addSection`` would be the call, but under the stylesheet it is
+    drawn as a bare separator: the name is dropped and only the line is left,
+    which says that something changes without saying what. A kicker label is
+    the same heading the panels on this page carry, and it is not an item -
+    it cannot be hovered, picked or reached with the arrow keys.
+    """
+    label = widgets.kicker(text)
+    label.setContentsMargins(12, 8, 12, 2)
+    action = QWidgetAction(menu)
+    action.setDefaultWidget(label)
+    action.setEnabled(False)
+    menu.addAction(action)
+    return action
 
 
 def _last_runs(sessions):

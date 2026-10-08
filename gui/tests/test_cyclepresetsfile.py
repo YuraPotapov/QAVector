@@ -97,3 +97,14 @@ def test_the_file_sits_beside_the_projects_file(tmp_path):
     projects = str(tmp_path / "elsewhere" / "cycleprojects.json")
     assert presets.path_beside(projects) == str(
         tmp_path / "elsewhere" / presets.FILE_NAME)
+
+
+def test_grouped_by_kind_and_in_saved_order_within_one():
+    made = [presets.Preset("To Do", "jira.issues"),
+            presets.Preset("Build", "command.shell"),
+            presets.Preset("In Progress", "jira.issues")]
+    groups = presets.grouped(made)
+
+    assert [plugin for plugin, _rows in groups] == ["command.shell",
+                                                    "jira.issues"]
+    assert [one.name for one in groups[1][1]] == ["To Do", "In Progress"]
