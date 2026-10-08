@@ -16,6 +16,20 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.14] - 2026-10-08
+
+### Changed
+- **Saved steps are grouped by kind.** Step → Saved lists every saved step,
+  whichever cycle or project it was saved from, under the name of its plugin
+  - Jira Issues, Shell command - and within one kind in the order saved.
+
+### Fixed
+- **The splash opens with its picture.** For the second or two the main
+  window took to build, it was an empty grey square with the desktop showing
+  through: the window was mapped, but its picture reached the screen only once
+  the event loop ran again. It is now painted and flushed before the main
+  window is built.
+
 ## [0.16.13] - 2026-10-08
 
 ### Fixed
