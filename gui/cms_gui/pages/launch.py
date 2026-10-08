@@ -20,7 +20,7 @@ import os
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
-                               QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+                               QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMenu, QPushButton, QRadioButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
@@ -1109,10 +1109,9 @@ class LaunchSessionsPage(QWidget):
     def save_configuration(self):
         name = self._current_config_name()
         if not name:
-            name, ok = QInputDialog.getText(self, "Save configuration",
-                                            "Name this configuration:")
-            name = (name or "").strip()
-            if not ok or not name:
+            name = widgets.ask_text(self, "Save configuration",
+                                    "Name this configuration:")
+            if not name:
                 return
             name = self._configs.unique_name(name)
         state = self.state()
@@ -1136,10 +1135,8 @@ class LaunchSessionsPage(QWidget):
             widgets.note(self, "Rename",
                                     "Save this configuration first.")
             return
-        new, ok = QInputDialog.getText(self, "Rename configuration",
-                                       "New name:", text=old)
-        new = (new or "").strip()
-        if not ok or not new or new == old:
+        new = widgets.ask_text(self, "Rename configuration", "New name:", old)
+        if not new or new == old:
             return
         
         # Keep desktop link if it existed for the old name

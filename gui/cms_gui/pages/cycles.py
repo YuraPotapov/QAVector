@@ -32,8 +32,8 @@ import subprocess
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
-from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QInputDialog,
-                               QLabel, QLineEdit, QMenu,
+from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout,
+                               QLabel, QMenu,
                                QPlainTextEdit, QPushButton, QStackedWidget,
                                QTabWidget, QTextBrowser, QToolButton,
                                QVBoxLayout, QWidget)
@@ -1900,9 +1900,7 @@ class CyclesPage(QWidget):
 
     # -- asking -----------------------------------------------------------------
     def _ask(self, title, label, value=""):
-        answer, ok = QInputDialog.getText(self, title, label, QLineEdit.Normal,
-                                          value)
-        return answer.strip() if ok else ""
+        return widgets.ask_text(self, title, label, value) or ""
 
     def _confirm(self, title, question):
         return widgets.confirm(self, title, question, agree="Yes",

@@ -16,7 +16,7 @@ import os
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
                                QMainWindow, QMenu,
                                QPushButton, QSizePolicy, QStackedWidget,
                                QToolButton, QVBoxLayout, QWidget)
@@ -1327,12 +1327,11 @@ class MainWindow(QMainWindow):
         if len(logins) <= 1:
             return ""
         # A list, not a row of buttons: eleven accounts is a normal number here.
-        chosen, ok = QInputDialog.getItem(
-            self, "Record",
-            "Recording opens one window, and %d accounts are selected.\n"
-            "Which one do you want to record?" % len(logins),
-            logins, 0, False)
-        if not ok or not chosen:
+        chosen = widgets.ask_item(
+            self, "Record", "Which account do you want to record?", logins,
+            detail="Recording opens one window, and %d accounts are selected."
+                   % len(logins))
+        if not chosen:
             return "cancel"
         return chosen
 

@@ -1390,7 +1390,8 @@ class Message(QDialog):
     OUTPUT_HEIGHT = 260
 
     def __init__(self, parent, title, message, detail="", kind="",
-                 agree="OK", refuse="", output="", choices=()):
+                 agree="OK", refuse="", output="", choices=(), text=None,
+                 items=()):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -1437,6 +1438,20 @@ class Message(QDialog):
             self.output.setMaximumHeight(self.OUTPUT_HEIGHT)
             layout.addWidget(self.output, 1)
 
+        # An answer to type or to pick, under the question that asks for it.
+        # QInputDialog was the last of the desktop's dialogs on these pages:
+        # its own frame, the platform's icons on its buttons, nothing of the
+        # theme - the one window that looked like another application.
+        self.field = None
+        if items:
+            self.field = QComboBox()
+            self.field.addItems([str(one) for one in items])
+            layout.addWidget(self.field)
+        elif text is not None:
+            self.field = QLineEdit(text)
+            self.field.selectAll()
+            layout.addWidget(self.field)
+
         #: Which of ``choices`` was pressed, or "" - the agree button counts
         #: as its own label, so one reading answers both shapes.
         self.chosen = ""
@@ -1474,6 +1489,17 @@ class Message(QDialog):
         self.chosen = label
         self.accept()
 
+    def answer(self):
+        """What was typed or picked, stripped; "" when there is no field."""
+        if isinstance(self.field, QComboBox):
+            return self.field.currentText()
+        return self.field.text().strip() if self.field is not None else ""
+
+    def showEvent(self, event):         # noqa: N802 - Qt's own spelling
+        super().showEvent(event)
+        if self.field is not None:
+            self.field.setFocus()
+
 
 def confirm(parent, title, question, detail="", agree="Yes", refuse="Cancel",
             kind=""):
@@ -1509,6 +1535,33 @@ def choose(parent, title, message, detail="", choices=(), agree="OK",
                      choices=choices)
     try:
         return dialog.chosen if dialog.exec() == QDialog.Accepted else ""
+    finally:
+        dialog.deleteLater()
+
+
+def ask_text(parent, title, question, value="", detail="", agree="OK",
+             refuse="Cancel"):
+    """A line of text, asked for. Returns it stripped, or None if refused.
+
+    None rather than "" for a refusal, so a caller can tell "cancelled" from
+    "agreed to nothing" - the second is usually a field it should refuse.
+    """
+    dialog = Message(parent, title, question, detail, "", agree, refuse,
+                     text=value or "")
+    try:
+        return dialog.answer() if dialog.exec() == QDialog.Accepted else None
+    finally:
+        dialog.deleteLater()
+
+
+def ask_item(parent, title, question, items, current=0, detail="",
+             agree="OK", refuse="Cancel"):
+    """One of ``items``, picked from a list. Returns it, or None if refused."""
+    dialog = Message(parent, title, question, detail, "", agree, refuse,
+                     items=items)
+    dialog.field.setCurrentIndex(max(0, min(int(current), len(items) - 1)))
+    try:
+        return dialog.answer() if dialog.exec() == QDialog.Accepted else None
     finally:
         dialog.deleteLater()
 

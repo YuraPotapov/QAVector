@@ -351,9 +351,7 @@ def test_saving_announces_itself_so_the_window_re_reads_describe(page):
 
 def test_a_new_scenario_starts_as_a_template(page, monkeypatch):
     # So a half-written one is not picked up by --run-tests=all.
-    from PySide6.QtWidgets import QInputDialog
-
-    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("fresh", True))
+    monkeypatch.setattr("cms_gui.widgets.ask_text", lambda *a, **k: "fresh")
     page.core = FakeCore()
     page.set_inventory(_inventory())
     page.new_scenario()
@@ -364,9 +362,7 @@ def test_a_new_scenario_starts_as_a_template(page, monkeypatch):
 
 
 def test_duplicating_sends_the_text_of_the_original(page, monkeypatch):
-    from PySide6.QtWidgets import QInputDialog
-
-    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("copy", True))
+    monkeypatch.setattr("cms_gui.widgets.ask_text", lambda *a, **k: "copy")
     page.core = FakeCore({"shipped": _flow("shipped", writable=False)})
     page.set_inventory(_inventory(_row("shipped", writable=False)))
     page.open("shipped")

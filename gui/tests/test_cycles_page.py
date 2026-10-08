@@ -1182,13 +1182,11 @@ def owning(page, tmp_path, monkeypatch):
 
 
 def _answer(monkeypatch, text):
-    monkeypatch.setattr("cms_gui.pages.cycles.QInputDialog.getText",
-                        lambda *a, **k: (text, True))
+    monkeypatch.setattr("cms_gui.widgets.ask_text", lambda *a, **k: text)
 
 
 def _cancel(monkeypatch):
-    monkeypatch.setattr("cms_gui.pages.cycles.QInputDialog.getText",
-                        lambda *a, **k: ("", False))
+    monkeypatch.setattr("cms_gui.widgets.ask_text", lambda *a, **k: None)
 
 
 def _agree(monkeypatch, yes=True):

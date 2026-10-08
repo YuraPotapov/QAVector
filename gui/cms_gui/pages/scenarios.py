@@ -23,7 +23,7 @@ import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHeaderView, QInputDialog,
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QHeaderView,
                                QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QSplitter, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -843,9 +843,9 @@ class ScenariosPage(QWidget):
         self._write(flow_id, document)
 
     def _ask_for_id(self, title, initial):
-        flow_id, ok = QInputDialog.getText(
-            self, title, "Scenario id (letters, digits, _ and - only):", text=initial)
-        return flow_id.strip() if ok else ""
+        return widgets.ask_text(
+            self, title, "Scenario id (letters, digits, _ and - only):",
+            initial) or ""
 
     def _write(self, flow_id, document):
         if not self.core:

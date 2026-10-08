@@ -938,3 +938,59 @@ def test_a_skeleton_breathes_slowly_and_each_row_a_little_behind(qapp, dispose):
     finally:
         for one in made:
             dispose(one)
+
+
+# ------------------------------------------------- a line of text, asked for
+# QInputDialog kept the desktop's frame and put the platform's icons on its
+# buttons - the last dialog that looked like another application.
+def test_a_question_with_a_field_is_the_same_dialog_with_a_field(qapp):
+    from PySide6.QtWidgets import QLineEdit
+
+    dialog = widgets.Message(None, "New cycle", "Id:", agree="OK",
+                             refuse="Cancel", text="nightly")
+    try:
+        assert isinstance(dialog.field, QLineEdit)
+        assert dialog.field.text() == "nightly"
+        assert dialog.field.selectedText() == "nightly", "typing replaces it"
+        assert dialog.agree_button.property("variant") == "primary"
+        assert dialog.refuse_button.property("variant") == "ghost"
+    finally:
+        dialog.deleteLater()
+
+
+def test_what_was_typed_comes_back_stripped(qapp):
+    dialog = widgets.Message(None, "New cycle", "Id:", text="")
+    try:
+        dialog.field.setText("  nightly  ")
+        assert dialog.answer() == "nightly"
+    finally:
+        dialog.deleteLater()
+
+
+def test_asking_for_text_tells_a_refusal_from_an_answer(qapp, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    monkeypatch.setattr(widgets.Message, "exec", lambda self: QDialog.Rejected)
+    assert widgets.ask_text(None, "New cycle", "Id:", "x") is None
+
+    def typed(self):
+        self.field.setText(" fresh ")
+        return QDialog.Accepted
+
+    monkeypatch.setattr(widgets.Message, "exec", typed)
+    assert widgets.ask_text(None, "New cycle", "Id:") == "fresh"
+
+
+def test_a_choice_from_a_list_is_the_same_dialog_with_a_list(qapp, monkeypatch):
+    from PySide6.QtWidgets import QComboBox, QDialog
+
+    seen = {}
+
+    def picked(self):
+        seen["field"] = isinstance(self.field, QComboBox)
+        seen["current"] = self.field.currentText()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(widgets.Message, "exec", picked)
+    assert widgets.ask_item(None, "Record", "Which?", ["a", "b"], 1) == "b"
+    assert seen == {"field": True, "current": "b"}
