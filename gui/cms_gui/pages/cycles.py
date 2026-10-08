@@ -39,7 +39,8 @@ from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QInputDialog,
                                QVBoxLayout, QWidget)
 
 from .. import (core as core_mod, cyclelayoutfile as clf,
-                cycleprojectsfile as cpf, icons, theme, widgets)
+                cyclepresetsfile as presets_file, cycleprojectsfile as cpf,
+                icons, theme, widgets)
 from .. import background, stageswindow
 from ..cycledraft import Draft
 from ..cyclesubjects import KEEP
@@ -841,8 +842,15 @@ class CyclesPage(QWidget):
                        check.get("diff") or "(nothing)")
 
     def _plugins_menu(self, menu, after=""):
-        """Every plugin the core offers, by category, each adding a step."""
+        """Every plugin the core offers, by category, each adding a step.
+
+        Saved steps come first: a step somebody configured and kept is the
+        one they reach for, and the plugins below are where a new one starts.
+        """
         plugins = list(getattr(self.inventory, "cycle_plugins", None) or [])
+        self._saved_menu(menu.addMenu("Saved"), after,
+                         {one.get("id", "") for one in plugins})
+        menu.addSeparator()
         by_category = {}
         for plugin in plugins:
             by_category.setdefault(plugin.get("category") or "other", []).append(plugin)
@@ -857,21 +865,111 @@ class CyclesPage(QWidget):
         if not plugins:
             menu.addAction("No plugins are known yet").setEnabled(False)
 
+    def _presets_path(self):
+        return presets_file.path_beside(self._projects_path)
+
+    def _saved_menu(self, menu, after, known):
+        """The saved steps, each adding a copy of itself, and a way to forget one.
+
+        Read when the menu opens rather than once: the file is small, and a
+        list remembered from earlier would miss a step saved from another
+        window a minute ago.
+        """
+        menu.setToolTipsVisible(True)
+        try:
+            saved = presets_file.load(self._presets_path())
+        except presets_file.CyclePresetsFileError as exc:
+            menu.addAction("The saved steps could not be read").setEnabled(False)
+            menu.setToolTip(str(exc))
+            return
+        if not saved:
+            menu.addAction("Nothing saved yet - right-click a step, "
+                           "Save as preset...").setEnabled(False)
+            return
+        # In the order they were saved, not by name: a person saving one per
+        # column of a board saves them in the board's order, and the alphabet
+        # puts To Do last.
+        for preset in saved:
+            action = menu.addAction(
+                preset.name, lambda p=preset: self._add_step(p.plugin, after, p))
+            if known and preset.plugin not in known:
+                action.setEnabled(False)
+                action.setToolTip("%s is not a plugin this version knows."
+                                  % preset.plugin)
+            else:
+                action.setToolTip(preset.plugin)
+        menu.addSeparator()
+        forget = menu.addMenu("Remove")
+        for preset in saved:
+            forget.addAction(preset.name,
+                             lambda n=preset.name: self._remove_preset(n))
+
+    def _save_preset(self, step_id):
+        """Keep this step, as configured, under a name for the Add step menu."""
+        step = self._step_of(step_id)
+        if step is None:
+            return
+        name = self._ask("Save as preset", "Name:",
+                         step.get("label") or step_id)
+        if not name:
+            return
+        path = self._presets_path()
+        try:
+            saved = presets_file.load(path)
+        except presets_file.CyclePresetsFileError as exc:
+            widgets.warn(self, "Save as preset", str(exc))
+            return
+        same = [one for one in saved if one.name.casefold() == name.casefold()]
+        if same and not widgets.confirm(
+                self, "Save as preset", "Replace the saved step %s?" % name,
+                agree="Replace", refuse="Cancel"):
+            return
+        made = presets_file.Preset.from_step(name, step, self._document_now())
+        # A replaced step keeps its place in the menu.
+        if same:
+            saved = [made if one is same[0] else one for one in saved
+                     if one is same[0] or one not in same]
+        else:
+            saved.append(made)
+        try:
+            presets_file.save(path, saved)
+        except presets_file.CyclePresetsFileError as exc:
+            widgets.warn(self, "Save as preset", str(exc))
+
+    def _remove_preset(self, name):
+        if not widgets.confirm(self, "Remove saved step",
+                               "Remove the saved step %s?" % name,
+                               "Cycles it was added to keep their copy.",
+                               agree="Remove", refuse="Keep"):
+            return
+        path = self._presets_path()
+        try:
+            saved = presets_file.load(path)
+            presets_file.save(path, [one for one in saved if one.name != name])
+        except presets_file.CyclePresetsFileError as exc:
+            widgets.warn(self, "Remove saved step", str(exc))
+
     def _add_step_from_bar(self):
         menu = QMenu(self)
         self._plugins_menu(menu, after=self._selected)
         menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
 
-    def _add_step(self, plugin_id, after=""):
+    def _add_step(self, plugin_id, after="", preset=None):
         """A new step, filled in straight away in its own window.
 
         Closing that window without applying takes the step back out - a
-        box with nothing in it is not something anybody asked for.
+        box with nothing in it is not something anybody asked for. A saved
+        step arrives already filled in, with the variables it refers to.
         """
         if not self._can_edit_graph():
             return
         draft = self._ensure_draft()
-        made = draft.add_step(plugin_id, after=after)
+        if preset is not None:
+            made = draft.add_step(plugin_id, after=after,
+                                  step=preset.step_for(),
+                                  variables=preset.variables)
+        else:
+            made = draft.add_step(plugin_id, after=after)
         if not self._edit_step(made, adding=True):
             draft.undo()
         self._draft_changed()
@@ -929,6 +1027,12 @@ class CyclesPage(QWidget):
             phases.addAction("New phase...", lambda: self._new_group(step_id))
             menu.addAction("Duplicate", lambda: self._duplicate_step(step_id))
             menu.addAction("Delete...", lambda: self._delete_step(step_id))
+        if step is not None:
+            # Not only in Design: keeping a step changes nothing in this
+            # cycle, and a template that ships with the application is
+            # exactly the kind of step worth keeping.
+            menu.addAction("Save as preset...",
+                           lambda: self._save_preset(step_id))
         menu.addSeparator()
         self._artifacts_menu(menu.addMenu("Artifacts"), step_id)
         running = bool(self.run_state and self.run_state.cycle_running)

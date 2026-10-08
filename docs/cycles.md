@@ -77,6 +77,18 @@ when one is selected - and right-clicking a step offers what can be done to it:
 open it, add a step after it, choose what it waits for, put it in a phase,
 duplicate or delete it. A dependency that would make a loop is not offered.
 
+**Saved steps.** A step that took a while to set up - a Jira site, an
+account, a status - is kept with right-click, **Save as preset...**, under a
+name; it works on any cycle, including one that ships with the application.
+It then sits under **Step → Saved**, in the order it was saved, and adds a
+copy of itself after the selected step, its id taken from the name. A saved
+step keeps its settings and label, not its place: no id, no `needs`, no phase,
+and no condition that reads another step. The variables it refers to come
+with it and are added to a cycle that lacks them - a secret as
+`{secret: true}`, never its value, so the token is entered once per cycle.
+Saving under a name already kept replaces it; **Saved → Remove** forgets one.
+The list is `cyclepresets.json`, beside `cycleprojects.json`.
+
 **Links.** A line from one step to another means the second waits for the
 first - its `needs:`. In Design, on a cycle you can edit, a link is made,
 moved or removed on the canvas:

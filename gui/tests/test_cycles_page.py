@@ -3756,3 +3756,124 @@ def test_a_run_s_artifacts_link_in_subjects_opens_its_folder(opened):
                                        "state": "success"}]}])
     opened._open_run_files("demo", "r1")
     assert asked == [("/runs/r1", "")]
+
+
+# --------------------------------------------------------------- saved steps
+# A step configured once - a Jira site, an account, a status - is kept under a
+# name and added again from Add step, in this cycle or another.
+@pytest.fixture
+def saving(editing, tmp_path, monkeypatch):
+    editing._projects_path = str(tmp_path / "cycleprojects.json")
+    monkeypatch.setattr(editing, "_ask", lambda *_a: "Shell: build")
+    return editing
+
+
+def _offered(monkeypatch, *path):
+    """The menu at ``path`` as (text, enabled) pairs, choosing nothing."""
+    seen = []
+
+    def exec_(menu):
+        held = [menu.actions()]
+        for name in path:
+            held.append(next(a for a in held[-1] if a.text() == name)
+                        .menu().actions())
+        seen.extend((one.text(), one.isEnabled()) for one in held[-1]
+                    if not one.isSeparator())
+        return None
+
+    _menus(monkeypatch, exec_)
+    return seen
+
+
+def test_a_step_saved_from_its_menu_is_offered_by_add_step(saving, monkeypatch):
+    from cms_gui import cyclepresetsfile
+
+    _pick(monkeypatch, "Save as preset...")
+    saving._node_menu("b", QPoint())
+    kept = cyclepresetsfile.load(saving._presets_path())
+    assert [one.name for one in kept] == ["Shell: build"]
+    assert kept[0].step == {"with": {"command": "y"}}
+
+    saving._selected = "d"
+    _pick(monkeypatch, "Saved", "Shell: build")
+    saving._add_step_from_bar()
+
+    made = saving._draft.step("shell_build")
+    assert made["with"] == {"command": "y"} and made["needs"] == ["d"]
+    assert saving.canvas.selected() == "shell_build"
+
+
+def test_a_cycle_that_cannot_be_edited_can_still_have_a_step_saved(
+        page, tmp_path, monkeypatch):
+    page.set_core(FakeCore({"demo": payload(writable=False)}))
+    page.set_inventory(FakeInventory([row(writable=False)], [SHELL_PLUGIN]))
+    page.open("demo")
+    page._projects_path = str(tmp_path / "cycleprojects.json")
+    monkeypatch.setattr(page, "_ask", lambda *_a: "Kept")
+
+    _pick(monkeypatch, "Save as preset...")
+    page._node_menu("a", QPoint())
+
+    from cms_gui import cyclepresetsfile
+    assert [one.name for one in cyclepresetsfile.load(page._presets_path())] \
+        == ["Kept"]
+
+
+def test_nothing_saved_yet_says_how_to_save_one(saving, monkeypatch):
+    seen = _offered(monkeypatch, "Saved")
+    saving._add_step_from_bar()
+    assert len(seen) == 1 and not seen[0][1]
+    assert "Save as preset" in seen[0][0]
+
+
+def test_a_saved_step_of_an_unknown_plugin_is_shown_and_not_offered(
+        saving, monkeypatch):
+    from cms_gui import cyclepresetsfile
+    cyclepresetsfile.save(saving._presets_path(), [
+        cyclepresetsfile.Preset("Gone", "nothing.here")])
+
+    seen = _offered(monkeypatch, "Saved")
+    saving._add_step_from_bar()
+    assert ("Gone", False) in seen
+
+
+def test_a_saved_step_can_be_removed(saving, monkeypatch):
+    from cms_gui import cyclepresetsfile
+    cyclepresetsfile.save(saving._presets_path(), [
+        cyclepresetsfile.Preset("One", "command.shell"),
+        cyclepresetsfile.Preset("Two", "command.shell")])
+
+    _pick(monkeypatch, "Saved", "Remove", "One")
+    saving._add_step_from_bar()
+
+    assert [one.name for one in cyclepresetsfile.load(saving._presets_path())] \
+        == ["Two"]
+
+
+def test_saved_steps_are_offered_in_the_order_they_were_saved(saving,
+                                                              monkeypatch):
+    """One per column of a board is saved in the board's order; the alphabet
+    would put To Do last."""
+    from cms_gui import cyclepresetsfile
+    cyclepresetsfile.save(saving._presets_path(), [
+        cyclepresetsfile.Preset(name, "command.shell")
+        for name in ("To Do", "In Progress", "Done")])
+
+    seen = _offered(monkeypatch, "Saved")
+    saving._add_step_from_bar()
+    assert [text for text, _on in seen][:3] == ["To Do", "In Progress", "Done"]
+
+
+def test_saving_under_a_name_already_kept_replaces_it_in_place(saving,
+                                                               monkeypatch):
+    from cms_gui import cyclepresetsfile
+    cyclepresetsfile.save(saving._presets_path(), [
+        cyclepresetsfile.Preset(name, "command.shell")
+        for name in ("First", "Shell: build", "Last")])
+
+    _pick(monkeypatch, "Save as preset...")
+    saving._node_menu("b", QPoint())
+
+    kept = cyclepresetsfile.load(saving._presets_path())
+    assert [one.name for one in kept] == ["First", "Shell: build", "Last"]
+    assert kept[1].step == {"with": {"command": "y"}}

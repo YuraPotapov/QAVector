@@ -158,3 +158,24 @@ def test_saving_makes_the_draft_clean_and_takes_the_new_digest():
     one.saved("new-digest")
     assert not one.dirty and one.base == "new-digest"
     assert one.can_undo(), "undo still walks back past a save"
+
+
+def test_a_saved_step_brings_the_variables_this_cycle_lacks_and_no_others():
+    one = Draft("demo", {"id": "demo", "variables": {"site": "mine"},
+                         "steps": [{"id": "a", "plugin": "command.shell"}]})
+    one.add_step("jira.issues", after="a",
+                 step={"id": "jira_todo", "with": {"site": "${vars.site}"}},
+                 variables={"site": "theirs", "token": {"secret": True}})
+
+    assert one.document["variables"] == {"site": "mine",
+                                         "token": {"secret": True}}
+    assert one.step("jira_todo")["needs"] == ["a"]
+
+
+def test_one_undo_takes_the_saved_step_and_its_variables_back_out():
+    one = Draft("demo", {"id": "demo", "steps": []})
+    one.add_step("jira.issues", step={"id": "jira_todo"},
+                 variables={"token": {"secret": True}})
+    one.undo()
+
+    assert one.steps() == [] and "variables" not in one.document

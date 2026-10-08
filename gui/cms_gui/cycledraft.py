@@ -168,12 +168,17 @@ class Draft(object):
         return found
 
     # -- changing it ----------------------------------------------------------
-    def add_step(self, plugin, after="", step=None):
+    def add_step(self, plugin, after="", step=None, variables=None):
         """A new step of ``plugin``, waiting for ``after``. Returns its id.
 
         Placed straight after ``after`` in the file, so the file reads in the
         order the graph runs - which is also where the core's writer puts it
         without rewriting anything around it.
+
+        ``variables`` are declarations the step refers to - a saved step's,
+        brought from another cycle. Only the ones this cycle lacks are added,
+        and in the same change, so one undo takes the step and them back out.
+        A variable the cycle already has keeps its own value.
         """
         made = dict(step or {})
         made["id"] = self.unique_id(made.get("id") or plugin.split(".")[-1])
@@ -184,6 +189,12 @@ class Draft(object):
             if group and "group" not in made:
                 made["group"] = group
         document = copy.deepcopy(self.document)
+        if variables:
+            declared = document.get("variables")
+            if not isinstance(declared, dict):
+                declared = document["variables"] = {}
+            for name, value in variables.items():
+                declared.setdefault(name, copy.deepcopy(value))
         steps = document.setdefault("steps", [])
         where = next((index for index, one in enumerate(steps)
                       if one.get("id") == after), None)
