@@ -16,6 +16,26 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.17] - 2026-10-08
+
+### Fixed
+- **A step added to an arranged cycle stays where you can see it.** It went
+  where the computed layout put it - which knows nothing of boxes dragged
+  about - the view was centred on it there, and a step added earlier and never
+  dragged was placed afresh, somewhere else, every time another was added. It
+  now goes one row on from the step it was added after (along the row if that
+  is taken) and keeps that place; the view scrolls only as far as showing it
+  takes, and keeps its zoom.
+- **The Cycles page says when it is saving.** A save, and the check of every
+  change, ran on the GUI thread: the window froze for as long as the core took
+  and could not be told from a hung one. They now run on a thread; the page
+  takes no input meanwhile and, after a moment, the canvas is veiled with
+  "Saving..." or "Checking..." until it is done.
+- **Saving a cycle keeps it open.** Every save refreshes the inventory, and
+  each refresh put the last cycle run back on the Cycles page - so saving one
+  cycle switched to whichever cycle had run last. That now happens once, when
+  the window opens.
+
 ## [0.16.16] - 2026-10-08
 
 ### Added
