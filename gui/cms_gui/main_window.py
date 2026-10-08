@@ -66,7 +66,7 @@ DEVELOPER_ONLY = ("commands",)
 # entry reserves room for the larger of these whether or not it uses it, so the
 # points line up in one column and the marks stay aligned when the rail is
 # collapsed - see widgets.NavButton.
-NAV_BADGES = {"logsources": 2, "run": 1}
+NAV_BADGES = {"logsources": 2, "cycles": 2, "run": 1}
 
 # The rail's width is measured from its contents (see _build_ui); these only set
 # the floor, the left/right inset of the group headings, and enough slack that a
@@ -123,6 +123,12 @@ def _close_warning(windows):
               if windows else "")
     return ("Closing stops the run first%s, so each window shuts down gracefully "
             "and keeps its login. This can take a few seconds." % closes)
+
+
+def _running_and_failed(up, down):
+    """A rail entry's two counts in words, for its tooltip: Services and Cycles."""
+    return " · ".join(filter(None, ["%d running" % up if up else "",
+                                    "%d failed" % down if down else ""]))
 
 
 def _background_tip(blockers):
@@ -1925,10 +1931,15 @@ class MainWindow(QMainWindow):
         if services is not None:
             supervisor = self.services.supervisor
             up, down = len(supervisor.running()), len(supervisor.failed())
-            services.set_badges(
-                [(up, "ok"), (down, "bad")],
-                " · ".join(filter(None, ["%d running" % up if up else "",
-                                         "%d failed" % down if down else ""])))
+            services.set_badges([(up, "ok"), (down, "bad")],
+                                _running_and_failed(up, down))
+        cycles = self._nav_buttons.get("cycles")
+        if cycles is not None:
+            # The same two points as Services, for the same two questions: is
+            # one going, and did the last one go wrong.
+            up, down = self.run_state.cycle_counts()
+            cycles.set_badges([(up, "ok"), (down, "bad")],
+                              _running_and_failed(up, down))
         run = self._nav_buttons.get("run")
         if run is not None:
             live = len(self.run_state.live())

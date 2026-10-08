@@ -3,6 +3,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cms_gui import runner as runner_mod
@@ -775,3 +777,37 @@ def test_a_new_run_starts_with_no_subject():
     state.handle({"kind": "cycle.run.start", "run_id": "r2", "cycle": "dev",
                   "graph": {}})
     assert state.cycle["subject"] == {} and state.cycle["mode"] == {}
+
+
+# --------------------------------------------------- the rail's Cycles points
+def test_no_cycle_yet_counts_nothing():
+    from cms_gui.runner import RunState
+    assert RunState().cycle_counts() == (0, 0)
+
+
+def test_a_cycle_going_counts_as_running():
+    assert _cycle_started().cycle_counts() == (1, 0)
+
+
+@pytest.mark.parametrize("status", ["failed", "timeout", "error"])
+def test_a_cycle_that_went_wrong_counts_as_failed_until_the_next_run(status):
+    state = _cycle_started()
+    state.handle({"kind": "cycle.run.end", "run_id": "r", "status": status})
+    assert state.cycle_counts() == (0, 1)
+    state.handle({"kind": "cycle.run.start", "run_id": "r2", "cycle": "dev",
+                  "graph": {}})
+    assert state.cycle_counts() == (1, 0)
+
+
+@pytest.mark.parametrize("status", ["success", "cancelled"])
+def test_a_cycle_that_finished_or_was_stopped_is_quiet(status):
+    """Stop is a person's decision, not a fault - Services counts it the same."""
+    state = _cycle_started()
+    state.handle({"kind": "cycle.run.end", "run_id": "r", "status": status})
+    assert state.cycle_counts() == (0, 0)
+
+
+def test_a_cycle_the_core_dropped_counts_as_failed():
+    state = _cycle_started()
+    state.cycle_interrupted()
+    assert state.cycle_counts() == (0, 1)

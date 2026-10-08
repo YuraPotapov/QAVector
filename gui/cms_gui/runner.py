@@ -226,6 +226,12 @@ def _new_process_group(args):
     args.flags |= CREATE_NEW_PROCESS_GROUP
 
 
+#: How a cycle run ends that the rail shows in red - what the Cycles explorer
+#: marks as a run that went wrong. "cancelled" is not among them: Stop is a
+#: person's decision, not a fault.
+CYCLE_FAILED = ("failed", "timeout", "interrupted", "error")
+
+
 class RunState(QObject):
     """Live model of a run, assembled from the event stream.
 
@@ -832,6 +838,20 @@ class RunState(QObject):
         the wrong one for "how many are on screen right now".
         """
         return [s for s in self.ordered() if s["state"] in LIVE_STATES]
+
+    def cycle_counts(self):
+        """``(running, failed)`` for the rail: the cycle going now, or the one
+        that went wrong.
+
+        The same two the Services entry counts, and the same meaning: failed
+        is a run that ended badly and stays so until the next run starts - not
+        one somebody stopped, which is a decision rather than a fault. This
+        window runs one cycle at a time, so each is 0 or 1.
+        """
+        if self.cycle_running:
+            return 1, 0
+        status = (self.cycle or {}).get("status")
+        return 0, int(status in CYCLE_FAILED)
 
     def totals(self):
         done = sum(s["done"] for s in self.sessions.values())
