@@ -16,6 +16,16 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.13] - 2026-10-08
+
+### Fixed
+- **Asking for a name or an id looks like the rest of the application.** New
+  cycle, Duplicate, Rename, New project, New phase, Save as preset, a launch
+  configuration's name, a new scenario's id and the account to record were
+  the desktop's own input dialog - its frame, and the platform's icons on its
+  buttons. They are now the application's dialog, with its title bar and
+  buttons, in light and dark.
+
 ## [0.16.12] - 2026-10-08
 
 ### Added
