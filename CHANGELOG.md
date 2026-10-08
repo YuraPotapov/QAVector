@@ -16,6 +16,28 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.12] - 2026-10-08
+
+### Added
+- **`jira.issues` reads a board's columns.** `status` takes one status or
+  several separated by commas, so a step per column - To Do, In Progress,
+  Reopened - is one field apart. `role: everyone` reads whoever carries the
+  work, for a column such as Ready for prod; it needs a status, project or JQL
+  to narrow it, and the step refuses it without one.
+- **`jira.issues` reads sub-tasks.** By default each issue's sub-tasks are read
+  in full - description, comments, pictures - in one more search, inside the
+  parent's `subtasks`; `subtasks: list` keeps only key, title and status, and
+  `none` leaves them out. A new `subtask_count` output; `count` and `key` stay
+  about the parents. `jira.html` shows them under their parent.
+- **Saved steps.** Right-click a step, **Save as preset...**, and it is offered
+  under **Step → Saved** in any cycle, already configured. The variables it
+  reads come with it - a secret without its value. Kept in
+  `cyclepresets.json` beside `cycleprojects.json`.
+- **Cycles on the rail say whether one is going, and whether it went wrong.**
+  The same two points as Services & Logs: blue while a cycle runs, red when
+  the last run failed, timed out or was cut off, until the next one starts. A
+  run somebody stopped is not counted as failed.
+
 ## [0.16.11] - 2026-09-29
 
 ### Fixed
