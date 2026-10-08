@@ -86,8 +86,11 @@ command - and within a kind in the order it was saved. It adds a copy of
 itself after the selected step, its id taken from the name. A saved
 step keeps its settings and label, not its place: no id, no `needs`, no phase,
 and no condition that reads another step. The variables it refers to come
-with it and are added to a cycle that lacks them - a secret as
-`{secret: true}`, never its value, so the token is entered once per cycle.
+with it and are added to a cycle that lacks them. A secret is kept in the
+saved step as `{secret: true}`, never its value: the step remembers the cycle
+it was saved from, and adding it copies that cycle's value inside the secrets
+store (`--cycle-secret-copy=FROM:TO:jira_token`), unless the cycle already
+has one of its own.
 Saving under a name already kept replaces it; **Saved → Remove** forgets one.
 The list is `cyclepresets.json`, beside `cycleprojects.json`.
 

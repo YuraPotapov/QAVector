@@ -257,3 +257,32 @@ def test_the_value_is_not_what_comes_back(store):
     answer = secrets.copy_to("from", "to", path=store)
 
     assert "sekret" not in repr(answer)
+
+
+# ------------------------------------------- the command a saved step uses
+def _copy_command(argument, store, capsys):
+    import session_launcher
+    with pytest.raises(SystemExit):
+        session_launcher.run_secret_command(("copy", argument), None, store)
+    return json.loads(capsys.readouterr().out)
+
+
+def test_the_copy_command_can_name_the_ones_it_wants(store, capsys):
+    """A saved step brings one token; the source's other credentials are
+    nothing the target asked for."""
+    secrets.set_secret("from", "jira_token", "zq-value-81", store)
+    secrets.set_secret("from", "other", "o", store)
+
+    answer = _copy_command("from:to:jira_token", store, capsys)
+
+    assert answer["ok"] and answer["copied"] == ["jira_token"]
+    assert secrets.names("to", store) == ["jira_token"]
+    assert "zq-value-81" not in json.dumps(answer), "never the value"
+
+
+def test_the_copy_command_without_names_still_copies_them_all(store, capsys):
+    secrets.set_secret("from", "jira_token", "t", store)
+    secrets.set_secret("from", "other", "o", store)
+
+    assert _copy_command("from:to", store, capsys)["copied"] == [
+        "jira_token", "other"]

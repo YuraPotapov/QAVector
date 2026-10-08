@@ -924,10 +924,16 @@ def run_secret_command(command, source, secrets_path=None):
             # CYCLE:OTHER rather than CYCLE:NAME here: the whole point is one
             # credential shared by several cycles, and naming the variable as
             # well would mean saying "jira_token" twice for the common case.
-            if not name:
+            # An optional third part names the ones wanted, for a saved step
+            # that brings one token along: the source's other credentials are
+            # nothing the target asked for. Names are not secret; values are.
+            target, _, only = name.partition(":")
+            if not target:
                 raise ValueError("--cycle-secret-copy needs FROM:TO")
-            copied = secrets.copy_to(cycle_id, name, path=secrets_path)
-            payload = {"ok": True, "cycle": cycle_id, "to": name,
+            wanted = tuple(one.strip() for one in only.split(",") if one.strip())
+            copied = secrets.copy_to(cycle_id, target, wanted,
+                                     path=secrets_path)
+            payload = {"ok": True, "cycle": cycle_id, "to": target,
                        "copied": copied, "path": path}
         elif kind == "delete":
             secrets.delete(cycle_id, name or None, secrets_path)
@@ -3326,7 +3332,7 @@ write a report. The steps that do not depend on each other run at the same time.
                             Set one secret from the JSON {"value": "..."} in
                             file F. The value is not on the command line: ps
                             shows that to everyone on the machine.
-  --cycle-secret-copy=FROM:TO
+  --cycle-secret-copy=FROM:TO[:NAME,...]
                             Give cycle TO the secrets cycle FROM has, for the
                             ordinary case of one credential wanted by several
                             cycles. The value is decrypted and re-encrypted

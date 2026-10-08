@@ -10,12 +10,14 @@ it to the cycle it came from: no id (the new cycle names it), no ``needs`` (it
 waits for whatever it is added after), no phase. A condition reading another
 step's outputs is dropped as well, since that step is not where it is going.
 
-**Variables travel with it, secrets without their value.** A step reading
-``${vars.jira_site}`` is no use in a cycle that has no ``jira_site``, so the
-declarations it refers to are kept beside it and added to a cycle that lacks
-them. A secret is kept the way a cycle file keeps one - ``{secret: true}`` -
-because its value lives in the secrets store, and this file is somebody's
-plain JSON on disk.
+**Variables travel with it, a secret's value through the store.** A step
+reading ``${vars.jira_site}`` is no use in a cycle that has no ``jira_site``,
+so the declarations it refers to are kept beside it and added to a cycle that
+lacks them. A secret is kept here the way a cycle file keeps one -
+``{secret: true}`` - because this file is somebody's plain JSON on disk. The
+preset remembers the cycle it was saved from instead, and adding it copies
+that cycle's value inside the secrets store, which is the one place it is
+ever decrypted.
 
 The module is the same shape as ``cycleprojectsfile``: **load, validate,
 save**, with the writer refusing anything ``validate`` complains about, and
@@ -35,7 +37,7 @@ VERSION = 1
 FILE_NAME = "cyclepresets.json"
 
 #: What a row may carry. Anything else is kept but not understood.
-KEYS = ("name", "plugin", "step", "variables")
+KEYS = ("name", "plugin", "step", "variables", "cycle")
 
 #: What a step carries that belongs to the cycle it is in, not to the step.
 _PLACE = ("id", "plugin", "needs", "group")
@@ -55,8 +57,10 @@ class Preset(object):
     """One saved step: a name, the plugin, its settings, what it refers to."""
 
     def __init__(self, name="", plugin="", step=None, variables=None,
-                 extra=None):
+                 extra=None, cycle=""):
         self.name = (name or "").strip()
+        #: The cycle it was saved from - where its secrets' values are.
+        self.cycle = str(cycle or "").strip()
         self.plugin = (plugin or "").strip()
         self.step = dict(step or {})
         self.variables = dict(variables or {})
@@ -73,6 +77,7 @@ class Preset(object):
                                         "objects" % (entry.get("name") or "?"))
         return cls(name=entry.get("name", ""), plugin=entry.get("plugin", ""),
                    step=step, variables=variables,
+                   cycle=entry.get("cycle", ""),
                    extra={key: value for key, value in entry.items()
                           if key not in KEYS})
 
@@ -94,7 +99,12 @@ class Preset(object):
                                  if isinstance(value, dict) and value.get("secret")
                                  else copy.deepcopy(value))
         return cls(name=name, plugin=(step or {}).get("plugin", ""), step=kept,
-                   variables=variables)
+                   variables=variables, cycle=(document or {}).get("id", ""))
+
+    def secrets(self):
+        """The names of the secret variables it brings, sorted."""
+        return sorted(name for name, value in self.variables.items()
+                      if isinstance(value, dict) and value.get("secret"))
 
     def step_for(self):
         """The step to add, its id taken from the preset's name.
@@ -112,6 +122,8 @@ class Preset(object):
                      step=copy.deepcopy(self.step))
         if self.variables:
             entry["variables"] = copy.deepcopy(self.variables)
+        if self.cycle:
+            entry["cycle"] = self.cycle
         return entry
 
     def __repr__(self):

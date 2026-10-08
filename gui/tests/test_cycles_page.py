@@ -58,6 +58,7 @@ class FakeCore:
         self.stored = {}
         self.secret_writes = []
         self.secret_deletes = []
+        self.secret_copies = []
         # What --cycle-sessions answers, and every session somebody deleted.
         self.sessions = []
         self.sessions_asked = 0
@@ -116,6 +117,10 @@ class FakeCore:
     def cycle_secret_set(self, cycle_id, name, value):
         self.secret_writes.append((cycle_id, name, value))
         self.stored.setdefault(cycle_id, {})[name] = value
+        return {"ok": True, "problems": []}
+
+    def cycle_secret_copy(self, source, target, names=()):
+        self.secret_copies.append((source, target, tuple(names)))
         return {"ok": True, "problems": []}
 
     def cycle_secret_delete(self, cycle_id, name=None):
@@ -3914,3 +3919,47 @@ def test_saving_under_a_name_already_kept_replaces_it_in_place(saving,
     kept = cyclepresetsfile.load(saving._presets_path())
     assert [one.name for one in kept] == ["First", "Shell: build", "Last"]
     assert kept[1].step == {"with": {"command": "y"}}
+
+
+def _secret_preset(saving, cycle="other_cycle"):
+    from cms_gui import cyclepresetsfile
+    cyclepresetsfile.save(saving._presets_path(), [cyclepresetsfile.Preset(
+        "Jira issue To Do", "command.shell",
+        {"with": {"command": "${vars.jira_token}"}},
+        variables={"jira_token": {"secret": True}, "jira_site": "x"},
+        cycle=cycle)])
+
+
+def test_a_saved_step_brings_its_secret_s_value_from_its_cycle(saving,
+                                                             monkeypatch):
+    """The declaration alone left the new cycle with a token nobody had set."""
+    _secret_preset(saving)
+    _pick(monkeypatch, "Saved", "Jira issue To Do")
+    saving._add_step_from_bar()
+
+    assert saving.core.secret_copies == [("other_cycle", "demo",
+                                          ("jira_token",))]
+    assert saving._draft.document["variables"]["jira_token"] == {"secret": True}
+
+
+def test_a_saved_step_taken_back_out_copies_nothing(saving, monkeypatch):
+    _secret_preset(saving)
+    saving.applied["yes"] = False
+    _pick(monkeypatch, "Saved", "Jira issue To Do")
+    saving._add_step_from_bar()
+    assert saving.core.secret_copies == []
+
+
+def test_a_saved_step_added_to_its_own_cycle_copies_nothing(saving,
+                                                          monkeypatch):
+    _secret_preset(saving, cycle="demo")
+    _pick(monkeypatch, "Saved", "Jira issue To Do")
+    saving._add_step_from_bar()
+    assert saving.core.secret_copies == []
+
+
+def test_a_step_saved_from_a_cycle_remembers_which(saving, monkeypatch):
+    from cms_gui import cyclepresetsfile
+    _pick(monkeypatch, "Save as preset...")
+    saving._node_menu("b", QPoint())
+    assert cyclepresetsfile.load(saving._presets_path())[0].cycle == "demo"

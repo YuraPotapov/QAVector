@@ -963,7 +963,8 @@ class CyclesPage(QWidget):
 
         Closing that window without applying takes the step back out - a
         box with nothing in it is not something anybody asked for. A saved
-        step arrives already filled in, with the variables it refers to.
+        step arrives already filled in, with the variables it refers to - and
+        the values of its secrets, copied from the cycle it was saved from.
         """
         if not self._can_edit_graph():
             return
@@ -976,9 +977,33 @@ class CyclesPage(QWidget):
             made = draft.add_step(plugin_id, after=after)
         if not self._edit_step(made, adding=True):
             draft.undo()
+        elif preset is not None:
+            self._bring_secrets(preset)
         self._draft_changed()
         if self.canvas.node(made) is not None:
             self.canvas.select(made)
+
+    def _bring_secrets(self, preset):
+        """Copy the saved step's secret values from the cycle it came from.
+
+        Inside the store, through the core: the values are never read into
+        this window. A secret this cycle already has a value for keeps it - a
+        credential somebody set differently on purpose is not overwritten. A
+        failure is only said: the step is added either way, and the cycle's
+        Properties is where a value can still be typed.
+        """
+        names = preset.secrets()
+        target = self.current_id()
+        if (not names or not preset.cycle or preset.cycle == target
+                or self.core is None or not target):
+            return
+        try:
+            self.core.cycle_secret_copy(preset.cycle, target, names)
+        except core_mod.CoreError as exc:
+            widgets.warn(self, "Saved step",
+                         "The step was added, but its secrets were not copied "
+                         "from %s." % preset.cycle,
+                         "Set them in Properties. %s" % exc)
 
     def _node_menu(self, step_id, where):
         """What can be done to one step, from the step."""

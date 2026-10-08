@@ -108,3 +108,15 @@ def test_grouped_by_kind_and_in_saved_order_within_one():
     assert [plugin for plugin, _rows in groups] == ["command.shell",
                                                     "jira.issues"]
     assert [one.name for one in groups[1][1]] == ["To Do", "In Progress"]
+
+
+def test_it_remembers_the_cycle_its_secrets_are_kept_for():
+    made = presets.Preset.from_step("Jira: To Do", STEP, DOCUMENT)
+    assert made.cycle == "demo"
+    assert made.secrets() == ["jira_token"]
+
+
+def test_the_cycle_survives_the_file(tmp_path):
+    path = str(tmp_path / presets.FILE_NAME)
+    presets.save(path, [presets.Preset.from_step("x", STEP, DOCUMENT)])
+    assert presets.load(path)[0].cycle == "demo"

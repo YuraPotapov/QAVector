@@ -527,6 +527,18 @@ class Core:
             "--cycle-secret-set=%s:%s" % (cycle_id, name), {"value": value},
             prefix="cms-secret-", extra=self.secrets_flag())
 
+    def cycle_secret_copy(self, source, target, names=()):
+        """Give ``target`` the values ``source`` has for ``names`` (or all).
+
+        Inside the store: the values are never read into this process. One
+        already set on ``target`` is left as it is.
+        """
+        spec = "%s:%s" % (source, target)
+        if names:
+            spec += ":" + ",".join(names)
+        return self._flow_json("--cycle-secret-copy=" + spec,
+                               *self.secrets_flag())
+
     def cycle_secret_delete(self, cycle_id, name=None):
         """Forget one secret, or every secret of one cycle."""
         target = "%s:%s" % (cycle_id, name) if name else cycle_id
