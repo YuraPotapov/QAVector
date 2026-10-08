@@ -16,6 +16,17 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.16] - 2026-10-08
+
+### Added
+- **A link offers to fix what a step reads.** Drawing a link changed only the
+  order, so a step brought from another cycle still read its old neighbour -
+  `${steps.todo.outputs.issues}` in a cycle with no `todo` - and failed at run
+  time while the canvas showed it connected. When a new link makes a step wait
+  for another and the step reads a step this cycle does not have, the canvas
+  asks whether to read it from the one it now waits for. One Undo takes back
+  the link and the rewrite.
+
 ## [0.16.15] - 2026-10-08
 
 ### Fixed
