@@ -11,8 +11,9 @@ import math
 import os
 import weakref
 
-from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPointF,
-                            QPropertyAnimation, QRectF, Qt, QTimer, Signal)
+from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
+                            QPointF, QPropertyAnimation, QRectF, Qt, QTimer,
+                            Signal)
 from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
                                QApplication, QComboBox, QDialog,
@@ -934,6 +935,158 @@ class PulseDot(QWidget):
         painter.setBrush(colour)
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+
+
+class Busy(QWidget):
+    """A page held still while something it depends on is being written.
+
+    Covers the whole page, so nothing on it can be clicked or typed into -
+    acting on a cycle that is half way through being saved would act on the
+    old one. The part being written (``area``, the canvas) is veiled and says
+    what is happening in the middle, with a breathing dot: the window was
+    frozen during a save before this, and a frozen window cannot be told from
+    a hung one.
+
+    Input is held at once, the veil shown only after :data:`DELAY_MS`: a save
+    quicker than that is over before anybody could wonder, and a veil flashed
+    for a moment is only a flicker.
+    """
+
+    DELAY_MS = 150
+    FRAME_MS = 40
+    PERIOD_MS = 1100
+
+    def __init__(self, host, area=None):
+        super().__init__(host)
+        self._host = host
+        self._area = area
+        self._text = ""
+        self._holding = False
+        self._shown = False
+        self._frame = 0
+        self._focus = None
+        self._delay = QTimer(self)
+        self._delay.setSingleShot(True)
+        self._delay.timeout.connect(self._appear)
+        self._frames = QTimer(self)
+        self._frames.setInterval(self.FRAME_MS)
+        self._frames.timeout.connect(self._advance)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.hide()
+        host.installEventFilter(self)
+
+    def start(self, text):
+        """Hold the page now; veil the area and say ``text`` in a moment."""
+        self._text = text
+        if self._holding:
+            self.update()
+            return
+        self._holding = True
+        self._focus = QApplication.focusWidget()
+        self.setGeometry(self._host.rect())
+        self.raise_()
+        self.show()
+        self.setFocus()
+        self._delay.start(self.DELAY_MS)
+
+    def stop(self):
+        self._delay.stop()
+        self._frames.stop()
+        self._holding = self._shown = False
+        self.unsetCursor()
+        self.hide()
+        if self._focus is not None and _alive_widget(self._focus):
+            self._focus.setFocus()
+        self._focus = None
+
+    def active(self):
+        """Whether the page is being held - from :meth:`start` to :meth:`stop`."""
+        return self._holding
+
+    def veiled(self):
+        """Whether the veil and its words are showing yet."""
+        return self._shown
+
+    def text(self):
+        return self._text
+
+    def _appear(self):
+        self._shown = True
+        self._frame = 0
+        self.setCursor(Qt.BusyCursor)
+        self._frames.start()
+        self.update()
+
+    def _advance(self):
+        self._frame += 1
+        self.update()
+
+    def _veil_rect(self):
+        if self._area is None:
+            return QRectF(self.rect())
+        corner = self._area.mapTo(self._host, QPoint(0, 0))
+        return QRectF(corner.x(), corner.y(), self._area.width(),
+                      self._area.height())
+
+    def eventFilter(self, watched, event):
+        if watched is self._host and event.type() == QEvent.Resize and self._holding:
+            self.setGeometry(self._host.rect())
+        return False
+
+    def event(self, event):
+        # Every click, wheel and key the page would have had stops here.
+        if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
+                            QEvent.MouseButtonDblClick, QEvent.Wheel,
+                            QEvent.KeyPress, QEvent.KeyRelease,
+                            QEvent.ContextMenu):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def paintEvent(self, _event):             # noqa: N802 - Qt's own spelling
+        if not self._shown:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        veil = self._veil_rect()
+        # Read now, not captured: dark mode rewrites the palette in place.
+        ground = QColor(theme.BG)
+        ground.setAlphaF(0.72)
+        painter.fillRect(veil, ground)
+
+        font = painter.font()
+        font.setPointSizeF(max(font.pointSizeF(), 10.0))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        dot, gap, pad = 10.0, 10.0, 16.0
+        width = pad + dot + gap + metrics.horizontalAdvance(self._text) + pad
+        height = max(36.0, metrics.height() + 16.0)
+        pill = QRectF(veil.center().x() - width / 2.0,
+                      veil.center().y() - height / 2.0, width, height)
+        painter.setPen(QPen(QColor(theme.DIVIDER), 1.0))
+        painter.setBrush(QColor(theme.BG))
+        painter.drawRect(pill)
+
+        breath = self._frame * self.FRAME_MS / float(self.PERIOD_MS)
+        accent = QColor(theme.ACCENT)
+        accent.setAlphaF(0.25 + 0.75 * (1.0 + math.cos(2.0 * math.pi * breath)) / 2.0)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(accent)
+        painter.drawEllipse(QRectF(pill.left() + pad, pill.center().y() - dot / 2.0,
+                                   dot, dot))
+        painter.setPen(QColor(theme.TEXT))
+        painter.drawText(QRectF(pill.left() + pad + dot + gap, pill.top(),
+                                width - pad - dot - gap - pad, height),
+                         Qt.AlignVCenter | Qt.AlignLeft, self._text)
+
+
+def _alive_widget(widget):
+    try:
+        import shiboken6
+        return shiboken6.isValid(widget)
+    except ImportError:
+        return True
 
 
 class Skeleton(QWidget):

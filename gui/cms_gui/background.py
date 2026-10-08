@@ -88,6 +88,34 @@ def call(work):
         return None, exc
 
 
+def wait(work, core=None):
+    """``(result, error)`` of ``work``, with the window still painting meanwhile.
+
+    For the calls a page has to have the answer to before it can go on - a
+    save, whose answer decides what is drawn next - but which used to be made
+    on the GUI thread, freezing the window for as long as the core took: long
+    enough to look hung. The work goes to a thread and a local event loop runs
+    until it answers, so whatever says "this is happening" keeps animating.
+    The caller blocks input itself; this only keeps the window alive.
+
+    A core that does not block (the tests' fakes) is called here and now.
+    """
+    if core is not None and not offloads(core):
+        return call(work)
+    from PySide6.QtCore import QEventLoop
+
+    loop, answer = QEventLoop(), []
+
+    def done(result, error):
+        answer.append((result, error))
+        loop.quit()
+
+    run(work, done)
+    if not answer:
+        loop.exec()
+    return answer[0]
+
+
 def busy():
     """Whether any job is still out - running, or answered and not delivered."""
     return bool(_unanswered) or any(job.isRunning() for job in _running)

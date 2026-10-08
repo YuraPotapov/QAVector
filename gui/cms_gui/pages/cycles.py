@@ -407,6 +407,9 @@ class CyclesPage(QWidget):
                                                 "lines"),
             "explorer": widgets.Skeleton(self.explorer.tree.viewport(), "rows"),
         }
+        # The page held still, and the canvas veiled with what is happening,
+        # while a change is checked or a cycle written - see _waiting.
+        self.busy = widgets.Busy(self, area=self.canvas)
 
         self._update_buttons()
 
@@ -594,6 +597,28 @@ class CyclesPage(QWidget):
         else:
             answer(*background.call(work))
 
+    def _waiting(self, text, work):
+        """``work()``'s answer, with the page held and saying ``text`` meanwhile.
+
+        For a call the page cannot go on without - a save, or the check of a
+        change - which used to be made on the GUI thread: the window froze for
+        as long as the core took, and a frozen window cannot be told from a
+        hung one, nor says when it is safe to carry on. The page now takes no
+        input until the answer is in, and after a moment the canvas is veiled
+        and says what is happening (see widgets.Busy). Raises what ``work``
+        raised.
+        """
+        if not background.offloads(self.core):
+            return work()
+        self.busy.start(text)
+        try:
+            result, error = background.wait(work, self.core)
+        finally:
+            self.busy.stop()
+        if error is not None:
+            raise error
+        return result
+
     def _loading(self, zones, on):
         """Skeletons on, or off, in these regions. A region folded shut shows
         nothing either way - it has no room to show it in."""
@@ -651,8 +676,14 @@ class CyclesPage(QWidget):
             # looking. Anything this does not mention - a step added since, or
             # a cycle never arranged - goes where the layout computes, so a
             # remembered arrangement never has to be thrown away.
+            # The same cycle redrawn - a step added, a link drawn - keeps the
+            # view on screen. The one in the file is written a second after
+            # the view settles, so it can be a zoom or a pan behind, and
+            # restoring it moved the picture away from somebody mid-edit.
+            same = cycle_id == drawn and self.canvas.graph() is not None
             self.canvas.set_graph(graph, self._remembered(cycle_id),
-                                  self._remembered_view(cycle_id),
+                                  self.canvas.view() if same
+                                  else self._remembered_view(cycle_id),
                                   folded=self._remembered_folded(cycle_id))
             if self._selected and self.canvas.node(self._selected) is None:
                 self._selected = ""
@@ -768,9 +799,11 @@ class CyclesPage(QWidget):
             return
         self._set_context(DESIGN)
         if draft.dirty:
+            core, document, base = self.core, draft.document, draft.base
             try:
-                draft.check = self.core.cycle_save(draft.cycle_id, draft.document,
-                                                   dry_run=True, base=draft.base)
+                draft.check = self._waiting(
+                    "Checking...", lambda: core.cycle_save(
+                        draft.cycle_id, document, dry_run=True, base=base))
             except core_mod.CoreError as exc:
                 draft.check = {"problems": [str(exc)]}
         self._redraw()
@@ -981,7 +1014,12 @@ class CyclesPage(QWidget):
             self._bring_secrets(preset)
         self._draft_changed()
         if self.canvas.node(made) is not None:
-            self.canvas.select(made)
+            # Kept where it was put: a step never dragged has no place of its
+            # own and was laid out afresh - somewhere else - on every redraw.
+            if made in self.canvas.placed_now():
+                self._remember_places()
+            self.canvas.select(made, center=False)
+            self.canvas.reveal(made)
 
     def _bring_secrets(self, preset):
         """Copy the saved step's secret values from the cycle it came from.
@@ -1872,15 +1910,17 @@ class CyclesPage(QWidget):
             options["base"] = digest
         if source:
             options["source"] = source
+        core = self.core
         try:
-            answer = self.core.cycle_save(cycle_id, document, **options)
+            answer = self._waiting("Saving...", lambda: core.cycle_save(
+                cycle_id, document, **options))
             if answer.get("stale"):
                 return self._changed_on_disk(cycle_id, answer)
             if answer.get("confirm"):
                 if not self._agree_to_lose(answer):
                     return False
-                answer = self.core.cycle_save(cycle_id, document, allow_loss=True,
-                                              **options)
+                answer = self._waiting("Saving...", lambda: core.cycle_save(
+                    cycle_id, document, allow_loss=True, **options))
         except core_mod.CoreError as exc:
             widgets.warn(self, "Save", str(exc))
             return False

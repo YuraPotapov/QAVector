@@ -994,3 +994,53 @@ def test_a_choice_from_a_list_is_the_same_dialog_with_a_list(qapp, monkeypatch):
     monkeypatch.setattr(widgets.Message, "exec", picked)
     assert widgets.ask_item(None, "Record", "Which?", ["a", "b"], 1) == "b"
     assert seen == {"field": True, "current": "b"}
+
+
+# ------------------------------------------------- a page held while it writes
+def test_a_busy_page_takes_no_input_at_once_and_says_so_after_a_moment(qapp):
+    import time
+
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QWidget
+
+    page = QWidget()
+    page.resize(600, 400)
+    area = QWidget(page)
+    area.setGeometry(100, 50, 400, 300)
+    page.show()
+    busy = widgets.Busy(page, area=area)
+    try:
+        busy.start("Saving...")
+        assert busy.active() and not busy.veiled(), "held now, veiled later"
+        assert busy.geometry() == page.rect()
+        click = QMouseEvent(QEvent.MouseButtonPress, QPointF(10, 10),
+                            QPointF(10, 10), Qt.LeftButton, Qt.LeftButton,
+                            Qt.NoModifier)
+        assert busy.event(click) and click.isAccepted()
+
+        deadline = time.time() + 2
+        while not busy.veiled() and time.time() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert busy.veiled() and busy.text() == "Saving..."
+        assert busy._veil_rect().toRect() == area.geometry()
+
+        busy.stop()
+        assert not busy.active() and not busy.veiled()
+    finally:
+        page.deleteLater()
+
+
+def test_a_quick_write_never_shows_the_veil(qapp):
+    from PySide6.QtWidgets import QWidget
+
+    page = QWidget()
+    busy = widgets.Busy(page)
+    try:
+        busy.start("Saving...")
+        busy.stop()
+        qapp.processEvents()
+        assert not busy.veiled()
+    finally:
+        page.deleteLater()

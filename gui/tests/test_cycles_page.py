@@ -4010,3 +4010,122 @@ def test_a_link_to_a_step_that_reads_nothing_missing_asks_nothing(editing,
                         lambda *a, **k: asked.append(a) or True)
     _drag_link(editing.canvas, "b", "out", onto="c")
     assert asked == []
+
+
+
+# ------------------------------------------ adding a step to an arranged cycle
+# A step added to a cycle whose boxes were dragged about went where the
+# computed layout put it, the view was centred on it there, and a step added
+# earlier and never dragged was laid out afresh - somewhere else - each time.
+@pytest.fixture
+def arranged(editing):
+    canvas = editing.canvas
+    for step_id, (x, y) in {"a": (0, 0), "b": (400, 0), "c": (800, 0),
+                            "d": (400, 400)}.items():
+        canvas.node(step_id).setPos(x, y)
+    canvas._moved = True
+    canvas.nodes_moved.emit()
+    return editing
+
+
+def _at(page, step_id):
+    pos = page.canvas.node(step_id).pos()
+    return (round(pos.x()), round(pos.y()))
+
+
+def test_a_step_added_to_an_arranged_cycle_goes_under_the_one_it_follows(
+        arranged):
+    arranged._add_step("command.shell", after="b")
+    assert _at(arranged, "shell")[0] == 400
+    assert _at(arranged, "shell")[1] > 0
+    assert _at(arranged, "a") == (0, 0), "the arrangement is kept"
+
+
+def test_a_new_step_keeps_its_place_when_another_is_added(arranged):
+    arranged._add_step("command.shell", after="b")
+    first = _at(arranged, "shell")
+    arranged._add_step("command.shell", after="c")
+    assert _at(arranged, "shell") == first
+
+
+def test_adding_a_step_keeps_the_zoom_on_screen(arranged):
+    arranged.canvas.apply_view({"zoom": 1.0, "center": [400, 0]})
+    arranged._add_step("command.shell", after="b")
+    assert abs(arranged.canvas.view()["zoom"] - 1.0) < 1e-6
+
+
+def test_a_new_step_is_shown_without_centring_on_it(arranged, qapp):
+    canvas = arranged.canvas
+    arranged.resize(1200, 700)
+    arranged.show()
+    qapp.processEvents()
+    canvas.apply_view({"zoom": 1.0, "center": [800, 0]})
+    before = canvas.view()["center"]
+    arranged._add_step("command.shell", after="c")
+    qapp.processEvents()
+    seen = canvas.mapToScene(canvas.viewport().rect()).boundingRect()
+    assert seen.contains(canvas.node("shell").sceneBoundingRect())
+    assert canvas.selected() == "shell"
+    # Scrolled by what showing it took - not moved to put it in the middle.
+    middle = canvas.node("shell").sceneBoundingRect().center()
+    after = canvas.view()["center"]
+    assert abs(after[0] - before[0]) < abs(middle.x() - before[0]) + 1
+    assert (abs(after[0] - middle.x()) > 1 or abs(after[1] - middle.y()) > 1)
+
+
+# ------------------------------------------------ held still while it writes
+# A save, and the check of every change, were made on the GUI thread: the
+# window froze for as long as the core took, and could not be told from a
+# hung one, nor said when it was safe to carry on.
+class _SlowSaves(FakeCore):
+    offload = True
+
+    def cycle_save(self, cycle_id, document, **options):
+        import time
+        time.sleep(0.4)
+        return FakeCore.cycle_save(self, cycle_id, document, **options)
+
+
+def _slow(editing):
+    slow = _SlowSaves(editing.core.cycles)
+    slow.__dict__.update({key: value for key, value in editing.core.__dict__.items()
+                          if key not in ("cycles",)})
+    editing.core = slow
+    return slow
+
+
+def _seen_meanwhile(page, qapp, act, after_ms=300):
+    from PySide6.QtCore import QTimer
+    seen = {}
+
+    def look():
+        seen.update(active=page.busy.active(), veiled=page.busy.veiled(),
+                    text=page.busy.text())
+    QTimer.singleShot(after_ms, look)
+    act()
+    qapp.processEvents()
+    return seen
+
+
+def test_a_save_holds_the_page_and_says_it_is_saving(editing, qapp):
+    editing._add_step("command.shell", after="d")
+    _slow(editing)
+    seen = _seen_meanwhile(editing, qapp, editing._save_draft)
+
+    assert seen == {"active": True, "veiled": True, "text": "Saving..."}
+    assert not editing.busy.active(), "and lets go once it is written"
+    assert editing._draft is None
+
+
+def test_a_change_is_checked_with_the_page_held_too(editing, qapp):
+    _slow(editing)
+    seen = _seen_meanwhile(
+        editing, qapp, lambda: editing._add_step("command.shell", after="d"))
+
+    assert seen["active"] and seen["text"] == "Checking..."
+    assert not editing.busy.active()
+
+
+def test_a_core_that_answers_at_once_never_holds_the_page(editing):
+    editing._add_step("command.shell", after="d")
+    assert not editing.busy.active()
