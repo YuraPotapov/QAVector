@@ -16,6 +16,18 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.15] - 2026-10-08
+
+### Fixed
+- **A saved step brings its token with it.** It brought the declaration -
+  `jira_token: {secret: true}` - but not the value, so a Jira step added to
+  another cycle failed until the token was typed again there. A saved step now
+  remembers the cycle it was saved from, and adding it copies that cycle's
+  value for its secrets inside the secrets store; one the cycle already has is
+  left alone. Steps saved before this do not know their cycle: save them again.
+  `--cycle-secret-copy=FROM:TO` takes an optional `:NAME,...` to copy only
+  those.
+
 ## [0.16.14] - 2026-10-08
 
 ### Changed
