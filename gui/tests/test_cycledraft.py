@@ -179,3 +179,48 @@ def test_one_undo_takes_the_saved_step_and_its_variables_back_out():
     one.undo()
 
     assert one.steps() == [] and "variables" not in one.document
+
+
+# ------------------------------------------- reads of steps that are not here
+def brought():
+    """A review brought from another cycle, still reading ``todo``."""
+    return Draft("demo", {"id": "demo", "steps": [
+        {"id": "take", "plugin": "jira.issues"},
+        {"id": "review", "plugin": "agent.review", "label": "Review",
+         "with": {"task": "${steps.todo.outputs.issues}",
+                  "also": ["${ steps.todo.outputs.key }",
+                           "${steps.take.outputs.count}"]}}]})
+
+
+def test_a_read_of_a_step_this_cycle_lacks_is_found():
+    one = brought()
+    assert one.missing_reads("review") == ["todo"]
+    assert one.missing_reads("take") == []
+
+
+def test_a_missing_read_is_pointed_at_the_step_named_everywhere_it_appears():
+    one = brought()
+    assert one.point_reads("review", "todo", "take")
+    assert one.step("review")["with"] == {
+        "task": "${steps.take.outputs.issues}",
+        "also": ["${ steps.take.outputs.key }", "${steps.take.outputs.count}"]}
+    assert one.missing_reads("review") == []
+
+
+def test_only_that_id_is_rewritten_not_one_it_is_a_prefix_of():
+    one = Draft("demo", {"id": "demo", "steps": [
+        {"id": "take", "plugin": "x"},
+        {"id": "r", "plugin": "y", "with": {"a": "${steps.todo.outputs.k}",
+                                            "b": "${steps.todo_2.outputs.k}"}}]})
+    one.point_reads("r", "todo", "take")
+    assert one.step("r")["with"] == {"a": "${steps.take.outputs.k}",
+                                     "b": "${steps.todo_2.outputs.k}"}
+
+
+def test_the_link_and_the_rewrite_go_back_with_one_undo():
+    one = brought()
+    one.set_need("review", "take", True)
+    one.point_reads("review", "todo", "take", merge=True)
+    one.undo()
+    assert "needs" not in one.step("review")
+    assert one.missing_reads("review") == ["todo"]

@@ -3963,3 +3963,50 @@ def test_a_step_saved_from_a_cycle_remembers_which(saving, monkeypatch):
     _pick(monkeypatch, "Save as preset...")
     saving._node_menu("b", QPoint())
     assert cyclepresetsfile.load(saving._presets_path())[0].cycle == "demo"
+
+
+# ------------------------------------------- a link that also fixes the data
+# A link is order and ${steps...} is data; drawing one never touched the other,
+# so a step brought from another cycle ran into a reference to a step that is
+# not here while the canvas showed it connected.
+@pytest.fixture
+def reading(editing):
+    draft = editing._ensure_draft()
+    document = dict(draft.document)
+    steps = [dict(one) for one in document["steps"]]
+    steps[2]["with"] = {"command": "echo ${steps.todo.outputs.issues}"}
+    document["steps"] = steps
+    draft.change(document)
+    editing._draft_changed()
+    return editing
+
+
+def test_a_link_to_a_step_reading_a_missing_one_offers_to_read_from_it(
+        reading, monkeypatch):
+    asked = []
+    monkeypatch.setattr("cms_gui.widgets.confirm",
+                        lambda *a, **k: asked.append(a[2]) or True)
+    _drag_link(reading.canvas, "b", "out", onto="c")
+
+    assert "c reads todo" in asked[0] and "from b" in asked[0]
+    assert reading._draft.step("c")["with"]["command"] == \
+        "echo ${steps.b.outputs.issues}"
+    reading._undo()
+    assert reading._draft.step("c")["needs"] == ["a"]
+    assert "steps.todo" in reading._draft.step("c")["with"]["command"]
+
+
+def test_leave_it_keeps_the_link_and_the_reference(reading, monkeypatch):
+    monkeypatch.setattr("cms_gui.widgets.confirm", lambda *a, **k: False)
+    _drag_link(reading.canvas, "b", "out", onto="c")
+    assert reading._draft.step("c")["needs"] == ["a", "b"]
+    assert "steps.todo" in reading._draft.step("c")["with"]["command"]
+
+
+def test_a_link_to_a_step_that_reads_nothing_missing_asks_nothing(editing,
+                                                                monkeypatch):
+    asked = []
+    monkeypatch.setattr("cms_gui.widgets.confirm",
+                        lambda *a, **k: asked.append(a) or True)
+    _drag_link(editing.canvas, "b", "out", onto="c")
+    assert asked == []

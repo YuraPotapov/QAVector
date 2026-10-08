@@ -1132,6 +1132,7 @@ class CyclesPage(QWidget):
         """One end of a link dragged to another step: one change, one Undo."""
         if self._ensure_draft().move_need(old_waiting, old_waited_for,
                                           waiting, waited_for):
+            self._offer_reads(waiting, waited_for)
             self._draft_changed()
             self.canvas.select_link(waited_for, waiting)
 
@@ -1140,7 +1141,34 @@ class CyclesPage(QWidget):
 
     def _set_need(self, step_id, other, wanted):
         if self._ensure_draft().set_need(step_id, other, wanted):
+            if wanted:
+                self._offer_reads(step_id, other)
             self._draft_changed()
+
+    def _offer_reads(self, waiting, waited_for):
+        """``waiting`` now waits for ``waited_for``: should it read from it too?
+
+        Asked only when ``waiting`` reads a step this cycle does not have -
+        typically one brought from another cycle, still reading its old
+        neighbour by the id it had there. A link is order, a ``${steps...}``
+        is data, and drawing one never changed the other, so a run failed on
+        a reference the canvas showed as connected. One question per missing
+        step; yes rewrites the reference, folded into the link's own change so
+        one Undo takes both back.
+        """
+        draft = self._ensure_draft()
+        waiting_name = (draft.step(waiting) or {}).get("label") or waiting
+        source_name = (draft.step(waited_for) or {}).get("label") or waited_for
+        for missing in draft.missing_reads(waiting):
+            if widgets.confirm(
+                    self, "Link",
+                    "%s reads %s, which is not a step of this cycle. Read it "
+                    "from %s instead?" % (waiting_name, missing, source_name),
+                    "Its settings will read %s wherever they read %s. Undo "
+                    "takes back the link and this together."
+                    % (waited_for, missing),
+                    agree="Read from %s" % source_name, refuse="Leave it"):
+                draft.point_reads(waiting, missing, waited_for, merge=True)
 
     def _set_group(self, step_id, name):
         if self._ensure_draft().set_group(step_id, name):

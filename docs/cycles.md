@@ -114,6 +114,15 @@ moved and removed are part of the draft like every other change. A link to or
 from a folded phase stands for several and cannot be picked up; open the
 phase. A step's window keeps the same list as text, under **Depends on**.
 
+**A link that fixes what a step reads.** A link is order - its `needs:` - and
+a `${steps.<id>.outputs...}` in a step's settings is data; drawing one never
+changes the other. A step brought from another cycle often still reads its old
+neighbour by the id it had there. So when a new link (drawn, moved, or ticked
+under **Waits for**) makes a step wait for another while it reads a step this
+cycle does not have, the canvas asks whether to read it from the step it now
+waits for; yes rewrites those references in its settings, and one Undo takes
+back the link and the rewrite together.
+
 **Changes collect until Save.** Almost every state between two good files is
 one the core would refuse - a step whose required field is still empty, a
 dependency on a step not added yet - so the canvas, the Problems tab and the

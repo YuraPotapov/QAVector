@@ -30,6 +30,12 @@ UNDO_LIMIT = 200
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 
+#: A step's output read in a setting: ``${steps.<id>.outputs...}``.
+_STEP_READ = re.compile(r"\$\{\s*steps\.([A-Za-z0-9_-]+)[.}\s]")
+
+#: What a step carries that says where it is, not what it does.
+_NOT_SETTINGS = ("id", "needs")
+
 
 class Draft(object):
     """One cycle's unsaved document, its history, and what it was made from."""
@@ -166,6 +172,41 @@ class Draft(object):
             if step_id in _needs(one) or pattern.search(repr(one)):
                 found.append(one.get("id"))
         return found
+
+    def missing_reads(self, step_id):
+        """The step ids ``step_id`` reads in a ``${steps.<id>...}`` that are not
+        steps of this cycle, in the order they first appear.
+
+        The usual cause is a step brought from another cycle, which still
+        reads its old neighbour by the id that neighbour had there.
+        """
+        step = self.step(step_id)
+        if step is None:
+            return []
+        have = {one.get("id") for one in self.document.get("steps") or []}
+        found = []
+        for name in _STEP_READ.findall(repr(_settings_of(step))):
+            if name not in have and name not in found:
+                found.append(name)
+        return found
+
+    def point_reads(self, step_id, missing, to, merge=False):
+        """Make ``step_id`` read ``to`` wherever it read ``missing``.
+
+        Only ``${steps.<missing>...}`` references in its own settings change;
+        its id and ``needs`` are not settings. ``merge`` folds this into the
+        last change, so a link and what it fixed go back with one Undo.
+        """
+        document = copy.deepcopy(self.document)
+        target = next((one for one in document.get("steps") or []
+                       if one.get("id") == step_id), None)
+        if target is None or not missing or not to:
+            return False
+        pattern = re.compile(r"(\$\{\s*steps\.)%s(?=[.}\s])" % re.escape(missing))
+        for key in list(target):
+            if key not in _NOT_SETTINGS:
+                target[key] = _replaced(target[key], pattern, r"\g<1>" + to)
+        return self.change(document, merge=merge)
 
     # -- changing it ----------------------------------------------------------
     def add_step(self, plugin, after="", step=None, variables=None):
@@ -334,3 +375,19 @@ def _needs(step):
     if isinstance(needs, str):
         return [needs] if needs.strip() else []
     return [str(one) for one in needs]
+
+
+def _settings_of(step):
+    return {key: value for key, value in step.items() if key not in _NOT_SETTINGS}
+
+
+def _replaced(value, pattern, replacement):
+    """``value`` with ``pattern`` replaced in every string inside it."""
+    if isinstance(value, str):
+        return pattern.sub(replacement, value)
+    if isinstance(value, dict):
+        return {key: _replaced(one, pattern, replacement)
+                for key, one in value.items()}
+    if isinstance(value, list):
+        return [_replaced(one, pattern, replacement) for one in value]
+    return value
