@@ -149,6 +149,9 @@ class MainWindow(QMainWindow):
     def __init__(self, splash=None, auto_launch=None, headless=False):
         super().__init__()
         self.splash = splash
+        #: Whether the last cycle run was put back on its page yet - see
+        #: refresh_inventory. Once per window, not once per refresh.
+        self._last_cycle_restored = False
         self._auto_launch = auto_launch
         self._headless = headless
         self._closing = False
@@ -1036,7 +1039,12 @@ class MainWindow(QMainWindow):
             # The last cycle run, put back on its page. After the inventory,
             # because it opens a cycle; through the event loop, because a file
             # read and a --cycle-show are no reason to hold up the splash.
-            QTimer.singleShot(0, self._restore_last_cycle)
+            # Once, at startup: every save refreshes the inventory, and doing
+            # it each time took whoever had just saved one cycle to the cycle
+            # of the last run instead.
+            if not self._last_cycle_restored:
+                self._last_cycle_restored = True
+                QTimer.singleShot(0, self._restore_last_cycle)
 
             if self._auto_launch:
                 self.show_page("launch")

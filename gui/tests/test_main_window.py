@@ -1415,3 +1415,25 @@ def test_a_step_s_file_opens_on_the_artifacts_page_with_it_selected(window, tmp_
     window.cycles.artifacts_requested.emit(str(run), "steps/a/stdout.log")
     assert window._page_key == "artifacts"
     assert window.artifacts._selected_path() == str(run / "steps" / "a" / "stdout.log")
+
+
+# ------------------------------------------- the last run, put back once
+def test_a_refresh_after_a_save_does_not_reopen_the_last_run_s_cycle(
+        window, qapp, monkeypatch):
+    """Every save refreshes the inventory, and each refresh used to put the
+    last cycle run back on the Cycles page - so saving one cycle opened
+    another, the one that had run last."""
+    restored = []
+    monkeypatch.setattr(window, "_restore_last_cycle",
+                        lambda: restored.append(True))
+    assert _until(qapp, lambda: window._last_cycle_restored)
+    _until(qapp, lambda: not (window.loader_thread
+                              and window.loader_thread.isRunning()))
+    restored.clear()
+
+    window.refresh_inventory()
+    _until(qapp, lambda: not (window.loader_thread
+                              and window.loader_thread.isRunning()))
+    _until(qapp, lambda: False, timeout=0.3)
+
+    assert restored == []
