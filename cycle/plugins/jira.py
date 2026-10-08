@@ -54,8 +54,12 @@ CLOUD, SERVER = "cloud", "server"
 
 #: Which side of an issue the person is on. ``any`` is the union, which is the
 #: honest default for "what is on their plate" - work is often reported by one
-#: person and carried by another.
-ROLES = ("assignee", "reporter", "creator", "mentioned", "watcher", "any")
+#: person and carried by another. ``everyone`` asks about nobody in particular:
+#: a column of the board - Ready for prod, whoever carries it - rather than one
+#: person's plate.
+EVERYONE = "everyone"
+ROLES = ("assignee", "reporter", "creator", "mentioned", "watcher", "any",
+         EVERYONE)
 
 #: The union ``any`` expands to. Not ``watcher`` or ``mentioned``: both are far
 #: wider than "their work" and would bury the answer.
@@ -69,7 +73,15 @@ DEFAULT_ORDER = "updated DESC"
 #: The fields worth asking for. Asking for everything makes the response many
 #: times larger and slower for facts nothing reads.
 FIELDS = ("summary", "description", "status", "assignee", "reporter",
-          "created", "updated", "priority", "issuetype", "attachment")
+          "created", "updated", "priority", "issuetype", "attachment",
+          "subtasks", "parent")
+
+#: What ``subtasks`` may be set to. "full" is the default because a sub-task is
+#: usually where the actual work of a story is written down, and a plan made
+#: from the parent alone is a plan made from its table of contents. "list" is
+#: what the search already answers - key, title, status - for no extra request.
+FULL, LIST = "full", "list"
+SUBTASKS = (FULL, LIST, "none")
 
 #: What ``attachments`` may be set to. "images" is the default because a
 #: screenshot is usually the half of a bug report that the words are about,
@@ -134,9 +146,10 @@ class JiraIssues(CyclePlugin):
                   hint="Reference a secret variable - ${vars.jira_token} - so "
                        "the value stays out of this file. Cycle files are "
                        "committed and shipped."),
-            field("user", "Whose issues", required=True,
+            field("user", "Whose issues",
                   hint="An account id on Cloud, a username on Server, or "
-                       "currentUser() for whoever the token belongs to."),
+                       "currentUser() for whoever the token belongs to. Not "
+                       "used when Their part in it is everyone."),
             field("project", "Projects",
                   hint="One key, or several separated by commas - QA, or "
                        "QA, WEB. Blank reads every project the account can "
@@ -151,7 +164,14 @@ class JiraIssues(CyclePlugin):
             field("role", "Their part in it", "choice", default="any",
                   options=ROLES,
                   hint="any is assignee, reporter or creator - work is often "
-                       "reported by one person and carried by another."),
+                       "reported by one person and carried by another. "
+                       "everyone is whoever carries it, for a column of the "
+                       "board rather than one person's plate; it needs "
+                       "Statuses, Projects or Extra JQL to narrow it."),
+            field("status", "Statuses",
+                  hint="One status, or several separated by commas - "
+                       "In Progress, Reopened. Blank is any status. The names "
+                       "are your workflow's own, as the board shows them."),
             field("jql", "Extra JQL",
                   hint="ANDed with the user clause, e.g. "
                        "statusCategory != Done AND updated >= -14d. Write the "
@@ -185,6 +205,11 @@ class JiraIssues(CyclePlugin):
                   hint="Bytes. Downloading stops once this much has arrived, "
                        "and the rest are still listed - so one issue with a "
                        "video on it cannot turn a read into a long wait."),
+            field("subtasks", "Sub-tasks", "choice", default=FULL,
+                  options=SUBTASKS,
+                  hint="full reads each sub-task like an issue - description, "
+                       "comments, pictures - in one more search. list is only "
+                       "their keys, titles and statuses. none leaves them out."),
             field("verify_tls", "Verify the certificate", "check", default=True,
                   hint="Off only for a Server with a self-signed certificate "
                        "on a network you trust."),
@@ -193,7 +218,8 @@ class JiraIssues(CyclePlugin):
             output("issues", "list",
                    "Each issue as {key, summary, description, status, "
                    "assignee, reporter, created, updated, url, comments, "
-                   "attachments}."),
+                   "attachments, parent, subtasks}. A sub-task is an issue of "
+                   "the same shape, inside its parent's subtasks."),
             output("keys", "list", "Just the issue keys, for a later step."),
             output("key", "text",
                    "The first issue's key, or empty. Here because a later "
@@ -216,6 +242,9 @@ class JiraIssues(CyclePlugin):
                    "of a bug report the words are about."),
             output("attachment_count", "number",
                    "How many files are on the issues, downloaded or not."),
+            output("subtask_count", "number",
+                   "How many sub-tasks the issues have between them. Not in "
+                   "count, so `limit: 1` still means one task from the queue."),
         ),
     )
 
@@ -243,9 +272,23 @@ class JiraIssues(CyclePlugin):
                 and not ISSUE_KEY.match(issue.strip())):
             found.append("issue must be an issue key such as QA-12, not %r."
                          % issue)
-        for key in ("site", "email", "token", "user", "jql", "project", "issue"):
+        for key in ("site", "email", "token", "user", "jql", "project", "issue",
+                    "status"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
+
+        pinned = isinstance(issue, str) and issue.strip()
+        if settings.get("role", "any") == EVERYONE:
+            # Nobody in particular and nothing else either is every issue the
+            # account can see - a read nobody meant, and one a small limit
+            # would quietly answer with whatever happened to be newest.
+            if not pinned and not any(
+                    str(settings.get(key) or "").strip()
+                    for key in ("status", "project", "jql")):
+                found.append("everyone needs Statuses, Projects or Extra JQL "
+                             "to say which issues.")
+        elif not pinned and not str(settings.get("user") or "").strip():
+            found.append("Whose issues is required.")
 
         site = str(settings.get("site") or "")
         if site and "${" not in site and not site.startswith(("http://", "https://")):
@@ -297,19 +340,27 @@ class JiraIssues(CyclePlugin):
         if issue:
             query = 'key = "%s"' % _escape(issue)
         else:
-            query = jql_for(str(self.setting(step.settings, "user")),
+            query = jql_for(str(self.setting(step.settings, "user", "") or ""),
                             self.setting(step.settings, "role", "any"),
                             str(self.setting(step.settings, "jql", "") or ""),
                             str(self.setting(step.settings, "project", "") or ""),
-                            str(self.setting(step.settings, "order", "") or ""))
+                            str(self.setting(step.settings, "order", "") or ""),
+                            str(self.setting(step.settings, "status", "") or ""))
         description_limit = int(self.setting(step.settings, "description_limit", 0) or 0)
+        subtasks = self.setting(step.settings, "subtasks", FULL)
         rich_comments = {}
         try:
             raw = _search(get, flavour, query, limit, context.cancel)
             issues = [_issue(one, get.site, flavour, description_limit)
                       for one in raw]
+            if subtasks == FULL:
+                raw += _add_subtasks(get, flavour, issues, description_limit,
+                                     context.cancel)
+            elif subtasks != LIST:
+                for one in issues:
+                    one["subtasks"] = []
             if self.setting(step.settings, "comments", True):
-                rich_comments = _add_comments(get, flavour, issues,
+                rich_comments = _add_comments(get, flavour, _every(issues),
                                               int(self.setting(step.settings,
                                                                "comment_limit", 20)),
                                               context.cancel)
@@ -321,7 +372,7 @@ class JiraIssues(CyclePlugin):
         # reason to lose the issue it was attached to. Each entry says whether
         # it arrived, so nothing downstream has to guess.
         downloaded = _fetch_attachments(
-            get, issues, context, step.id,
+            get, _every(issues), context, step.id,
             self.setting(step.settings, "attachments", IMAGES),
             int(self.setting(step.settings, "attachment_bytes",
                              DEFAULT_ATTACHMENT_BYTES) or 0),
@@ -344,11 +395,12 @@ class JiraIssues(CyclePlugin):
         html_path = os.path.join(context.step_dir(step.id), "jira.html")
         with open(html_path, "w", encoding="utf-8") as handle:
             handle.write(jira_report.render(answer, descriptions, rich_comments,
-                                            _pictures(issues, context)))
+                                            _pictures(_every(issues), context)))
 
-        comments = sum(len(one.get("comments") or []) for one in issues)
-        files = [dict(one, key=issue["key"])
-                 for issue in issues for one in issue.get("attachments") or []]
+        comments = sum(len(one.get("comments") or []) for one in _every(issues))
+        files = [dict(one, key=issue["key"]) for issue in _every(issues)
+                 for one in issue.get("attachments") or []]
+        children = sum(len(one.get("subtasks") or []) for one in issues)
         images = [one["path"] for one in files
                   if one.get("path") and str(one.get("mime", "")).startswith(
                       IMAGE_PREFIX)]
@@ -362,14 +414,17 @@ class JiraIssues(CyclePlugin):
                      "report_path": context.relative(path),
                      "html_path": context.relative(html_path),
                      "attachments": files, "images": images,
-                     "attachment_count": len(files)},
+                     "attachment_count": len(files),
+                     "subtask_count": children},
             artifacts=[Artifact("json", context.relative(path), step.id,
                                 name="jira", bytes=os.path.getsize(path)),
                        Artifact("html", context.relative(html_path), step.id,
                                 name="jira.html", bytes=os.path.getsize(html_path))]
             + downloaded,
-            message="jira: %d issue%s, %d comment%s%s" % (
+            message="jira: %d issue%s, %s%d comment%s%s" % (
                 len(issues), "" if len(issues) == 1 else "s",
+                "%d sub-task%s, " % (children, "" if children == 1 else "s")
+                if children else "",
                 comments, "" if comments == 1 else "s",
                 ", %d file%s" % (len(downloaded),
                                  "" if len(downloaded) == 1 else "s")
@@ -399,7 +454,8 @@ def _peek(settings, limit=20):
     flavour = settings.get("flavour", CLOUD)
     query = jql_for(str(settings.get("user") or ""), settings.get("role", "any"),
                     str(settings.get("jql") or ""), str(settings.get("project") or ""),
-                    str(settings.get("order") or ""))
+                    str(settings.get("order") or ""),
+                    str(settings.get("status") or ""))
     raw = _search(get, flavour, query, int(limit), CancelToken())
     found = []
     for one in raw:
@@ -409,7 +465,7 @@ def _peek(settings, limit=20):
     return found
 
 
-def jql_for(user, role, extra="", project="", order=""):
+def jql_for(user, role, extra="", project="", order="", status=""):
     """The JQL for "this person's issues", in the order the step asked for.
 
     Quoted, with the quotes in the names escaped. A user string and a project
@@ -422,26 +478,32 @@ def jql_for(user, role, extra="", project="", order=""):
     - and an ORDER BY inside brackets is a syntax error, not an ordering. It
     matters more than it looks: a cycle that takes one task per run is choosing
     which task here.
-    """
-    who = user.strip()
-    literal = who if who.endswith("()") else '"%s"' % _escape(who)
-    if role == "any":
-        clause = "(%s)" % " OR ".join("%s = %s" % (one, literal)
-                                      for one in ANY_ROLES)
-    elif role == "mentioned":
-        clause = "text ~ %s" % literal      # the only way Jira expresses it
-    else:
-        clause = "%s = %s" % (role, literal)
 
-    where = projects_clause(project)
-    if where:
-        clause = "%s AND %s" % (clause, where)
+    ``everyone`` leaves the person out altogether - a column of the board,
+    whoever carries it - and the clauses that are left are joined as they are.
+    """
+    who = (user or "").strip()
+    literal = who if who.endswith("()") else '"%s"' % _escape(who)
+    if role == EVERYONE:
+        clauses = []
+    elif role == "any":
+        clauses = ["(%s)" % " OR ".join("%s = %s" % (one, literal)
+                                        for one in ANY_ROLES)]
+    elif role == "mentioned":
+        clauses = ["text ~ %s" % literal]   # the only way Jira expresses it
+    else:
+        clauses = ["%s = %s" % (role, literal)]
+
+    for where in (projects_clause(project), statuses_clause(status)):
+        if where:
+            clauses.append(where)
     extra = (extra or "").strip()
     if extra:
         # Bracketed, because an OR inside it would otherwise swallow
         # everything to its left.
-        clause = "%s AND (%s)" % (clause, extra)
-    return "%s ORDER BY %s" % (clause, _ordering(order))
+        clauses.append("(%s)" % extra)
+    return ("%s ORDER BY %s" % (" AND ".join(clauses), _ordering(order))
+            ).lstrip()
 
 
 def _ordering(order):
@@ -476,6 +538,22 @@ def projects_clause(project):
     if len(keys) == 1:
         return "project = %s" % keys[0]
     return "project in (%s)" % ", ".join(keys)
+
+
+def statuses_clause(status):
+    """``status = "In Progress"`` or ``status in (...)``, or nothing at all.
+
+    The same shape as :func:`projects_clause`, and escaped for the same reason:
+    a status name comes from a cycle file or a variable. The names are the
+    workflow's own - nothing here knows what a project calls its columns.
+    """
+    names = [one.strip() for one in str(status or "").split(",")]
+    names = ['"%s"' % _escape(one) for one in names if one]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return "status = %s" % names[0]
+    return "status in (%s)" % ", ".join(names)
 
 
 def _escape(text):
@@ -640,6 +718,53 @@ def _signed_in(get, flavour):
     get("/rest/api/%s/myself" % ("3" if flavour == CLOUD else "2"))
 
 
+def _add_subtasks(get, flavour, issues, description_limit, cancel):
+    """Each issue's sub-tasks, read as fully as the issue was, in place.
+
+    Returns their raw payloads, for the reading copy's rich descriptions.
+
+    One search per page of keys rather than a request per sub-task: the
+    parent's ``subtasks`` field already names them, so ``key in (...)`` asks
+    for exactly those. A sub-task the search does not return - one the account
+    may not browse - keeps the key, title and status the parent gave for it,
+    because a parent that silently lost a child reads as smaller work.
+    """
+    wanted = []
+    for issue in issues:
+        for one in issue.get("subtasks") or []:
+            if one["key"] and one["key"] not in wanted:
+                wanted.append(one["key"])
+    found, raw = {}, []
+    for start in range(0, len(wanted), PAGE):
+        batch = wanted[start:start + PAGE]
+        query = "key in (%s) ORDER BY key ASC" % ", ".join(
+            '"%s"' % _escape(key) for key in batch)
+        for one in _search(get, flavour, query, len(batch), cancel):
+            raw.append(one)
+            child = _issue(one, get.site, flavour, description_limit)
+            child["subtasks"] = []
+            found[child["key"]] = child
+    for issue in issues:
+        issue["subtasks"] = [found.get(one["key"], one)
+                             for one in issue.get("subtasks") or []]
+    return raw
+
+
+def _every(issues):
+    """The issues and each read sub-task inside them, parents first.
+
+    What comments, attachments and the reading copy's pictures walk: a
+    sub-task read in full is an issue like any other there. One known only by
+    its key and title has nothing to fetch, and is left out.
+    """
+    found = []
+    for issue in issues:
+        found.append(issue)
+        found.extend(one for one in issue.get("subtasks") or []
+                     if "comments" in one)
+    return found
+
+
 def _add_comments(get, flavour, issues, limit, cancel):
     """The most recent comments on each issue, in place.
 
@@ -684,7 +809,30 @@ def _issue(raw, site, flavour=CLOUD, description_limit=0):
         # and the file was never asked for - so whatever read this planned the
         # work from half the page without knowing there was another half.
         "attachments": _attachments(fields.get("attachment")),
+        # The parent's key on a sub-task, so one read on its own still says
+        # what it is part of.
+        "parent": str((fields.get("parent") or {}).get("key") or "")
+        if isinstance(fields.get("parent"), dict) else "",
+        # Key, title and status, from the search itself; replaced by the full
+        # issue when the step reads sub-tasks in full.
+        "subtasks": _subtasks(fields.get("subtasks"), site),
     }
+
+
+def _subtasks(raw, site):
+    """The sub-tasks a search names on an issue, as the little it says of them."""
+    found = []
+    for one in raw or []:
+        if not isinstance(one, dict) or not one.get("key"):
+            continue
+        fields = one.get("fields") or {}
+        found.append({"key": str(one["key"]),
+                      "summary": fields.get("summary") or "",
+                      "status": _name(fields.get("status")),
+                      "type": _name(fields.get("issuetype")),
+                      "priority": _name(fields.get("priority")),
+                      "url": "%s/browse/%s" % (site, one["key"])})
+    return found
 
 
 def _attachments(raw):

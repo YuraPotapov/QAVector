@@ -227,3 +227,28 @@ def test_a_picture_cannot_smuggle_markup_through_its_filename():
                          attachments=[attached('<script>x</script>.png')]),
                   pictures={"QA-1": [picture('<script>x</script>.png')]})
     assert "<script>" not in page
+
+
+def test_a_sub_task_read_in_full_is_rendered_like_an_issue_under_its_parent():
+    child = dict(key="QA-2", summary="The backend half", description="Change the API",
+                 url="https://jira.example/browse/QA-2", status="To Do", comments=[],
+                 subtasks=[])
+    page = render(answer(subtasks=[child]))
+
+    assert "Sub-tasks (1)" in page
+    assert page.index("A readable task") < page.index("The backend half")
+    assert "Change the API" in page
+    assert '<h3>The backend half</h3>' in page
+
+
+def test_a_sub_task_known_only_by_name_is_one_line():
+    child = dict(key="QA-2", summary="The backend half", status="To Do",
+                 url="https://jira.example/browse/QA-2")
+    page = render(answer(subtasks=[child]))
+
+    assert "The backend half" in page
+    assert "<h3>" not in page
+
+
+def test_an_issue_without_sub_tasks_says_nothing_about_them():
+    assert "Sub-tasks" not in render(answer())

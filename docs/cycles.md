@@ -840,7 +840,8 @@ steps:
       user: currentUser()            # or an account id on Cloud, a username on Server
       project: QA, WEB               # blank reads every project the account sees
       role: any                      # assignee, reporter or creator
-      jql: statusCategory != Done AND updated >= -14d
+      status: In Progress, Reopened  # blank is any status
+      jql: updated >= -14d
       limit: 25
 ```
 
@@ -848,6 +849,26 @@ steps:
 default for "what is on this person's plate" — work crosses projects and few
 people think in one. `project` narrows it: one key, or several separated by
 commas, which becomes `project in (...)`.
+
+**Statuses.** `status` is the board's column, by the name your workflow gives
+it: one, or several separated by commas, which becomes `status in (...)`. It is
+its own field rather than something written into `jql` because it is usually
+the one thing a step per column changes — set one step up, duplicate it, change
+the status.
+
+**Everyone.** `role: everyone` leaves the person out — *Ready for prod,
+whoever carries it* — and `user` is then not needed. It needs `status`,
+`project` or `jql` to say which issues; on its own it would be every issue the
+account can see, and the step refuses it.
+
+**Sub-tasks.** `subtasks: full` (the default) reads each issue's sub-tasks the
+way the issue itself was read — description, comments, pictures — in one more
+search, and puts them in the parent's `subtasks` list, each with its `parent`
+key. `list` keeps only the key, title and status the search already returned,
+for no extra request; `none` leaves them out. `keys`, `key` and `count` are
+still about the parents, so `limit: 1` still takes one task from the queue;
+`subtask_count` says how many sub-tasks came with them. A sub-task the account
+may not browse keeps what its parent said of it rather than disappearing.
 
 **Attachments.** A bug report's specification is often a screenshot, so the
 step downloads the pictures on the issues it read and says where they landed.

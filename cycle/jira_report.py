@@ -62,6 +62,10 @@ table { border-collapse:collapse; width:100%; font-size:14px; }
 th,td { border:1px solid var(--line); padding:10px 12px; text-align:left; vertical-align:top; }
 th { background:var(--ground); font-weight:600; }
 .comment { border-top:1px solid var(--line); padding:20px 0; }
+.subtask { border:1px solid var(--line); border-radius:8px; padding:20px 24px;
+  margin:16px 0; background:var(--ground); }
+.subtask h3 { margin:6px 0 16px; }
+.subtask .issue-header { padding-bottom:16px; margin-bottom:18px; }
 .comment-header { display:flex; justify-content:space-between; gap:16px;
   flex-wrap:wrap; font-size:14px; margin-bottom:12px; }
 time,.muted { color:var(--muted); font-size:14px; }
@@ -376,6 +380,68 @@ def _date(value):
         return str(value or "")
 
 
+
+def _issue_html(issue, descriptions, comments, pictures, heading, key=""):
+    """One issue's header, description, files and comments.
+
+    The same for a sub-task read in full as for its parent, a heading smaller:
+    a sub-task is where the actual work of a story is often written down, and
+    a shorter rendering of it would be a shorter reading of the work.
+    """
+    key = issue.get("key") or key
+    title = issue.get("summary") or key
+    metadata = []
+    for name, label in (("status", "Status"), ("type", "Type"), ("priority", "Priority"),
+                        ("assignee", "Assignee"), ("reporter", "Reporter"),
+                        ("created", "Created"), ("updated", "Updated")):
+        value = issue.get(name)
+        if value:
+            shown = _escape(_date(value) if name in ("created", "updated") else value)
+            if name == "status":
+                shown = '<span class="badge">%s</span>' % shown
+            metadata.append("<div><dt>%s</dt><dd>%s</dd></div>" % (label, shown))
+    # One queue per issue, shared by the description and its comments: an
+    # image pasted into a comment is as much "where does this belong" as
+    # one in the body, and a second queue would hand the same file twice.
+    queue = Pictures(pictures.get(key) or [])
+    description = _body(descriptions.get(key, issue.get("description")),
+                        queue)
+    discussion = []
+    rich_comments = comments.get(key) or []
+    for number, comment in enumerate(issue.get("comments") or []):
+        body = rich_comments[number] if number < len(rich_comments) else comment.get("body")
+        discussion.append('<section class="comment"><div class="comment-header">'
+                          '<strong>%s</strong><time>%s</time></div>'
+                          '<div class="document">%s</div></section>' % (
+                              _escape(comment.get("author") or "Unknown author"),
+                              _escape(_date(comment.get("created"))),
+                              _body(body, queue)))
+    # After the comments, not before: a picture pasted into one is placed
+    # from the same queue, and asking what is left over before they have
+    # had their turn lists files that are about to be shown.
+    files = _attachments(issue.get("attachments") or [],
+                         pictures.get(key) or [], queue.placed())
+    return ('<header class="issue-header">'
+            '<div class="issue-key">%s</div><%s>%s</%s>'
+            '<dl class="metadata">%s</dl></header>'
+            '<div class="section-label">Description</div><div class="document">%s</div>'
+            '%s'
+            '<div class="section-label">Comments (%d)</div>%s' % (
+                _link(issue.get("url"), _escape(key)), heading, _escape(title),
+                heading, "".join(metadata),
+                description or '<p class="muted">No description.</p>', files,
+                len(discussion),
+                "".join(discussion) or '<p class="muted">No comments in this result.</p>'))
+
+
+def _subtask_line(issue):
+    """A sub-task known only by what its parent said of it: key, title, status."""
+    status = issue.get("status")
+    return '<p>%s %s%s</p>' % (
+        _link(issue.get("url"), _escape(issue.get("key") or "")),
+        _escape(issue.get("summary") or ""),
+        ' <span class="badge">%s</span>' % _escape(status) if status else "")
+
 def render(answer, descriptions=None, comments=None, pictures=None):
     """Render normalized results, optionally with original ADF bodies alongside.
 
@@ -390,49 +456,18 @@ def render(answer, descriptions=None, comments=None, pictures=None):
     sections, navigation = [], []
     for index, issue in enumerate(issues, 1):
         key = issue.get("key") or "Issue %d" % index
-        title = issue.get("summary") or key
         navigation.append('<a href="#issue-%d">%s</a>' % (index, _escape(key)))
-        metadata = []
-        for name, label in (("status", "Status"), ("type", "Type"), ("priority", "Priority"),
-                            ("assignee", "Assignee"), ("reporter", "Reporter"),
-                            ("created", "Created"), ("updated", "Updated")):
-            value = issue.get(name)
-            if value:
-                shown = _escape(_date(value) if name in ("created", "updated") else value)
-                if name == "status":
-                    shown = '<span class="badge">%s</span>' % shown
-                metadata.append("<div><dt>%s</dt><dd>%s</dd></div>" % (label, shown))
-        # One queue per issue, shared by the description and its comments: an
-        # image pasted into a comment is as much "where does this belong" as
-        # one in the body, and a second queue would hand the same file twice.
-        queue = Pictures(pictures.get(key) or [])
-        description = _body(descriptions.get(key, issue.get("description")),
-                            queue)
-        discussion = []
-        rich_comments = comments.get(key) or []
-        for number, comment in enumerate(issue.get("comments") or []):
-            body = rich_comments[number] if number < len(rich_comments) else comment.get("body")
-            discussion.append('<section class="comment"><div class="comment-header">'
-                              '<strong>%s</strong><time>%s</time></div>'
-                              '<div class="document">%s</div></section>' % (
-                                  _escape(comment.get("author") or "Unknown author"),
-                                  _escape(_date(comment.get("created"))),
-                                  _body(body, queue)))
-        # After the comments, not before: a picture pasted into one is placed
-        # from the same queue, and asking what is left over before they have
-        # had their turn lists files that are about to be shown.
-        files = _attachments(issue.get("attachments") or [],
-                             pictures.get(key) or [], queue.placed())
-        sections.append('<article class="issue" id="issue-%d"><header class="issue-header">'
-                        '<div class="issue-key">%s</div><h2>%s</h2>'
-                        '<dl class="metadata">%s</dl></header>'
-                        '<div class="section-label">Description</div><div class="document">%s</div>'
-                        '%s'
-                        '<div class="section-label">Comments (%d)</div>%s</article>' % (
-                            index, _link(issue.get("url"), _escape(key)), _escape(title),
-                            "".join(metadata), description or '<p class="muted">No description.</p>',
-                            files,
-                            len(discussion), "".join(discussion) or '<p class="muted">No comments in this result.</p>'))
+        children = issue.get("subtasks") or []
+        nested = "".join(
+            '<section class="subtask">%s</section>' % (
+                _issue_html(one, descriptions, comments, pictures, "h3")
+                if "comments" in one else _subtask_line(one))
+            for one in children)
+        sections.append('<article class="issue" id="issue-%d">%s%s</article>' % (
+            index, _issue_html(issue, descriptions, comments, pictures, "h2",
+                               key),
+            '<div class="section-label">Sub-tasks (%d)</div>%s'
+            % (len(children), nested) if children else ""))
     title = ("%s - %s" % (issues[0].get("key", ""), issues[0].get("summary", ""))
              if len(issues) == 1 else "Jira issues (%d)" % len(issues))
     return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">' \

@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cycle import registry                                       # noqa: E402
 from cycle.context import CancelToken, Cancelled, RunContext     # noqa: E402
 from cycle.plugins.jira import (JiraError, jql_for,               # noqa: E402
-                                projects_clause)
+                                projects_clause, statuses_clause)
 from cycle.workspace import create                               # noqa: E402
 from domain.cycle import CycleRun, CycleStep                     # noqa: E402
 
@@ -1030,3 +1030,216 @@ def test_an_issue_that_is_not_a_key_is_refused_before_anything_is_asked():
         "site": "https://example.invalid", "email": "me@example.invalid",
         "token": "t", "user": "u", "issue": 'QA-1" OR project = X'})
     assert any("issue must be an issue key" in one for one in problems)
+
+
+# ----------------------------------------------------- statuses and everyone
+# A board is read by its columns - To Do, In Progress, Ready for prod - and the
+# column is the one thing a person setting up a step per column changes.
+def test_one_status_narrows_to_it():
+    assert statuses_clause("In Progress") == 'status = "In Progress"'
+    assert 'AND status = "In Progress"' in jql_for("tester", "assignee",
+                                                   status="In Progress")
+
+
+def test_several_statuses_become_an_in_clause():
+    assert (statuses_clause(" In Progress , Reopened ,")
+            == 'status in ("In Progress", "Reopened")')
+
+
+def test_no_status_is_any_status():
+    assert statuses_clause("") == ""
+    assert "status" not in jql_for("tester", "assignee")
+
+
+def test_a_status_name_cannot_end_its_literal_and_become_query():
+    query = jql_for("tester", "assignee", status='Done") OR project = SECRET OR x in ("')
+    assert _bare_quotes(query) == 4
+
+
+def test_everyone_leaves_the_person_out_altogether():
+    """Ready for prod is a column of the board, whoever carries the work."""
+    query = jql_for("", "everyone", project="QA", status="Ready for prod")
+    assert query == ('project = "QA" AND status = "Ready for prod" '
+                     'ORDER BY updated DESC')
+
+
+def test_everyone_with_only_extra_jql_does_not_start_with_and():
+    query = jql_for("", "everyone", "labels = release")
+    assert query == "(labels = release) ORDER BY updated DESC"
+
+
+def test_everyone_needs_something_to_say_which_issues():
+    """Nobody in particular and nothing else is every issue the account can
+    see - a read nobody meant."""
+    plugin = registry.get("jira.issues")
+    base = {"site": "https://x.invalid", "token": "t", "email": "e",
+            "role": "everyone"}
+    assert any("everyone" in one for one in plugin.problems(base))
+    for narrowed in ({"status": "Ready for prod"}, {"project": "QA"},
+                     {"jql": "labels = release"}, {"issue": "QA-1"}):
+        assert plugin.problems(dict(base, **narrowed)) == [], narrowed
+
+
+def test_one_person_s_issues_still_need_the_person():
+    plugin = registry.get("jira.issues")
+    found = plugin.problems({"site": "https://x.invalid", "token": "t",
+                             "email": "e", "role": "assignee"})
+    assert "Whose issues is required." in found
+
+
+def test_the_status_reaches_the_query_jira_is_actually_sent(jira, run):
+    server = jira(**{CLOUD_SEARCH: {"issues": [], "isLast": True}})
+    run(server.site, user="", role="everyone", status="Ready for prod, Done")
+
+    sent = server.seen[0][2]["jql"]
+    assert sent.startswith('status in ("Ready for prod", "Done")')
+    assert "5b10a2" not in sent
+
+
+def test_a_listener_asks_the_same_statuses_as_the_step(jira):
+    from cycle.plugins.jira import _peek
+    server = jira(**{CLOUD_SEARCH: {"issues": [], "isLast": True}})
+    _peek({"site": server.site, "email": "e", "token": "t", "user": "u",
+           "role": "assignee", "status": "Reopened"})
+    assert 'status = "Reopened"' in server.seen[0][2]["jql"]
+
+
+# ----------------------------------------------------------------- sub-tasks
+# A story's actual work is often written down in its sub-tasks, so a plan made
+# from the parent alone is made from its table of contents.
+def _parent(key="QA-1", *children):
+    issue = _issue(key, "A story")
+    issue["fields"]["subtasks"] = [
+        {"key": child, "fields": {"summary": "Part " + child,
+                                  "status": {"name": "To Do"},
+                                  "issuetype": {"name": "Sub-task"}}}
+        for child in children]
+    return issue
+
+
+def _child(key, parent="QA-1", *attachments):
+    issue = _issue(key, "Part " + key)
+    issue["fields"]["description"] = "Do the %s half" % key
+    issue["fields"]["parent"] = {"key": parent}
+    issue["fields"]["attachment"] = list(attachments)
+    return issue
+
+
+def _searching(parents, children):
+    """Answers the queue with the parents and a key search with the children."""
+    def answer(body, _count):
+        if body["jql"].startswith("key in"):
+            wanted = [one for one in children
+                      if '"%s"' % one["key"] in body["jql"]]
+            return {"issues": wanted, "isLast": True}
+        return {"issues": parents, "isLast": True}
+    return answer
+
+
+def test_sub_tasks_are_read_in_full_by_default(jira, run):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2", "QA-3")],
+                                 [_child("QA-2"), _child("QA-3")]),
+        CLOUD_COMMENT: {"comments": [{"author": {"displayName": "Reviewer"},
+                                      "created": "2026-09-17T09:00:00.000+0000",
+                                      "body": "Looked at it"}]}})
+
+    result = run(server.site)
+
+    assert result.ok, result.message
+    parent = result.outputs["issues"][0]
+    assert [one["key"] for one in parent["subtasks"]] == ["QA-2", "QA-3"]
+    assert parent["subtasks"][0]["description"] == "Do the QA-2 half"
+    assert parent["subtasks"][0]["parent"] == "QA-1"
+    assert parent["subtasks"][0]["comments"][0]["body"] == "Looked at it"
+    assert result.outputs["subtask_count"] == 2
+    assert result.outputs["comment_count"] == 3
+    # The queue is still the parents: `limit: 1` means one task, not a part.
+    assert result.outputs["keys"] == ["QA-1"]
+    assert result.outputs["count"] == 1
+    assert "2 sub-tasks" in result.message
+
+
+def test_sub_tasks_are_asked_for_in_one_search_not_one_each(jira, run):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2", "QA-3")],
+                                 [_child("QA-2"), _child("QA-3")]),
+        CLOUD_COMMENT: {"comments": []}})
+    run(server.site)
+
+    searches = [one[2]["jql"] for one in server.seen if one[1] == CLOUD_SEARCH]
+    assert len(searches) == 2
+    assert searches[1] == 'key in ("QA-2", "QA-3") ORDER BY key ASC'
+
+
+def test_a_sub_task_s_pictures_are_fetched_like_its_parent_s(jira, run):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2")],
+                                 [_child("QA-2", "QA-1", _attached())]),
+        CLOUD_COMMENT: {"comments": []}, CONTENT: PNG})
+
+    result = run(server.site)
+
+    assert [one["key"] for one in result.outputs["attachments"]] == ["QA-2"]
+    assert len(result.outputs["images"]) == 1
+    assert "/QA-2/" in result.outputs["images"][0]
+
+
+def test_a_sub_task_the_account_cannot_read_keeps_what_its_parent_said(jira,
+                                                                       run):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2", "QA-9")],
+                                 [_child("QA-2")]),
+        CLOUD_COMMENT: {"comments": []}})
+
+    children = run(server.site).outputs["issues"][0]["subtasks"]
+
+    assert [one["key"] for one in children] == ["QA-2", "QA-9"]
+    assert children[1]["summary"] == "Part QA-9"
+    assert children[1]["status"] == "To Do"
+
+
+def test_a_list_of_sub_tasks_costs_no_request(jira, run):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2")], [_child("QA-2")]),
+        CLOUD_COMMENT: {"comments": []}})
+
+    result = run(server.site, subtasks="list")
+
+    only = result.outputs["issues"][0]["subtasks"][0]
+    assert only["key"] == "QA-2" and only["status"] == "To Do"
+    assert "description" not in only
+    assert len([one for one in server.seen if one[1] == CLOUD_SEARCH]) == 1
+    assert len([one for one in server.seen
+                if one[1].startswith(CLOUD_COMMENT)]) == 1
+
+
+def test_sub_tasks_can_be_left_out(jira, run):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2")], [_child("QA-2")]),
+        CLOUD_COMMENT: {"comments": []}})
+
+    result = run(server.site, subtasks="none")
+
+    assert result.outputs["issues"][0]["subtasks"] == []
+    assert result.outputs["subtask_count"] == 0
+    assert len([one for one in server.seen if one[1] == CLOUD_SEARCH]) == 1
+
+
+def test_the_reading_copy_shows_a_sub_task_under_its_parent(jira, run,
+                                                            tmp_path):
+    server = jira(**{
+        CLOUD_SEARCH: _searching([_parent("QA-1", "QA-2")], [_child("QA-2")]),
+        CLOUD_COMMENT: {"comments": []}})
+
+    result = run(server.site)
+    page = open(os.path.join(tmp_path, "20260919-000000-j",
+                             result.outputs["html_path"])).read()
+
+    assert "Sub-tasks (1)" in page
+    assert page.index("A story") < page.index("Do the QA-2 half")
+
+
+def test_the_sub_task_and_parent_fields_are_asked_for():
+    from cycle.plugins.jira import FIELDS
+    assert "subtasks" in FIELDS and "parent" in FIELDS
