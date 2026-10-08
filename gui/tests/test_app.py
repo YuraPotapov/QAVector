@@ -62,3 +62,49 @@ def test_the_strip_is_still_a_strip(qapp):
     top = app_mod.SPLASH_PX - app_mod.SPLASH_BAND_PX
     assert canvas.toImage().pixelColor(400, top).name().lower() \
         == theme.DIVIDER.lower()
+
+
+# ------------------------------------------------- on screen, with its picture
+# It used to be show() and one pass of the event loop. A compositing window
+# manager shows what is in a window only once the application has painted it
+# and answered for that frame in its event loop - so for the second or two the
+# main window took to build, the splash was an empty grey square.
+def test_the_splash_is_exposed_and_painted_before_anything_else_starts(qapp):
+    artwork = QPixmap(app_mod.SPLASH_PX, app_mod.SPLASH_PX)
+    artwork.fill()
+    splash = app_mod.Splash(artwork)
+    painted = []
+    original = splash.repaint
+    splash.repaint = lambda: (painted.append(splash.windowHandle().isExposed()),
+                              original())
+    try:
+        app_mod.show_painted(qapp, splash)
+        assert painted == [True], "painted once, and only once it was on screen"
+    finally:
+        splash.close()
+        splash.deleteLater()
+
+
+def test_a_splash_the_window_system_never_exposes_does_not_hold_up_the_start(
+        qapp, monkeypatch):
+    import time
+
+    from PySide6.QtGui import QWindow
+
+    monkeypatch.setattr(QWindow, "isExposed", lambda self: False)
+    artwork = QPixmap(app_mod.SPLASH_PX, app_mod.SPLASH_PX)
+    artwork.fill()
+    splash = app_mod.Splash(artwork)
+    # QSplashScreen.show() waits for the window on its own, up to a second on
+    # some platforms; that wait is Qt's, so it is measured and taken off.
+    started = time.monotonic()
+    splash.show()
+    qt_wait = time.monotonic() - started
+    splash.hide()
+    try:
+        started = time.monotonic()
+        app_mod.show_painted(qapp, splash, limit=0.2)
+        assert time.monotonic() - started < qt_wait + 0.6
+    finally:
+        splash.close()
+        splash.deleteLater()

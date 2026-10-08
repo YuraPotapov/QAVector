@@ -2,8 +2,9 @@
 
 import os
 import sys
+import time
 
-from PySide6.QtCore import Qt, QRect
+from PySide6.QtCore import QEventLoop, Qt, QRect
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
@@ -24,6 +25,11 @@ SPLASH_NAMES = ("splash.jpg", "splash.jpeg", "splash.png")
 #: is a drawing with its own annotations, so a message laid straight onto it
 #: reads as part of the drawing - which is how a loading app looks stuck.
 SPLASH_BAND_PX = 46
+
+#: The longest the splash is waited for before the window is built anyway. A
+#: window system that never says the splash is on screen must not hold the
+#: application back - this is a wait for a picture, not for permission.
+SPLASH_EXPOSE_S = 1.0
 
 
 def _splash_file():
@@ -63,6 +69,34 @@ class Splash(QSplashScreen):
         painter.setPen(QColor(theme.TEXT))
         painter.drawText(band.adjusted(18, 0, -18, 0),
                          Qt.AlignVCenter | Qt.AlignLeft, self.message())
+
+
+def show_painted(app, splash, limit=SPLASH_EXPOSE_S):
+    """Put the splash on screen with its picture in it, before anything blocks.
+
+    ``show()`` and one ``processEvents()`` was not that. The window was mapped,
+    but under a compositing window manager - GNOME's, at least - what is in it
+    reaches the screen only once the application has painted it and answered
+    the window manager about that frame, both of which happen in the event
+    loop. Right after that one pass the main thread builds the main window and
+    answers nothing for a second or two, and for that time the splash was an
+    empty grey square with the desktop showing through it.
+
+    So the picture is painted now rather than when the loop next gets round to
+    it, the loop is given a pass to answer for it, and the result is flushed
+    to the window system before anything slow starts. Waiting for the window
+    to be exposed first is bounded by ``limit``, so a platform that never says
+    so costs that and no more.
+    """
+    splash.show()
+    handle = splash.windowHandle()
+    deadline = time.monotonic() + limit
+    while (handle is not None and not handle.isExposed()
+           and time.monotonic() < deadline):
+        app.processEvents(QEventLoop.AllEvents, 20)
+    splash.repaint()
+    app.processEvents()
+    app.sync()
 
 
 def _claim_windows_identity():
@@ -128,8 +162,7 @@ def main(argv=None):
                                              Qt.SmoothTransformation)
         splash = Splash(pixmap, Qt.WindowStaysOnTopHint)
         splash.showMessage("starting…")
-        splash.show()
-        app.processEvents()
+        show_painted(app, splash)
 
     window = MainWindow(splash=splash, auto_launch=auto_launch, headless=bool(auto_launch))
     geometry = window.settings.geometry()
