@@ -226,6 +226,54 @@ def layout_graph(nodes, spec=None):
     return places
 
 
+def place_beside(waits_for, placed, spec=None):
+    """Where a step nobody has placed goes, in a cycle somebody arranged.
+
+    The computed layout is about the whole graph, and a cycle whose boxes were
+    dragged about is not that graph any more: a new step put where the layout
+    says landed wherever its layer happened to be, away from the step it was
+    added after and often off the screen - and moved again with every step
+    added after it, since a step never dragged has no place of its own.
+
+    So it goes one row on from the first step it waits for that has a place -
+    under it when the flow runs down - and along the row past whatever is
+    already there. A step that waits for nothing goes one row on from the
+    furthest along. ``placed`` is ``{step id: (x, y)}``; pure, like
+    :func:`layout_graph`.
+    """
+    spec = spec or SPEC
+    down = spec["grid"].get("flow", "down") == "down"
+    width, height = spec["node"]["w"], spec["node"]["h"]
+    along = height if down else width
+    across = width if down else height
+    layer_gap, sibling_gap = spec["grid"]["layer_gap"], spec["grid"]["sibling_gap"]
+    if not placed:
+        margin = spec["grid"]["margin"]
+        return (margin, margin)
+
+    def split(point):
+        x, y = point
+        return (y, x) if down else (x, y)          # (along, across)
+
+    anchor = next((placed[one] for one in waits_for or () if one in placed), None)
+    if anchor is None:
+        anchor = max(placed.values(), key=lambda one: split(one)[0])
+    first, side = split(anchor)
+    first += along + layer_gap
+
+    def free(at_along, at_across):
+        for other in placed.values():
+            o_along, o_across = split(other)
+            if (abs(o_along - at_along) < along + layer_gap / 2.0
+                    and abs(o_across - at_across) < across + sibling_gap / 2.0):
+                return False
+        return True
+
+    while not free(first, side):
+        side += across + sibling_gap
+    return (side, first) if down else (first, side)
+
+
 def scene_size(places, spec=None):
     """How big the scene has to be to hold ``places``, including the margin."""
     spec = spec or SPEC
@@ -1525,10 +1573,27 @@ class CycleCanvas(QGraphicsView):
         # are about the open graph, and half of them would land on a phase.
         remembered = {} if self._folded else dict(places or {})
 
+        # In a cycle somebody arranged, a step without a place of its own goes
+        # beside the step it waits for (see place_beside), not where the
+        # computed layout - which knows nothing of the arrangement - would put
+        # it. In layer order, so a step added after a new one lands beside it.
+        waits = {}
+        for edge in self._drawn.get("edges") or []:
+            if edge.get("kind", "dependency") == "dependency":
+                waits.setdefault(edge.get("to"), []).append(edge.get("from"))
+        positions = dict(remembered)
+        self._unplaced = []
+        if remembered:
+            for node in sorted(nodes, key=lambda one: int(one.get("layer", 0))):
+                if node["id"] not in positions:
+                    positions[node["id"]] = place_beside(
+                        waits.get(node["id"]), positions, self._spec)
+                    self._unplaced.append(node["id"])
+
         for node in nodes:
             item = CycleNodeItem(node, self._spec)
-            x, y = remembered.get(node["id"],
-                                  computed.get(node["id"], (0.0, 0.0)))
+            x, y = positions.get(node["id"],
+                                 computed.get(node["id"], (0.0, 0.0)))
             item.setPos(x, y)
             item.on_moved = self._moved_one
             # Folded, the view is for reading; moving boxes about is for the
@@ -2149,6 +2214,26 @@ class CycleCanvas(QGraphicsView):
             self._touched = True
             self.scale(by, by)
             self.view_changed.emit()
+
+    def placed_now(self):
+        """The steps the last build had to find a place for beside others.
+
+        The page writes them down, so a new step keeps the place it was given
+        rather than being placed afresh - and moving - every time the graph is
+        drawn again.
+        """
+        return list(getattr(self, "_unplaced", []))
+
+    def reveal(self, step_id, margin=48):
+        """Scroll just enough to show one step, and not at all if it shows.
+
+        Not :meth:`center_on`: centring moves the whole picture to wherever
+        the step is, which after adding one read as the screen jumping away
+        from what somebody was working on.
+        """
+        item = self._nodes.get(step_id)
+        if item is not None:
+            self.ensureVisible(item, margin, margin)
 
     def center_on(self, step_id):
         item = self._nodes.get(step_id)

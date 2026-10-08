@@ -867,3 +867,41 @@ def test_the_canvas_skeleton_uses_the_canvas_s_own_sizes(qapp):
         skeleton.grab()
     finally:
         canvas.deleteLater()
+
+
+# ------------------------------------------ a new step in an arranged cycle
+# The computed layout knows nothing of where somebody dragged the boxes, so a
+# step added to an arranged cycle landed wherever its layer happened to be -
+# away from the step it was added after, and often off the screen.
+def test_a_new_step_goes_one_row_on_from_the_step_it_waits_for():
+    from cms_gui.cyclegraph import SPEC, place_beside
+    placed = {"a": (0, 0), "b": (400, 0)}
+    x, y = place_beside(["b"], placed)
+    assert x == 400
+    assert y == SPEC["node"]["h"] + SPEC["grid"]["layer_gap"]
+
+
+def test_a_taken_place_moves_it_along_the_row_rather_than_on_top():
+    from cms_gui.cyclegraph import SPEC, place_beside
+    row = SPEC["node"]["h"] + SPEC["grid"]["layer_gap"]
+    placed = {"b": (400, 0), "first": (400, row)}
+    x, y = place_beside(["b"], placed)
+    assert y == row
+    assert x == 400 + SPEC["node"]["w"] + SPEC["grid"]["sibling_gap"]
+
+
+def test_a_step_that_waits_for_nothing_goes_after_the_furthest_along():
+    from cms_gui.cyclegraph import SPEC, place_beside
+    placed = {"a": (0, 0), "low": (300, 500)}
+    x, y = place_beside([], placed)
+    assert (x, y) == (300, 500 + SPEC["node"]["h"] + SPEC["grid"]["layer_gap"])
+
+
+def test_across_the_page_it_goes_to_the_right_instead():
+    import copy
+
+    from cms_gui.cyclegraph import SPEC, place_beside
+    spec = copy.deepcopy(SPEC)
+    spec["grid"]["flow"] = "right"
+    x, y = place_beside(["b"], {"b": (0, 100)}, spec)
+    assert (x, y) == (spec["node"]["w"] + spec["grid"]["layer_gap"], 100)
