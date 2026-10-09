@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.19] - 2026-10-09
+
 ### Added
 - **`teams.message` can send a file.** `text_file` reads the message from a
   file in the run workspace, for one longer than the forty lines a step keeps
