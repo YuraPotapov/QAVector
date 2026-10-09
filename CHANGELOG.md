@@ -16,6 +16,24 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.20] - 2026-10-09
+
+### Added
+- **`teams.message` can mention people.** `mentions:` takes `name <email>`
+  entries, or bare emails, one per line or comma. Teams notifies each one: the
+  card tags them where its text already says `<at>name</at>`, or on a last line
+  of their own, and lists them for Teams. An entry another step got wrong is
+  left out and named in the step's message; the message still goes. The new
+  output `mentioned` says how many were tagged.
+
+### Fixed
+- **A phase that cannot fold says why.** A phase another phase runs in the
+  middle of - Tests between two halves of Hand over, say - cannot be one box,
+  since it would wait for itself. Its band used to take the click and do
+  nothing. Now it shows no fold mark, does not look clickable, and its tooltip
+  names the phase in between, the steps it goes through, and how to regroup
+  them so it folds. Fold phases folds every other phase as before.
+
 ## [0.16.19] - 2026-10-09
 
 ### Added
