@@ -16,6 +16,11 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **`teams.message` can send a file.** `text_file` reads the message from a
+  file in the run workspace, for one longer than the forty lines a step keeps
+  of what it printed - a list of every failed test, one per line.
+
 ## [0.16.18] - 2026-10-09
 
 ### Added

@@ -128,9 +128,39 @@ def test_only_https_or_a_stand_in_on_this_machine(tmp_path, webhook):
 
 def test_an_empty_message_is_not_sent(workflow, tmp_path):
     result = send(tmp_path, webhook=workflow.url, text="   ")
-    assert not result.ok and "required" in result.message
+    assert not result.ok and "text_file" in result.message
     assert workflow.received == []
 
 
 def test_its_metadata_survives_the_wire():
     json.dumps(registry.get("teams.message").metadata.to_dict())
+
+
+def test_the_message_can_come_from_a_file_in_the_workspace(workflow, tmp_path):
+    """For a message longer than the forty lines a step keeps of its output."""
+    many = "\n".join("- TestX.test_%d" % one for one in range(60))
+    (tmp_path / "failed.md").write_text("Tests failed\n" + many, encoding="utf-8")
+    result = send(tmp_path, webhook=workflow.url, text_file="failed.md")
+    assert result.ok, result.message
+    lines = texts(workflow.received[0][2])
+    assert lines[0] == "Tests failed" and len(lines) == 61
+    assert lines[-1] == "\u2022 TestX.test_59"
+
+
+def test_text_wins_over_the_file(workflow, tmp_path):
+    (tmp_path / "other.md").write_text("from the file", encoding="utf-8")
+    send(tmp_path, webhook=workflow.url, text="from text", text_file="other.md")
+    assert texts(workflow.received[0][2]) == ["from text"]
+
+
+def test_a_missing_file_fails_and_sends_nothing(workflow, tmp_path):
+    result = send(tmp_path, webhook=workflow.url, text_file="nowhere.md")
+    assert not result.ok and "Cannot read the message from nowhere.md" in result.message
+    assert workflow.received == []
+
+
+def test_a_very_long_file_is_cut_and_says_so(workflow, tmp_path):
+    from cycle.plugins.teams import MAX_TEXT
+    (tmp_path / "long.md").write_text("x" * (MAX_TEXT + 500), encoding="utf-8")
+    send(tmp_path, webhook=workflow.url, text_file="long.md")
+    assert texts(workflow.received[0][2])[-1] == "(cut at %d characters)" % MAX_TEXT

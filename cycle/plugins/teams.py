@@ -19,12 +19,17 @@ lines, ``- `` bullets and ``**bold**``. Teams draws Markdown lists inside one
 card block unreliably, so each line becomes a block of its own and a bullet is
 drawn as one; bold and italic are left to Teams, which draws those well.
 
+**Or from a file.** ``text_file`` reads the message from a file - in the run
+workspace, or given whole - for one longer than the forty lines a step keeps of
+what it printed: a list of every test that failed, say.
+
 **Sending twice sends twice.** A message is not something that can be taken
 back or recognised later, so there is nothing to reconcile: running the step
 again posts again. Resuming a run does not re-run a step that finished.
 """
 
 import json
+import os
 import ssl
 import urllib.error
 import urllib.parse
@@ -38,6 +43,9 @@ from cycle.registry import CyclePlugin, PluginMetadata, field, output
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 TIMEOUT = 30
 CARD = "application/vnd.microsoft.card.adaptive"
+#: The most a message from a file carries. A Teams card stops at about 28 KB;
+#: this leaves room for the card around the text.
+MAX_TEXT = 20000
 
 
 class TeamsMessage(CyclePlugin):
@@ -52,10 +60,14 @@ class TeamsMessage(CyclePlugin):
                        "request is received\" gives. A secret: reference a "
                        "secret variable - ${vars.teams_webhook} - so the value "
                        "stays out of this file."),
-            field("text", "Message", "multiline", required=True,
+            field("text", "Message", "multiline",
                   hint="Markdown as a note is written: lines, \"- \" bullets, "
                        "**bold**. Usually an earlier step's output, such as "
-                       "${steps.release_note.outputs.summary}."),
+                       "${steps.release_note.outputs.summary}. Or use text_file."),
+            field("text_file", "Message from a file", "file",
+                  hint="A file holding the message, in the run workspace or "
+                       "given whole - for a message longer than the lines a "
+                       "step keeps of what it printed. Used when text is blank."),
             field("title", "Title",
                   hint="A heading above the message. Blank for none."),
             field("verify_tls", "Verify TLS", "check", default=True,
@@ -70,9 +82,12 @@ class TeamsMessage(CyclePlugin):
     def problems(self, settings):
         settings = settings or {}
         found = super().problems(settings)
-        for key in ("webhook", "text", "title"):
+        for key in ("webhook", "text", "text_file", "title"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
+        if not str(settings.get("text") or "").strip() and \
+                not str(settings.get("text_file") or "").strip():
+            found.append("A message needs text, or text_file to read it from.")
         webhook = str(settings.get("webhook") or "").strip()
         if webhook and "${" not in webhook:
             problem = _address_problem(webhook)
@@ -85,6 +100,17 @@ class TeamsMessage(CyclePlugin):
         if problems:
             return registry.failed("; ".join(problems))
         text = str(self.setting(step.settings, "text", "") or "").strip()
+        source = str(self.setting(step.settings, "text_file", "") or "").strip()
+        if not text and source:
+            path = os.path.join(context.workspace or "", os.path.expanduser(source))
+            try:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    text = handle.read(MAX_TEXT + 1).strip()
+            except OSError as exc:
+                return registry.failed("Cannot read the message from %s: %s"
+                                       % (source, exc.strerror or exc))
+            if len(text) > MAX_TEXT:
+                text = text[:MAX_TEXT].rstrip() + "\n\n(cut at %d characters)" % MAX_TEXT
         if not text:
             return registry.failed("There is no message to send: the text is empty.")
         webhook = str(self.setting(step.settings, "webhook")).strip()

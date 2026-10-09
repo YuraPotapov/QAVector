@@ -995,7 +995,10 @@ steps:
 ```
 
 The text is laid out as a card: each line a block, `- ` bullets drawn as
-bullets, `**bold**` left to Teams. `title` adds a heading. The URL is never
+bullets, `**bold**` left to Teams. `title` adds a heading. A message longer than
+the forty lines a step keeps of its output - every test that failed, a line
+each - is written to a file by the step before and sent with `text_file:`
+(in the run workspace, or a whole path) instead of `text:`. The URL is never
 repeated - not in the step's message, its outputs or an error, which name only
 the host and the HTTP status. Only `https://` is accepted, or `http://` to a
 stand-in on this machine. Running the step again posts again; resuming a run
