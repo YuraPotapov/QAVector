@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.18] - 2026-10-09
+
 ### Added
 - **Start something on the plan later.** Double-clicking a plan entry asks
   when: start now, or a day and time up to three days ahead. The application
