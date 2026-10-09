@@ -312,14 +312,23 @@ class JiraIssues(CyclePlugin):
                              % (key, ceiling))
         return found
 
-    def peek(self, settings):
+    def peek(self, settings, each=False):
         """The issues this step would take now - keys, titles and statuses only.
 
         For a trigger listening for new work: the step's own query, with
         ``issue`` ignored, since a listener pinned to one key would never see
-        another. Raises :class:`JiraError` when Jira cannot be asked.
+        another. ``each`` lists every issue the query finds, for a cycle run
+        on one picked issue; without it the step's own ``limit`` holds, so
+        what is offered is what a run would take. Raises :class:`JiraError`
+        when Jira cannot be asked.
         """
-        return _peek(settings)
+        if each:
+            return _peek(settings)
+        try:
+            limit = int(settings.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        return _peek(settings, limit=limit)
 
     def execute(self, context, step):
         problems = self.problems(step.settings)

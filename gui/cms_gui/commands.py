@@ -122,6 +122,9 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # on the step selected on the canvas. Naming a step by hand on a
              # command line would mean knowing the graph without seeing it.
              "--cycle-only", "--cycle-from", "--cycle-resume", "--cycle-reuse",
+             # What a run started from a listener's offer or the plan is about:
+             # the page passes the offer it was started from, nobody types it.
+             "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin",
              # Where the cycles tree is, for the reason --flows-dir is here: the
              # page edits it and a run reads it, so two places to say it would
              # mean editing one tree while a run read another.
@@ -149,6 +152,7 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # the cycle file sets. Nobody types one.
              "--cycle-watch", "--cycle-watch-seen", "--cycle-watch-plan",
              "--cycle-watch-planned", "--cycle-plan-remove",
+             "--cycle-plan-schedule",
              # RUN ▾ -> "With Recorder" adds this; it is a mode, not a form field.
              "--recorder",
              # And RUN ▾ -> "In Background" adds this one, for the same reason.

@@ -583,16 +583,28 @@ class Core:
         target = ":".join(one for one in (cycle_id, trigger_id, key) if one)
         return self._flow_json("--cycle-watch-seen=" + target, *self.memory_flag())
 
-    def cycle_watch_plan(self, cycle_id, key, trigger_id="", title="", url=""):
-        """Keep ``key`` to look at later; it is not offered again meanwhile."""
+    def cycle_watch_plan(self, cycle_id, key, trigger_id="", title="", url="",
+                         items=None):
+        """Keep ``key`` to look at later; it is not offered again meanwhile.
+        ``items`` are the tasks of an offer that is a step's whole answer."""
         target = ":".join(one for one in (cycle_id, trigger_id, key) if one)
+        document = {"title": title, "url": url}
+        if items:
+            document["items"] = list(items)
         return self._with_document("--cycle-watch-plan=" + target,
-                                   {"title": title, "url": url}, prefix="cms-plan-",
+                                   document, prefix="cms-plan-",
                                    extra=tuple(self.memory_flag()))
 
     def cycle_watch_planned(self):
         """Everything on the plan - tasks and waiting approvals - oldest first."""
         return self._flow_json("--cycle-watch-planned", *self.memory_flag())
+
+    def cycle_plan_schedule(self, entry_id, run_at=None):
+        """Start a plan entry at ``run_at`` (seconds since the epoch), or take
+        its start time off with None."""
+        when = "" if run_at is None else "%d" % int(run_at)
+        return self._flow_json("--cycle-plan-schedule=%s@%s" % (entry_id, when),
+                               *self.memory_flag())
 
     def cycle_plan_remove(self, entry_id):
         """Take one entry off the plan."""

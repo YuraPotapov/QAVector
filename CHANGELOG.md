@@ -16,6 +16,77 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Start something on the plan later.** Double-clicking a plan entry asks
+  when: start now, or a day and time up to three days ahead. The application
+  starts it then while it is open; if it was closed, it asks when it opens. A
+  start more than three days in the past is never made, so the application
+  opened a month later does not run last month's plan.
+  `--cycle-plan-schedule=ID@SECONDS` does the same from a terminal.
+- **An approval can answer itself, when the cycle says which answer.**
+  `approval.gate` takes `auto_answer` and `auto_after` (300 seconds): with
+  nobody answering, that answer is taken and the result says it was automatic.
+  The window counts it down by name. Blank means never, so a cycle can point it
+  at a check that prints the answer only when the release is ready. Closing
+  the window is still no answer.
+- **`teams.message`: post to Teams.** A message - a release note, say - goes
+  to a group chat, channel or person through a Teams Workflows webhook, laid
+  out as an Adaptive Card. The webhook URL is a secret and is never repeated
+  in a message or an error.
+- **`agent.merge`: an agent that merges branches and cannot push.** It edits
+  files and runs a fixed list of local git commands - `merge --no-ff`,
+  `merge --abort`, add, commit, `checkout --ours/--theirs` and reads - plus the
+  read-only commands the Claude Code CLI allows on its own (`grep`, `head`),
+  with push, fetch, pull, remote, clone and config refused by name. It refuses a
+  repository that has a remote, and fails if one appears. Every command it ran
+  comes back as `commands`, so a review can check the work against the plan.
+- **`agent.review` can say whether the work can go.** `verdict: true` asks
+  the review for `ready: true/false` and publishes it as `ready`, apart from
+  the issues - so a gate can tell "something for this cycle to fix" from "not
+  shippable for a reason no step here can fix", such as a bug in a task's own
+  code.
+- **A review with a verdict says who can fix each issue.** Every issue
+  carries `fixable` - true when a later step can fix it, false when only an
+  outside author can, such as a bug in a task's own code - and the step
+  publishes `fixable_count`, the blocking issues a step can fix. A fix round
+  that waits on it no longer starts for a problem it cannot touch.
+- **`agent.merge` reports refused attempts apart.** `commands` holds only what
+  ran; what the CLI would not run is in `refused`, so a review no longer reads
+  a blocked script as one that rewrote the files.
+- An agent step's tool list may now hold rules with spaces in them, such as
+  `Bash(git merge --no-ff:*)`, and refuse tools by name.
+- **A listener offers what a run would take: one task, or all of them.** When
+  the watched step does not read the trigger's pin - a release that takes
+  every task ready for it - a new task is offered together with everything
+  else the step returns, as one question listing every task, and goes on the
+  plan as one entry that the next answer replaces. A step that reads the pin
+  (`issue: ${vars.task_key}`) is offered task by task as before. The step's own
+  `limit` now holds for the first kind; `peek` takes `each=` to tell them apart.
+- **A run started from an offer or the plan keeps its name.** A cycle that
+  names no subject of its own - a release - showed up in Subjects as *Run
+  12:02* once started; it is now about what was offered, *3 tasks  QA-1, QA-2,
+  QA-3*, the way the plan named it. `--cycle-subject=KEY` (with
+  `--cycle-subject-title` and `--cycle-subject-pin`) is how the page says so; a
+  cycle that names its subject still finds its own.
+
+### Fixed
+- **Folding a phase no longer jumps the view.** Folding rebuilt the canvas
+  with no view, which reset it, so a click on a phase's band fitted the whole
+  cycle into the window. The zoom now stays, and the phase that was clicked
+  stays where it was on the screen, folded or opened.
+- **The fold marks are sharp, and read as what they do.** Icons on the canvas
+  were pixmaps resampled with the zoom, and soft; they are drawn as lines now.
+  Fold is one chevron up and open one chevron down - two chevrons meeting read
+  as a cross at that size.
+
+### Changed
+- **A condition shows on the link it rides on.** A step's `if:` was a mark in
+  the corner of its box and raw text in a tooltip, so a flow that branches
+  read as a plain chain. The link from the step a condition reads into the
+  step it decides is now drawn dashed, with the condition in a few words on
+  it - "if files changed", "unless rejected", "either way" - and the full
+  expression in its tooltip.
+
 ## [0.16.17] - 2026-10-08
 
 ### Fixed

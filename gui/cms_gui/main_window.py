@@ -27,6 +27,7 @@ from . import (background, commands, core as core_mod, cycleinteractions, cycler
                logsourcesfile as lsf, stageswindow, theme, titlebar, widgets)
 from .askbridge import AskBridge
 from .cyclewatch import Listener
+from .cycleschedule import PlanScheduler
 from .loader import LoaderThread
 from . import version as gui_version
 from .runner import LauncherProcess, RunState
@@ -253,6 +254,13 @@ class MainWindow(QMainWindow):
         self.listener = Listener(self.core, self)
         self.listener.offers_changed.connect(self._offer_next)
         self._offering = False
+        # Planned entries somebody asked to start later. Started when their
+        # time comes - after the run going on then, if there is one.
+        self.scheduler = PlanScheduler(self)
+        self.scheduler.due.connect(self._scheduled_due)
+        # Here rather than in _build_ui, which runs before the scheduler exists.
+        self.cycles.planned_loaded.connect(self.scheduler.set_planned)
+        self._due = []
         self._listen_timer = QTimer(self)
         self._listen_timer.timeout.connect(self._update_listening)
         self._listen_timer.start(1000)
@@ -583,6 +591,7 @@ class MainWindow(QMainWindow):
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
         self.cycles.session_opened.connect(self._open_cycle_run)
         self.cycles.planned_started.connect(self._start_planned)
+        self.cycles.planned_opened.connect(self._open_planned)
         self.cycles.artifacts_requested.connect(self._open_artifacts)
         self.cycles.stages_detached_changed.connect(self._stages_detached_changed)
         self.command = CommandPage(self.settings)
@@ -1206,7 +1215,58 @@ class MainWindow(QMainWindow):
         self.listener.seen(item)
         self.cycles.refresh_planned()
         self.cycles.explorer.select(item["cycle"])
-        self.start_cycle_run(item["cycle"], variables={pin: item["key"]} if pin else {})
+        self.start_cycle_run(item["cycle"], variables={pin: item["key"]} if pin else {},
+                             subject={"key": item["key"], "title": item.get("title", ""),
+                                      "pin": pin})
+
+    def _open_planned(self, item):
+        """A planned entry double-clicked: start it now, or pick when."""
+        from . import cycleschedule
+        from .cyclesubjects import planned_title
+
+        answer, run_at = cycleschedule.ask_when(self, item, title=planned_title(item))
+        if answer == cycleschedule.START_NOW:
+            self._start_planned(item)
+            return
+        if answer not in (cycleschedule.SCHEDULE, cycleschedule.CLEAR):
+            return
+        try:
+            self.core.cycle_plan_schedule(item.get("id", ""), run_at)
+        except core_mod.CoreError as exc:
+            widgets.warn(self, "Start later", "The start time was not saved.", str(exc))
+        self.cycles.refresh_planned()
+
+    def _scheduled_due(self, item, missed):
+        """A planned entry's time has come. Kept until nothing is running, and
+        nobody is being asked anything else."""
+        self._due.append((item, missed))
+        self._start_due()
+
+    def _start_due(self):
+        if not self._due or self._offering or getattr(self, "_closing", False):
+            return
+        if self.process.is_running():
+            return                              # _on_finished asks again
+        from . import cycleschedule
+        from .cyclesubjects import planned_title
+
+        item, missed = self._due.pop(0)
+        if missed:
+            self._offering = True
+            try:
+                agreed = cycleschedule.ask_missed(self, item, planned_title(item))
+            finally:
+                self._offering = False
+            if not agreed:
+                try:
+                    self.core.cycle_plan_schedule(item.get("id", ""), None)
+                except core_mod.CoreError:
+                    pass
+                self.cycles.refresh_planned()
+                QTimer.singleShot(0, self._start_due)
+                return
+        self.show_page("cycles")
+        self._start_planned(item)
 
     def _ask_about(self, offer):
         """The "new task" window - see cyclewatch.ask_about."""
@@ -1230,6 +1290,8 @@ class MainWindow(QMainWindow):
         finally:
             self._offering = False
             self.listener.answered(offer)
+            # A start that fell due while this was asked waited for it.
+            QTimer.singleShot(0, self._start_due)
         if answer == "In plan":
             self.listener.plan(offer)
             self.cycles.refresh_planned()
@@ -1238,7 +1300,9 @@ class MainWindow(QMainWindow):
             self.show_page("cycles")
             self.cycles.explorer.select(offer["cycle"])
             self.start_cycle_run(offer["cycle"], variables=(
-                {offer["pin"]: offer["key"]} if offer["pin"] else {}))
+                {offer["pin"]: offer["key"]} if offer["pin"] else {}),
+                subject={"key": offer["key"], "title": offer.get("title", ""),
+                         "pin": offer["pin"]})
             return
         if answer == "Ignore":
             self.listener.seen(offer)
@@ -1518,7 +1582,7 @@ class MainWindow(QMainWindow):
                                    "id": request.get("id"),
                                    "reason": "The launcher is no longer accepting input."})
 
-    def start_cycle_run(self, cycle_id, how="", step="", variables=None):
+    def start_cycle_run(self, cycle_id, how="", step="", variables=None, subject=None):
         """Run one cycle. Modelled on start_run, and deliberately separate.
 
         A scenario run is assembled from a page's form; a cycle run is one id
@@ -1546,6 +1610,14 @@ class MainWindow(QMainWindow):
         args = (["--cycle-run=" + cycle_id, "--events=-", "--control=-"]
                 + self.core.secrets_flag() + self.core.memory_flag()
                 + ["--cycle-var=%s=%s" % one for one in sorted((variables or {}).items())])
+        if subject and subject.get("key") and not how:
+            # Started from an offer or the plan: the run is about what was
+            # offered, so its row keeps the name the plan gave it.
+            args.append("--cycle-subject=" + subject["key"])
+            if subject.get("title"):
+                args.append("--cycle-subject-title=" + subject["title"])
+            if subject.get("pin"):
+                args.append("--cycle-subject-pin=" + subject["pin"])
         if how == "resume" and step:
             args.append("--cycle-resume=" + step)
         elif how and step:
@@ -1645,6 +1717,8 @@ class MainWindow(QMainWindow):
         self.run_state.cycle_interrupted()
         # A task that turned up during the run was kept waiting for this.
         QTimer.singleShot(0, self._offer_next)
+        # And so was a start somebody scheduled for while it ran.
+        QTimer.singleShot(0, self._start_due)
         self.run.run_finished(code)
         self.status_right.setText("finished (exit %d)" % code)
         if self.run_state.run_dir:

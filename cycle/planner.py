@@ -10,6 +10,14 @@ answer:
   would have done was done. What the plan adds is that the stop is not lost:
   the entry names the run, and resuming it asks the question again.
 
+**Run later.** An entry may carry ``run_at``: when somebody asked for it to be
+started, at most :data:`HORIZON` ahead. The application starts it then, or -
+when it was closed at the time - asks whether to start it now. One whose
+``run_at`` is further back than the same three days is *stale* and never
+started: the application may be opened a month later, and a task planned a
+month ago is not today's work. Nothing is deleted for it; the entry stays on
+the plan, saying so, until somebody removes or starts it.
+
 Every entry is ``{"id", "kind", "cycle", "title", "at", ...}``. Tasks live in
 their trigger's watch record, where "seen" is kept; approvals in a record of
 their own under ``plan/approval/<run>/<step>``. :func:`items` reads both, so a
@@ -23,6 +31,9 @@ from cycle import memory
 APPROVAL = "approval"
 TASK = "task"
 APPROVAL_PREFIX = "plan/approval/"
+#: How far ahead a start may be scheduled - and how long after its time a
+#: scheduled start is still worth asking about.
+HORIZON = 3 * 24 * 3600
 
 
 def add_approval(cycle_id, run_id, step_id, question, subject=None,
@@ -77,3 +88,61 @@ def remove(entry_id, memory_path=None, cycles_dir=None):
                         memory_path)
         return True
     return False
+
+
+def stale(item, now=None):
+    """True when ``item`` was scheduled further back than :data:`HORIZON`:
+    it is never started on its own, nor asked about."""
+    run_at = item.get("run_at") if isinstance(item, dict) else None
+    if not isinstance(run_at, (int, float)) or isinstance(run_at, bool):
+        return False
+    return (now if now is not None else time.time()) - run_at > HORIZON
+
+
+def schedule(entry_id, run_at, memory_path=None, cycles_dir=None, now=None):
+    """Start ``entry_id`` at ``run_at`` (seconds since the epoch), or never on
+    its own again when ``run_at`` is None. Returns the entry's ``run_at``.
+
+    Raises ValueError for a time in the past, one more than :data:`HORIZON`
+    ahead, or an entry that is not on the plan.
+    """
+    now = now if now is not None else time.time()
+    if run_at is not None:
+        try:
+            run_at = float(run_at)
+        except (TypeError, ValueError):
+            raise ValueError("run_at must be a time, in seconds since the epoch")
+        if run_at <= now:
+            raise ValueError("That time has already passed.")
+        if run_at > now + HORIZON:
+            raise ValueError("A start can be scheduled at most %d days ahead."
+                             % (HORIZON // 86400))
+    kind, _, rest = str(entry_id).partition(":")
+    if kind == APPROVAL:
+        run_id, _, step_id = rest.rpartition(":")
+        key = APPROVAL_PREFIX + "%s/%s" % (run_id, step_id)
+        if not memory.known(key, memory_path):
+            raise ValueError("%s is not on the plan" % entry_id)
+        memory.remember(key, {"run_at": run_at}, memory_path)
+        return run_at
+    if kind == TASK:
+        from cycle import watch
+        parts = rest.split(":")
+        if len(parts) < 3:
+            raise ValueError("%s is not on the plan" % entry_id)
+        cycle_id, trigger_id, task = parts[0], parts[1], ":".join(parts[2:])
+        record = watch.record_key(cycle_id, trigger_id)
+        planned = list(memory.recall(record, memory_path).get("planned") or [])
+        found = False
+        for one in planned:
+            if one.get("key") == task:
+                found = True
+                if run_at is None:
+                    one.pop("run_at", None)
+                else:
+                    one["run_at"] = run_at
+        if not found:
+            raise ValueError("%s is not on the plan" % entry_id)
+        memory.remember(record, {"planned": planned}, memory_path)
+        return run_at
+    raise ValueError("%s is not on the plan" % entry_id)

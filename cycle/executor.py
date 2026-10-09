@@ -136,17 +136,18 @@ def submit_interaction(raw):
 def run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
               jobs=None, registry=None, flows_dir=None, cycles_dir=None,
               trigger=MANUAL, run_id=None, environment=None, secrets=None,
-              memory_path="", only=None, reuse=None, resume=False):
+              memory_path="", only=None, reuse=None, resume=False, subject=None):
     with checkpoints.lock(workspace):
         return _run_cycle(cycle, workspace, variables_, observer, cancel, jobs,
                           registry, flows_dir, cycles_dir, trigger, run_id,
-                          environment, secrets, memory_path, only, reuse, resume)
+                          environment, secrets, memory_path, only, reuse, resume,
+                          subject)
 
 
 def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                jobs=None, registry=None, flows_dir=None, cycles_dir=None,
                trigger=MANUAL, run_id=None, environment=None, secrets=None,
-               memory_path="", only=None, reuse=None, resume=False):
+               memory_path="", only=None, reuse=None, resume=False, subject=None):
     """Run every step of ``cycle`` that should run. Returns a :class:`CycleRun`.
 
     Never raises for anything the run did - a step that fails, a plugin that
@@ -161,6 +162,11 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
     finds one, and it counts as done, so ``needs`` is satisfied. Nothing else
     in the scheduler knows this happened; a step that is already finished is a
     step it never looks at.
+
+    ``subject`` is what the run was started on - ``{"key", "title", ...}`` of
+    the offer or planned entry somebody pressed Start on. It is the run's
+    subject only when the cycle does not name one itself: a cycle that does
+    finds its own from its steps, and that is the answer.
     """
     registry = registry or default_registry
     observer = observer or NullObserver()
@@ -183,6 +189,12 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                    variables=dict(variables_ or {}),
                    steps={step.id: StepRun(step.id, plugin=step.plugin)
                           for step in cycle.steps})
+        if subject and subject.get("key") and getattr(cycle, "subject", None) is None:
+            run.subject = {"kind": str(subject.get("kind") or "task"),
+                           "key": str(subject["key"]),
+                           "title": str(subject.get("title") or ""),
+                           "memory": "", "pin": str(subject.get("pin") or ""),
+                           "step": ""}
         borrowed = _borrow(run, cycle, only, reuse, registry)
 
     # What a person said to this run before it went down, if it did. Read

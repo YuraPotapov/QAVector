@@ -281,6 +281,55 @@ def written(line):
     return found
 
 
+def commands(line):
+    """Every shell command one line of the stream says the agent ran.
+
+    What a step that lets an agent run commands reports - the whole list, in
+    order - so a later step can check it against what the agent was asked to
+    do, rather than take the agent's own account of it.
+    """
+    event = _parse(line)
+    if not isinstance(event, dict) or event.get("type") != "assistant":
+        return []
+    found = []
+    for block in ((event.get("message") or {}).get("content")) or []:
+        if (isinstance(block, dict) and block.get("type") == "tool_use"
+                and block.get("name") == "Bash"):
+            command = (block.get("input") or {}).get("command")
+            if isinstance(command, str) and command.strip():
+                found.append(command.strip())
+    return found
+
+
+def command_calls(line):
+    """``[(tool use id, command)]`` for each shell command one line asks for."""
+    event = _parse(line)
+    if not isinstance(event, dict) or event.get("type") != "assistant":
+        return []
+    found = []
+    for block in ((event.get("message") or {}).get("content")) or []:
+        if (isinstance(block, dict) and block.get("type") == "tool_use"
+                and block.get("name") == "Bash"):
+            command = (block.get("input") or {}).get("command")
+            if isinstance(command, str) and command.strip():
+                found.append((str(block.get("id") or ""), command.strip()))
+    return found
+
+
+def refused_calls(line):
+    """The tool use ids the CLI refused to run, from the final result line.
+
+    The CLI lists them as ``permission_denials`` when the run ends - the one
+    account of a refusal that does not depend on reading its message.
+    """
+    event = _parse(line)
+    if not isinstance(event, dict) or event.get("type") != "result":
+        return []
+    return [str(one.get("tool_use_id") or "")
+            for one in event.get("permission_denials") or []
+            if isinstance(one, dict) and one.get("tool_use_id")]
+
+
 def last_result(text):
     """The final ``result`` object in a stream, as a dict.
 

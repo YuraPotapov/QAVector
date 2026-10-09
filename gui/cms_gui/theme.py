@@ -500,16 +500,16 @@ QPushButton[dirty="true"]:hover, QPushButton[dirty="true"]:pressed {{
 }}
 
 /* --- inputs -------------------------------------------------------------- */
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
+QLineEdit, QComboBox, QSpinBox, QTimeEdit, QPlainTextEdit, QTextEdit {{
     background: {surface}; color: {text};
     border: 1px solid {divider}; border-radius: 0;
     padding: 4px 8px; min-height: 20px;
     selection-background-color: {a300}; selection-color: {text};
 }}
-QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {divider_strong}; }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus,
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QTimeEdit:hover {{ border-color: {divider_strong}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTimeEdit:focus,
 QPlainTextEdit:focus, QTextEdit:focus {{ border-color: {accent}; }}
-QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QTimeEdit:disabled {{
     background: {n200}; color: {n500};
 }}
 QLineEdit[mono="true"], QComboBox[mono="true"] {{ font-family: {mono}; font-size: 12px; }}

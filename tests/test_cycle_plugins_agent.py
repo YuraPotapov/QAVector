@@ -543,14 +543,16 @@ def test_a_review_says_how_many_it_found():
     review = {"issues": [{"severity": "high", "description": "a"},
                          {"severity": "low", "description": "b"},
                          {"severity": "medium", "description": "c"}]}
-    assert counts(review) == {"issue_count": 3, "blocking_count": 2}
+    assert counts(review) == {"issue_count": 3, "blocking_count": 2,
+                              "fixable_count": 2}
 
 
 def test_a_clean_review_counts_to_zero_rather_than_going_quiet():
     from cycle.plugins.agent import counts
 
-    assert counts({"issues": []}) == {"issue_count": 0, "blocking_count": 0}
-    assert counts({}) == {"issue_count": 0, "blocking_count": 0}
+    assert counts({"issues": []}) == {"issue_count": 0, "blocking_count": 0,
+                                             "fixable_count": 0}
+    assert counts({}) == {"issue_count": 0, "blocking_count": 0, "fixable_count": 0}
 
 
 def test_blocking_means_the_same_two_severities_it_means_elsewhere():
@@ -824,3 +826,125 @@ def test_every_agent_step_offers_the_floor(plugin):
 
     keys = [one.key for one in registry.get(plugin).metadata.inputs]
     assert keys.index("min_effort") == keys.index("effort") + 1
+
+
+# ------------------------------------------------- saying whether it can go
+# Issues are what a later step can fix. Whether the work can go out at all is
+# a different question - a release can be unshippable for a reason no step in
+# the cycle is allowed to fix - and a gate needs it apart from the issues.
+def test_a_review_asked_for_a_verdict_must_give_one():
+    with pytest.raises(ValueError, match="ready"):
+        validate_review(dict(REVIEW), verdict=True)
+    with pytest.raises(ValueError, match="ready"):
+        validate_review(dict(REVIEW, ready="yes"), verdict=True)
+    assert validate_review(dict(REVIEW, ready=False), verdict=True)["ready"] is False
+
+
+def test_a_verdict_nobody_asked_for_is_dropped():
+    assert "ready" not in validate_review(dict(REVIEW, ready=True))
+
+
+def test_the_prompt_asks_for_a_verdict_only_when_the_step_does():
+    assert '"ready"' not in _claude_cli_prompt("Review it", {}, [], "")
+    asked = _claude_cli_prompt("Review it", {}, [], "", verdict=True)
+    assert '"ready": true | false' in asked and "the decision" in asked
+
+
+def test_the_worker_carries_the_verdict_to_its_prompt():
+    from cycle.plugins.agent_worker import prompt_for
+
+    base = {"task": "Review it", "inputs": {}, "files": []}
+    assert '"ready"' not in prompt_for(base)
+    assert '"ready"' in prompt_for(dict(base, verdict=True))
+
+
+@_posix_only
+def test_a_verdict_comes_back_as_an_output_beside_the_issues(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20261008-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=_replying(tmp_path, dict(
+            _REVIEW, ready=False,
+            issues=[dict(one, fixable=True) for one in _REVIEW["issues"]])),
+            verdict=True))
+
+    assert result.ok, result.message
+    assert result.outputs["ready"] is False
+    assert result.message.split(" - at")[0].endswith(", not ready")
+
+
+# ------------------------------------------- what a later step can fix
+# A blocking issue only the task's author can fix used to start a fix round
+# that could do nothing about it: whether a step can fix it is the review's to
+# say, issue by issue, and the count a fix round waits on leaves the rest out.
+_MERGER = {"severity": "high", "description": "merged out of order", "fixable": True}
+_AUTHOR = {"severity": "medium", "description": "migration Odoo skips",
+           "fixable": False}
+
+
+def test_with_a_verdict_every_issue_says_whether_a_step_can_fix_it():
+    with pytest.raises(ValueError, match="fixable"):
+        validate_review(dict(REVIEW, ready=False, issues=[
+            {"severity": "high", "description": "x"}]), verdict=True)
+    kept = validate_review(dict(REVIEW, ready=False, issues=[_MERGER, _AUTHOR]),
+                           verdict=True)
+    assert [one["fixable"] for one in kept["issues"]] == [True, False]
+
+
+def test_only_what_a_step_can_fix_counts_as_fixable():
+    from cycle.plugins.agent import counts
+
+    said = counts({"issues": [_MERGER, _AUTHOR,
+                              {"severity": "low", "description": "n", "fixable": True}]})
+    assert said == {"issue_count": 3, "blocking_count": 2, "fixable_count": 1}
+
+
+def test_without_a_verdict_every_blocking_issue_is_fixable():
+    from cycle.plugins.agent import counts
+
+    said = counts({"issues": [{"severity": "high", "description": "x"}]})
+    assert said["fixable_count"] == said["blocking_count"] == 1
+
+
+def test_the_prompt_asks_for_fixable_only_with_a_verdict():
+    assert '"fixable"' not in _claude_cli_prompt("Review it", {}, [], "")
+    asked = _claude_cli_prompt("Review it", {}, [], "", verdict=True)
+    assert '"fixable": true | false' in asked and "only its author" in asked
+
+
+def test_the_schema_asks_for_fixable_only_with_a_verdict():
+    pytest.importorskip("pydantic")
+    from cycle.plugins.agent_worker import review_schema
+
+    issue = {"severity": "high", "description": "x"}
+    review_schema()(summary="s", issues=[issue], recommendations=[], risk="low")
+    with pytest.raises(Exception):
+        review_schema(verdict=True)(summary="s", issues=[issue], recommendations=[],
+                                    risk="low", ready=False)
+    review_schema(verdict=True)(summary="s", issues=[dict(issue, fixable=False)],
+                                recommendations=[], risk="low", ready=False)
+
+
+@_posix_only
+def test_fixable_count_comes_back_as_an_output(tmp_path):
+    from cycle import registry
+    from cycle.context import RunContext
+    from cycle.workspace import create
+    from domain.cycle import CycleRun
+
+    path = create("20261009-000000-demo", str(tmp_path))
+    context = RunContext(CycleRun(id="r", cycle_id="demo", workspace=path),
+                         None, path)
+    result = registry.get("agent.review").execute(
+        context, _cli_step(claude=_replying(tmp_path, dict(
+            _REVIEW, ready=False, issues=[_AUTHOR])), verdict=True))
+
+    assert result.ok, result.message
+    assert result.outputs["blocking_count"] == 1
+    assert result.outputs["fixable_count"] == 0

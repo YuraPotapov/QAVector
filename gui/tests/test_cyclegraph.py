@@ -905,3 +905,135 @@ def test_across_the_page_it_goes_to_the_right_instead():
     spec["grid"]["flow"] = "right"
     x, y = place_beside(["b"], {"b": (0, 100)}, spec)
     assert (x, y) == (spec["node"]["w"] + spec["grid"]["layer_gap"], 100)
+
+
+# ------------------------------------------------- a condition, on its link
+# A step's `if:` was a mark in the corner of its box and raw text in a tooltip,
+# so a two-branch flow read as a plain chain. The link into such a step is now
+# drawn broken, with the condition written on it in a few words.
+def test_a_condition_is_said_in_a_few_words():
+    from cms_gui.cyclegraph import describe_condition as said
+    assert said("${steps.fix.outputs.changed}", "agent.edit") == "if files changed"
+    assert said("${steps.todo.outputs.count}") == "if any found"
+    assert said("${steps.gate.status} != 'failed'", "approval.gate") == "unless rejected"
+    assert said("${steps.tests.status} != 'failed'", "command.shell") == "unless it failed"
+    assert said("${steps.tests.status} == 'failed'") == "if it failed"
+    assert said('"${steps.t.outputs.passed}" == \'false\'') == "if passed is false"
+    assert said("${run.id}") == "either way"
+    assert said("${vars.task_key}") == "if task_key is set"
+    assert said("${steps.r.outputs.blocking_count}") == "if problems found"
+    assert said("${steps.r.outputs.fixable_count}") == "if something to fix"
+    assert said("${steps.fix.status} != 'skipped'") == "if it ran"
+    assert said("") == ""
+
+
+def test_what_it_does_not_know_is_written_as_it_is_and_kept_short():
+    from cms_gui.cyclegraph import LABEL_CHARS, describe_condition
+    long = "${steps.a.outputs.x} == 'something rather long indeed here'"
+    assert len(describe_condition(long)) <= LABEL_CHARS
+
+
+def test_which_steps_a_condition_reads():
+    from cms_gui.cyclegraph import condition_reads
+    assert condition_reads("${steps.a.status} != 'failed'") == ["a"]
+    assert condition_reads("${run.id}") == []
+
+
+def _built(qapp, nodes_, edges):
+    from cms_gui.cyclegraph import CycleCanvas
+    canvas = CycleCanvas()
+    canvas.resize(600, 600)
+    canvas.set_graph({"id": "c", "nodes": nodes_, "edges": [
+        {"from": a, "to": b, "kind": "dependency"} for a, b in edges]})
+    return canvas
+
+
+def _node(step_id, layer, plugin="command.shell", condition=""):
+    return {"id": step_id, "label": step_id, "plugin": plugin, "layer": layer,
+            "row": 0, "condition": condition}
+
+
+def test_only_the_link_from_the_step_it_reads_is_broken_and_labelled(qapp):
+    canvas = _built(qapp, [
+        _node("take", 0, "jira.issues"), _node("fix", 1, "agent.edit"),
+        _node("gate", 2, "approval.gate", "${steps.fix.outputs.changed}"),
+        _node("review", 3, "agent.review", "${steps.gate.status} != 'failed'")],
+        [("take", "fix"), ("fix", "gate"), ("take", "review"),
+         ("fix", "review"), ("gate", "review")])
+    try:
+        said = {(edge.source, edge.target): edge.condition for edge in canvas._edges}
+        assert said == {("take", "fix"): "", ("fix", "gate"): "if files changed",
+                        ("take", "review"): "", ("fix", "review"): "",
+                        ("gate", "review"): "unless rejected"}
+        labelled = next(edge for edge in canvas._edges if edge.condition)
+        assert not labelled.label_rect().isEmpty()
+        assert "runs only if files changed" in labelled.toolTip()
+        canvas.grab()
+    finally:
+        canvas.deleteLater()
+
+
+def test_a_condition_on_no_step_it_waits_for_marks_every_link_in(qapp):
+    canvas = _built(qapp, [_node("a", 0), _node("b", 0),
+                           _node("report", 1, condition="${run.id}")],
+                    [("a", "report"), ("b", "report")])
+    try:
+        assert {edge.condition for edge in canvas._edges} == {"either way"}
+    finally:
+        canvas.deleteLater()
+
+
+# ------------------------------------------------- folding stays where it was
+# Folding rebuilt the scene with no view, which reset it - so one click on a
+# phase's band fitted the whole cycle into the window.
+def _phased(qapp):
+    from cms_gui.cyclegraph import CycleCanvas
+    nodes_ = [dict(_node(step, layer), group=group) for step, layer, group in (
+        ("a", 0, ""), ("b", 1, "Build"), ("c", 2, "Build"), ("d", 3, "Review"),
+        ("e", 4, "Review"), ("f", 5, ""))]
+    canvas = CycleCanvas()
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.set_graph({"id": "c", "nodes": nodes_, "edges": [
+        {"from": one, "to": two, "kind": "dependency"}
+        for one, two in zip("abcde", "bcdef")]})
+    qapp.processEvents()
+    canvas.apply_view({"zoom": 0.9, "center": [300, 450]})
+    qapp.processEvents()
+    return canvas
+
+
+def test_folding_a_phase_keeps_the_zoom_and_the_phase_where_it_was(qapp):
+    canvas = _phased(qapp)
+    try:
+        before = canvas.mapFromScene(canvas._phase_point("Review"))
+        canvas.fold("Review")
+        qapp.processEvents()
+        assert abs(canvas.view()["zoom"] - 0.9) < 1e-6
+        after = canvas.mapFromScene(canvas._phase_point("Review"))
+        assert abs(after.x() - before.x()) <= 3 and abs(after.y() - before.y()) <= 3
+
+        canvas.unfold("Review")
+        qapp.processEvents()
+        assert abs(canvas.view()["zoom"] - 0.9) < 1e-6
+        again = canvas.mapFromScene(canvas._phase_point("Review"))
+        assert abs(again.x() - before.x()) <= 3 and abs(again.y() - before.y()) <= 3
+    finally:
+        canvas.deleteLater()
+
+
+def test_folding_every_phase_keeps_the_zoom_too(qapp):
+    canvas = _phased(qapp)
+    try:
+        canvas.set_folded(canvas.phases())
+        qapp.processEvents()
+        assert abs(canvas.view()["zoom"] - 0.9) < 1e-6
+    finally:
+        canvas.deleteLater()
+
+
+def test_the_fold_marks_are_one_chevron_each_way():
+    """Two chevrons meeting read as a cross at the size a band carries it."""
+    from cms_gui import icons
+    assert icons.DRAWINGS["fold"] is not icons.DRAWINGS["unfold"]
+    assert icons.DRAWINGS["unfold"] is icons.DRAWINGS["disclosure_open"]

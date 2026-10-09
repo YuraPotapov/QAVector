@@ -48,6 +48,16 @@ def _clock(seconds):
     return "%d:%02d" % (seconds // 60, seconds % 60)
 
 
+def _count(number):
+    return "%d task%s" % (number, "" if number == 1 else "s")
+
+
+def item_line(item):
+    """One task of a whole-answer offer: ``KEY  title``."""
+    return ("%s  %s" % (item.get("key", ""), item["title"])
+            if item.get("title") else str(item.get("key", "")))
+
+
 def _short(text, limit=60):
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[:limit - 3] + "..."
@@ -184,12 +194,22 @@ class Listener(QObject):
         for issue in payload.get("new") or []:
             if (cycle_id, issue.get("key")) in waiting:
                 continue
-            self.queue.append({"cycle": cycle_id, "trigger": trigger_id,
-                               "name": trigger["name"],
-                               "pin": payload.get("pin") or trigger["pin"],
-                               "key": issue.get("key", ""),
-                               "title": issue.get("title", ""),
-                               "url": issue.get("url", "")})
+            offer = {"cycle": cycle_id, "trigger": trigger_id,
+                     "name": trigger["name"],
+                     "pin": payload.get("pin") or trigger["pin"],
+                     "key": issue.get("key", ""),
+                     "title": issue.get("title", ""),
+                     "url": issue.get("url", "")}
+            if issue.get("whole"):
+                # The step's whole answer: it supersedes the one still waiting
+                # for this trigger, and is not queued while that one is asked.
+                if self.asking is not None and self.asking.get("whole") and (
+                        self.asking["cycle"], self.asking["trigger"]) == key:
+                    continue
+                self.queue = [one for one in self.queue if not (
+                    one.get("whole") and (one["cycle"], one["trigger"]) == key)]
+                offer.update(whole=True, items=list(issue.get("items") or []))
+            self.queue.append(offer)
             added = True
         if added:
             self.offers_changed.emit()
@@ -252,7 +272,9 @@ class Listener(QObject):
         again at the next check, which loses nothing."""
         try:
             self.core.cycle_watch_plan(offer["cycle"], offer["key"], offer["trigger"],
-                                       offer.get("title", ""), offer.get("url", ""))
+                                       offer.get("title", ""), offer.get("url", ""),
+                                       items=offer.get("items") if offer.get("whole")
+                                       else None)
             return True
         except core_mod.CoreError:
             return False
@@ -273,13 +295,25 @@ def ask_about(parent, offer):
     """
     from . import widgets
 
+    if offer.get("whole"):
+        items = offer.get("items") or []
+        title, question = "New tasks", "Start %s on %s?" % (
+            offer["name"], _count(len(items)))
+        info = ("A new task is among those %s takes, and a run takes all of "
+                "them - the ones below. The cycle still asks before anything is "
+                "handed over. If nobody answers, it goes on the plan in the "
+                "Subjects list on the Cycles page." % offer["name"])
+        listed = "\n".join(item_line(one) for one in items)
+    else:
+        title = "New task"
+        question = "Start work on %s - %s?" % (offer["key"], offer["title"])
+        info = ("%s found it in the queue it watches. Starting runs the cycle on "
+                "this task; the cycle still asks before any code is written. If "
+                "nobody answers, it goes on the plan in the Subjects list on the "
+                "Cycles page." % offer["name"])
+        listed = ""
     dialog = widgets.Message(
-        parent, "New task",
-        "Start work on %s - %s?" % (offer["key"], offer["title"]),
-        "%s found it in the queue it watches. Starting runs the cycle on this "
-        "task; the cycle still asks before any code is written. If nobody "
-        "answers, it goes on the plan in the Subjects list on the Cycles page."
-        % offer["name"], "", "Start work", "Not now",
+        parent, title, question, info, "", "Start work", "Not now", output=listed,
         choices=("Ignore", "%s (%d)" % (PLAN_LABEL, PLAN_AFTER_SECONDS)))
     plan_button = dialog.choice_buttons[-1]
     left = [PLAN_AFTER_SECONDS]

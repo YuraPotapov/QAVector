@@ -245,3 +245,71 @@ def test_answering_drops_any_copy_still_waiting(listening):
     offer = listener.next_offer()
     listener.answered(offer)
     assert [one["key"] for one in listener.queue] == ["QA-7"]
+
+
+def whole(*keys):
+    return {"key": ",".join(keys), "title": "%d tasks" % len(keys), "whole": True,
+            "items": [{"key": one, "title": "Task " + one} for one in keys]}
+
+
+def test_a_whole_answer_replaces_the_one_still_waiting(listening):
+    """A step that does not read the pin is offered whole: the latest answer is
+    what a run would take, so it is one offer, never one per check."""
+    listener, core, clock = listening
+    core.answers["rel"] = {"ok": True, "new": [whole("QA-1")]}
+    listener.set_inventory(inventory(row("rel", every=60)))
+    settle(listener)
+    core.answers["rel"] = {"ok": True, "new": [whole("QA-1", "QA-2")]}
+    clock.now += 60
+    listener.tick()
+    settle(listener)
+
+    [offer] = listener.queue
+    assert offer["key"] == "QA-1,QA-2" and offer["whole"] is True
+    assert [one["key"] for one in offer["items"]] == ["QA-1", "QA-2"]
+    assert offer["pin"] == "task_key"
+
+
+def test_a_whole_answer_is_not_queued_while_one_is_asked(listening):
+    listener, core, clock = listening
+    core.answers["rel"] = {"ok": True, "new": [whole("QA-1")]}
+    listener.set_inventory(inventory(row("rel", every=60)))
+    settle(listener)
+    listener.next_offer()
+    core.answers["rel"] = {"ok": True, "new": [whole("QA-1", "QA-2")]}
+    clock.now += 60
+    listener.tick()
+    settle(listener)
+    assert listener.queue == [], "asked again at the next check if not answered"
+
+
+def test_planning_a_whole_answer_keeps_its_tasks(listening):
+    listener, core, _clock = listening
+    kept = []
+    core.cycle_watch_plan = lambda *args, **kw: kept.append((args, kw))
+    offer = dict(whole("QA-1", "QA-2"), cycle="rel", trigger="t", name="Rel", pin="k",
+                 url="")
+    assert listener.plan(offer)
+    (args, kw), = kept
+    assert args[:3] == ("rel", "QA-1,QA-2", "t")
+    assert [one["key"] for one in kw["items"]] == ["QA-1", "QA-2"]
+
+
+def test_the_question_about_a_whole_answer_lists_every_task(qapp, monkeypatch):
+    from cms_gui import widgets
+    made = {}
+
+    class Seen(widgets.Message):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            made.update(args=args, kw=kw)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(widgets, "Message", Seen)
+    offer = dict(whole("QA-1", "QA-2"), cycle="rel", trigger="t",
+                 name="Ready To Release", pin="k", url="")
+    cyclewatch.ask_about(None, offer)
+    assert made["args"][2] == "Start Ready To Release on 2 tasks?"
+    assert made["kw"]["output"] == "QA-1  Task QA-1\nQA-2  Task QA-2"

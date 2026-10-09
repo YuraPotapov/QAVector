@@ -1005,7 +1005,7 @@ def run_session_command(command, memory_path=None, cycles_dir=None):
 
 
 def _plan_document(source):
-    """``{"title", "url"}`` from the ``--from`` file, or {} without one."""
+    """``{"title", "url", "items"}`` from the ``--from`` file, or {} without one."""
     if not source:
         return {}
     with open(source, encoding="utf-8") as handle:
@@ -1029,6 +1029,16 @@ def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=N
         if kind == "planned":
             from cycle import planner
             payload = {"ok": True, "planned": planner.items(memory_path)}
+        elif kind == "schedule":
+            from cycle import planner
+            entry_id, _, when = argument.rpartition("@")
+            if not entry_id:
+                raise ValueError("--cycle-plan-schedule needs ID@SECONDS, or ID@ "
+                                 "to take the start time off")
+            run_at = float(when) if when.strip() else None
+            payload = {"ok": True, "id": entry_id,
+                       "run_at": planner.schedule(entry_id, run_at, memory_path,
+                                                  cycles_dir)}
         elif kind == "unplan":
             from cycle import planner
             payload = {"ok": True, "id": argument,
@@ -1044,7 +1054,8 @@ def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=N
             payload = {"ok": True, "cycle": cycle_id, "key": key,
                        "planned": watch.plan(cycle, key, about.get("title", ""),
                                              about.get("url", ""), trigger_id,
-                                             memory_path)}
+                                             memory_path,
+                                             items=about.get("items") or None)}
         elif kind == "check":
             cycle_id, trigger_id = parts[0], (parts[1] if len(parts) > 1 else "")
             cycle = loader.load_cycle(cycle_id, cycles_dir)
@@ -1191,7 +1202,7 @@ def _save_cycle(cycle_id, source, cycles_dir=None):
 def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                    jobs=None, control=False, reports_dir=None,
                    secrets_path=None, memory_path=None, only=None,
-                   start_from="", resume="", reuse_from=""):
+                   start_from="", resume="", reuse_from="", subject=None):
     """Run one cycle to completion. Returns the exit code.
 
     Handled before the Chrome launch loop, because a cycle opens no windows of
@@ -1302,7 +1313,8 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
             cycle, workspace, variables_=variables, jobs=jobs,
             observer=bus.Tee(observers), flows_dir=flows_dir,
             cycles_dir=cycles_dir, run_id=run_id, secrets=values,
-            memory_path=memory_path, only=chosen, reuse=reuse, resume=bool(resume))
+            memory_path=memory_path, only=chosen, reuse=reuse, resume=bool(resume),
+            subject=subject)
     except checkpoints.CheckpointError as exc:
         log.error("%s", exc)
         _emit("cycle.run.end", cycle=cycle_id, status="error", message=str(exc), exit_code=2)
@@ -1602,7 +1614,9 @@ def _bad_option_message(arg, config_path):
                "--cycle-secret-delete", "--cycle-secrets-file",
                "--cycle-memory-show", "--cycle-memory-forget",
                "--cycle-memory-file", "--cycle-runs-dir", "--cycle-watch",
-               "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove"):
+               "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove",
+               "--cycle-plan-schedule",
+               "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin"):
         return "%s needs a value: %s=VALUE (note the '=', not a space)." % (arg, arg)
     return ("Unknown option %r. Run --help for the full list." % arg)
 
@@ -3369,6 +3383,10 @@ write a report. The steps that do not depend on each other run at the same time.
                             tasks kept for later, and approvals a run stopped at
                             because nobody answered.
   --cycle-plan-remove=ID    Take one entry off the plan.
+  --cycle-plan-schedule=ID@SECONDS
+                            Start a plan entry at that time (seconds since the
+                            epoch), at most 3 days ahead; ID@ takes the time
+                            off. The application starts it while it is open.
 
   --cycle-sessions[=ID]     What the cycles have been working on: every run of
                             one cycle on one subject, grouped, newest first.
@@ -3396,6 +3414,11 @@ Running a cycle:
                             with --run-tests or --recorder.
   --cycle-jobs=N            How many steps may run at once (default: 4).
   --cycle-var=NAME=VALUE    Override one of the cycle's variables. Repeatable.
+  --cycle-subject=KEY       What the run was started on - the key of the task (or
+                            the tasks, joined by commas) somebody pressed Start
+                            on. Names the run only when the cycle names no
+                            subject itself. --cycle-subject-title=TITLE and
+                            --cycle-subject-pin=VAR go with it.
   --cycle-resume=RUN_ID     Continue this saved run in its workspace. Keep verified
                             completed results and retry unfinished work. Refuse
                             changed completed inputs or uncertain external calls.
@@ -3509,6 +3532,9 @@ def main():
     cycle_reuse = ""      # --cycle-reuse: exact source for a partial execution
     plugin_action = None  # --cycle-plugin-action=PLUGIN:ACTION: JSON, then exit
     cycle_vars = {}       # --cycle-var=NAME=VALUE, repeatable
+    cycle_subject = ""    # --cycle-subject=KEY: what the run was started on
+    cycle_subject_title = ""
+    cycle_subject_pin = ""
     cycle_jobs = None     # --cycle-jobs: steps at once (None = the engine default)
     cycles_dir = None     # --cycles-dir: where cycles live (None = the default)
     secret_command = None # --cycle-secret-list/set/delete: JSON, then exit
@@ -3722,6 +3748,8 @@ def main():
             memory_command = ("forget", arg.split("=", 1)[1].strip())
         elif arg == "--cycle-watch-planned":
             watch_command = ("planned", "")
+        elif arg.startswith("--cycle-plan-schedule="):
+            watch_command = ("schedule", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-plan-remove="):
             watch_command = ("unplan", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-watch-plan="):
@@ -3747,6 +3775,12 @@ def main():
             plugin_action = arg.split("=", 1)[1].strip()
         elif arg.startswith("--cycle-run="):
             cycle_run = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-subject="):
+            cycle_subject = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-subject-title="):
+            cycle_subject_title = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-subject-pin="):
+            cycle_subject_pin = arg.split("=", 1)[1].strip()
         elif arg.startswith("--cycle-var="):
             # Repeatable, and split on the FIRST equals, so a value may contain
             # one: --cycle-var=url=https://host/?a=b is one variable, not a
@@ -3958,7 +3992,11 @@ def main():
                                 secrets_path=secrets_file,
                                 memory_path=memory_file,
                                 only=cycle_only, start_from=cycle_from,
-                                resume=cycle_resume, reuse_from=cycle_reuse))
+                                resume=cycle_resume, reuse_from=cycle_reuse,
+                                subject=({"key": cycle_subject,
+                                          "title": cycle_subject_title,
+                                          "pin": cycle_subject_pin}
+                                         if cycle_subject else None)))
     if session_prefix and (os.sep in session_prefix or (os.altsep and os.altsep in session_prefix)):
         sys.exit("--user-session must be a single name, no path separators.")
     if overlay_components and run_tests is None:

@@ -92,13 +92,18 @@ def abandon_all():
 
 
 def ask(question, detail="", options=(), timeout_ms=None, step="",
-        cancel=None, revision=None):
+        cancel=None, revision=None, auto=""):
     """Put a question to whoever is watching. Blocks until answered or not.
 
     Returns ``{answered, answer, who, message}``. ``answered`` is the only
     field worth branching on: it is False for every way of not getting an
     answer, and a caller that read ``answer`` alone would treat an empty string
     from a timeout as a choice somebody made.
+
+    ``auto`` is the one exception, and it is said: an answer the question takes
+    by itself when its time runs out with nobody answering. Then the result is
+    answered, with that answer and ``automatic`` true. A window closed by hand
+    is still no answer, and a stopped run is still stopped.
     """
     if not enabled():
         return {"answered": False, "answer": "", "who": "",
@@ -116,7 +121,8 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
 
     events.emit("cycle.ask", id=request_id, step=step or "",
                 question=str(question or ""), detail=str(detail or ""),
-                options=choices, timeout_ms=timeout_ms, revision=dict(revision or {}))
+                options=choices, timeout_ms=timeout_ms, revision=dict(revision or {}),
+                auto=str(auto or ""))
 
     answered = _wait(slot[0], timeout_ms / 1000.0, cancel)
     with _lock:
@@ -135,6 +141,14 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
         # the part the reason does not say: that nobody answered.
         return {"answered": False, "answer": "", "who": "",
                 "message": "nobody answered"}
+    if str(auto or "").strip():
+        # The window is still up and counting nothing: take it away, the
+        # question has been answered.
+        events.emit("cycle.ask.withdrawn", id=request_id, step=step or "")
+        return {"answered": True, "answer": str(auto).strip(), "who": "",
+                "automatic": True,
+                "message": "nobody answered within %ds - %r chosen automatically"
+                           % (timeout_ms / 1000.0, str(auto).strip())}
     return {"answered": False, "answer": "", "who": "",
             "message": "nobody answered within %ds" % (timeout_ms / 1000.0)}
 

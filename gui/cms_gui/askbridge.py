@@ -44,8 +44,11 @@ DISMISSED = ""
 class AskDialog(QDialog):
     """One question, its detail, and the answers it takes as buttons."""
 
-    def __init__(self, question, detail="", options=(), parent=None, revision=None):
+    def __init__(self, question, detail="", options=(), parent=None, revision=None,
+                 auto=""):
         super().__init__(parent)
+        #: The answer the question takes by itself when its time runs out.
+        self.auto = str(auto or "")
         self.setWindowTitle("Review and decide")
         self.setModal(False)
         self.answer = DISMISSED
@@ -147,6 +150,8 @@ class AskDialog(QDialog):
         self.answer_buttons = []
         for index, one in enumerate(options or ("Approve", "Reject")):
             button = QPushButton(one)
+            # Its answer, apart from its label: a countdown changes the label.
+            button.setProperty("answer", one)
             if index == 0:
                 button.setProperty("variant", "primary")
             button.setAutoDefault(False)
@@ -158,7 +163,11 @@ class AskDialog(QDialog):
         if self.feedback_editor is not None:
             self.feedback_editor.textChanged.connect(self._feedback_changed)
         layout.addLayout(row)
-        note = widgets.lede("Closing this window ends the request without approval.")
+        note = widgets.lede(
+            "If nobody answers, the counting button is pressed when it reaches "
+            "zero. Closing this window ends the request without approval."
+            if self.auto else
+            "Closing this window ends the request without approval.")
         note.setProperty("role", "hint")
         layout.addWidget(note)
         if detail:
@@ -172,7 +181,7 @@ class AskDialog(QDialog):
             "Revise the plan and ask for approval again.")
         # Do not silently discard typed feedback by treating it as approval.
         for button in self.answer_buttons:
-            if button.text().strip().lower() in self._approving:
+            if str(button.property("answer")).strip().lower() in self._approving:
                 button.setEnabled(not text)
 
     def _request_revision(self):
@@ -187,6 +196,15 @@ class AskDialog(QDialog):
 
     def countdown(self, seconds):
         """Say how long is left, so nobody decides after it stopped mattering."""
+        button = self.auto_button()
+        if button is not None:
+            # On the button that presses itself, the way "In plan (20)" counts
+            # down on the new-task window: one habit for every timed answer.
+            self._left.setText("")
+            button.setText("%s (%d:%02d)" % (self.auto, max(0, seconds) // 60,
+                                             max(0, seconds) % 60)
+                           if seconds > 0 else self.auto)
+            return
         if seconds <= 0:
             self._left.setText("")
             return
@@ -194,6 +212,15 @@ class AskDialog(QDialog):
             self._left.setText("%d minutes left" % (seconds // 60))
         else:
             self._left.setText("%d seconds left" % seconds)
+
+    def auto_button(self):
+        """The button for the answer taken by itself, or None."""
+        if not self.auto:
+            return None
+        for button in self.answer_buttons:
+            if button.property("answer") == self.auto:
+                return button
+        return None
 
     def _choose(self, text):
         self.answer = text
@@ -239,7 +266,8 @@ class AskBridge(QObject):
                            detail=str(event.get("detail") or ""),
                            options=[str(one) for one in
                                     (event.get("options") or [])],
-                           parent=self._parent, revision=event.get("revision"))
+                           parent=self._parent, revision=event.get("revision"),
+                           auto=str(event.get("auto") or ""))
         dialog.finished.connect(lambda _code, rid=request_id: self._done(rid))
 
         timer = QTimer(self)
@@ -289,6 +317,13 @@ class AskBridge(QObject):
         seconds[0] -= 1
         if seconds[0] > 0:
             found[0].countdown(seconds[0])
+            return
+        if found[0].auto:
+            # The core takes the answer itself and then withdraws the question.
+            # Closing it here would send a dismissal - which is no answer, and
+            # could beat the core to it.
+            found[0].countdown(0)
+            found[1].stop()
             return
         # The core has stopped waiting. Taking the window away is the honest
         # thing: a button that no longer decides anything should not be there

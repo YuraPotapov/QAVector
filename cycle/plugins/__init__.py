@@ -24,9 +24,11 @@ from cycle.plugins.memory import MemoryClaim, MemoryRecall, MemoryRemember
 from cycle.plugins.agent import AgentReview
 from cycle.plugins.agent_edit import AgentEdit
 from cycle.plugins.agent_implement import AgentImplement
+from cycle.plugins.agent_merge import AgentMerge
 from cycle.plugins.report import ReportHtml, ReportJson
 from cycle.plugins.scenario import ScenarioRun
 from cycle.plugins.wait import Wait
+from cycle.plugins.teams import TeamsMessage
 from cycle.plugins.service import (ServiceRestart, ServiceStart, ServiceStop,
                                    ServiceWait)
 
@@ -47,6 +49,7 @@ BUILTIN = (
     ScenarioRun(),
     JiraIssues(),
     JiraTransition(),
+    TeamsMessage(),
     MemoryRecall(),
     MemoryRemember(),
     MemoryClaim(),
@@ -54,6 +57,7 @@ BUILTIN = (
     AgentReview(),
     AgentEdit(),
     AgentImplement(),
+    AgentMerge(),
     ReportJson(),
     ReportHtml(),
 )

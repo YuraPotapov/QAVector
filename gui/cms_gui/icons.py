@@ -367,26 +367,16 @@ def _warn(painter, ink):
     painter.drawRect(QRectF(11, 15.5, 2, 2))
 
 
-def _fold(painter, ink):
-    """Two chevrons meeting: fold what is between them into one."""
+def _chevron_up(painter, ink):
+    """Fold: the phase closes up into one box. One chevron, because two
+    meeting - what this used to be - read as a cross at the size a phase's
+    band carries it."""
     _stroke(painter, ink)
-    for top, bottom in ((3.5, 9.5), (20.5, 14.5)):
-        path = QPainterPath()
-        path.moveTo(6.5, top)
-        path.lineTo(12, bottom)
-        path.lineTo(17.5, top)
-        painter.drawPath(path)
-
-
-def _unfold(painter, ink):
-    """Two chevrons parting: open a folded group back out."""
-    _stroke(painter, ink)
-    for top, bottom in ((9.5, 3.5), (14.5, 20.5)):
-        path = QPainterPath()
-        path.moveTo(6.5, top)
-        path.lineTo(12, bottom)
-        path.lineTo(17.5, top)
-        painter.drawPath(path)
+    path = QPainterPath()
+    path.moveTo(5.5, 15)
+    path.lineTo(12, 8)
+    path.lineTo(18.5, 15)
+    painter.drawPath(path)
 
 
 def _fit(painter, ink):
@@ -468,8 +458,8 @@ DRAWINGS = {
     # as artifacts, named for what it marks there.
     "folder": _artifacts,
     "warn": _warn,
-    "fold": _fold,
-    "unfold": _unfold,
+    "fold": _chevron_up,
+    "unfold": _chevron_down,
     "fit": _fit,
     "popout": _popout,
     "dock": _dock,
@@ -538,6 +528,27 @@ def pixmap(name, size=16, color=None):
         painter.end()
     _cache[key] = canvas
     return canvas
+
+
+def paint(painter, name, rect, color=None):
+    """Draw one icon straight onto ``painter``, into ``rect``, as lines.
+
+    For a surface that is itself scaled - the cycle canvas, zoomed in or out:
+    a pixmap painted there is resampled and comes out soft, and at the size a
+    phase's band carries a mark that is the difference between a chevron and
+    a smudge. Drawn as paths, it is as sharp as the text beside it.
+    """
+    draw = DRAWINGS.get(name)
+    if draw is None:
+        return
+    ink = color or theme.TEXT
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.translate(rect.left(), rect.top())
+    painter.scale(rect.width() / GRID, rect.height() / GRID)
+    _stroke(painter, ink)
+    draw(painter, ink)
+    painter.restore()
 
 
 def icon(name, color=None):

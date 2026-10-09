@@ -287,3 +287,46 @@ def test_exhausted_revisions_keep_ordinary_decisions_available(qapp, bridge):
     assert not dialog.feedback_editor.isEnabled()
     assert not dialog.revision_button.isEnabled()
     assert all(button.isEnabled() for button in dialog.answer_buttons)
+
+
+# ------------------------------------------------- answering by itself
+def _button(dialog, answer):
+    return next(one for one in dialog.answer_buttons
+                if one.property("answer") == answer)
+
+
+def test_the_auto_answer_counts_down_on_its_own_button(qapp, bridge):
+    """The way "In plan (20)" counts down on the new-task window."""
+    bridge.handle(_event(timeout_ms=300000, auto="Approve"))
+    dialog = _dialog(bridge)
+    assert _button(dialog, "Approve").text() == "Approve (5:00)"
+    assert _button(dialog, "Reject").text() == "Reject"
+    assert dialog._left.text() == ""
+    dialog.countdown(61)
+    assert _button(dialog, "Approve").text() == "Approve (1:01)"
+
+
+def test_pressing_the_counting_button_sends_its_answer_not_its_label(qapp, bridge):
+    bridge.handle(_event(timeout_ms=300000, auto="Approve"))
+    _button(_dialog(bridge), "Approve").click()
+    qapp.processEvents()
+    assert bridge.sent[0]["answer"] == "Approve"
+
+
+def test_at_zero_an_auto_question_stays_and_sends_nothing(qapp, bridge):
+    """The core takes the answer and withdraws the window; a dismissal sent
+    from here would be no answer, and could arrive first."""
+    bridge.handle(_event(timeout_ms=1000, auto="Approve"))
+    bridge._tick(1, [1])
+    qapp.processEvents()
+    assert 1 in bridge._open and bridge.sent == []
+    assert _button(_dialog(bridge), "Approve").text() == "Approve"
+    bridge.handle({"kind": "cycle.ask.withdrawn", "id": 1})
+    qapp.processEvents()
+    assert bridge._open == {} and bridge.sent == []
+
+
+def test_without_an_auto_answer_the_window_reads_as_before(qapp, bridge):
+    bridge.handle(_event(timeout_ms=180000))
+    assert "minutes left" in _dialog(bridge)._left.text()
+    assert _button(_dialog(bridge), "Approve").text() == "Approve"

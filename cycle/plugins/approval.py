@@ -62,6 +62,16 @@ class ApprovalGate(CyclePlugin):
             field("options", "The answers it takes", "args",
                   hint="Buttons, in order. The first is the one that means "
                        "yes. Blank offers Approve and Reject."),
+            field("auto_answer", "Answer by itself",
+                  hint="One of the answers, chosen by itself when nobody "
+                       "answers within auto_after. Blank for never - then "
+                       "silence fails the step. Usually a ${...} reference "
+                       "that is blank whenever a person must decide."),
+            field("auto_after", "Answer by itself after (seconds)", "number",
+                  default=300,
+                  hint="How long to wait before the answer above is taken. "
+                       "Only with an answer to take; capped by the step's "
+                       "timeout."),
             field("approve", "Which answers mean yes", "args",
                   hint="Blank means the first option. Name more than one when "
                        "several answers should let the run continue."),
@@ -71,12 +81,21 @@ class ApprovalGate(CyclePlugin):
                    "True only when somebody chose an answer that means yes."),
             output("answer", "text", "What they chose."),
             output("who", "text", "Who answered, when the application says."),
+            output("automatic", "boolean",
+                   "True when nobody answered and auto_answer was taken."),
         ),
     )
 
     def problems(self, settings):
         settings = settings or {}
         found = super().problems(settings)
+        auto = settings.get("auto_answer")
+        if auto is not None and not isinstance(auto, str):
+            found.append("auto_answer must be text.")
+        wait = settings.get("auto_after", 300)
+        if wait not in (None, "") and (not isinstance(wait, (int, float))
+                                       or isinstance(wait, bool) or wait <= 0):
+            found.append("auto_after must be a number of seconds above 0.")
         for key in ("question", "detail", "revision_step"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
@@ -93,6 +112,11 @@ class ApprovalGate(CyclePlugin):
         unknown = [one for one in approve
                    if one.strip().lower() not in
                    [other.strip().lower() for other in options]]
+        auto = str(settings.get("auto_answer") or "").strip()
+        if auto and "${" not in auto and auto.lower() not in [
+                other.strip().lower() for other in options]:
+            found.append("auto_answer %s is not one of the answers: %s."
+                         % (auto, ", ".join(options)))
         if unknown and "${" not in str(settings.get("approve")):
             # Caught here rather than at run time, where it would read as a
             # rejection: an answer that means yes and is not on offer means
@@ -128,13 +152,24 @@ class ApprovalGate(CyclePlugin):
 
         context.stage(step.id, {"kind": "start", "title": "Waiting for an answer",
                                 "detail": question, "status": "running"})
+        # The step's own timeout, so the deadline is written where every
+        # other deadline in the file is rather than in a field of its own -
+        # or, with an answer to take by itself, the shorter wait for that.
+        timeout_ms = int(step.timeout * 1000) if step.timeout else None
+        auto = _resolved_auto(self.setting(step.settings, "auto_answer", ""), options)
+        if auto is None:
+            return registry.failed(
+                "auto_answer %s is not one of the answers: %s."
+                % (self.setting(step.settings, "auto_answer", ""), ", ".join(options)))
+        if auto:
+            wait_ms = int(float(self.setting(step.settings, "auto_after", 300)) * 1000)
+            # Under the step's own deadline, or the executor stops the step
+            # before the answer is taken.
+            timeout_ms = min(wait_ms, timeout_ms - 1000) if timeout_ms else wait_ms
         answer = ask_mod.ask(
             question, detail=str(self.setting(step.settings, "detail", "") or ""),
-            options=options,
-            # The step's own timeout, so the deadline is written where every
-            # other deadline in the file is rather than in a field of its own.
-            timeout_ms=int(step.timeout * 1000) if step.timeout else None,
-            step=step.id, cancel=context.cancel, revision=revision)
+            options=options, timeout_ms=timeout_ms,
+            step=step.id, cancel=context.cancel, revision=revision, auto=auto)
 
         if answer.get("revision_requested"):
             if not revision.get("enabled"):
@@ -153,9 +188,12 @@ class ApprovalGate(CyclePlugin):
             "status": "done" if approved else "failed"})
 
         outputs = {"approved": approved, "answer": chosen,
-                   "who": answer.get("who", "")}
+                   "who": answer.get("who", ""),
+                   "automatic": bool(answer.get("automatic"))}
         if approved:
-            return registry.succeeded(message="approved: %s" % chosen, **outputs)
+            return registry.succeeded(
+                message=("approved automatically: %s" if answer.get("automatic")
+                         else "approved: %s") % chosen, **outputs)
         # A refusal and a silence are different things and the message says
         # which, but neither lets the run go on.
         if not answer.get("answered") and _unanswered(context):
@@ -164,6 +202,18 @@ class ApprovalGate(CyclePlugin):
             "failed", outputs=outputs,
             message=("not approved: %s" % chosen if answer.get("answered")
                      else answer.get("message", "nobody answered")))
+
+
+def _resolved_auto(value, options):
+    """The answer to take by itself, spelled as the option is; "" for none;
+    None for one that is not on offer."""
+    auto = str(value or "").strip()
+    if not auto:
+        return ""
+    for one in options:
+        if one.strip().lower() == auto.lower():
+            return one
+    return None
 
 
 def _unanswered(context):

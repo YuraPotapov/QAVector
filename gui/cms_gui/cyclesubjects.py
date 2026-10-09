@@ -53,16 +53,42 @@ def plan_id(item):
 def planned_title(item):
     if item.get("kind") == APPROVAL:
         return "%s  waiting for your approval" % (item.get("key") or item.get("cycle", ""))
+    if len(item.get("items") or []) > 1:
+        # Everything the watched step returned, run together: the count first,
+        # the keys after it, since the row is too narrow for every title.
+        return "%d tasks  %s" % (len(item["items"]), ", ".join(
+            str(one.get("key", "")) for one in item["items"]))
     return "%s  %s" % (item.get("key", ""), item.get("title", "")) if item.get(
         "title") else item.get("key", "")
 
 
-def planned_detail(item, cycle_id=""):
+def scheduled_text(item, now=None):
+    """When a planned entry starts by itself, or "" when it does not."""
+    from .cycleschedule import stale, when_text
+
+    run_at = item.get("run_at")
+    if not isinstance(run_at, (int, float)) or isinstance(run_at, bool):
+        return ""
+    if stale(item, time.time() if now is None else now):
+        return "was scheduled for %s - more than 3 days ago, will not run" % (
+            when_text(run_at))
+    return "scheduled for %s" % when_text(run_at)
+
+
+def planned_detail(item, cycle_id="", now=None):
     when = time.strftime("%d %b %H:%M", time.localtime(item.get("at") or 0))
     where = "" if item.get("cycle") == cycle_id else "%s - " % item.get("cycle", "")
+    scheduled = scheduled_text(item, now)
+    if scheduled:
+        return "%s%s" % (where, scheduled)
     if item.get("kind") == APPROVAL:
         return "%snobody answered %s - resume to be asked again" % (where, when)
     return "%splanned %s - waiting for you" % (where, when)
+
+
+def _item(one):
+    return ("%s  %s" % (one.get("key", ""), one["title"]) if one.get("title")
+            else str(one.get("key", "")))
 
 
 def start_label(item):
@@ -77,13 +103,25 @@ def planned_html(item):
                 "again; the bin takes it off the plan and leaves the run as it is."
                 % (html.escape(item.get("cycle", "")),
                    html.escape(item.get("question", ""))))
+    elif len(item.get("items") or []) > 1:
+        said = ("The tasks the cycle %s takes, found while listening and kept "
+                "for you to look at. Start work runs the cycle on all of them; "
+                "the bin takes them off the plan." % html.escape(item.get("cycle", "")))
     else:
         said = ("A new task the cycle %s found while listening, kept for you to "
                 "look at. Start work runs the cycle on it; the bin takes it off "
                 "the plan." % html.escape(item.get("cycle", "")))
     rows = ["<p><b>%s</b></p>" % html.escape(planned_title(item)),
             "<p style='color:%s'>%s</p>" % (theme.NEUTRAL[600], said),
-            "<p>%s</p>" % html.escape(planned_detail(item))]
+            "<p>%s</p>" % html.escape(planned_detail(item)),
+            "<p style='color:%s'>Double-click it to start it later.</p>"
+            % theme.NEUTRAL[500]]
+    if len(item.get("items") or []) > 1:
+        rows.append("<ul>%s</ul>" % "".join(
+            "<li>%s</li>" % (("<a href='%s'>%s</a>" % (html.escape(one["url"], True),
+                                                       html.escape(_item(one))))
+                             if one.get("url") else html.escape(_item(one)))
+            for one in item["items"]))
     if item.get("url"):
         rows.append("<p><a href='%s'>%s</a></p>" % (html.escape(item["url"], True),
                                                    html.escape(item["url"])))
@@ -167,6 +205,10 @@ def status_colour(session):
 def subject_title(session):
     """What a row is called: its key and title, or the run it stands for."""
     subject = session.get("subject") or {}
+    keys = [one.strip() for one in str(subject.get("key") or "").split(",") if one.strip()]
+    if len(keys) > 1:
+        # Started on everything a step returned: named as the plan named it.
+        return "%d tasks  %s" % (len(keys), ", ".join(keys))
     if subject.get("key"):
         return ("%s  %s" % (subject["key"], subject["title"])
                 if subject.get("title") else subject["key"])
@@ -371,6 +413,8 @@ class SubjectsPanel(QWidget):
     #: A planned task: start work on it, or take it off the plan.
     planned_start = Signal(dict)
     planned_remove = Signal(dict)
+    #: A planned entry double-clicked: start it now or later.
+    planned_open = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -395,6 +439,7 @@ class SubjectsPanel(QWidget):
         self.list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.list.setProperty("role", "panel")
         self.list.itemClicked.connect(self._clicked)
+        self.list.itemDoubleClicked.connect(self._double_clicked)
 
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
@@ -630,6 +675,14 @@ class SubjectsPanel(QWidget):
         session = self.session(picked)
         if session is not None:
             self.activated.emit(session)
+
+    def _double_clicked(self, item):
+        picked = item.data(ROLE_SESSION) or ""
+        if picked.startswith(PLAN_PREFIX) and not self._busy:
+            self._picked = picked
+            planned = self.planned_item()
+            if planned is not None:
+                self.planned_open.emit(planned)
 
     def _link(self, url):
         target = url.toString()

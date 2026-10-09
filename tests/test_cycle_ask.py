@@ -391,3 +391,53 @@ def test_plain_approval_does_not_accept_a_revision_intent(asking):
     assert ask_mod.deliver(1, answer="Reject")
     thread.join(3)
     assert result[0]["answer"] == "Reject"
+
+
+# ------------------------------------------------- answering by itself
+# A release that every check called ready should not sit an hour on a window
+# nobody is looking at. Taking an answer by itself is allowed only when the
+# step names one, it is said in the result, and closing the window by hand is
+# still no answer.
+def test_with_an_auto_answer_silence_takes_it_and_says_so(asking, gate):
+    result = gate(_timeout=60, auto_answer="Approve", auto_after=0.3)
+
+    assert result.ok, result.message
+    assert result.outputs == {"approved": True, "answer": "Approve", "who": "",
+                              "automatic": True}
+    assert result.message == "approved automatically: Approve"
+    [asked] = _emitted(asking)
+    assert asked["auto"] == "Approve" and asked["timeout_ms"] == 300
+    assert _emitted(asking, "cycle.ask.withdrawn"), "the window is taken away"
+
+
+def test_a_blank_auto_answer_is_the_ordinary_gate(asking, gate):
+    """What a ${...} reference resolves to whenever a person must decide."""
+    result = gate(_timeout=0.2, auto_answer="", auto_after=0.1)
+    assert not result.ok and result.outputs["automatic"] is False
+
+
+def test_closing_the_window_is_still_no_answer(asking, gate):
+    _answer_soon(1, "")
+    result = gate(_timeout=60, auto_answer="Approve", auto_after=30)
+    assert not result.ok and result.outputs["answer"] == ""
+
+
+def test_somebody_answering_first_is_their_answer(asking, gate):
+    _answer_soon(1, "Reject", who="tester")
+    result = gate(_timeout=60, auto_answer="Approve", auto_after=30)
+    assert not result.ok and result.outputs["automatic"] is False
+    assert result.outputs["who"] == "tester"
+
+
+def test_the_auto_answer_waits_under_the_step_s_own_deadline(asking, gate):
+    _answer_soon(1, "Approve")
+    gate(_timeout=10, auto_answer="Approve", auto_after=300)
+    assert _emitted(asking)[0]["timeout_ms"] == 9000
+
+
+def test_an_auto_answer_that_is_not_on_offer_is_refused():
+    found = registry.get("approval.gate").problems(
+        {"question": "Ship?", "options": ["Ship", "Stop"], "auto_answer": "Maybe"})
+    assert any("auto_answer Maybe is not one of the answers" in one for one in found)
+    assert registry.get("approval.gate").problems(
+        {"question": "Ship?", "auto_answer": "${steps.x.outputs.stdout_tail}"}) == []

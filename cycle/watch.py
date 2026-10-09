@@ -19,10 +19,23 @@ What has been seen lives in the memory store under ``watch/<cycle>/<trigger>``,
 beside the records the cycles themselves keep, so it survives a restart and
 can be read or forgotten like any other record.
 
+**One offer or one per item - the step decides.** What is offered is what a
+run started from the offer would take, and only the watched step knows that.
+When the trigger's pin is one of the step's own inputs (``issue:
+${vars.task_key}``), a run takes the one item it is started on, so every item
+is offered on its own. When the step does not read the pin, a run takes
+whatever the step returns - all the tasks ready for a release, say - so that
+whole answer is a single offer, listing every item, made whenever any of them
+is new. Its key is the items' keys joined by commas; seeing or planning it
+sees or plans each of them. The listener adds no selection of its own: the
+step's query and its limit are the offer.
+
 **Planned.** An item nobody answered about in time - or that somebody chose to
 look at later - is *planned*: kept in the same record with its title and when,
 and no longer offered, until somebody starts it or removes it. Either of those
-marks it seen, which is also what takes it off the plan.
+marks it seen, which is also what takes it off the plan. A whole-answer offer
+planned replaces the one planned before it: the latest answer is what a run
+would take now.
 """
 
 import time
@@ -99,31 +112,63 @@ def settings_for(cycle, trigger, secrets_path=None, env=None, registry=None):
     return variables.resolve(step.settings, scope)
 
 
+def each_on_its_own(cycle, trigger):
+    """True when a run takes the one item it is started on: the trigger's pin
+    is an input of the watched step. False when the step does not read it, and
+    a run takes everything the step returns."""
+    pin = model.trigger_pin(cycle, trigger)
+    step = cycle.step(trigger.watch)
+    if not pin or step is None:
+        return False
+    return any(path == "vars." + pin or path.startswith("vars.%s." % pin)
+               for path in variables.references(step.settings))
+
+
+def keys_of(key):
+    """The keys in an offer's key: one, or several joined by commas."""
+    return [one.strip() for one in str(key).split(",") if one.strip()]
+
+
+def whole(found):
+    """One offer for everything a step returned: the run takes all of it."""
+    keys = [one["key"] for one in found]
+    if len(found) == 1:
+        return dict(found[0], whole=True, items=list(found))
+    return {"key": ",".join(keys), "title": "%d tasks" % len(found), "url": "",
+            "whole": True, "items": list(found)}
+
+
 def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
           registry=None):
     """``{"trigger", "first", "new": [{key, title, ...}], "pin"}``.
 
     ``first`` is true on a trigger's very first check, when everything found is
-    recorded as seen and nothing is reported new.
+    recorded as seen and nothing is reported new. For a step that does not
+    read the pin, ``new`` holds at most one offer: everything the step returned,
+    with ``whole`` true and the items under ``items``.
     """
     trigger = trigger_of(cycle, trigger_id)
     _step, plugin = plugin_for(cycle, trigger, registry)
     settings = settings_for(cycle, trigger, secrets_path, env, registry)
+    each = each_on_its_own(cycle, trigger)
     try:
-        found = [one for one in plugin.peek(settings) if one.get("key")]
+        found = [one for one in plugin.peek(settings, each=each) if one.get("key")]
     except Exception as exc:  # noqa: BLE001 - whatever the plugin raised, said
         raise WatchError(str(exc) or type(exc).__name__)
     key = record_key(cycle.id, trigger.id)
     first = not memory.known(key, memory_path)
     fields = memory.recall(key, memory_path)
     seen = set(fields.get("seen") or [])
-    seen |= {one.get("key") for one in fields.get("planned") or []}
+    for one in fields.get("planned") or []:
+        seen.update(keys_of(one.get("key", "")))
     if first:
         memory.remember(key, {"seen": sorted(one["key"] for one in found)},
                         memory_path)
         new = []
-    else:
+    elif each:
         new = [one for one in found if one["key"] not in seen]
+    else:
+        new = [whole(found)] if any(one["key"] not in seen for one in found) else []
     return {"cycle": cycle.id, "trigger": trigger.id, "first": first,
             "every": trigger.every, "pin": model.trigger_pin(cycle, trigger),
             "new": new}
@@ -132,30 +177,48 @@ def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
 def mark_seen(cycle, key, trigger_id="", memory_path=None):
     """Remember ``key`` as seen, so it is not offered again - and take it off
     the plan, since seen is what starting or removing a planned item means.
-    Returns how many are seen."""
+    A whole-answer key sees each of its items. Returns how many are seen."""
     trigger = trigger_of(cycle, trigger_id)
     record = record_key(cycle.id, trigger.id)
     fields = memory.recall(record, memory_path)
     seen = set(fields.get("seen") or [])
-    seen.add(str(key))
+    seen.update(keys_of(key))
     planned = [one for one in fields.get("planned") or [] if one.get("key") != str(key)]
     memory.remember(record, {"seen": sorted(seen), "planned": planned}, memory_path)
     return len(seen)
 
 
-def plan(cycle, key, title="", url="", trigger_id="", memory_path=None, when=None):
+def plan(cycle, key, title="", url="", trigger_id="", memory_path=None, when=None,
+         items=None):
     """Keep ``key`` to be looked at later. Returns the plan for this trigger.
 
     Planned is not seen: it is not offered again, and it stays until somebody
     starts or removes it (:func:`mark_seen`). Planning one twice keeps the
-    first time it was planned.
+    first time it was planned. For a step that does not read the pin, the
+    offer planned is everything the step returned, and it replaces whatever
+    was planned before: the latest answer is what a run would take.
     """
     trigger = trigger_of(cycle, trigger_id)
     record = record_key(cycle.id, trigger.id)
     planned = list(memory.recall(record, memory_path).get("planned") or [])
-    if not any(one.get("key") == str(key) for one in planned):
-        planned.append({"key": str(key), "title": str(title or ""),
-                        "url": str(url or ""), "at": when or time.time()})
+    entry = {"key": str(key), "title": str(title or ""),
+             "url": str(url or ""), "at": when or time.time()}
+    if items:
+        entry["items"] = [{"key": str(one.get("key", "")),
+                           "title": str(one.get("title", "")),
+                           "url": str(one.get("url", ""))} for one in items]
+    if not each_on_its_own(cycle, trigger):
+        kept = [one for one in planned if one.get("key") == str(key)]
+        if not kept:
+            # The latest answer replaces the one planned before it - and keeps
+            # its start time: a task that turns up at three must not cancel
+            # the release somebody scheduled for six.
+            when_run = [one["run_at"] for one in planned if one.get("run_at")]
+            if when_run:
+                entry["run_at"] = when_run[-1]
+        planned = kept or [entry]
+    elif not any(one.get("key") == str(key) for one in planned):
+        planned.append(entry)
     memory.remember(record, {"planned": planned}, memory_path)
     return planned
 

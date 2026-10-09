@@ -420,3 +420,53 @@ def test_a_long_list_is_drawn_a_screenful_first_and_the_rest_after(qapp, dispose
         assert len(panel.row_ids()) == 4, "a newer drawing drops the older's rest"
     finally:
         dispose(panel)
+
+
+def test_a_planned_whole_answer_shows_how_many_and_every_task():
+    item = {"kind": "task", "cycle": "rel", "key": "QA-1,QA-2", "title": "2 tasks",
+            "items": [{"key": "QA-1", "title": "First", "url": "https://x.invalid/QA-1"},
+                      {"key": "QA-2", "title": "Second", "url": ""}], "at": 0}
+    assert cs.planned_title(item) == "2 tasks  QA-1, QA-2"
+    shown = cs.planned_html(item)
+    assert "runs the cycle on all of them" in shown
+    assert "<a href='https://x.invalid/QA-1'>QA-1  First</a>" in shown
+    assert "<li>QA-2  Second</li>" in shown
+
+
+def test_a_planned_single_task_reads_as_before():
+    item = {"kind": "task", "cycle": "dev", "key": "QA-3", "title": "One",
+            "items": [{"key": "QA-3", "title": "One"}], "at": 0}
+    assert cs.planned_title(item) == "QA-3  One"
+
+
+def test_a_run_started_on_several_tasks_is_named_as_the_plan_named_it():
+    session = {"subject": {"kind": "task", "key": "QA-1,QA-2,QA-3", "title": "3 tasks"},
+               "started_at": 0}
+    assert cs.subject_title(session) == "3 tasks  QA-1, QA-2, QA-3"
+    one = {"subject": {"key": "QA-1", "title": "Fix the login"}, "started_at": 0}
+    assert cs.subject_title(one) == "QA-1  Fix the login"
+
+
+def test_a_scheduled_entry_says_when_it_starts():
+    now = time.mktime((2026, 10, 6, 9, 30, 0, 0, 0, -1))
+    run_at = time.mktime((2026, 10, 6, 18, 0, 0, 0, 0, -1))
+    item = {"kind": "task", "cycle": "rel", "key": "QA-1", "title": "t",
+            "run_at": run_at, "at": 0}
+    assert cs.planned_detail(item, "rel", now=now) == "scheduled for 06 Oct 18:00"
+    old = cs.planned_detail(item, "rel", now=run_at + 4 * 24 * 3600)
+    assert old == ("was scheduled for 06 Oct 18:00 - more than 3 days ago, "
+                   "will not run")
+
+
+def test_double_clicking_a_planned_entry_asks_when(qapp):
+    panel = cs.SubjectsPanel()
+    opened = []
+    panel.planned_open.connect(opened.append)
+    item = {"id": "task:rel:t:QA-1", "kind": "task", "cycle": "rel", "key": "QA-1",
+            "title": "t", "at": 0}
+    panel.set_planned([item])
+    row = next(panel.list.item(index) for index in range(panel.list.count())
+               if panel.list.item(index).data(cs.ROLE_SESSION) == cs.plan_id(item))
+    panel.list.itemDoubleClicked.emit(row)
+    assert opened == [item]
+    panel.deleteLater()

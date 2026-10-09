@@ -33,10 +33,11 @@ it.
 
 import contextlib
 import math
+import re
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
-                           QPainterPathStroker, QPen, QPolygonF)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QPainter,
+                           QPainterPath, QPainterPathStroker, QPen, QPolygonF)
 from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsObject,
                                QGraphicsPathItem, QGraphicsPolygonItem,
                                QGraphicsScene, QGraphicsView, QToolTip)
@@ -86,7 +87,13 @@ SPEC = {
              # is far wider than it is drawn, or nobody would ever hit one.
              "hit": 10,
              # None is a solid line. A dash pattern is in pen units.
-             "dash": {"dependency": None, "success": None, "failure": (4, 3)}},
+             "dash": {"dependency": None, "success": None, "failure": (4, 3),
+                      # A link into a step with an `if:` - the step may not
+                      # run, and a broken line says so before it is read.
+                      "condition": (5, 3)},
+             # The condition written on such a link: its text size, and how
+             # far its box stands off the words.
+             "label": 10, "label_pad": 4},
     "text": {"title": 12, "plugin": 10, "meta": 10},
     # `grid` is the scale a cycle opens at and the scale the ruled paper starts
     # being drawn at - one number on purpose. The paper appearing is what tells
@@ -176,6 +183,82 @@ def ink(name):
         # so a glance separates a step that is working from one that is parked.
         return theme.ACCENT_RAMP[int(name[len("ACCENT"):])]
     return getattr(theme, name)
+
+
+# -- conditions, in words ------------------------------------------------------
+#: A step's output or status as a condition reads it.
+_READ = re.compile(r"\$\{\s*steps\.([A-Za-z0-9_-]+)\.(status|outputs\.([A-Za-z0-9_.-]+))\s*\}")
+#: ``<reference> == 'value'`` or ``!=``, or the reference alone - the grammar
+#: cycle/conditions.py accepts. Quotes around the reference are allowed.
+_COMPARED = re.compile(
+    r"^\s*[\"']?(\$\{[^}]*\})[\"']?\s*(?:(==|!=)\s*([\"'])(.*)\3)?\s*$")
+
+#: Outputs whose plain truth reads better as words than as their name.
+_SAID = {"changed": "if files changed", "count": "if any found",
+         "approved": "if approved", "passed": "if passed", "ok": "if ok",
+         "found": "if found", "blocking_count": "if problems found",
+         "fixable_count": "if something to fix",
+         "issue_count": "if issues found"}
+
+#: The longest a condition is written on a link. The rest is in its tooltip.
+LABEL_CHARS = 28
+
+
+def condition_reads(condition):
+    """The step ids a condition reads, in order."""
+    found = []
+    for step_id, _what, _output in _READ.findall(str(condition or "")):
+        if step_id not in found:
+            found.append(step_id)
+    return found
+
+
+def describe_condition(condition, plugin=""):
+    """A step's ``if:`` as the few words written on the link into it.
+
+    Said from the side of the step it reads - the link comes out of that one -
+    so ``${steps.fix.outputs.changed}`` is "if files changed" and
+    ``${steps.gate.status} != 'failed'`` is "unless it failed", or "unless
+    rejected" when the step is an approval, whose failing is somebody saying
+    no. Anything it does not recognise is written as it is, shortened.
+    """
+    text = str(condition or "").strip()
+    if not text:
+        return ""
+    matched = _COMPARED.match(text)
+    read = _READ.fullmatch(matched.group(1)) if matched else None
+    if read is None:
+        alone = matched.group(1) if matched and matched.group(2) is None else ""
+        if re.fullmatch(r"\$\{\s*run\.[A-Za-z0-9_.]+\s*\}", alone):
+            # A run always has an id: this is how a step says it runs whatever
+            # became of the step before it.
+            return "either way"
+        variable = re.fullmatch(r"\$\{\s*vars\.([A-Za-z0-9_-]+)\s*\}", alone)
+        if variable:
+            return "if %s is set" % variable.group(1)
+        short = text if len(text) <= LABEL_CHARS - 3 else text[:LABEL_CHARS - 4] + "..."
+        return "if " + short
+    what, output = read.group(2), read.group(3) or ""
+    operator, value = matched.group(2), matched.group(4)
+    gate = plugin.startswith("approval")
+    if what == "status":
+        if operator is None:
+            return "if it ran"
+        wording = {("==", "success"): "if approved" if gate else "if it succeeded",
+                   ("!=", "success"): "unless approved" if gate else "unless it succeeded",
+                   ("==", "failed"): "if rejected" if gate else "if it failed",
+                   ("!=", "failed"): "unless rejected" if gate else "unless it failed",
+                   ("==", "skipped"): "if it was skipped",
+                   ("!=", "skipped"): "if it ran"}
+        return wording.get((operator, value),
+                           "if %s %s" % ("status is" if operator == "==" else
+                                         "status is not", value))
+    name = output.split(".")[-1]
+    if operator is None:
+        return _SAID.get(name, "if " + name.replace("_", " "))
+    said = "if %s is %s%s" % (name.replace("_", " "),
+                              "" if operator == "==" else "not ", value)
+    return said if len(said) <= LABEL_CHARS else said[:LABEL_CHARS - 3] + "..."
 
 
 # -- layout -------------------------------------------------------------------
@@ -804,8 +887,9 @@ class CycleNodeItem(QGraphicsObject):
         x = spec["w"] - spec["pad_x"] - size
         y = spec["pad_y"]
         for name, colour in self._badges():
-            painter.drawPixmap(QRectF(x, y, size, size).toRect(),
-                               icons.pixmap(name, size, ink(colour)))
+            # As lines, not a pixmap: the canvas is scaled, and a pixmap
+            # resampled with it comes out soft.
+            icons.paint(painter, name, QRectF(x, y, size, size), ink(colour))
             x -= size + 4
 
     def _badges(self):
@@ -891,6 +975,10 @@ class CycleEdgeItem(QGraphicsPathItem):
         #: selected link is re-pointed by.
         self._start = QPointF()
         self._tip = QPointF()
+        #: The target's condition in words, written on the line, when the
+        #: target has one and this is the link it reads - see set_condition.
+        self.condition = ""
+        self._condition_full = ""
         self.setZValue(EDGE_Z)      # under the nodes, always
         if not self.is_phase_link:
             self.setToolTip("%s waits for %s" % (self.target, self.source))
@@ -913,6 +1001,34 @@ class CycleEdgeItem(QGraphicsPathItem):
             self.setToolTip(said + ("\nClick it, then drag an end to another "
                                     "step, or press Delete." if on else ""))
 
+    def set_condition(self, label, condition=""):
+        """Draw this link broken, with ``label`` on it: the step it leads to
+        runs only when ``condition`` holds."""
+        self.prepareGeometryChange()
+        self.condition, self._condition_full = label or "", condition or ""
+        if self.condition and not self.is_phase_link:
+            self.setToolTip("%s runs only %s.\nif: %s\n%s waits for %s" % (
+                self.target, self.condition, self._condition_full,
+                self.target, self.source))
+        self.update()
+
+    def _label_font(self):
+        font = QFont(theme.FONT_BODY[0])
+        font.setPixelSize(self._spec["edge"].get("label", 10))
+        return font
+
+    def label_rect(self):
+        """Where the condition's box is drawn: on the middle of the line."""
+        if not self.condition or self.path().isEmpty():
+            return QRectF()
+        pad = self._spec["edge"].get("label_pad", 4)
+        metrics = QFontMetricsF(self._label_font())
+        width = metrics.horizontalAdvance(self.condition) + pad * 2
+        height = metrics.height() + pad
+        middle = self.path().pointAtPercent(0.5)
+        return QRectF(middle.x() - width / 2.0, middle.y() - height / 2.0,
+                      width, height)
+
     def end_at(self, point):
         """Which end of a selected link ``point`` takes - "from", "to" or ""."""
         if not self.isSelected():
@@ -931,6 +1047,8 @@ class CycleEdgeItem(QGraphicsPathItem):
         stroker.setWidth(self._spec["edge"]["hit"])
         found = stroker.createStroke(self.path())
         found.addPolygon(self._head)
+        if self.condition:
+            found.addRect(self.label_rect())
         if self.isSelected():
             reach = self._spec["node"]["port_reach"]
             for centre in (self._start, self._tip):
@@ -1027,8 +1145,8 @@ class CycleEdgeItem(QGraphicsPathItem):
         margin = max(max(edge["width"], edge["lit_width"]) / 2.0 + 1.0,
                      self._spec["node"]["port_reach"] + 1.0)
         return QGraphicsPathItem.boundingRect(self).united(
-            self._head.boundingRect()).adjusted(-margin, -margin,
-                                                margin, margin)
+            self._head.boundingRect()).united(self.label_rect()).adjusted(
+                -margin, -margin, margin, margin)
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -1038,7 +1156,8 @@ class CycleEdgeItem(QGraphicsPathItem):
         pen = QPen(colour)
         pen.setWidthF(edge["lit_width"] if lit else edge["width"])
         pen.setCapStyle(Qt.RoundCap)
-        dash = self._spec["edge"]["dash"].get(self.kind)
+        dash = self._spec["edge"]["dash"].get(
+            "condition" if self.condition else self.kind)
         if dash:
             pen.setDashPattern(list(dash))
 
@@ -1051,6 +1170,20 @@ class CycleEdgeItem(QGraphicsPathItem):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(colour))
         painter.drawPolygon(self._head)
+
+        if self.condition:
+            # On the paper's own ground, so the line stops at the words rather
+            # than running through them, and in the line's colour, so the two
+            # read as one thing.
+            box = self.label_rect()
+            border = QPen(colour)
+            border.setWidthF(1.0)
+            painter.setPen(border)
+            painter.setBrush(QBrush(QColor(ink("CANVAS_BG"))))
+            painter.drawRect(box)
+            painter.setFont(self._label_font())
+            painter.setPen(QColor(ink("ACCENT" if lit else "NEUTRAL700")))
+            painter.drawText(box, Qt.AlignCenter, self.condition)
 
         if self.isSelected():
             # The two ends it can be dragged by: hollow, like a step's own
@@ -1232,10 +1365,9 @@ class CycleGroupFrame(QGraphicsObject):
                              Qt.AlignLeft | Qt.AlignVCenter,
                              _elide(painter, label, room))
             size = 12
-            painter.drawPixmap(QRectF(band.right() - size,
-                                      band.center().y() - size / 2.0,
-                                      size, size).toRect(),
-                               icons.pixmap("fold", size, ink("NEUTRAL600")))
+            icons.paint(painter, "fold", QRectF(band.right() - size,
+                                                band.center().y() - size / 2.0,
+                                                size, size), ink("NEUTRAL600"))
 
     def mousePressEvent(self, event):
         if (any(one.contains(event.pos()) for one in self._headings)
@@ -1611,6 +1743,17 @@ class CycleCanvas(QGraphicsView):
             item = CycleEdgeItem(source, target,
                                  edge.get("kind", "dependency"), self._spec)
             item.set_editable(self._linking is not None)
+            condition = (getattr(target, "node", None) or {}).get("condition")
+            if condition:
+                # On the link from the step the condition reads - or, when it
+                # reads none of the steps this one waits for, on every link
+                # in, since then any of them is the way it may not be taken.
+                reads = condition_reads(condition)
+                incoming = waits.get(edge.get("to")) or []
+                if edge.get("from") in reads or not set(reads) & set(incoming):
+                    item.set_condition(describe_condition(
+                        condition, (getattr(source, "node", None) or {})
+                        .get("plugin", "")), condition)
             source.edges.append(item)
             target.edges.append(item)
             self.scene().addItem(item)
@@ -1641,8 +1784,15 @@ class CycleCanvas(QGraphicsView):
     def folded(self):
         return sorted(self._folded)
 
-    def set_folded(self, names):
-        """Fold exactly these phases. Statuses and problems are carried over."""
+    def set_folded(self, names, anchor=""):
+        """Fold exactly these phases. Statuses and problems are carried over.
+
+        The zoom stays what it was. Rebuilding with no view used to reset it,
+        so folding one phase fitted the whole cycle into the window - a jump
+        away from what somebody had just clicked. ``anchor`` names the phase
+        that was clicked: it is kept where it was on the screen, folded or
+        opened, so the eye does not have to find it again.
+        """
         names = set(names or ()) & set(self.phases())
         if names == self._folded:
             return
@@ -1651,19 +1801,42 @@ class CycleCanvas(QGraphicsView):
             # puts the steps back where they had them.
             self._places = self.places()
         statuses, problems = dict(self._statuses), dict(self._problems)
+        view = self.view() if self._nodes else None
+        before = self._phase_point(anchor)
+        on_screen = self.mapFromScene(before) if before is not None else None
         self._folded = names
         with self._placing_view():
-            self._build(self._graph, self._places, None)
+            self._build(self._graph, self._places, view)
+            after = self._phase_point(anchor)
+            if on_screen is not None and after is not None:
+                # Move the view by however far the phase moved in the scene,
+                # so it lands back under the pointer that clicked it.
+                shift = after - self.mapToScene(on_screen)
+                centre = self.mapToScene(self.viewport().rect().center())
+                self.centerOn(centre + shift)
         self._statuses, self._problems = statuses, problems
         self._repaint_statuses()
         self._repaint_problems()
         self.folds_changed.emit()
 
+    def _phase_point(self, name):
+        """Where a phase is read from in the scene: its band, or its box when
+        folded. None for no phase, or one not drawn."""
+        if not name:
+            return None
+        frame = self._frames.get(name)
+        if frame is not None and not frame.band().isEmpty():
+            return frame.mapToScene(frame.band().topLeft())
+        box = self._nodes.get(GROUP_PREFIX + name)
+        if box is not None:
+            return box.pos()
+        return None
+
     def fold(self, name):
-        self.set_folded(self._folded | {name})
+        self.set_folded(self._folded | {name}, anchor=name)
 
     def unfold(self, name):
-        self.set_folded(self._folded - {name})
+        self.set_folded(self._folded - {name}, anchor=name)
 
     @contextlib.contextmanager
     def _moving_many(self):

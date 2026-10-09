@@ -29,8 +29,8 @@ from cycle.plugins import agent_cli, agent_run
 from cycle.operations import (Operation, recorded, result_document,
                               result_from_document)
 from cycle.plugins._process import run_process
-from cycle.plugins.agent_worker import (COMPLEXITY_GUIDE, SCOPE_GUIDE, extract_json,
-                                        validate_review)
+from cycle.plugins.agent_worker import (COMPLEXITY_GUIDE, SCOPE_GUIDE, VERDICT_GUIDE,
+                                        extract_json, validate_review)
 from cycle.registry import (CyclePlugin, PluginMetadata, action, field,
                             output)
 from domain.cycle import Artifact
@@ -98,6 +98,12 @@ class AgentReview(CyclePlugin):
                        "effort scale (low to max), and publishes it as "
                        "`complexity` - so a later agent step can take "
                        "effort: ${steps.<id>.outputs.complexity}."),
+            field("verdict", "Say whether it can go", "check", default=False,
+                  hint="Also asks for a yes or no - can this go ahead as it "
+                       "is - published as `ready`. Separate from the issues: "
+                       "a gate can then tell 'something for this cycle to "
+                       "fix' from 'not shippable for a reason no step here "
+                       "can fix'."),
             field("scope", "Name what is left out", "check", default=False,
                   hint="Also asks for everything the task leaves unsaid that "
                        "the work deliberately does not handle, published as "
@@ -113,10 +119,18 @@ class AgentReview(CyclePlugin):
             output("blocking_count", "number",
                    "How many of them are high or medium. The count a gate "
                    "usually wants: a low-severity note should not stop a run."),
+            output("fixable_count", "number",
+                   "How many blocking issues a later step can fix. With "
+                   "verdict every issue says whether it can - a problem only "
+                   "an outside author can fix does not count; without it, "
+                   "the same as blocking_count."),
             output("recommendations", "array"), output("risk", "string"),
             output("complexity", "string",
                    "How hard the task is, as an effort level - only when the "
                    "step sets assess: complexity."),
+            output("ready", "boolean",
+                   "Whether the work can go ahead as it is - only when the "
+                   "step sets verdict."),
             output("out_of_scope", "array",
                    "What the work deliberately leaves out, one sentence each - "
                    "only when the step sets scope."),
@@ -274,6 +288,7 @@ class AgentReview(CyclePlugin):
             "max_iterations": int(self.setting(step.settings, "max_iterations", 12)),
             "assess": self.setting(step.settings, "assess", ""),
             "scope": _scoped(self, step),
+            "verdict": _checked_setting(self, step, "verdict"),
         }
         interpreter = os.path.expanduser(self.setting(step.settings, "python"))
         # Explicit relative interpreter paths are relative to the run workspace;
@@ -338,7 +353,7 @@ class AgentReview(CyclePlugin):
                 raise ValueError("review exceeds the 2 MiB limit")
             review = validate_review(json.loads(raw),
                                      request["assess"] == "complexity",
-                                     request["scope"])
+                                     request["scope"], request.get("verdict", False))
         except (OSError, ValueError, TypeError) as exc:
             result.status = "failed"
             result.message = "Agent did not return a valid review: %s" % exc
@@ -378,10 +393,11 @@ def _claude_cli_method(self, context, step):
 
     assess = self.setting(step.settings, "assess", "") == "complexity"
     scope = _scoped(self, step)
+    verdict = _checked_setting(self, step, "verdict")
     prompt = _claude_cli_prompt(
         str(self.setting(step.settings, "task") or ""),
         self.setting(step.settings, "inputs", {}), files, repository,
-        complexity=assess, scope=scope)
+        complexity=assess, scope=scope, verdict=verdict)
 
     directory = context.step_dir(step.id)
     # The prompt is on the command line and can be long, so it is kept out of
@@ -402,7 +418,7 @@ def _claude_cli_method(self, context, step):
         return result
 
     try:
-        review = validate_review(extract_json(reply.text), assess, scope)
+        review = validate_review(extract_json(reply.text), assess, scope, verdict)
     except (ValueError, TypeError) as exc:
         result.status = "failed"
         result.message = "Agent did not return a valid review: %s" % exc
@@ -436,13 +452,20 @@ def counts(review):
     ``${...}`` walks mappings and cannot measure a list, so "did the review
     find anything" is unaskable from a cycle file without these. Both are here
     rather than only the total because the useful question is almost always
-    the second one: a low-severity note should not stop a run.
+    the second one: a low-severity note should not stop a run. And the third,
+    with a verdict, is the one a fix round wants: of those, how many a step
+    of this cycle can fix - a bug in a task's own code is blocking, and no
+    second merge attempt will touch it.
     """
     issues = review.get("issues") or []
+    blocking = [one for one in issues
+                if isinstance(one, dict) and one.get("severity") in BLOCKING]
+    # An issue says whether a step can fix it only when the review gave a
+    # verdict; one that does not say is this pipeline's to fix, as before.
     return {"issue_count": len(issues),
-            "blocking_count": sum(1 for one in issues
-                                  if isinstance(one, dict)
-                                  and one.get("severity") in BLOCKING)}
+            "blocking_count": len(blocking),
+            "fixable_count": sum(1 for one in blocking
+                                 if one.get("fixable", True) is not False)}
 
 
 def _review_outputs(review, report):
@@ -459,7 +482,12 @@ def _review_outputs(review, report):
 def _scoped(plugin, step):
     """Whether the step asked for what it leaves out. A check box may arrive as
     a bool, or as text from a cycle file written by hand."""
-    value = plugin.setting(step.settings, "scope", False)
+    return _checked_setting(plugin, step, "scope")
+
+
+def _checked_setting(plugin, step, key):
+    """A check box's value, which may arrive as a bool or as text."""
+    value = plugin.setting(step.settings, key, False)
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
@@ -470,10 +498,13 @@ def _said(review):
         line += ", %s complexity" % review["complexity"]
     if "out_of_scope" in review:
         line += ", %d left out of scope" % len(review["out_of_scope"])
+    if "ready" in review:
+        line += ", ready" if review["ready"] else ", not ready"
     return line
 
 
-def _claude_cli_prompt(task, inputs, files, repository, complexity=False, scope=False):
+def _claude_cli_prompt(task, inputs, files, repository, complexity=False, scope=False,
+                       verdict=False):
     """The whole request, as one prompt.
 
     Written out rather than handed over as attachments because the CLI takes a
@@ -504,20 +535,24 @@ else - no prose before it, no code fence around it:
     {"severity": "low" | "medium" | "high",
      "description": "what is wrong",
      "file": "path, or an empty string",
-     "line": 12 or null}
+     "line": 12 or null%s}
   ],
   "recommendations": ["what to do about it"]%s
 }
 
 Every field is required. Use an empty list when you found nothing.""" % (
+        (',\n     "fixable": true | false' if verdict else ""),
         (',\n  "complexity": "low" | "medium" | "high" | "xhigh" | "max"'
          if complexity else "")
         + (',\n  "out_of_scope": ["what is left out, one sentence each"]'
-           if scope else ""))]
+           if scope else "")
+        + (',\n  "ready": true | false' if verdict else ""))]
     if complexity:
         parts += ["", COMPLEXITY_GUIDE]
     if scope:
         parts += ["", SCOPE_GUIDE]
+    if verdict:
+        parts += ["", VERDICT_GUIDE]
     return "\n".join(parts)
 
 

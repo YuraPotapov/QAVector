@@ -257,6 +257,7 @@ appears to the left of something it depends on.
 | `agent.review` | Reviews a repository and step results; returns structured findings. The default backend needs no API key - it uses the Claude Code CLI's browser sign-in. |
 | `agent.edit` | Lets an agent change files in a directory. Edits are applied as they are made. No shell. |
 | `agent.implement` | Makes a change and proves it: edit, run the checks, fix what failed, repeat. |
+| `agent.merge` | Lets an agent merge branches and resolve conflicts in a repository with no remote. Local git only, from a fixed list; it cannot push. Reports every command it ran. |
 | `git.commit` | Commits the tree that was verified, and refuses anything else. Local only — no push. |
 | `jira.issues` | Reads a person's Jira issues and the comments on them. Reads only. |
 | `jira.transition` | Moves one issue along its workflow. Writes — and only this. |
@@ -654,6 +655,30 @@ check. **In plan (20)** counts down on its own button and presses itself at
 zero: a task nobody answered about goes on the plan instead of holding up every
 task behind it. Several new tasks are asked about one window at a time.
 
+**One task, or everything the step returns.** What is offered is what a run
+started from the offer would take, and the watched step decides that - the
+listener adds no selection of its own. When the trigger's `pin` is one of the
+step's inputs (`issue: ${vars.task_key}`, as above), a run takes the one task it
+is started on, so each new task is its own offer. When the step does not read
+the pin - a release that takes every task ready for it - a run takes the step's
+whole answer, so that is one offer: *Start Ready To Release on 3 tasks?*, with
+every task listed, made whenever one of them is new. The step's own `limit`
+holds. Start runs the cycle with `pin` set to the keys joined by commas; Ignore
+and Start mark each of them seen. Planned, it is one entry - *3 tasks  QA-1,
+QA-2, QA-3* - replaced by the next answer if that is planned too, since the
+latest answer is what a run would take now.
+Started, the run keeps that name in Subjects: a cycle that names no `subject:`
+of its own is about what it was started on.
+
+```yaml
+variables:
+  offered_task: ""     # where the offered keys go; the step does not read it
+triggers:
+  - id: ready_for_release
+    watch: ready        # role: everyone, jql: status = "Ready for release"
+    pin: offered_task
+```
+
 **The plan** is in the Subjects list on the Cycles page, under *+ New run*, the
 open cycle's first: each task with when it was planned, *Start work* for the one
 picked, and a bin that takes it off (and does not offer it again). It is kept in
@@ -694,6 +719,29 @@ because the network is down.
 
 From a terminal: `--cycle-watch=CYCLE[:TRIGGER]` prints what is new (it starts
 nothing), and `--cycle-watch-seen=CYCLE[:TRIGGER]:KEY` marks one task seen.
+
+### Starting something on the plan later
+
+Double-click an entry on the plan - a planned task, or an approval nobody
+answered - and a window asks when: **Start now**, or a day and a time and
+**Schedule**. The day is today or one of the three after it: a start can be
+put at most three days ahead. A scheduled entry says so in the list -
+*scheduled for 09 Oct 18:00* - and double-clicking it again moves the time or
+takes it off (**Clear schedule**).
+
+At that time, if the application is open, the entry starts as though Start
+work had been pressed - after the run going on then, if there is one. If the
+application was closed at the time (or the machine asleep), it asks when it is
+next open: *Start it now?* - and **Not now** keeps the entry on the plan
+without a time. A start more than three days in the past is never made nor
+asked about: the application may be opened a month later, and what was planned
+a month ago is not today's work. Such an entry stays on the plan, saying it
+will not run, until somebody starts or removes it.
+
+A whole-answer entry (a release) keeps its time when the next answer replaces
+it: a task that turns up at three does not cancel the release scheduled for
+six. From a terminal: `--cycle-plan-schedule=ID@SECONDS` sets the time
+(seconds since the epoch), `ID@` takes it off.
 
 ### How a run began
 
@@ -812,9 +860,31 @@ window counts it down so nobody decides after it has stopped mattering.
 
 **Not answered is not approved.** No application attached, nobody at the
 screen, the window closed, the deadline passed — every one of those fails the
-step, and there is deliberately no setting to change it. A gate that approved
-when it could not ask would stop being a gate exactly where somebody believed
-they had one.
+step. A gate that approved when it could not ask would stop being a gate
+exactly where somebody believed they had one.
+
+**Unless the step names the answer to take.** `auto_answer:` is one of the
+answers, taken by itself when nobody has answered within `auto_after:` seconds
+(300 unless said otherwise, and always under the step's own timeout). The
+window says so and counts it down - *"Put it into claim/" automatically in
+4:59* - the result says `approved automatically`, and the step publishes
+`automatic: true`. Closing the window by hand is still no answer, and a
+stopped run is still stopped. Blank means never, which is what makes it safe
+to point at an earlier step: a check that prints the answer only when every
+review said ready leaves the gate an ordinary one whenever a person has to
+decide.
+
+```yaml
+  - id: take_release
+    plugin: approval.gate
+    needs: [release_is_ready]
+    timeout: 3600
+    with:
+      question: Put the release into the project?
+      options: [Put it into the project, Stop]
+      auto_answer: ${steps.release_is_ready.outputs.stdout_tail}   # blank unless ready
+      auto_after: 300
+```
 
 That is also its cost, and it is a real one: a run that reaches a gate at three
 in the morning waits out its deadline and then fails. **A cycle meant to run
@@ -833,6 +903,104 @@ after it runs. But the question is kept on the plan with the run it belongs to:
 the Subjects list shows *QA-4 waiting for your approval*, and **Resume** there
 continues that run and asks again. A refusal is an answer and is not planned;
 nor is a run somebody stopped.
+### Merging with an agent
+
+`agent.merge` is for the one job `agent.edit` cannot do: the work is `git
+merge`, and a conflict is resolved by editing files and then `git add` and
+`git commit`. It is given the editing tools and a fixed list of local git
+commands - status, diff, log, show, `merge --no-ff`, `merge --abort`, add, rm,
+commit, `checkout --ours/--theirs`, `reset --hard`, reflog and a few reads.
+The Claude Code CLI also lets through on its own the commands it judges
+read-only - `grep`, `head`, `ls` - which cannot write or reach anything.
+Push, fetch, pull, remote, clone and config are refused by name.
+
+It also refuses to start in a repository that has a remote, and fails if one
+appears during the step: a list of refused commands is a promise about the
+CLI, a repository with nowhere to push to is a fact about the disk. Make a
+scratch clone for it in a `command.shell` step and remove its remote:
+
+```yaml
+  - id: prepare
+    plugin: command.shell
+    with:
+      command: |-
+        git clone --quiet --shared --no-checkout "$SRC" work
+        cd work
+        git fetch --quiet "$SRC" '+refs/remotes/origin/*:refs/remotes/up/*'
+        git remote remove origin
+        git switch -c release --no-track up/production-ecs
+  - id: merge
+    plugin: agent.merge
+    needs: [prepare]
+    with:
+      directory: work
+      model: opus
+      task: Merge each task's branch with --no-ff, in order ...
+```
+
+Every command the agent ran comes back as `commands`, in order - an attempt
+the CLI refused is in `refused` instead, since nothing it would have done
+happened - with
+`branch` and `merging` (1 when a merge was left unfinished). A review after it
+can then check the work against the plan - the order of the merges, a push
+attempted - rather than against the agent's own account. Taking the result out
+of the scratch clone is a step of its own, after somebody has said yes.
+
+### A review's verdict
+
+Whether the work can go out at all is a different question from what is
+wrong with it: a release can be unshippable for a reason no step in the cycle
+is allowed to fix - a bug in a task's own code, a migration Odoo will skip.
+`verdict: true` asks for that answer as well and publishes it as `ready`
+(true or false). It also makes every issue say whether a later step can fix
+it - `fixable: true` for something the reviewed work did wrong, `false` for a
+problem only an outside author can change - and `fixable_count` counts the
+blocking ones a step can fix. A fix round waits on that count, so a problem in
+a task's own code goes to a person instead of to an agent that can do nothing
+about it:
+
+```yaml
+  - id: fix_round
+    plugin: agent.merge
+    needs: [review]
+    if: ${steps.review.outputs.fixable_count}
+  - id: ask_about_tasks
+    plugin: approval.gate
+    needs: [review]
+    if: ${steps.review.outputs.ready} == 'false'
+```
+
+Without `verdict` an issue says nothing about it, and `fixable_count` is the
+same as `blocking_count`.
+
+### Telling Teams
+
+`teams.message` posts a message to a Teams group chat, channel or person
+through a **Workflows webhook**. In Teams, the Workflows app's *Post to a chat
+when a webhook request is received* (or *... to a channel*), pointed at the
+chat it should post in, gives a URL. That URL is the whole of the permission,
+so it goes in a secret variable:
+
+```yaml
+variables:
+  teams_release_webhook: {secret: true}
+steps:
+  - id: notify_team
+    plugin: teams.message
+    needs: [release_note]
+    if: ${vars.teams_release_webhook}     # skipped until the secret is set
+    with:
+      webhook: ${vars.teams_release_webhook}
+      text: ${steps.release_note.outputs.summary}
+```
+
+The text is laid out as a card: each line a block, `- ` bullets drawn as
+bullets, `**bold**` left to Teams. `title` adds a heading. The URL is never
+repeated - not in the step's message, its outputs or an error, which name only
+the host and the HTTP status. Only `https://` is accepted, or `http://` to a
+stand-in on this machine. Running the step again posts again; resuming a run
+does not re-run a step that finished.
+
 ### Reading Jira
 
 Each successful `jira.issues` step writes two neighboring artifacts:
@@ -1089,6 +1257,12 @@ skipped step that produced none, the conditional step is also skipped. For
 example, an absent `passed` output does not count as `false`: the gate never
 ran. Status comparisons still work, and an unknown step or a missing output
 from a step that ran still reports an error.
+
+**It shows on the canvas.** The link from the step a condition reads into the
+step it decides is drawn dashed, with the condition in a few words on it -
+"if files changed", "unless rejected", "either way" - and the expression itself
+in the link's tooltip. A condition that reads none of the steps it waits for
+marks every link in.
 
 **It must `needs:` what it reads.** A condition on a step that does not wait for
 the step it mentions is evaluated before that step has run, so it silently never
@@ -1418,8 +1592,10 @@ the handle and stops it at the end.
 
 A plugin whose step is worth listening to - it reads a queue that new work
 arrives in - sets `watchable=True` in its metadata and implements
-`peek(settings)`: what the step would take now, as a list of `{"key", "title"}`,
-without running anything or writing anywhere. That is all a cycle's `triggers:`
+`peek(settings, each=False)`: what the step would take now, as a list of
+`{"key", "title"}`, without running anything or writing anywhere - its own
+limit and all. `each=True` is asked when the cycle runs on one item picked by
+key: then every item that could be picked, not only as many as the step takes. That is all a cycle's `triggers:`
 needs; the engine and the application only compare keys, and never learn what
 kind of queue it is.
 

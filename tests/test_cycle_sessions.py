@@ -208,6 +208,30 @@ def test_a_resume_that_takes_the_task_again_finds_out_again(tmp_path):
     assert [one["key"] for one in recorder.of("subject")] == ["QA-2"]
 
 
+def test_a_run_started_on_an_offer_is_about_it_when_the_cycle_names_nothing(tmp_path):
+    """A release cycle names no subject of its own; started from the plan it
+    must keep the plan's name rather than become "Run 12:02"."""
+    recorder = bus.Recorder()
+    root = tmp_path / "runs"
+    plugins = Plugins(a=Plugin(lambda c, s: registry.succeeded()))
+    run = execute(workflow(node("a"), subject=None), plugins,
+                  root / "20261009-120200-demo",
+                  bus.Tee([recorder, records.Persister(root=str(root))]),
+                  subject={"key": "QA-1,QA-2", "title": "2 tasks", "pin": "offered"})
+
+    assert run.subject == {"kind": "task", "key": "QA-1,QA-2", "title": "2 tasks",
+                           "memory": "", "pin": "offered", "step": ""}
+    assert [one["key"] for one in recorder.of("subject")] == ["QA-1,QA-2"]
+    assert records.index(str(root))[0]["subject"]["key"] == "QA-1,QA-2"
+
+
+def test_a_cycle_that_names_its_subject_finds_its_own(tmp_path):
+    plugins = Plugins(todo=picking(), work=Plugin(lambda c, s: registry.succeeded()))
+    run = execute(todo_cycle(), plugins, tmp_path / "run",
+                  subject={"key": "QA-9", "title": "offered"})
+    assert run.subject["key"] == "QA-1", "the cycle's own answer wins"
+
+
 def test_the_subject_and_where_it_got_to_are_in_the_index(tmp_path):
     root = tmp_path / "runs"
     plugins = Plugins(todo=picking(), work=Plugin(lambda c, s: registry.failed("no")))

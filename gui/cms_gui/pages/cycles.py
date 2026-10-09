@@ -126,6 +126,10 @@ class CyclesPage(QWidget):
     session_opened = Signal(str, str)
     #: A planned task, to start work on: the window knows how to run it.
     planned_started = Signal(dict)
+    #: A planned entry double-clicked - start it now or later.
+    planned_opened = Signal(dict)
+    #: The plan as just read: what the scheduler starts on time.
+    planned_loaded = Signal(list)
     stop_requested = Signal()
     interaction_requested = Signal(dict)
     saved = Signal()
@@ -359,6 +363,7 @@ class CyclesPage(QWidget):
         self.subjects.new_requested.connect(lambda: self._run(""))
         self.subjects.delete_requested.connect(self._delete_session)
         self.subjects.planned_start.connect(self.planned_started.emit)
+        self.subjects.planned_open.connect(self.planned_opened.emit)
         self.subjects.planned_remove.connect(self._remove_planned)
         self.subjects.files_picked.connect(self._open_run_files)
 
@@ -1460,11 +1465,14 @@ class CyclesPage(QWidget):
         sessions_answer, planned_answer = answer
         self._sessions_loaded = True
         sessions = (sessions_answer or {}).get("sessions") or []
+        planned = (None if planned_answer is None
+                   else (planned_answer or {}).get("planned") or [])
         self.subjects.set_state(
             sessions=sessions,
-            planned=(KEEP if planned_answer is None
-                     else (planned_answer or {}).get("planned") or []),
+            planned=KEEP if planned is None else planned,
             live=self._live_cycle())
+        if planned is not None:
+            self.planned_loaded.emit(planned)
         self.explorer.set_last_runs(_last_runs(sessions))
         self._update_buttons()
 
@@ -1477,7 +1485,9 @@ class CyclesPage(QWidget):
 
         def done(answer, error):
             if error is None:
-                self.subjects.set_planned((answer or {}).get("planned") or [])
+                planned = (answer or {}).get("planned") or []
+                self.subjects.set_planned(planned)
+                self.planned_loaded.emit(planned)
 
         self._call("planned", core.cycle_watch_planned, done)
 

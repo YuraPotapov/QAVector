@@ -134,7 +134,7 @@ class Reply(object):
 
 def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
                max_turns=None, add_dir="", name="agent", effort="",
-               clarify=False, last=False):
+               clarify=False, last=False, disallowed=()):
     """Run the CLI on ``prompt`` in ``cwd``. Returns a :class:`Reply`.
 
     ``binary`` is the resolved path from ``agent_cli.auth_status`` - resolving
@@ -166,7 +166,7 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     refused rather than accepted for a point that never comes.
     """
     options = dict(tools=tools, mode=mode, model=model, max_turns=max_turns,
-                   add_dir=add_dir, effort=effort)
+                   add_dir=add_dir, effort=effort, disallowed=disallowed)
     inbox, snapshot = None, None
     if clarify:
         inbox = context.inbox(step.id)
@@ -239,16 +239,24 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
 
 
 def _argv(binary, prompt, tools, mode="", model="", max_turns=None, add_dir="",
-          effort=""):
+          effort="", disallowed=()):
     """The command line for one call. Built in one place, because the prompt
-    with and without a person's messages must differ in nothing else."""
+    with and without a person's messages must differ in nothing else.
+
+    A rule with a space in it - ``Bash(git merge:*)`` - is its own argument:
+    joined into one string with the others, the CLI splits it at the space.
+    Tools without one are still joined, so the command line a step recorded
+    before rules existed is the one it is asked about on Resume.
+    """
     argv = [binary, "-p", prompt,
             # stream-json rather than json: the same answer arrives at the end,
             # but every turn is announced as it happens, so the step can show
             # what it is doing instead of going quiet and then printing a wall
             # of JSON. --verbose is what makes the CLI emit the turns at all.
-            "--output-format", "stream-json", "--verbose",
-            "--allowedTools", " ".join(tools)]
+            "--output-format", "stream-json", "--verbose"]
+    argv += _tool_list("--allowedTools", tools)
+    if disallowed:
+        argv += _tool_list("--disallowedTools", disallowed)
     if max_turns not in (None, ""):
         argv += ["--max-turns", str(int(max_turns))]
     if mode:
@@ -262,6 +270,13 @@ def _argv(binary, prompt, tools, mode="", model="", max_turns=None, add_dir="",
     if add_dir:
         argv += ["--add-dir", add_dir]
     return argv
+
+
+def _tool_list(flag, tools):
+    tools = list(tools)
+    if any(" " in one for one in tools):
+        return [flag] + tools
+    return [flag, " ".join(tools)]
 
 
 #: The heading of the section a person's messages are given under. One place,

@@ -15,6 +15,7 @@ class Queue(object):
     def __init__(self):
         self.issues = []
         self.queries = []
+        self.bodies = []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -24,6 +25,7 @@ class Queue(object):
             def do_POST(self):                                  # noqa: N802
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.queries.append(body["jql"])
+                outer.bodies.append(body)
                 raw = json.dumps({"isLast": True, "issues": [
                     {"id": key, "key": key,
                      "fields": {"summary": title, "status": {"name": "In Progress"}}}
@@ -82,6 +84,18 @@ def cycle_for(site, **trigger):
             "issue": "${vars.task_key}", "limit": 1}}]}, "dev")
 
 
+def release_for(site, limit=50):
+    """A cycle that takes every task the step finds: the trigger's pin is not
+    one of the step's inputs, so a run takes the step's whole answer."""
+    return model.parse_cycle({
+        "id": "rel",
+        "variables": {"site": site, "offered": "", "token": {"secret": True}},
+        "triggers": [{"id": "ready", "watch": "ready", "pin": "offered"}],
+        "steps": [{"id": "ready", "plugin": "jira.issues", "with": {
+            "site": "${vars.site}", "email": "e@example.invalid", "token": "${vars.token}",
+            "role": "everyone", "jql": 'status = "Ready"', "limit": limit}}]}, "rel")
+
+
 def test_the_first_look_only_remembers_what_is_there(queue, tmp_path):
     """Turning a listener on must not greet somebody with a question per task."""
     queue.issues = [("QA-1", "Old"), ("QA-2", "Older")]
@@ -132,7 +146,7 @@ def test_the_step_s_secret_is_used_and_nothing_starts(queue, tmp_path, monkeypat
     used = {}
     plugin = registry.get("jira.issues")
     real = plugin.peek
-    monkeypatch.setattr(plugin, "peek", lambda settings: used.update(settings) or real(settings))
+    monkeypatch.setattr(plugin, "peek", lambda settings, each=False: used.update(settings) or real(settings, each=each))
     monkeypatch.setattr(watch.secret_store, "get",
                         lambda cycle_id, name, path=None: "sekret" if name == "token" else "")
     watch.check(cycle_for(queue.site), memory_path=str(tmp_path / "m.json"))
@@ -152,7 +166,7 @@ def test_an_unset_secret_is_refused_before_anything_is_asked(queue, tmp_path,
     from cycle import registry
     asked = []
     monkeypatch.setattr(registry.get("jira.issues"), "peek",
-                        lambda settings: asked.append(settings) or [])
+                        lambda settings, each=False: asked.append(settings) or [])
     monkeypatch.setattr(watch.secret_store, "get",
                         lambda cycle_id, name, path=None: None)
 
@@ -217,7 +231,7 @@ class Board(registry_mod.CyclePlugin):
     metadata = registry_mod.PluginMetadata(id="test.board", name="Board", watchable=True)
     items = []
 
-    def peek(self, settings):
+    def peek(self, settings, each=False):
         return list(self.items)
 
 
@@ -257,7 +271,7 @@ def test_a_plugin_that_did_not_say_it_can_be_watched_is_refused(tmp_path):
 
 def test_what_the_plugin_raises_is_what_the_listener_says(tmp_path):
     class Broken(Board):
-        def peek(self, settings):
+        def peek(self, settings, each=False):
             raise RuntimeError("board is down")
     cycle = model.parse_cycle({
         "id": "b", "variables": {"card": ""},
@@ -398,3 +412,178 @@ def test_a_trigger_survives_every_save_the_application_makes(tmp_path):
         back = loader.load_cycle("dev", str(tmp_path))
         assert [(one.id, one.watch, one.every, one.enabled) for one in back.triggers] == [
             ("new_task", "todo", 120, enabled)], text
+
+
+# ------------------------------------------------ the step's whole answer
+def test_a_step_that_does_not_read_the_pin_is_offered_whole(queue, tmp_path):
+    """A release takes every ready task, so a new one is offered with all the
+    others the step returns - one question, not one per task."""
+    store = str(tmp_path / "m.json")
+    cycle = release_for(queue.site)
+    assert not watch.each_on_its_own(cycle, cycle.triggers[0])
+    queue.issues = [("QA-1", "Old")]
+    watch.check(cycle, memory_path=store)
+    queue.issues = [("QA-1", "Old"), ("QA-2", "New")]
+
+    found = watch.check(cycle, memory_path=store)
+
+    assert len(found["new"]) == 1
+    offer = found["new"][0]
+    assert offer["key"] == "QA-1,QA-2" and offer["whole"] is True
+    assert offer["title"] == "2 tasks"
+    assert [one["key"] for one in offer["items"]] == ["QA-1", "QA-2"]
+
+
+def test_nothing_new_in_the_answer_offers_nothing(queue, tmp_path):
+    store = str(tmp_path / "m.json")
+    cycle = release_for(queue.site)
+    queue.issues = [("QA-1", "Old"), ("QA-2", "Old too")]
+    watch.check(cycle, memory_path=store)
+    queue.issues = [("QA-2", "Old too")]
+    assert watch.check(cycle, memory_path=store)["new"] == []
+
+
+def test_the_step_s_own_limit_is_the_offer(queue, tmp_path):
+    """The listener adds no selection of its own and drops none: it asks for
+    what the step would take - and asks for every issue only when a run is
+    started on one picked by key."""
+    release_check = release_for(queue.site, limit=7)
+    watch.check(release_check, memory_path=str(tmp_path / "a.json"))
+    watch.check(cycle_for(queue.site), memory_path=str(tmp_path / "b.json"))
+    assert queue.bodies[0]["maxResults"] == 7
+    assert queue.bodies[1]["maxResults"] != 1, "limit 1 is the run, not the queue"
+
+
+def test_a_single_task_answer_keeps_its_own_key_and_title(queue, tmp_path):
+    store = str(tmp_path / "m.json")
+    cycle = release_for(queue.site)
+    watch.check(cycle, memory_path=store)
+    queue.issues = [("QA-5", "Alone")]
+    [offer] = watch.check(cycle, memory_path=store)["new"]
+    assert (offer["key"], offer["title"], offer["whole"]) == ("QA-5", "Alone", True)
+
+
+def test_seeing_a_whole_offer_sees_each_of_its_tasks(queue, tmp_path):
+    store = str(tmp_path / "m.json")
+    cycle = release_for(queue.site)
+    watch.check(cycle, memory_path=store)
+    queue.issues = [("QA-1", "a"), ("QA-2", "b")]
+    watch.mark_seen(cycle, "QA-1,QA-2", memory_path=store)
+    assert watch.check(cycle, memory_path=store)["new"] == []
+    queue.issues = [("QA-1", "a"), ("QA-2", "b"), ("QA-3", "c")]
+    [offer] = watch.check(cycle, memory_path=store)["new"]
+    assert offer["key"] == "QA-1,QA-2,QA-3", "a run still takes all three"
+
+
+def test_a_planned_whole_offer_is_replaced_by_the_next_one(queue, tmp_path):
+    """The plan shows what a run would take now, not each answer since."""
+    store = str(tmp_path / "m.json")
+    cycle = release_for(queue.site)
+    watch.check(cycle, memory_path=store)
+    queue.issues = [("QA-1", "a")]
+    [first] = watch.check(cycle, memory_path=store)["new"]
+    watch.plan(cycle, first["key"], first["title"], items=first["items"],
+               memory_path=store, when=10.0)
+    assert watch.check(cycle, memory_path=store)["new"] == [], "planned, not asked again"
+
+    queue.issues = [("QA-1", "a"), ("QA-2", "b")]
+    [second] = watch.check(cycle, memory_path=store)["new"]
+    watch.plan(cycle, second["key"], second["title"], items=second["items"],
+               memory_path=store, when=20.0)
+
+    [entry] = watch.planned(store)
+    assert entry["key"] == "QA-1,QA-2" and entry["at"] == 20.0
+    assert [one["key"] for one in entry["items"]] == ["QA-1", "QA-2"]
+
+    watch.mark_seen(cycle, entry["key"], memory_path=store)
+    assert watch.planned(store) == []
+
+
+# ------------------------------------------------------------ run later
+from cycle import planner  # noqa: E402
+
+DAY = 24 * 3600
+
+
+def test_a_planned_task_can_be_scheduled_up_to_three_days_ahead(tmp_path):
+    store = str(tmp_path / "m.json")
+    cycle = cycle_for("http://x.invalid")
+    watch.plan(cycle, "QA-4", "t", memory_path=store, when=100.0)
+    entry = "task:dev:new_task:QA-4"
+
+    assert planner.schedule(entry, 1000.0 + DAY, store, now=1000.0) == 1000.0 + DAY
+    [item] = planner.items(store)
+    assert item["run_at"] == 1000.0 + DAY and item["id"] == entry
+
+    with pytest.raises(ValueError, match="at most 3 days"):
+        planner.schedule(entry, 1000.0 + 3 * DAY + 1, store, now=1000.0)
+    with pytest.raises(ValueError, match="already passed"):
+        planner.schedule(entry, 999.0, store, now=1000.0)
+
+    planner.schedule(entry, None, store, now=1000.0)
+    assert "run_at" not in planner.items(store)[0]
+
+
+def test_only_what_is_on_the_plan_can_be_scheduled(tmp_path):
+    with pytest.raises(ValueError, match="not on the plan"):
+        planner.schedule("task:dev:new_task:QA-9", 2000.0,
+                         str(tmp_path / "m.json"), now=1000.0)
+
+
+def test_an_approval_on_the_plan_can_be_scheduled(tmp_path):
+    store = str(tmp_path / "m.json")
+    item = planner.add_approval("dev", "run-1", "gate", "Ship it?",
+                                memory_path=store, when=10.0)
+    planner.schedule(item["id"], 5000.0, store, now=1000.0)
+    assert planner.items(store)[0]["run_at"] == 5000.0
+
+
+def test_a_start_older_than_three_days_is_stale():
+    assert not planner.stale({"run_at": 1000.0}, now=1000.0 + 3 * DAY)
+    assert planner.stale({"run_at": 1000.0}, now=1000.0 + 3 * DAY + 1)
+    assert not planner.stale({}, now=10 ** 10), "no start time, nothing to go stale"
+
+
+def test_the_next_answer_keeps_the_time_the_release_was_scheduled_for(queue, tmp_path):
+    """A task that turns up at three must not cancel the release somebody
+    scheduled for six."""
+    store = str(tmp_path / "m.json")
+    cycle = release_for(queue.site)
+    watch.plan(cycle, "QA-1", "1 task", memory_path=store, when=10.0)
+    planner.schedule("task:rel:ready:QA-1", 5000.0, store, now=1000.0)
+
+    watch.plan(cycle, "QA-1,QA-2", "2 tasks", memory_path=store, when=20.0)
+
+    [entry] = watch.planned(store)
+    assert entry["key"] == "QA-1,QA-2" and entry["run_at"] == 5000.0
+
+
+def _cli(capsys, command, store):
+    import session_launcher
+    with pytest.raises(SystemExit) as done:
+        session_launcher.run_watch_command(command, memory_path=store)
+    return done.value.code, json.loads(capsys.readouterr().out)
+
+
+def test_the_command_line_schedules_and_unschedules(tmp_path, capsys):
+    import time as clock
+    store = str(tmp_path / "m.json")
+    watch.plan(cycle_for("http://x.invalid"), "QA-4", "t", memory_path=store)
+    later = int(clock.time()) + 3600
+
+    code, said = _cli(capsys, ("schedule", "task:dev:new_task:QA-4@%d" % later), store)
+    assert code == 0 and said["run_at"] == later
+    assert planner.items(store)[0]["run_at"] == later
+
+    code, said = _cli(capsys, ("schedule", "task:dev:new_task:QA-4@"), store)
+    assert code == 0 and said["run_at"] is None
+    assert "run_at" not in planner.items(store)[0]
+
+
+def test_the_command_line_says_why_it_cannot_schedule(tmp_path, capsys):
+    import time as clock
+    store = str(tmp_path / "m.json")
+    watch.plan(cycle_for("http://x.invalid"), "QA-4", "t", memory_path=store)
+    too_late = int(clock.time()) + 4 * DAY
+    code, said = _cli(capsys, ("schedule", "task:dev:new_task:QA-4@%d" % too_late), store)
+    assert code == 2 and "at most 3 days" in said["problems"][0]

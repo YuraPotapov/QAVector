@@ -372,7 +372,7 @@ class CyclePlugin(object):
                 "detail": "", "argv": []}
 
     # -- being listened to ---------------------------------------------------
-    def peek(self, settings):
+    def peek(self, settings, each=False):
         """What a step with these settings would take now, without running it.
 
         Only for a plugin whose metadata says ``watchable``. Returns a list of
@@ -380,6 +380,11 @@ class CyclePlugin(object):
         the next and is what an accepted item is run with; anything else is
         shown to the person being asked. Nothing may be written anywhere.
         Raises on failure, with a message a person can read.
+
+        ``each`` is for a cycle that runs on one item at a time, picked by
+        key: then every item that could be picked is wanted, not only as many
+        as the step would take by itself. Without it, the answer is what a
+        run of the step would take - its own limit and all.
         """
         raise NotImplementedError("%s cannot be watched" % self.metadata.id)
 
