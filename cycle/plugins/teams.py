@@ -23,6 +23,14 @@ drawn as one; bold and italic are left to Teams, which draws those well.
 workspace, or given whole - for one longer than the forty lines a step keeps of
 what it printed: a list of every test that failed, say.
 
+**Mentioning people.** ``mentions`` names who Teams should notify -
+``name <email>`` or just the email, their Teams sign-in. Writing "@name" in
+the text notifies nobody: a card mentions somebody only when its text holds
+``<at>name</at>`` *and* the card lists that tag with the person's address. So
+the step does both. Where the text already says ``<at>name</at>`` - beside the
+test that person's change broke, say - that is where the mention goes; anybody
+the text does not tag is tagged on a line of their own at the end.
+
 **Sending twice sends twice.** A message is not something that can be taken
 back or recognised later, so there is nothing to reconcile: running the step
 again posts again. Resuming a run does not re-run a step that finished.
@@ -30,6 +38,7 @@ again posts again. Resuming a run does not re-run a step that finished.
 
 import json
 import os
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -46,6 +55,9 @@ CARD = "application/vnd.microsoft.card.adaptive"
 #: The most a message from a file carries. A Teams card stops at about 28 KB;
 #: this leaves room for the card around the text.
 MAX_TEXT = 20000
+#: One person to mention: ``name <email>``, or the email alone.
+PERSON = re.compile(r"^\s*(?:(?P<name>[^<>]+?)\s*<\s*(?P<email>[^<>\s@]+@[^<>\s@]+)\s*>"
+                    r"|(?P<bare>[^<>\s@,]+@[^<>\s@,]+))\s*$")
 
 
 class TeamsMessage(CyclePlugin):
@@ -70,12 +82,18 @@ class TeamsMessage(CyclePlugin):
                        "step keeps of what it printed. Used when text is blank."),
             field("title", "Title",
                   hint="A heading above the message. Blank for none."),
+            field("mentions", "People to mention", "args",
+                  hint="Who Teams should notify, one per line or comma: "
+                       "name <email>, or the email alone - their Teams sign-in. "
+                       "Tagged where the text says <at>name</at>, otherwise on "
+                       "a line at the end. Blank for nobody."),
             field("verify_tls", "Verify TLS", "check", default=True,
                   hint="Off only for a stand-in with a certificate of its own."),
         ),
         outputs=(
             output("sent", "boolean", "True when Teams accepted the message."),
             output("status", "number", "The HTTP status Teams answered with."),
+            output("mentioned", "number", "How many people the message mentions."),
         ),
     )
 
@@ -93,10 +111,17 @@ class TeamsMessage(CyclePlugin):
             problem = _address_problem(webhook)
             if problem:
                 found.append(problem)
+        mentions = settings.get("mentions")
+        if mentions is not None and not isinstance(mentions, (list, str)):
+            found.append("mentions must be a list of people.")
+        elif "${" not in str(mentions or ""):
+            found.extend(people(mentions)[1])
         return found
 
     def execute(self, context, step):
-        problems = self.problems(step.settings)
+        # A list another step made is checked here rather than refused: one
+        # address it got wrong must not cost everybody the message.
+        problems = self.problems(dict(step.settings, mentions=None))
         if problems:
             return registry.failed("; ".join(problems))
         text = str(self.setting(step.settings, "text", "") or "").strip()
@@ -117,10 +142,11 @@ class TeamsMessage(CyclePlugin):
         problem = _address_problem(webhook)
         if problem:
             return registry.failed(problem)
+        mentions, skipped = people(self.setting(step.settings, "mentions"))
         context.cancel.raise_if_set()
 
-        body = json.dumps(card(text, str(self.setting(step.settings, "title", "") or "")),
-                          ensure_ascii=False).encode("utf-8")
+        body = json.dumps(card(text, str(self.setting(step.settings, "title", "") or ""),
+                               mentions), ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             webhook, data=body, method="POST",
             headers={"Content-Type": "application/json; charset=utf-8"})
@@ -134,16 +160,20 @@ class TeamsMessage(CyclePlugin):
             return registry.failed(
                 "Teams did not take the message: %s answered HTTP %d. A 404 is "
                 "usually a workflow that was deleted or turned off." % (host, exc.code),
-                sent=False, status=exc.code)
+                sent=False, status=exc.code, mentioned=0)
         except (urllib.error.URLError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             return registry.failed("Could not reach %s: %s" % (host, reason),
-                                   sent=False, status=0)
+                                   sent=False, status=0, mentioned=0)
         if not 200 <= status < 300:
             return registry.failed("Teams did not take the message: %s answered "
-                                   "HTTP %d." % (host, status), sent=False, status=status)
-        return registry.succeeded("teams: sent to %s (HTTP %d)" % (host, status),
-                                  sent=True, status=status)
+                                   "HTTP %d." % (host, status), sent=False, status=status,
+                                   mentioned=0)
+        said = " mentioning %d" % len(mentions) if mentions else ""
+        if skipped:
+            said += "; not mentioned: " + " ".join(skipped)
+        return registry.succeeded("teams: sent to %s (HTTP %d)%s" % (host, status, said),
+                                  sent=True, status=status, mentioned=len(mentions))
 
 
 def _address_problem(webhook):
@@ -157,8 +187,41 @@ def _address_problem(webhook):
             "stand-in on this machine).")
 
 
-def card(text, title=""):
-    """The Adaptive Card a Teams workflow posts: one block per line of ``text``."""
+def people(value):
+    """``([(name, email), ...], problems)`` from a list, or from lines or commas.
+
+    One person once, however often named: the first spelling of their name
+    wins. Somebody given by email alone is tagged by that email.
+    """
+    entries = value if isinstance(value, list) else re.split(r"[\n,]", str(value or ""))
+    found, problems, seen = [], [], set()
+    for entry in entries:
+        entry = str(entry or "").strip()
+        if not entry:
+            continue
+        hit = PERSON.match(entry)
+        if not hit:
+            problems.append("mentions: %r is not an email or \"name <email>\"." % entry)
+            continue
+        email = hit.group("email") or hit.group("bare")
+        if email.lower() in seen:
+            continue
+        seen.add(email.lower())
+        found.append(((hit.group("name") or email).strip(), email))
+    return found, problems
+
+
+def card(text, title="", mentions=()):
+    """The Adaptive Card a Teams workflow posts: one block per line of ``text``.
+
+    ``mentions`` - ``(name, email)`` pairs - are listed for Teams to notify;
+    whoever the text does not already tag as ``<at>name</at>`` is tagged on a
+    last line of its own.
+    """
+    tags = [("<at>%s</at>" % name, name, email) for name, email in mentions]
+    rest = [tag for tag, _name, _email in tags if tag not in text]
+    if rest:
+        text = text.rstrip() + "\n\n" + ", ".join(rest)
     body = []
     if title.strip():
         body.append({"type": "TextBlock", "text": title.strip(), "weight": "Bolder",
@@ -178,6 +241,10 @@ def card(text, title=""):
             block["spacing"] = "Medium"
         gap = False
         body.append(block)
+    content = {"type": "AdaptiveCard", "version": "1.4", "body": body}
+    if tags:
+        content["msteams"] = {"entities": [
+            {"type": "mention", "text": tag, "mentioned": {"id": email, "name": name}}
+            for tag, name, email in tags]}
     return {"type": "message", "attachments": [{
-        "contentType": CARD, "contentUrl": None,
-        "content": {"type": "AdaptiveCard", "version": "1.4", "body": body}}]}
+        "contentType": CARD, "contentUrl": None, "content": content}]}

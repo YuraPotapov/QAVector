@@ -988,7 +988,6 @@ steps:
   - id: notify_team
     plugin: teams.message
     needs: [release_note]
-    if: ${vars.teams_release_webhook}     # skipped until the secret is set
     with:
       webhook: ${vars.teams_release_webhook}
       text: ${steps.release_note.outputs.summary}
@@ -1003,6 +1002,23 @@ repeated - not in the step's message, its outputs or an error, which name only
 the host and the HTTP status. Only `https://` is accepted, or `http://` to a
 stand-in on this machine. Running the step again posts again; resuming a run
 does not re-run a step that finished.
+
+Leave `if:` off a message that sends another step's work. A step with an `if:`
+runs even when a step it needs was skipped - that is what lets a condition
+react to a skip - so `if: ${vars.teams_release_webhook}` sends after a
+release note that was never written, and fails reading it. Without one, the
+message is skipped with the step it needs.
+
+`mentions:` names who Teams should notify - one per line or comma, as
+`name <email>` or the email alone, their Teams sign-in. Typing "@name" in the
+text notifies nobody: a card mentions somebody only when its text holds
+`<at>name</at>` and the card lists that tag with their address, so the step
+does both. Where the text already says `<at>name</at>` - beside the test a
+person's change broke - the mention is made there; anybody else is tagged on a
+line of their own at the end. The list usually comes from a step before
+(`mentions: ${steps.who_broke.outputs.stdout_tail}`); an entry it got wrong is
+named in the step's message and left out, rather than costing everybody the
+message. `mentioned` says how many were tagged.
 
 ### Reading Jira
 

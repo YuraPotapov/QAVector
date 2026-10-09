@@ -8,7 +8,7 @@ import pytest
 
 from cycle import registry
 from cycle.context import RunContext
-from cycle.plugins.teams import card
+from cycle.plugins.teams import card, people
 from domain.cycle import CycleRun, CycleStep
 
 NOTE = """Release 09.10.2026
@@ -72,7 +72,7 @@ def test_the_note_is_posted_as_an_adaptive_card(workflow, tmp_path):
     result = send(tmp_path, webhook=workflow.url, text=NOTE)
 
     assert result.ok, result.message
-    assert result.outputs == {"sent": True, "status": 202}
+    assert result.outputs == {"sent": True, "status": 202, "mentioned": 0}
     [(path, kind, payload)] = workflow.received
     assert path.startswith("/workflows/abc/") and kind.startswith("application/json")
     assert payload["type"] == "message"
@@ -109,7 +109,7 @@ def test_a_refusal_fails_the_step_without_the_url(tmp_path):
     assert not result.ok
     assert "HTTP 404" in result.message and "127.0.0.1" in result.message
     assert "SECRET" not in result.message and "workflows" not in result.message
-    assert result.outputs == {"sent": False, "status": 404}
+    assert result.outputs == {"sent": False, "status": 404, "mentioned": 0}
 
 
 def test_an_unreachable_workflow_fails_without_the_url(tmp_path):
@@ -164,3 +164,60 @@ def test_a_very_long_file_is_cut_and_says_so(workflow, tmp_path):
     (tmp_path / "long.md").write_text("x" * (MAX_TEXT + 500), encoding="utf-8")
     send(tmp_path, webhook=workflow.url, text_file="long.md")
     assert texts(workflow.received[0][2])[-1] == "(cut at %d characters)" % MAX_TEXT
+
+
+def entities(payload):
+    return payload["attachments"][0]["content"].get("msteams", {}).get("entities", [])
+
+
+def test_a_person_the_text_tags_is_mentioned_there(workflow, tmp_path):
+    """Beside the test their change broke - not again at the end."""
+    text = "Tests failed\n- TestA.test_one - <at>Olena Koval</at>"
+    result = send(tmp_path, webhook=workflow.url, text=text,
+                  mentions="Olena Koval <olena@example.invalid>")
+    assert result.ok, result.message
+    assert result.outputs["mentioned"] == 1 and "mentioning 1" in result.message
+    payload = workflow.received[0][2]
+    assert texts(payload) == ["Tests failed", "\u2022 TestA.test_one - <at>Olena Koval</at>"]
+    assert entities(payload) == [{
+        "type": "mention", "text": "<at>Olena Koval</at>",
+        "mentioned": {"id": "olena@example.invalid", "name": "Olena Koval"}}]
+
+
+def test_people_the_text_does_not_tag_are_tagged_at_the_end(workflow, tmp_path):
+    send(tmp_path, webhook=workflow.url, text="Tests failed",
+         mentions=["Olena Koval <olena@example.invalid>", "taras@example.invalid"])
+    payload = workflow.received[0][2]
+    assert texts(payload)[-1] == ("<at>Olena Koval</at>, "
+                                  "<at>taras@example.invalid</at>")
+    assert [one["mentioned"]["id"] for one in entities(payload)] == [
+        "olena@example.invalid", "taras@example.invalid"]
+
+
+def test_nobody_to_mention_leaves_the_card_as_it_was(workflow, tmp_path):
+    result = send(tmp_path, webhook=workflow.url, text="Hello", mentions="")
+    assert result.outputs["mentioned"] == 0
+    assert "msteams" not in workflow.received[0][2]["attachments"][0]["content"]
+
+
+def test_a_list_from_a_step_reads_lines_and_commas_once_each():
+    found, problems = people("Olena Koval <olena@example.invalid>, taras@example.invalid\n"
+                             "O. Koval <OLENA@example.invalid>\n\n")
+    assert found == [("Olena Koval", "olena@example.invalid"),
+                     ("taras@example.invalid", "taras@example.invalid")]
+    assert problems == []
+
+
+def test_a_mention_written_in_the_cycle_must_be_an_address():
+    problems = registry.get("teams.message").problems(
+        {"webhook": "https://example.invalid/x", "text": "Hi", "mentions": ["Olena Koval"]})
+    assert problems == ["mentions: 'Olena Koval' is not an email or \"name <email>\"."]
+
+
+def test_a_bad_address_from_a_step_costs_only_its_own_mention(workflow, tmp_path):
+    """One address another step got wrong must not cost everybody the message."""
+    result = send(tmp_path, webhook=workflow.url, text="Tests failed",
+                  mentions="Olena Koval <olena@example.invalid>\nnot an address")
+    assert result.ok, result.message
+    assert result.outputs["mentioned"] == 1 and "not an address" in result.message
+    assert len(entities(workflow.received[0][2])) == 1
