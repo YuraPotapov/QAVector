@@ -1032,6 +1032,81 @@ def test_folding_every_phase_keeps_the_zoom_too(qapp):
         canvas.deleteLater()
 
 
+# ------------------------------------------- a phase that cannot fold says why
+# Clicking the band of a phase that could not be one box did nothing, so some
+# phases folded and some did not with no way to tell which, or why.
+def test_a_phase_that_cannot_fold_says_which_phase_runs_between_its_steps():
+    from cms_gui.cyclegraph import fold_blocker
+    gapped = payload(("ready", [], "Hand over"), ("run", ["ready"], "Tests"),
+                     ("passed", ["run"], "Tests"), ("go", ["passed"], "Hand over"),
+                     ("write", ["go"], "Hand over"))
+    said = fold_blocker(gapped, "Hand over")
+    assert said.startswith("Tests runs between its steps (ready -> run -> passed -> go)")
+    assert "put the steps after Tests in a phase of their own" in said
+    assert fold_blocker(gapped, "Tests") == ""
+
+
+def test_steps_in_no_phase_between_are_named_as_such():
+    from cms_gui.cyclegraph import fold_blocker
+    looped = payload(("x", [], "P"), ("out", ["x"], ""), ("y", ["out"], "P"))
+    assert fold_blocker(looped, "P").startswith(
+        "steps outside any phase runs between its steps (x -> out -> y)")
+
+
+def test_a_phase_that_folds_has_nothing_to_explain():
+    from cms_gui.cyclegraph import fold_blocker
+    assert fold_blocker(PHASED, "Take") == "" and fold_blocker(PHASED, "Plan") == ""
+    assert fold_blocker(PHASED, "No such phase") == ""
+
+
+class _Press(object):
+    def __init__(self, point):
+        self.point, self.accepted = point, None
+
+    def pos(self):
+        return self.point
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.accepted = False
+
+
+def test_the_band_of_a_phase_that_cannot_fold_does_not_take_the_click(qapp):
+    from cms_gui.cyclegraph import CycleCanvas
+    from PySide6.QtCore import Qt
+    nodes_ = [dict(_node(step, layer), group=group, needs=needs)
+              for step, layer, group, needs in (
+                  ("ready", 0, "Hand over", []), ("run", 1, "Tests", ["ready"]),
+                  ("go", 2, "Hand over", ["run"]), ("note", 3, "Note", ["go"]))]
+    canvas = CycleCanvas()
+    canvas.resize(700, 600)
+    canvas.set_graph({"id": "c", "nodes": nodes_, "edges": [
+        {"from": need, "to": one["id"], "kind": "dependency"}
+        for one in nodes_ for need in one["needs"]]})
+    try:
+        blocked = canvas._frames["Hand over"]
+        assert "Tests runs between its steps" in blocked.blocked()
+        assert "does not fold into one box" in blocked.toolTip()
+        assert blocked.cursor().shape() == Qt.ArrowCursor
+        folding = []
+        blocked.on_fold = folding.append
+        press = _Press(blocked.band().center())
+        blocked.mousePressEvent(press)
+        assert folding == [] and press.accepted is False
+
+        foldable = canvas._frames["Note"]
+        assert foldable.blocked() == "" and "Click the band" in foldable.toolTip()
+
+        canvas.set_folded(canvas.phases())
+        assert canvas.folded() == ["Note", "Tests"]
+        assert "Tests runs between" in canvas._frames["Hand over"].blocked()
+        canvas.grab()
+    finally:
+        canvas.deleteLater()
+
+
 def test_the_fold_marks_are_one_chevron_each_way():
     """Two chevrons meeting read as a cross at the size a band carries it."""
     from cms_gui import icons

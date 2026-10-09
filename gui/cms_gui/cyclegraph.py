@@ -474,6 +474,58 @@ def fold_graph(graph, folded):
     return dict(graph, nodes=order, edges=edges), refused
 
 
+def fold_blocker(graph, name):
+    """Why phase ``name`` cannot be one box, in a sentence; "" when it can.
+
+    The reason is a path that leaves the phase and comes back into it - the
+    one box would have to wait for itself. It is named by the steps' labels,
+    because that is what the canvas shows, and the phases it passes through
+    are named first, because that is what somebody reading it has to move.
+    """
+    nodes = _steps_only((graph or {}).get("nodes"))
+    members = set(groups_of(nodes).get(name) or ())
+    if not members:
+        return ""
+    by_id = {node["id"]: node for node in nodes}
+    after = {}
+    for node in nodes:
+        for need in node.get("needs") or ():
+            after.setdefault(need, []).append(node["id"])
+    for node in nodes:
+        if node["id"] not in members:
+            continue
+        # Breadth first from each step's way out of the phase, through steps
+        # outside it only, until a way back in: the shortest such detour.
+        queue = [[node["id"], out] for out in after.get(node["id"], ())
+                 if out not in members]
+        seen = set(one[-1] for one in queue)
+        while queue:
+            path = queue.pop(0)
+            for nxt in after.get(path[-1], ()):
+                if nxt in members:
+                    return _blocker_text(path + [nxt], by_id)
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(path + [nxt])
+    return ""
+
+
+def _blocker_text(path, by_id):
+    between = []
+    for step in path[1:-1]:
+        phase = (by_id[step].get("group") or "").strip()
+        word = phase or "steps outside any phase"
+        if word not in between:
+            between.append(word)
+    labels = [by_id[step].get("label") or step for step in path]
+    if len(labels) > 5:
+        labels = labels[:2] + ["..."] + labels[-2:]
+    return ("%s %s between its steps (%s), so as one box it would wait for "
+            "itself. To fold it, put the steps after %s in a phase of their own."
+            % (", ".join(between), "runs" if len(between) == 1 else "run",
+               " -> ".join(labels), " and ".join(between)))
+
+
 def _steps_only(nodes):
     """The nodes that are steps - not a folded phase standing in for some."""
     return [node for node in nodes or () if not str(node.get("id", "")).startswith(GROUP_PREFIX)]
@@ -1287,6 +1339,8 @@ class CycleGroupFrame(QGraphicsObject):
         self._count = 0
         self._state = "pending"
         self._current = False
+        #: Why the phase cannot fold into one box - see fold_blocker - or "".
+        self._blocked = ""
         #: Called with the phase's name when its band is clicked.
         self.on_fold = None
         self.setZValue(FRAME_Z)
@@ -1308,9 +1362,31 @@ class CycleGroupFrame(QGraphicsObject):
                                          heading[3] - heading[1]))
         self._path = path.simplified()
         self._count = count
-        self.setToolTip("Phase %s - %d step%s. Click the band to fold it into "
-                        "one box." % (self.name, count, "" if count == 1 else "s"))
+        self._say()
         self.update()
+
+    def set_blocked(self, reason):
+        """Say the phase cannot fold, and why - or, with "", that it can.
+
+        A band that took the click and did nothing was the whole complaint:
+        some phases folded and some did not, with no way to tell which or why.
+        """
+        reason = reason or ""
+        if reason != self._blocked:
+            self._blocked = reason
+            self.setCursor(Qt.ArrowCursor if reason else Qt.PointingHandCursor)
+            self._say()
+            self.update()
+
+    def blocked(self):
+        return self._blocked
+
+    def _say(self):
+        head = "Phase %s - %d step%s." % (self.name, self._count,
+                                          "" if self._count == 1 else "s")
+        self.setToolTip("%s It does not fold into one box: %s" % (head, self._blocked)
+                        if self._blocked else
+                        "%s Click the band to fold it into one box." % head)
 
     def set_state(self, state, current):
         """How the phase is going, and whether the run is in it now."""
@@ -1364,6 +1440,8 @@ class CycleGroupFrame(QGraphicsObject):
             painter.drawText(QRectF(band.left(), band.top(), room, band.height()),
                              Qt.AlignLeft | Qt.AlignVCenter,
                              _elide(painter, label, room))
+            if self._blocked:
+                continue      # no fold mark on a band a click does not fold
             size = 12
             icons.paint(painter, "fold", QRectF(band.right() - size,
                                                 band.center().y() - size / 2.0,
@@ -1371,7 +1449,7 @@ class CycleGroupFrame(QGraphicsObject):
 
     def mousePressEvent(self, event):
         if (any(one.contains(event.pos()) for one in self._headings)
-                and self.on_fold is not None):
+                and self.on_fold is not None and not self._blocked):
             event.accept()
             self.on_fold(self.name)
             return
@@ -1762,6 +1840,10 @@ class CycleCanvas(QGraphicsView):
         for name in groups_of(_steps_only(nodes)):
             frame = CycleGroupFrame(name, self._spec)
             frame.on_fold = self._fold_later
+            if fold_graph(graph, self._folded | {name})[1]:
+                frame.set_blocked(fold_blocker(graph, name) or (
+                    "with the phases folded now, as one box it would wait for "
+                    "itself. Open them first."))
             self.scene().addItem(frame)
             self._frames[name] = frame
 
