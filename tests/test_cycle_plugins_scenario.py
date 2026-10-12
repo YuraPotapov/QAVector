@@ -331,3 +331,40 @@ def test_a_nonsense_window_count_is_complained_about():
     assert ScenarioRun().problems({"scenarios": "x", "jobs": 0})
     assert ScenarioRun().problems({"scenarios": "x", "jobs": "auto"}) == []
     assert ScenarioRun().problems({"scenarios": "x", "jobs": 4}) == []
+
+
+# ------------------------------------------------- a second attempt in one folder
+class _AppendingChild(_Child):
+    """The real launcher appends to --events; the fake above overwrites."""
+
+    def __call__(self, argv, **kwargs):
+        self.argv = list(argv)
+        self.kwargs = kwargs
+        for arg in argv:
+            if arg.startswith("--events="):
+                with open(arg.split("=", 1)[1], "a", encoding="utf-8") as handle:
+                    for event in self.events:
+                        handle.write(json.dumps(event) + "\n")
+        return self
+
+
+def test_a_resumed_step_counts_only_this_attempt(context, monkeypatch):
+    """Resume reuses the step's folder; the last attempt's failure used to be
+    added to this one's passes, and a green run read as red."""
+    failing = passed() + [{"kind": "flow.end", "session": "localhost-agent",
+                           "status": "fail", "passed": 0, "total": 1}]
+    first = _AppendingChild(code=1, events=failing)
+    monkeypatch.setattr("subprocess.Popen", first)
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: None)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    run(context, first)
+
+    second = _AppendingChild(code=0, events=passed() + passed("other"))
+    monkeypatch.setattr("subprocess.Popen", second)
+    result = run(context, second)
+
+    assert result.status == "success"
+    assert (result.outputs["passed"], result.outputs["failed"]) == (2, 0)
+    step_dir = context.step_dir("run")
+    assert os.path.exists(os.path.join(step_dir, "events.1.jsonl")), \
+        "the earlier attempt's events are kept beside the new ones"

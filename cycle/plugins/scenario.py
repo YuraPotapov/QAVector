@@ -135,6 +135,7 @@ class ScenarioRun(CyclePlugin):
     def execute(self, context, step):
         reports = context.step_dir(step.id, "reports")
         events_path = os.path.join(context.step_dir(step.id), "events.jsonl")
+        _set_aside(events_path)
         argv = self._argv(context, step, reports, events_path)
 
         log_path = os.path.join(context.step_dir(step.id), "launcher.log")
@@ -270,6 +271,27 @@ def _read_events(path):
     except OSError:
         pass
     return summary
+
+
+def _set_aside(path):
+    """Move an earlier attempt's events out of the way, as ``events.1.jsonl``...
+
+    The launcher appends to the file it is given, and a resumed run gives this
+    step the folder it had before: the counts then added the last attempt's
+    scenarios to this one's - five that passed became nine, beside one failure
+    that was already fixed. Kept rather than deleted: what the earlier attempt
+    did is still worth reading.
+    """
+    if not os.path.exists(path):
+        return
+    stem, suffix = os.path.splitext(path)
+    number = 1
+    while os.path.exists("%s.%d%s" % (stem, number, suffix)):
+        number += 1
+    try:
+        os.replace(path, "%s.%d%s" % (stem, number, suffix))
+    except OSError:
+        pass
 
 
 def _why(summary, code, log_path):
