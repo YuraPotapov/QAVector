@@ -16,6 +16,42 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.22] - 2026-10-12
+
+### Added
+- **Artifacts shows a scenario's run as a flow.** Pick a scenario's folder, or
+  its `result.json`, and a `Flow / Source` switch appears beside Open in OS.
+  Flow lays the steps out as cards in order, joined by arrows: what each step
+  did, how it went, how long it took, and the top of the page right after it,
+  from that step's screenshot. A failed step is outlined and says why. Clicking
+  a picture opens it whole; Source is the JSON as before.
+
+### Changed
+- **The HUD folds down when every step is photographed.** With
+  `--report-screen=each` it starts as its header alone, which names the step
+  under way and fills left to right with the progress, so each screenshot
+  keeps a strip instead of a card over the page. Unfold it by hand and it stays
+  unfolded. Nothing is hidden for the capture, so the window does not blink.
+
+### Fixed
+- **Step screenshots show the page the step led to.** Taken the moment a step
+  passed, they often caught the page a click had just left, or one half drawn:
+  Odoo loads a view after the click, with no navigation for the browser to
+  wait on. A screenshot now waits until the page has had no request in flight
+  for a moment and has drawn - three seconds at most - and is named after its
+  step (`screenshot_004.png` is step 4). Runs without screenshots do not wait.
+- **The HUD no longer cuts off the step it is running.** Its width is fixed,
+  and a long selector ended in "..." exactly where it said what was being done.
+  The step under way and a failed one now wrap, the Current line wraps, and
+  every line has its full text as a tooltip.
+- **The execution HUD no longer swallows the scenario's own clicks.** Its card
+  is interactive - scroll, collapse, drag - and where it sat over the element a
+  step clicked, Playwright refused the click ("`__exec_hud_host__` intercepts
+  pointer events") and failed a page that worked. For as long as a clicking
+  step runs, the whole HUD now lets the mouse through; between steps it is
+  interactive again. Tree, progress, status, logs and highlight stay on screen
+  throughout.
+
 ## [0.16.21] - 2026-10-12
 
 ### Added
