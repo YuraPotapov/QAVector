@@ -220,3 +220,51 @@ def test_reveal_of_the_folder_already_shown_picks_up_new_files(page, tmp_path):
     page.reveal(str(run))
     (run / "reports" / "run.html").write_text("<p>done</p>", encoding="utf-8")
     assert page.reveal(str(run), "reports/run.html")
+
+
+# ------------------------------------------------- a scenario's run as a flow
+def _scenario(tmp_path):
+    folder = tmp_path / "run" / "localhost:8069-admin" / "s"
+    folder.mkdir(parents=True)
+    (folder / "result.json").write_text(json.dumps({
+        "scenario": "s", "session": "localhost:8069-admin", "status": "pass",
+        "steps": [{"index": 0, "action": "click", "status": "pass", "target": ".x",
+                   "message": "ok", "duration_ms": 10, "attempts": 1}]}),
+        encoding="utf-8")
+    image = QPixmap(40, 30)
+    image.fill(Qt.blue)
+    image.save(str(folder / "screenshot_001.png"), "PNG")
+    (folder / "console.log").write_text("hello", encoding="utf-8")
+    return folder
+
+
+def test_a_scenario_folder_opens_as_a_flow_and_switches_to_its_json(page, tmp_path):
+    folder = _scenario(tmp_path)
+    page.show_dir(str(tmp_path / "run"))
+    page._select_path(str(folder))
+    assert page.flow_mode.isVisibleTo(page)
+    assert page.flow is not None and page.flow.isVisibleTo(page)
+    assert len(page.flow.cards) == 1
+    page.flow_mode.setCurrentIndex(1)                    # Source
+    assert not page.flow.isVisibleTo(page)
+    assert '"action": "click"' in page.text.toPlainText()
+
+
+def test_result_json_offers_the_flow_and_other_files_do_not(page, tmp_path):
+    folder = _scenario(tmp_path)
+    page.show_dir(str(tmp_path / "run"))
+    page._select_path(str(folder / "result.json"))
+    assert page.flow_mode.isVisibleTo(page)
+    page._select_path(str(folder / "console.log"))
+    assert not page.flow_mode.isVisibleTo(page)
+    assert page.text.toPlainText() == "hello"
+
+
+def test_clicking_a_card_s_picture_shows_that_file(page, tmp_path, qapp):
+    folder = _scenario(tmp_path)
+    page.show_dir(str(tmp_path / "run"))
+    page._select_path(str(folder))
+    page.flow.picked.emit(str(folder / "screenshot_001.png"))
+    qapp.processEvents()                                 # the pick is queued
+    assert page._selected_path().endswith("screenshot_001.png")
+    assert page.image_area.isVisibleTo(page)

@@ -45,6 +45,7 @@ class ArtifactsPage(QWidget):
         self._shown_dir = ""        # what the tree is showing
         self._loading = False
         self.html = None             # start WebEngine only when opening HTML
+        self.flow = None             # the storyboard, made the first time it is shown
         # Reserve Qt Quick composition before the main window is shown. The
         # WebEngine view creates its own Quick widget only when first loaded;
         # adding that to a visible raster window destroys and recreates the
@@ -120,6 +121,15 @@ class ArtifactsPage(QWidget):
         self.preview_mode.setVisible(False)
         self.preview_mode.currentIndexChanged.connect(self._preview_selected)
         path_row.addWidget(self.preview_mode)
+        # A scenario's folder, or its result.json: the run as a storyboard of
+        # its steps and their screenshots, or the JSON it is read from.
+        self.flow_mode = QComboBox()
+        self.flow_mode.addItems(["Flow", "Source"])
+        self.flow_mode.setToolTip("Show the steps as a flow of screenshots, or "
+                                  "result.json as written")
+        self.flow_mode.setVisible(False)
+        self.flow_mode.currentIndexChanged.connect(self._preview_selected)
+        path_row.addWidget(self.flow_mode)
         path_row.addWidget(self.open_file)
         path_layout.addLayout(path_row)
         right_layout.addWidget(path_bar)
@@ -336,6 +346,15 @@ class ArtifactsPage(QWidget):
         if self.html is not None:
             self.html.stop()
             self.html.setVisible(False)
+        if self.flow is not None:
+            self.flow.setVisible(False)
+        folder = _scenario_folder(path)
+        self.flow_mode.setVisible(bool(folder))
+        if folder and self.flow_mode.currentIndex() == 0 and self._show_flow(folder):
+            return
+        if folder and os.path.isdir(path):
+            # Source, for the folder itself: the file its flow is read from.
+            path, suffix = os.path.join(folder, "result.json"), ".json"
         if not path or os.path.isdir(path):
             self._show_text("" if not path else "Directory")
             return
@@ -369,6 +388,23 @@ class ArtifactsPage(QWidget):
                 return
         self._show_text("(no preview for %s — use Open in OS)" % (suffix or "this file"))
 
+    def _show_flow(self, folder):
+        """The scenario as a storyboard. False when its result.json cannot be read."""
+        if self.flow is None:
+            from ..flowview import FlowView
+
+            self.flow = FlowView(self)
+            # Queued: the click arrives inside the card that the new selection
+            # is about to replace.
+            self.flow.picked.connect(self._select_path, Qt.QueuedConnection)
+            self._preview_layout.addWidget(self.flow, 1)
+        if not self.flow.show_folder(folder):
+            return False
+        self.text.setVisible(False)
+        self.image_area.setVisible(False)
+        self.flow.setVisible(True)
+        return True
+
     def _show_text(self, body):
         if self.html is not None:
             self.html.setVisible(False)
@@ -400,6 +436,15 @@ class ArtifactsPage(QWidget):
     def _open_run_dir(self):
         if self._shown_dir:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._shown_dir))
+
+
+def _scenario_folder(path):
+    """The scenario folder ``path`` is, or whose result.json it is - or ""."""
+    if not path:
+        return ""
+    if os.path.isdir(path):
+        return path if os.path.isfile(os.path.join(path, "result.json")) else ""
+    return os.path.dirname(path) if os.path.basename(path) == "result.json" else ""
 
 
 def _mtime(path):

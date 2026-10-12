@@ -652,6 +652,21 @@ QFrame[role="emptyzone"] {{
 QFrame[role="sidebar"] {{ background: {n100}; border-right: 1px solid {divider}; }}
 QFrame[role="bar"] {{ background: {bg}; border-bottom: 1px solid {divider}; }}
 QFrame[role="footer"] {{ background: {n100}; border-top: 1px solid {divider}; }}
+/* Artifacts > Flow: one card per step of a scenario's run (flowview.py). The left
+   edge says how the step went; a failed one is outlined and tinted. Square and
+   hairline, like every other surface here. */
+QFrame[role="flowcard"] {{
+    background: {surface}; border: 1px solid {divider}; border-left: 4px solid {n400};
+}}
+QFrame[role="flowcard"][status="pass"] {{ border-left-color: {ok}; }}
+QFrame[role="flowcard"][status="start"] {{ border-left-color: {accent}; }}
+QFrame[role="flowcard"][status="fail"], QFrame[role="flowcard"][status="error"] {{
+    background: {bad_tint}; border: 1px solid {bad}; border-left: 4px solid {bad};
+}}
+QLabel[role="flowtitle"] {{ font-size: 12px; font-weight: 600; color: {text}; }}
+QLabel[role="flowthumb"] {{
+    background: {n200}; border: 1px solid {divider}; color: {n600}; font-size: 11px;
+}}
 QFrame[role="hline"] {{ background: {divider}; max-height: 1px; border: none; }}
 QFrame[role="vline"] {{ background: {divider}; max-width: 1px; border: none; }}
 
