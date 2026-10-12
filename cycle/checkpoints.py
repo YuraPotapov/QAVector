@@ -237,9 +237,12 @@ class Store:
                 % ", ".join(uncertain))
 
         # Business refusals are results too; retrying a failed agent is different
-        # from trying to force a budget/approval gate to say yes.
+        # from trying to force a budget/approval gate to say yes. A refusal is a
+        # yes/no ``passed``: scenario.run's ``passed`` is a count of scenarios,
+        # and a run that failed on a flaky click is work to try again, not an
+        # answer - keyed on the key alone, Resume never ran it again.
         decisions = {s.step_id for s in previous.steps.values()
-                     if s.status == FAILED and "passed" in s.outputs}
+                     if s.status == FAILED and isinstance(s.outputs.get("passed"), bool)}
         retry = {s.step_id for s in previous.steps.values()
                  if s.status in (FAILED, TIMEOUT, CANCELLED, PENDING, WAITING, RUNNING)
                  and s.step_id not in decisions}

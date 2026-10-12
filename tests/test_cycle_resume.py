@@ -617,3 +617,29 @@ def test_a_backoff_is_a_change_to_the_step():
         _pinned_cycle(retry={"attempts": 2, "delay": 1, "backoff": "fixed"}),
         {}, registry)
     assert fixed == PINNED, "saying the default out loud changes nothing"
+
+
+def test_a_failed_step_that_counts_what_passed_is_tried_again(tmp_path):
+    """scenario.run's ``passed`` is a number of scenarios. Taken for a gate's
+    yes/no, a run that failed on a flaky click was never run again by Resume."""
+    scenarios = Plugin(lambda c, s: registry.PluginResult(
+        "failed", outputs={"passed": 4, "failed": 1}, message="1 scenario(s) failed"))
+    plugins = Plugins(scenarios=scenarios)
+    cycle = workflow(node("scenarios", on_failure="continue"))
+    run(cycle, plugins, tmp_path)
+    scenarios.action = lambda c, s: registry.succeeded(passed=5, failed=0)
+    final = run(cycle, plugins, tmp_path, resume=True)
+    assert scenarios.calls == ["scenarios", "scenarios"]
+    assert final.status == SUCCESS
+
+
+def test_a_gate_that_said_no_is_still_not_asked_again(tmp_path):
+    gate = Plugin(lambda c, s: registry.PluginResult(
+        "failed", outputs={"passed": False}, message="refused"))
+    other = Plugin(lambda c, s: registry.failed("disk unavailable"))
+    plugins = Plugins(gate=gate, other=other)
+    cycle = workflow(node("gate", on_failure="continue"), node("other"))
+    run(cycle, plugins, tmp_path)
+    run(cycle, plugins, tmp_path, resume=True)
+    assert gate.calls == ["gate"]
+    assert other.calls == ["other", "other"]
