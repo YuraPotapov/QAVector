@@ -16,6 +16,16 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.24] - 2026-10-13
+
+### Fixed
+- **A resumed scenario step counts only its own scenarios.** The launcher
+  appends to the events file it is given, and a resumed run gives the step the
+  folder it had before, so the last attempt's results were added to this
+  one's: five scenarios that passed read as nine, beside a failure already
+  fixed, and the gate after the step refused. The earlier attempt's events are
+  now set aside as `events.1.jsonl` before the launcher starts.
+
 ## [0.16.23] - 2026-10-12
 
 ### Fixed
