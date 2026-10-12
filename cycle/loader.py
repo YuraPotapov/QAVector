@@ -51,9 +51,9 @@ def search_path(cycles_dir=None):
 
 
 def _load_yaml(path):
-    import yaml  # lazy: only needed when actually reading a cycle
+    from engine import yamlload  # lazy: only needed when actually reading a cycle
     with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+        return yamlload.safe_load(fh) or {}
 
 
 def candidate_paths(cycle_id, cycles_dir=None):

@@ -971,7 +971,7 @@ def _secret_value(source):
     return str(document["value"] or "")
 
 
-def run_session_command(command, memory_path=None, cycles_dir=None):
+def run_session_command(command, memory_path=None, cycles_dir=None, page=None):
     """Serve one --cycle-session* call: print JSON, then exit.
 
     A session is every run of one cycle on one subject - see
@@ -983,10 +983,12 @@ def run_session_command(command, memory_path=None, cycles_dir=None):
     try:
         from cycle import sessions
         if kind == "list":
-            payload = {"ok": True,
-                       "sessions": sessions.sessions(cycle_id=argument,
-                                                     memory_path=memory_path,
-                                                     cycles_dir=cycles_dir)}
+            # One page when asked for one (see sessions.page), with how many
+            # there are in all and whether more follow; every session else.
+            payload = dict(sessions.page(cycle_id=argument,
+                                         memory_path=memory_path,
+                                         cycles_dir=cycles_dir, **(page or {})),
+                           ok=True)
         elif kind == "delete":
             payload = dict(sessions.delete(argument, memory_path=memory_path),
                            ok=True)
@@ -1143,6 +1145,8 @@ def run_cycle_command(command, source, cycles_dir=None):
             payload = cyclefile.import_file(argument, cycles_dir, registry)
         elif kind == "save":
             payload = _save_cycle(argument, source, cycles_dir)
+        elif kind == "move":
+            payload = _move_cycles(source, cycles_dir)
         else:                                   # unreachable; kept honest anyway
             raise ValueError("unknown cycle command %r" % kind)
     except Exception as exc:  # noqa: BLE001 - the report IS the error report
@@ -1156,6 +1160,24 @@ def run_cycle_command(command, source, cycles_dir=None):
     # "ok" is absent from a --cycle-show or --cycle-list payload, which are
     # reads and cannot fail here; only the writes report one.
     sys.exit(0 if payload.get("ok", True) else 1)
+
+
+def _move_cycles(source, cycles_dir=None):
+    """--cycle-move: read the JSON list at ``source`` and rewrite each project."""
+    from cycle import cyclefile, registry
+    if not source:
+        return {"ok": False, "moved": [], "failed": [],
+                "problems": ["--cycle-move needs --from=FILE (a JSON list)"]}
+    try:
+        with open(source, encoding="utf-8") as handle:
+            moves = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "moved": [], "failed": [],
+                "problems": ["cannot read %s: %s" % (source, exc)]}
+    if not isinstance(moves, list):
+        return {"ok": False, "moved": [], "failed": [],
+                "problems": ["%s must contain a JSON list" % source]}
+    return cyclefile.move(moves, cycles_dir, registry)
 
 
 def _save_cycle(cycle_id, source, cycles_dir=None):
@@ -1604,6 +1626,8 @@ def _bad_option_message(arg, config_path):
                 "Repeat it for each variable a cycle takes.")
     if arg == "--cycle-jobs":
         return "--cycle-jobs needs a number: how many steps may run at once."
+    if arg in ("--cycle-sessions-limit", "--cycle-sessions-offset"):
+        return "%s needs a whole number, e.g. %s=50." % (arg, arg)
     if arg in ("--user", "--password", "--filter-users", "--url", "--config",
                "--sessions-dir", "--user-session", "--log-level", "--report-level",
                "--report-screen", "--jobs", "--flows-dir", "--reports-dir",
@@ -1616,7 +1640,8 @@ def _bad_option_message(arg, config_path):
                "--cycle-memory-file", "--cycle-runs-dir", "--cycle-watch",
                "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove",
                "--cycle-plan-schedule",
-               "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin"):
+               "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin",
+               "--cycle-sessions-first"):
         return "%s needs a value: %s=VALUE (note the '=', not a space)." % (arg, arg)
     return ("Unknown option %r. Run --help for the full list." % arg)
 
@@ -3338,6 +3363,9 @@ write a report. The steps that do not depend on each other run at the same time.
   --cycle-delete=ID         Delete a cycle. Refuses the ones that ship with the
                             application - duplicate those instead.
   --cycle-import=FILE       Copy a cycle file in, validating it first.
+  --cycle-move --from=F     Put many cycles in another project at once, from
+                            the JSON list in file F ([{"id", "project"}], ""
+                            for none). Answers with each moved cycle's row.
   --cycles-dir=DIR          Where cycles live (default: beside the rest of your
                             data, then the ones that ship with the app).
   --cycle-secret-list=ID    Which of a cycle's secret variables have a value.
@@ -3392,6 +3420,11 @@ write a report. The steps that do not depend on each other run at the same time.
                             one cycle on one subject, grouped, newest first.
                             ID narrows to one cycle. A cycle with no subject
                             gives one session per run.
+  --cycle-sessions-limit=N  With --cycle-sessions: only N sessions (one page),
+  --cycle-sessions-offset=K after skipping the first K, and
+  --cycle-sessions-first=ID with that cycle's sessions ahead of the rest. The
+                            answer says how many there are and whether more
+                            follow.
   --cycle-session-delete=S  Delete one session: its run directories, their
                             index rows and the memory record its subject
                             names. Never a git branch or a Jira issue. Refused
@@ -3541,6 +3574,7 @@ def main():
     memory_command = None # --cycle-memory-list/show/forget: JSON, then exit
     memory_file = None    # --cycle-memory-file: the store (None = the default)
     session_command = None  # --cycle-sessions / --cycle-session-delete: JSON, then exit
+    session_page = {}       # --cycle-sessions-first/-limit/-offset: one page of them
     watch_command = None  # --cycle-watch / --cycle-watch-seen: JSON, then exit
     secrets_file = None   # --cycle-secrets-file: the store (None = the default)
     users_filter = None   # None = launch every user in the config
@@ -3726,6 +3760,8 @@ def main():
                 arg.split("=", 1)[1].strip())))
         elif arg == "--cycle-list":
             cycle_command = ("list", "")
+        elif arg == "--cycle-move":
+            cycle_command = ("move", "")
         # -- secret variables. The value of one never appears here: --set takes
         # it from the --from file, because argv is world-readable through ps.
         elif arg.startswith("--cycle-secret-list="):
@@ -3758,6 +3794,16 @@ def main():
             watch_command = ("seen", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-watch="):
             watch_command = ("check", arg.split("=", 1)[1].strip())
+        elif arg.startswith(("--cycle-sessions-first=", "--cycle-sessions-limit=",
+                             "--cycle-sessions-offset=")):
+            name, value = arg[len("--cycle-sessions-"):].split("=", 1)
+            if name == "first":
+                session_page[name] = value.strip()
+            else:
+                try:
+                    session_page[name] = max(0, int(value))
+                except ValueError:
+                    bad_option = "--cycle-sessions-" + name
         elif arg == "--cycle-sessions" or arg.startswith("--cycle-sessions="):
             session_command = ("list", arg.split("=", 1)[1].strip()
                                if "=" in arg else "")
@@ -3970,7 +4016,8 @@ def main():
     if memory_command:
         run_memory_command(memory_command, flow_source, memory_file)
     if session_command:
-        run_session_command(session_command, memory_file, cycles_dir)
+        run_session_command(session_command, memory_file, cycles_dir,
+                            page=session_page)
     if watch_command:
         run_watch_command(watch_command, cycles_dir, secrets_file, memory_file,
                           flow_source)

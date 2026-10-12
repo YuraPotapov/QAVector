@@ -130,3 +130,92 @@ def test_a_path_keeps_its_type_and_value_after_saving_and_reopening(tmp_path, pa
         assert opened["cycle"]["secrets"] == ["token"]
         assert opened["cycle"]["paths"] == ["project_dir"]
         document = opened["document"]
+
+
+# -- what a save answers with --------------------------------------------------
+# A front-end used to read every cycle on the machine (--describe) and then the
+# one it had just written (--cycle-show) after each save. The answer now carries
+# both, and they have to be exactly what those two reads would have said.
+
+_CYCLE = ("id: demo\nname: Demo\nproject: Portal\n"
+          "steps:\n  - id: first  # keep me\n    plugin: command.shell\n"
+          "    with:\n      command: echo hi\n")
+
+
+def test_a_save_answers_with_the_row_and_the_cycle_as_opened(tmp_path):
+    from cycle.cyclefile import list_cycles
+
+    answer = save("demo", str(tmp_path), yaml_text=_CYCLE)
+    assert answer["ok"]
+    assert answer["row"] == list_cycles(str(tmp_path))[0]
+    assert answer["shown"] == describe_cycle("demo", str(tmp_path))
+
+
+def test_a_dry_run_answers_with_neither(tmp_path):
+    answer = save("demo", str(tmp_path), yaml_text=_CYCLE, dry_run=True)
+    assert "row" not in answer and "shown" not in answer
+
+
+def test_moving_rewrites_only_the_project_and_keeps_comments(tmp_path):
+    from cycle.cyclefile import move
+
+    save("demo", str(tmp_path), yaml_text=_CYCLE)
+    answer = move([{"id": "demo", "project": "Shop"}, {"id": "gone", "project": ""}],
+                  str(tmp_path))
+
+    assert [row["project"] for row in answer["moved"]] == ["Shop"]
+    assert [one["id"] for one in answer["failed"]] == ["gone"]
+    assert not answer["ok"]
+    text = (tmp_path / "demo.yaml").read_text(encoding="utf-8")
+    assert "project: Shop" in text and "# keep me" in text
+
+
+def test_moving_out_of_every_project_drops_the_key(tmp_path):
+    from cycle.cyclefile import move
+
+    save("demo", str(tmp_path), yaml_text=_CYCLE)
+    answer = move([{"id": "demo", "project": ""}], str(tmp_path))
+    assert answer["ok"] and answer["moved"][0]["project"] == ""
+    assert "project:" not in (tmp_path / "demo.yaml").read_text(encoding="utf-8")
+
+
+def test_yaml_is_read_with_libyaml_when_it_is_there():
+    from engine import yamlload
+
+    expected = yaml.CSafeLoader if getattr(yaml, "__with_libyaml__", False) \
+        else yaml.SafeLoader
+    assert yamlload.LOADER is expected
+    assert yamlload.safe_load("a: [1, two]\n") == {"a": [1, "two"]}
+
+
+@pytest.mark.skipif(not getattr(yaml, "__with_libyaml__", False),
+                    reason="PyYAML built without libyaml")
+def test_libyaml_patches_a_file_exactly_as_the_pure_parser_did(monkeypatch):
+    """cyclepatch slices the file by node positions. libyaml puts every node
+    where the pure parser did, but names a plain scalar's style '' rather than
+    None - this is the test that a patch made with it is the same file."""
+    import copy
+    import glob
+
+    from cycle import cyclefile, model
+    from engine import yamlload
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    checked = 0
+    for path in sorted(glob.glob(os.path.join(here, "cycles", "*.yaml"))):
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        document = model.to_document(model.parse_cycle(yaml.safe_load(text), None))
+        changed = copy.deepcopy(document)
+        changed["description"] = (changed.get("description") or "") + " - changed"
+        changed["project"] = "Somewhere"
+        if changed.get("steps"):
+            changed["steps"][-1]["timeout"] = 77
+            changed["steps"][0].setdefault("with", {})["note"] = "a # not a comment"
+        written = []
+        for loader in (yaml.SafeLoader, yaml.CSafeLoader):
+            monkeypatch.setattr(yamlload, "LOADER", loader)
+            written.append(cyclefile.compose(changed, text))
+        assert written[0] == written[1], path
+        checked += 1
+    assert checked

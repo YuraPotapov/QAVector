@@ -44,8 +44,10 @@ def comments(text):
     parser rather than guessed at with a regular expression.
     """
     import yaml
+
+    from engine import yamlload
     try:
-        root = yaml.compose(text)
+        root = yamlload.compose(text)
     except Exception:  # noqa: BLE001 - an unreadable file has no answer here
         return None
     spans = []
@@ -105,8 +107,10 @@ def patch(text, base, new, render):
     :class:`PatchError` when the change cannot be made as edits.
     """
     import yaml
+
+    from engine import yamlload
     try:
-        root = yaml.compose(text)
+        root = yamlload.compose(text)
     except Exception as exc:  # noqa: BLE001
         raise PatchError("the file does not parse: %s" % exc)
     if not isinstance(root, yaml.MappingNode) or root.flow_style:
@@ -166,7 +170,9 @@ def _replace(text, key, value, context, name, now, render, edits):
     import yaml
     inline = render.inline(now)
     one_line = value.start_mark.line == value.end_mark.line
-    in_place = (isinstance(value, yaml.ScalarNode) and value.style in (None, '"', "'")
+    # A plain scalar's style is None to the pure parser and '' to libyaml.
+    in_place = (isinstance(value, yaml.ScalarNode)
+                and (value.style or None) in (None, '"', "'")
                 and value.start_mark.index < value.end_mark.index) or (
         isinstance(value, (yaml.MappingNode, yaml.SequenceNode)) and value.flow_style)
     if inline is not None and one_line and in_place:

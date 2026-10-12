@@ -457,3 +457,33 @@ def test_runs_kept_elsewhere_are_found_where_the_flag_says(tmp_path):
     code, listed = _launcher(tmp_path, "--cycle-sessions=demo",
                              "--cycle-runs-dir=" + root)
     assert code == 0 and [one["id"] for one in listed["sessions"]] == ["demo:K-1"]
+
+
+def test_a_page_puts_one_cycle_first_and_says_what_follows(tmp_path):
+    """The Subjects list asks for fifty at a time, the open cycle's first."""
+    root = str(tmp_path)
+    _index(root, [_row(root, "r%d" % one, key="K-%d" % one,
+                       cycle="one" if one % 2 else "two", started=one * 10)
+                  for one in range(1, 8)])
+    memory = str(tmp_path / "m.json")
+
+    first = sessions.page(root, first="two", limit=2, memory_path=memory)
+    assert [one["id"] for one in first["sessions"]] == ["two:K-6", "two:K-4"]
+    assert first["total"] == 7 and first["more"]
+
+    rest = sessions.page(root, first="two", limit=10, offset=2, memory_path=memory)
+    assert [one["id"] for one in rest["sessions"]] == [
+        "two:K-2", "one:K-7", "one:K-5", "one:K-3", "one:K-1"]
+    assert not rest["more"]
+    assert sessions.page(root, memory_path=memory)["sessions"] == \
+        sessions.sessions(root, memory_path=memory)
+
+
+def test_when_each_cycle_last_ran_is_over_every_session_not_the_page(tmp_path):
+    root = str(tmp_path)
+    _index(root, [_row(root, "r2", key="K-2", cycle="two", started=20),
+                  _row(root, "r1", status=FAILED, key="K-1", cycle="one", started=10)])
+    found = sessions.page(root, first="two", limit=1,
+                          memory_path=str(tmp_path / "m.json"))
+    assert [one["cycle"] for one in found["sessions"]] == ["two"]
+    assert found["last_runs"]["one"] == {"when": 11, "status": FAILED}

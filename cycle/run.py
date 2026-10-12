@@ -40,10 +40,11 @@ SCHEMA = 1
 METADATA = "metadata.json"
 INDEX = "index.json"
 
-#: How many runs the index keeps. The directories are left alone - deleting
-#: someone's artifacts because a list got long would be a surprise - so this
-#: only bounds what is listed quickly.
-MAX_INDEXED = 500
+#: The index keeps every run. It used to keep the newest 500, and since the
+#: Subjects list is built from it, every session older than that silently
+#: vanished from the list while its runs stayed on disk. A row is about 600
+#: bytes, so even ten thousand runs is a few megabytes; the list pages through
+#: them (see sessions.page) rather than drawing them all.
 
 
 def metadata_path(workspace):
@@ -285,8 +286,7 @@ def remember(run, root=None):
     rows = [row for row in index(root) if row.get("id") != run.id]
     rows.insert(0, summary(run))
     try:
-        _atomic(index_path(root), {"schema": SCHEMA,
-                                   "runs": rows[:MAX_INDEXED]})
+        _atomic(index_path(root), {"schema": SCHEMA, "runs": rows})
     except OSError:
         pass
     return rows
@@ -317,7 +317,7 @@ def rebuild_index(root=None):
             rows.append(summary(run))
     rows.sort(key=lambda row: row.get("started_at") or 0, reverse=True)
     try:
-        _atomic(index_path(root), {"schema": SCHEMA, "runs": rows[:MAX_INDEXED]})
+        _atomic(index_path(root), {"schema": SCHEMA, "runs": rows})
     except OSError:
         pass
     return rows

@@ -241,13 +241,14 @@ def test_remembering_a_run_twice_replaces_its_row(tmp_path):
     assert rows[0]["status"] == FAILED
 
 
-def test_the_index_is_capped(tmp_path):
+def test_the_index_keeps_every_run(tmp_path):
+    """It used to keep 500, and the sessions older than that vanished."""
     root = str(tmp_path)
-    rows = [{"id": "run-%d" % index} for index in range(run_mod.MAX_INDEXED + 20)]
+    rows = [{"id": "run-%d" % index} for index in range(520)]
     run_mod._atomic(run_mod.index_path(root), {"schema": 1, "runs": rows})
     run_mod.remember(a_run(root), root)
 
-    assert len(run_mod.index(root)) == run_mod.MAX_INDEXED
+    assert len(run_mod.index(root)) == 521
 
 
 def test_reading_an_index_that_is_not_there_gives_nothing(tmp_path):

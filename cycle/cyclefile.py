@@ -114,34 +114,38 @@ def list_cycles(cycles_dir=None, registry=None):
     validation is left to :func:`describe_cycle`, which is asked for one cycle
     at a time.
     """
-    rows = []
-    for cycle_id, path in sorted(loader.cycle_files(cycles_dir).items()):
-        writable = is_writable(path, cycles_dir)
-        row = {"id": cycle_id, "name": "", "description": "", "project": "",
-               "path": path, "writable": writable,
-               "source": "user" if writable else "bundled",
-               "steps": 0, "problems": [],
-               # So a front-end can tell whether the cycle it has open changed
-               # on disk without reading it again - see describe_cycle.
-               "digest": text_digest(_read_text(path))}
-        try:
-            parsed, raw = loader.read_cycle(cycle_id, cycles_dir)
-        except Exception as exc:          # noqa: BLE001 - a broken file is a row
-            row["problems"] = [str(exc)]
-            rows.append(row)
-            continue
-        row["name"] = parsed.name
-        row["description"] = parsed.description
-        row["project"] = parsed.project
-        row["steps"] = len(parsed.steps)
-        # So a front-end knows which cycles to listen for without opening each.
-        row["triggers"] = [dict(id=one.id, watch=one.watch, every=one.every,
-                                pin=model.trigger_pin(parsed, one),
-                                enabled=one.enabled)
-                           for one in parsed.triggers]
-        row["problems"] = model.problems(parsed, registry=registry, raw=raw)
-        rows.append(row)
-    return rows
+    return [list_row(cycle_id, path, cycles_dir, registry)
+            for cycle_id, path in sorted(loader.cycle_files(cycles_dir).items())]
+
+
+def list_row(cycle_id, path, cycles_dir=None, registry=None):
+    """One cycle's row of :func:`list_cycles` - also what a save answers with,
+    so a front-end can put the one row it changed in place instead of reading
+    every cycle on the machine again."""
+    writable = is_writable(path, cycles_dir)
+    row = {"id": cycle_id, "name": "", "description": "", "project": "",
+           "path": path, "writable": writable,
+           "source": "user" if writable else "bundled",
+           "steps": 0, "problems": [],
+           # So a front-end can tell whether the cycle it has open changed
+           # on disk without reading it again - see describe_cycle.
+           "digest": text_digest(_read_text(path))}
+    try:
+        parsed, raw = loader.read_cycle(cycle_id, cycles_dir)
+    except Exception as exc:              # noqa: BLE001 - a broken file is a row
+        row["problems"] = [str(exc)]
+        return row
+    row["name"] = parsed.name
+    row["description"] = parsed.description
+    row["project"] = parsed.project
+    row["steps"] = len(parsed.steps)
+    # So a front-end knows which cycles to listen for without opening each.
+    row["triggers"] = [dict(id=one.id, watch=one.watch, every=one.every,
+                            pin=model.trigger_pin(parsed, one),
+                            enabled=one.enabled)
+                       for one in parsed.triggers]
+    row["problems"] = model.problems(parsed, registry=registry, raw=raw)
+    return row
 
 
 def is_writable(path, cycles_dir=None):
@@ -380,11 +384,11 @@ def _literal(text, indent):
         return [header] + [(pad + line) if line else "" for line in body.split("\n")]
 
     try:
-        import yaml
+        from engine import yamlload
     except ImportError:
         return None
     try:
-        if yaml.safe_load("v: " + "\n".join(block("  ")) + "\n") != {"v": text}:
+        if yamlload.safe_load("v: " + "\n".join(block("  ")) + "\n") != {"v": text}:
             return None
     except Exception:  # noqa: BLE001 - anything unparseable stays quoted
         return None
@@ -445,11 +449,11 @@ def _reads_back_as_text(text):
     rules written out above.
     """
     try:
-        import yaml
+        from engine import yamlload
     except ImportError:
         return None
     try:
-        return yaml.safe_load("v: " + text) == {"v": text}
+        return yamlload.safe_load("v: " + text) == {"v": text}
     except Exception:  # noqa: BLE001 - anything unparseable needs the quotes
         return False
 
@@ -506,8 +510,8 @@ def compose(document, origin=None):
         return rendered, []
     text = rendered
     try:
-        import yaml
-        base = model.to_document(model.parse_cycle(yaml.safe_load(origin) or {},
+        from engine import yamlload
+        base = model.to_document(model.parse_cycle(yamlload.safe_load(origin) or {},
                                                    None))
         patched = cyclepatch.patch(origin, base, document, _RENDERER)
         if _meaning(patched) == _meaning(rendered):
@@ -521,9 +525,9 @@ def compose(document, origin=None):
 
 def _meaning(text):
     """What ``text`` says, in the one shape two writings can be compared in."""
-    import yaml
+    from engine import yamlload
     try:
-        return model.to_document(model.parse_cycle(yaml.safe_load(text) or {}, None))
+        return model.to_document(model.parse_cycle(yamlload.safe_load(text) or {}, None))
     except Exception:  # noqa: BLE001
         return None
 
@@ -608,14 +612,62 @@ def save(cycle_id, cycles_dir=None, yaml_text=None, document=None,
         answer["problems"] = ["cannot write %s: %s" % (path, exc)]
         return answer
     answer["ok"] = True
+    # What a front-end would otherwise start two more processes for straight
+    # after: the cycle's row in the list (a whole --describe) and the cycle
+    # as an editor opens it (a --cycle-show). The row is read without the
+    # registry, the way --describe reads it, so the two cannot disagree.
+    answer["row"] = list_row(cycle_id, path, cycles_dir)
+    try:
+        answer["shown"] = describe_cycle(cycle_id, cycles_dir, registry)
+    except CycleFileError:
+        pass
     return answer
+
+
+def move(moves, cycles_dir=None, registry=None):
+    """Rewrite ``project:`` in many cycles at once - one process, not two per
+    cycle. ``moves`` is ``[{"id": ..., "project": ...}]``, an empty project
+    meaning none. Each goes through :func:`save` as a document edit, so the
+    rest of the file - comments included - stays as it was.
+
+    Returns ``{ok, moved: [row, ...], failed: [{id, problem}, ...]}``.
+    """
+    moved, failed = [], []
+    for one in moves or []:
+        cycle_id = str((one or {}).get("id") or "")
+        project = str((one or {}).get("project") or "").strip()
+        try:
+            shown = describe_cycle(cycle_id, cycles_dir, registry)
+        except (CycleFileError, ValueError) as exc:
+            failed.append({"id": cycle_id, "problem": str(exc)})
+            continue
+        document = shown.get("document")
+        if not document or not shown.get("writable"):
+            failed.append({"id": cycle_id, "problem": (
+                "%s cannot be read" % cycle_id if not document
+                else "%s ships with the application" % cycle_id)})
+            continue
+        document = dict(document)
+        if project:
+            document["project"] = project
+        else:
+            document.pop("project", None)
+        answer = save(cycle_id, cycles_dir, document=document, registry=registry,
+                      base=shown.get("digest") or None)
+        if answer.get("ok"):
+            moved.append(answer["row"])
+        else:
+            failed.append({"id": cycle_id, "problem": "; ".join(
+                str(problem) for problem in answer.get("problems") or [])
+                or "not written"})
+    return {"ok": not failed, "moved": moved, "failed": failed}
 
 
 def _shapes(text):
     """The graph and the document ``text`` makes, for an editor's preview."""
-    import yaml
+    from engine import yamlload
     try:
-        parsed = model.parse_cycle(yaml.safe_load(text) or {}, None)
+        parsed = model.parse_cycle(yamlload.safe_load(text) or {}, None)
     except Exception:  # noqa: BLE001 - the problems already say why
         return {"cycle": None, "document": None}
     return {"cycle": model.to_graph(parsed), "document": model.to_document(parsed)}

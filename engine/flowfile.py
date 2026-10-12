@@ -386,14 +386,14 @@ def describe_selectors(flows_dir=None):
 
 def save_selectors(yaml_text, flows_dir=None):
     """Write the user's selectors.yaml, refusing anything that is not a map."""
-    import yaml
+    from engine import yamlload
 
     path = os.path.join(loader.search_path(flows_dir)[0], "selectors.yaml")
     if not is_writable(path, flows_dir):
         return {"ok": False, "path": path,
                 "problems": ["%s is not in the writable flows tree" % path]}
     try:
-        data = yaml.safe_load(yaml_text)
+        data = yamlload.safe_load(yaml_text)
     except Exception as exc:
         return {"ok": False, "path": path, "problems": [str(exc)]}
     if data is not None and not isinstance(data, dict):

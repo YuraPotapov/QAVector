@@ -157,6 +157,25 @@ def sessions(root=None, cycle_id="", memory_path=None, cycles_dir=None):
     running but which nothing is executing reported as interrupted - where it
     got to, and what the memory record its subject names holds now.
     """
+    return page(root, cycle_id, memory_path=memory_path,
+                cycles_dir=cycles_dir)["sessions"]
+
+
+def page(root=None, cycle_id="", first="", limit=0, offset=0, memory_path=None,
+         cycles_dir=None):
+    """One page of :func:`sessions`, and what a list needs to page through it.
+
+    ``first`` puts that cycle's sessions ahead of the rest - the open cycle,
+    in a front-end - each part still newest first. ``limit`` (0 for all) and
+    ``offset`` cut the page out of that order. Only the page's sessions are
+    worked out in full: each run of one may open its graph and its lock, and
+    doing that for every run ever made, to show fifty, is what made the list
+    slower with every run.
+
+    Returns ``{sessions, total, more, last_runs}`` - ``last_runs`` being each
+    cycle's latest session, ``{cycle: {"when", "status"}}``, worked out over
+    every session rather than only the page, for the explorer's rows.
+    """
     backfill(root, cycles_dir)
     grouped, order = {}, []
     for row in records.index(root):
@@ -168,48 +187,70 @@ def sessions(root=None, cycle_id="", memory_path=None, cycles_dir=None):
             order.append(name)
         grouped[name].append(row)
 
+    def updated(name):
+        return max((row.get("ended_at") or row.get("started_at") or 0)
+                   for row in grouped[name])
+
+    names = sorted(order, key=updated, reverse=True)
+    if first:
+        names = ([name for name in names if grouped[name][0].get("cycle") == first]
+                 + [name for name in names if grouped[name][0].get("cycle") != first])
+    offset = max(0, int(offset or 0))
+    chosen = names[offset:offset + int(limit)] if limit else names[offset:]
+
     try:
         remembered = memory.load(memory_path)
     except memory.MemoryError_:
         remembered = {}
+    last_runs = {}
+    for name in sorted(order, key=updated, reverse=True):
+        cycle = grouped[name][0].get("cycle") or ""
+        if cycle and cycle not in last_runs:
+            newest = max(grouped[name], key=lambda row: row.get("started_at") or 0)
+            last_runs[cycle] = {"when": updated(name),
+                                "status": _run_entry(newest, root)["state"] or ""}
+    return {"sessions": [_session(name, grouped[name], root, remembered)
+                         for name in chosen],
+            "total": len(names),
+            "more": offset + len(chosen) < len(names),
+            "last_runs": last_runs}
 
-    found = []
-    for name in order:
-        runs = [_run_entry(row, root) for row in grouped[name]]
-        runs.sort(key=lambda one: one.get("started_at") or 0, reverse=True)
-        latest = runs[0]
-        subject = {}
-        for one in reversed(runs):
-            # Oldest first, so the newest run's title wins - but a run that
-            # found no title does not erase what an earlier one did find.
-            for key, value in (one.get("subject") or {}).items():
-                if value:
-                    subject[key] = value
-        record = remembered.get(subject.get("memory") or "") or {}
-        found.append({
-            "id": name,
-            "cycle": latest.get("cycle", ""),
-            "name": latest.get("name", ""),
-            "subject": subject,
-            "status": latest["state"],
-            "running": latest["running"],
-            "reached": latest.get("reached", ""),
-            "reached_label": latest.get("reached_label", ""),
-            "reached_plugin": latest.get("reached_plugin", ""),
-            "message": latest.get("message", ""),
-            "latest": latest.get("id", ""),
-            "started_at": min((one.get("started_at") or 0) for one in runs),
-            "updated_at": max((one.get("ended_at") or one.get("started_at") or 0)
-                              for one in runs),
-            "memory": ({"key": subject.get("memory", ""),
-                        "fields": dict(record.get("fields") or {}),
-                        "updated_at": record.get("updated_at"),
-                        "claim": dict(record.get("claim") or {})}
-                       if record else {}),
-            "runs": runs,
-        })
-    found.sort(key=lambda one: one["updated_at"] or 0, reverse=True)
-    return found
+
+def _session(name, rows, root, remembered):
+    """One session in full, from its index rows."""
+    runs = [_run_entry(row, root) for row in rows]
+    runs.sort(key=lambda one: one.get("started_at") or 0, reverse=True)
+    latest = runs[0]
+    subject = {}
+    for one in reversed(runs):
+        # Oldest first, so the newest run's title wins - but a run that
+        # found no title does not erase what an earlier one did find.
+        for key, value in (one.get("subject") or {}).items():
+            if value:
+                subject[key] = value
+    record = remembered.get(subject.get("memory") or "") or {}
+    return {
+        "id": name,
+        "cycle": latest.get("cycle", ""),
+        "name": latest.get("name", ""),
+        "subject": subject,
+        "status": latest["state"],
+        "running": latest["running"],
+        "reached": latest.get("reached", ""),
+        "reached_label": latest.get("reached_label", ""),
+        "reached_plugin": latest.get("reached_plugin", ""),
+        "message": latest.get("message", ""),
+        "latest": latest.get("id", ""),
+        "started_at": min((one.get("started_at") or 0) for one in runs),
+        "updated_at": max((one.get("ended_at") or one.get("started_at") or 0)
+                          for one in runs),
+        "memory": ({"key": subject.get("memory", ""),
+                    "fields": dict(record.get("fields") or {}),
+                    "updated_at": record.get("updated_at"),
+                    "claim": dict(record.get("claim") or {})}
+                   if record else {}),
+        "runs": runs,
+    }
 
 
 def _run_entry(row, root):

@@ -61,9 +61,9 @@ class FlowNotFound(FlowError):
 
 
 def _load_yaml(path):
-    import yaml  # lazy: only needed when actually reading flows
+    from engine import yamlload  # lazy: only needed when actually reading flows
     with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+        return yamlload.safe_load(fh) or {}
 
 
 def candidate_paths(flow_id, flows_dir=None):
