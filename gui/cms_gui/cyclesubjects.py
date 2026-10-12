@@ -30,6 +30,7 @@ import html
 import time
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QPushButton,
                                QSplitter, QTextBrowser, QVBoxLayout, QWidget)
@@ -43,6 +44,12 @@ NEW_RUN = "new"
 PLAN_PREFIX = "plan:"
 #: The two kinds the core puts on the plan (cycle/planner.py).
 APPROVAL = "approval"
+#: The row at the foot of the list that loads the next page. No colon, so no
+#: session can have it either.
+MORE = "more"
+#: Sessions asked for at a time. The list starts with this many and asks for
+#: this many more each time it is scrolled to the end.
+PAGE = 50
 
 
 def plan_id(item):
@@ -133,6 +140,8 @@ SPEC = {
     "width": 300,
     "list_height": 260,
     "details_height": 240,
+    "heading_height": 22,
+    "more_height": 30,
     "row": {"pad_x": 8, "pad_y": 5, "gap": 1, "title": 12, "detail": 11},
     "delete_size": 22,
 }
@@ -229,6 +238,41 @@ def row_detail(session, open_cycle=""):
     if (session.get("subject") or {}).get("key"):
         parts.append(when(session.get("updated_at")))
     return parts
+
+
+def period(timestamp, now=None):
+    """Which stretch of time a session falls in, as a heading in the list says
+    it: "Today", "Yesterday", "Last 7 days", "Last 30 days", then the month.
+
+    Headings rather than a date on every row: with a page loaded after a page,
+    where one stretch ends and an older one begins is what tells somebody
+    how far back they have come.
+    """
+    if not timestamp:
+        return "Earlier"
+    now = time.time() if now is None else now
+    today = time.localtime(now)
+    midnight = time.mktime((today.tm_year, today.tm_mon, today.tm_mday,
+                            0, 0, 0, 0, 0, -1))
+    if timestamp >= midnight:
+        return "Today"
+    if timestamp >= midnight - 86400:
+        return "Yesterday"
+    if timestamp >= midnight - 6 * 86400:
+        return "Last 7 days"
+    if timestamp >= midnight - 29 * 86400:
+        return "Last 30 days"
+    return time.strftime("%B %Y", time.localtime(timestamp))
+
+
+def more_text(total, shown, loading=False):
+    """What the row at the foot of the list says."""
+    left = max(0, int(total or 0) - int(shown or 0))
+    if loading:
+        return "Loading %d older..." % min(PAGE, left) if left else "Loading older..."
+    if left:
+        return "%d older - scroll down or click to load %d more" % (left, min(PAGE, left))
+    return "Older sessions - scroll down or click to load more"
 
 
 def picks(graph_subject, labels):
@@ -415,12 +459,25 @@ class SubjectsPanel(QWidget):
     planned_remove = Signal(dict)
     #: A planned entry double-clicked: start it now or later.
     planned_open = Signal(dict)
+    #: Scrolled to the end, or the row at the foot clicked: the next page.
+    more_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         #: Which drawing of the list is current - see _rebuild. A newer one
         #: makes the rows an older one still had to add pointless.
         self._drawing = 0
+        #: Whether the drawing in progress has added its last row yet.
+        self._drawn = True
+        #: Whether the core has older sessions than these, how many there are
+        #: in all, and whether the next page has been asked for.
+        self._more = False
+        self._total = 0
+        self._loading_more = False
+        #: The heading the last row added sat under - see _add_sessions.
+        self._section = None
+        #: Where the list was scrolled to before it was drawn again.
+        self._scroll = 0
         self._sessions = []
         self._planned = []
         self._cycle = ""
@@ -440,6 +497,7 @@ class SubjectsPanel(QWidget):
         self.list.setProperty("role", "panel")
         self.list.itemClicked.connect(self._clicked)
         self.list.itemDoubleClicked.connect(self._double_clicked)
+        self.list.verticalScrollBar().valueChanged.connect(self._scrolled)
 
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
@@ -507,7 +565,7 @@ class SubjectsPanel(QWidget):
             self._picked = "%s:%s" % (live.get("cycle", ""), live["subject"]["key"])
 
     def set_state(self, cycle=KEEP, graph=None, sessions=KEEP, planned=KEEP,
-                  live=KEEP):
+                  live=KEEP, more=KEEP, total=KEEP):
         """Several of the above at once, drawn once.
 
         Each setter redraws the whole list, and a list of a hundred and fifty
@@ -523,12 +581,51 @@ class SubjectsPanel(QWidget):
                             for node in graph.get("nodes") or [] if node.get("id")}
         if sessions is not KEEP:
             self._sessions = [one for one in sessions or [] if isinstance(one, dict)]
+            # A new answer replaces whatever page was still being asked for.
+            self._loading_more = False
+        if more is not KEEP:
+            self._more = bool(more)
+        if total is not KEEP:
+            self._total = int(total or 0)
         if planned is not KEEP:
             self._planned = [one for one in planned or [] if isinstance(one, dict)]
             if self._picked.startswith(PLAN_PREFIX) and self.planned_item() is None:
                 self._picked = ""
         self._take_live(self._live if live is KEEP else live)
         self._rebuild()
+
+    def append_sessions(self, sessions, more=False, total=KEEP):
+        """The next page: added under what is there, not drawn over it.
+
+        Drawing the whole list again would throw away where somebody had
+        scrolled to - which is the end, the very place they were reading.
+        """
+        known = {one.get("id") for one in self._sessions}
+        fresh = [one for one in sessions or []
+                 if isinstance(one, dict) and one.get("id") not in known]
+        self._sessions.extend(fresh)
+        self._more, self._loading_more = bool(more), False
+        if total is not KEEP:
+            self._total = int(total or 0)
+        if not self._drawn:
+            self._rebuild()
+            return
+        self._drop_footer()
+        self.list.blockSignals(True)
+        self._add_sessions(fresh)
+        self.list.blockSignals(False)
+        self._add_footer()
+
+    def more_failed(self):
+        """The next page could not be read: offer it again rather than hang."""
+        self._loading_more = False
+        self._update_footer()
+
+    def has_more(self):
+        return self._more
+
+    def loading_more(self):
+        return self._loading_more
 
     def set_busy(self, busy):
         """A cycle is running: nothing that starts or deletes one is offered."""
@@ -565,9 +662,17 @@ class SubjectsPanel(QWidget):
         return mine + rest
 
     def row_ids(self):
-        """What each row stands for, top to bottom. For tests and nothing else."""
+        """What each row stands for, top to bottom. For tests and nothing else.
+        A heading has no id and is left out - see :meth:`headings`."""
         return [self.list.item(index).data(ROLE_SESSION)
-                for index in range(self.list.count())]
+                for index in range(self.list.count())
+                if self.list.item(index).data(ROLE_SESSION)]
+
+    def headings(self):
+        """The headings in the list, top to bottom. For tests."""
+        return [self.list.item(index).text()
+                for index in range(self.list.count())
+                if not self.list.item(index).data(ROLE_SESSION)]
 
     # -- drawing --------------------------------------------------------------
     def _add(self, key, row):
@@ -581,8 +686,10 @@ class SubjectsPanel(QWidget):
         return item
 
     def _rebuild(self):
+        self._scroll = self.list.verticalScrollBar().value()
         self.list.blockSignals(True)
         self.list.clear()
+        self._section = None
         if self._cycle:
             self._add(NEW_RUN, _Row("+ New run", new_run_text(
                 self._graph_subject, self._labels), theme.NEUTRAL[500]))
@@ -605,10 +712,47 @@ class SubjectsPanel(QWidget):
             # A row is a handful of widgets, and a hundred and fifty of them
             # built in one go held the window still for a fifth of a second.
             # What is on screen is built now; the rest follows between frames.
-            self._more(self._drawing, sessions[ROWS_AT_ONCE:])
+            self._drawn = False
+            self._later(self._drawing, sessions[ROWS_AT_ONCE:])
+        else:
+            self._finish_drawing()
+
+    def _finish_drawing(self):
+        self._drawn = True
+        self._add_footer()
+        self.list.verticalScrollBar().setValue(self._scroll)
+
+    def _heading(self, text, group=False):
+        """A line that says where a stretch of the list begins. Not a row:
+        it cannot be picked, and it carries no id. ``group`` is the one that
+        starts the other cycles' part, set like the panel's own kicker so it
+        reads as a level above the stretches of time inside it."""
+        item = QListWidgetItem(text)
+        item.setFlags(Qt.ItemIsEnabled)
+        font = item.font()
+        font.setPixelSize(SPEC["row"]["detail"])
+        font.setWeight(QFont.DemiBold)
+        if group:
+            font.setCapitalization(QFont.AllUppercase)
+            font.setLetterSpacing(QFont.PercentageSpacing, 112)
+        item.setFont(font)
+        item.setForeground(theme.color(theme.NEUTRAL[700 if group else 500]))
+        item.setSizeHint(QSize(0, SPEC["heading_height"] + (8 if group else 0)))
+        self.list.addItem(item)
 
     def _add_sessions(self, sessions):
         for session in sessions:
+            # Headings where a stretch of time begins, and before the other
+            # cycles' sessions when the open cycle's came first - so a page
+            # loaded under a page says plainly how far back it reaches.
+            mine = session.get("cycle") == self._cycle
+            when_ = period(session.get("updated_at"))
+            section = (mine, when_)
+            if section != self._section:
+                if (self._section is not None and self._section[0] and not mine):
+                    self._heading("Other cycles", group=True)
+                self._heading(when_)
+                self._section = section
             detail = " - ".join(part for part in row_detail(session, self._cycle)
                                 if part)
             row = _Row(subject_title(session), detail, status_colour(session),
@@ -617,7 +761,7 @@ class SubjectsPanel(QWidget):
                                     self.delete_requested.emit(one))
             self._add(session.get("id"), row)
 
-    def _more(self, drawing, rest):
+    def _later(self, drawing, rest):
         def next_batch():
             if drawing != self._drawing:
                 return                  # redrawn since; these rows are stale
@@ -625,8 +769,52 @@ class SubjectsPanel(QWidget):
             self._add_sessions(rest[:ROWS_LATER])
             self.list.blockSignals(False)
             if rest[ROWS_LATER:]:
-                self._more(drawing, rest[ROWS_LATER:])
-        QTimer.singleShot(0, next_batch)
+                self._later(drawing, rest[ROWS_LATER:])
+            else:
+                self._finish_drawing()
+        # Bound to the panel, so a batch still queued when it is deleted is
+        # dropped with it rather than run against a list that is gone.
+        QTimer.singleShot(0, self, next_batch)
+
+    # -- the next page --------------------------------------------------------
+    def _footer(self):
+        last = self.list.item(self.list.count() - 1) if self.list.count() else None
+        return last if last is not None and last.data(ROLE_SESSION) == MORE else None
+
+    def _add_footer(self):
+        if not self._more or self._footer() is not None:
+            return
+        item = QListWidgetItem(more_text(self._total, len(self._sessions),
+                                         self._loading_more))
+        item.setData(ROLE_SESSION, MORE)
+        item.setFlags(Qt.ItemIsEnabled)
+        item.setForeground(theme.color(theme.ACCENT))
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setSizeHint(QSize(0, SPEC["more_height"]))
+        self.list.addItem(item)
+
+    def _drop_footer(self):
+        footer = self._footer()
+        if footer is not None:
+            self.list.takeItem(self.list.row(footer))
+
+    def _update_footer(self):
+        footer = self._footer()
+        if footer is not None:
+            footer.setText(more_text(self._total, len(self._sessions),
+                                     self._loading_more))
+
+    def _ask_more(self):
+        if not self._more or self._loading_more or not self._drawn:
+            return
+        self._loading_more = True
+        self._update_footer()
+        self.more_requested.emit()
+
+    def _scrolled(self, value):
+        bar = self.list.verticalScrollBar()
+        if bar.maximum() > 0 and value >= bar.maximum():
+            self._ask_more()
 
     def _paint_details(self):
         picked = self.picked()
@@ -670,6 +858,11 @@ class SubjectsPanel(QWidget):
 
     def _clicked(self, item):
         picked = item.data(ROLE_SESSION) or ""
+        if picked == MORE:
+            self._ask_more()
+            return
+        if not picked:
+            return                      # a heading
         self._picked = picked
         self._paint_details()
         session = self.session(picked)

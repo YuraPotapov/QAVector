@@ -34,6 +34,13 @@ GRAPH = {"id": "dev", "subject": {"kind": "task", "key": "${steps.todo.outputs.k
 
 
 # ------------------------------------------------------------------- words
+
+def _item(panel, index):
+    """The index-th row that stands for something - headings are skipped."""
+    rows = [panel.list.item(one) for one in range(panel.list.count())
+            if panel.list.item(one).data(cs.ROLE_SESSION)]
+    return rows[index]
+
 def test_a_session_waiting_on_a_person_says_so():
     assert cs.status_word(session(running=True, reached="approve",
                                   plugin="approval.gate")) == "waiting for approval"
@@ -132,7 +139,7 @@ def test_clicking_a_row_asks_for_its_session(panel):
     panel.set_cycle("dev", GRAPH)
     asked = []
     panel.activated.connect(asked.append)
-    panel._clicked(panel.list.item(1))
+    panel._clicked(_item(panel, 1))
     assert [one["id"] for one in asked] == ["dev:QA-1"]
 
 
@@ -140,7 +147,7 @@ def test_the_new_run_row_offers_to_start_one(panel):
     panel.set_cycle("dev", GRAPH)
     started = []
     panel.new_requested.connect(lambda: started.append(True))
-    panel._clicked(panel.list.item(0))
+    panel._clicked(_item(panel, 0))
     assert not panel.new_button.isHidden()
     panel.new_button.click()
     assert started == [True]
@@ -150,21 +157,21 @@ def test_the_bin_asks_to_delete_its_own_session(panel):
     panel.set_sessions([session(), session(key="QA-2")])
     asked = []
     panel.delete_requested.connect(asked.append)
-    row = panel.list.itemWidget(panel.list.item(1))
+    row = panel.list.itemWidget(_item(panel, 1))
     row.bin.click()
     assert [one["id"] for one in asked] == ["dev:QA-2"]
 
 
 def test_a_running_session_cannot_be_deleted(panel):
     panel.set_sessions([session(running=True)])
-    assert not panel.list.itemWidget(panel.list.item(0)).bin.isEnabled()
+    assert not panel.list.itemWidget(_item(panel, 0)).bin.isEnabled()
 
 
 def test_nothing_is_deleted_or_started_while_a_cycle_runs(panel):
     panel.set_sessions([session()])
     panel.set_cycle("dev", GRAPH)
     panel.set_busy(True)
-    assert not panel.list.itemWidget(panel.list.item(1)).bin.isEnabled()
+    assert not panel.list.itemWidget(_item(panel, 1)).bin.isEnabled()
     assert not panel.new_button.isEnabled()
 
 
@@ -324,7 +331,7 @@ def test_planned_tasks_sit_under_the_new_run_row_the_open_cycle_s_first(panel):
 def test_a_planned_row_says_what_and_that_it_waits(panel):
     panel.set_cycle("dev", {"nodes": []})
     panel.set_planned([planned(key="OPS-1", cycle="ops")])
-    row = panel.list.itemWidget(panel.list.item(1))
+    row = panel.list.itemWidget(_item(panel, 1))
     assert row.title.text() == "OPS-1  Count the items"
     assert row.detail.text().startswith("ops - planned ")
     assert row.detail.text().endswith("waiting for you")
@@ -336,7 +343,7 @@ def test_picking_a_planned_task_offers_to_start_work_on_it(panel):
     started, fresh = [], []
     panel.planned_start.connect(started.append)
     panel.new_requested.connect(lambda: fresh.append(True))
-    panel._clicked(panel.list.item(1))
+    panel._clicked(_item(panel, 1))
 
     assert panel.new_button.isVisible() or not panel.isVisible()
     assert panel.new_button.text() == "Start work"
@@ -350,14 +357,14 @@ def test_the_bin_takes_it_off_the_plan(panel):
     panel.set_planned([planned()])
     removed = []
     panel.planned_remove.connect(removed.append)
-    panel.list.itemWidget(panel.list.item(1)).bin.click()
+    panel.list.itemWidget(_item(panel, 1)).bin.click()
     assert [one["key"] for one in removed] == ["QA-7"]
 
 
 def test_a_planned_task_that_went_away_is_no_longer_picked(panel):
     panel.set_cycle("dev", {"nodes": []})
     panel.set_planned([planned()])
-    panel._clicked(panel.list.item(1))
+    panel._clicked(_item(panel, 1))
     panel.set_planned([])
     assert panel.planned_item() is None and panel.new_button.text() == "Start"
 
@@ -369,12 +376,12 @@ def test_an_approval_nobody_answered_is_resumed_from_the_plan(panel):
     panel.set_cycle("dev", {"nodes": []})
     panel.set_planned([waiting])
     assert panel.row_ids()[1] == "plan:approval:r1:approve"
-    row = panel.list.itemWidget(panel.list.item(1))
+    row = panel.list.itemWidget(_item(panel, 1))
     assert row.title.text() == "QA-4  waiting for your approval"
     assert "resume to be asked again" in row.detail.text()
     started = []
     panel.planned_start.connect(started.append)
-    panel._clicked(panel.list.item(1))
+    panel._clicked(_item(panel, 1))
     assert panel.new_button.text() == "Resume"
     assert "Start work on QA-4?" in panel.details.toPlainText()
     panel.new_button.click()
@@ -470,3 +477,76 @@ def test_double_clicking_a_planned_entry_asks_when(qapp):
     panel.list.itemDoubleClicked.emit(row)
     assert opened == [item]
     panel.deleteLater()
+
+
+# -- pages, and where each stretch of time begins ------------------------------
+def test_a_session_falls_in_a_stretch_a_heading_can_name():
+    now = time.mktime((2026, 10, 12, 15, 0, 0, 0, 0, -1))
+    hour = 3600
+    assert cs.period(now - hour, now) == "Today"
+    assert cs.period(now - 20 * hour, now) == "Yesterday"
+    assert cs.period(now - 4 * 24 * hour, now) == "Last 7 days"
+    assert cs.period(now - 20 * 24 * hour, now) == "Last 30 days"
+    assert cs.period(time.mktime((2026, 8, 3, 9, 0, 0, 0, 0, -1)), now) == "August 2026"
+
+
+def _dated(key, cycle, days_ago):
+    one = session(key, cycle)
+    one["updated_at"] = time.time() - days_ago * 86400
+    return one
+
+
+def test_headings_say_where_a_stretch_begins_and_where_other_cycles_start(panel):
+    panel.set_cycle("dev", GRAPH)
+    panel.set_state(sessions=[_dated("QA-1", "dev", 0), _dated("QA-2", "dev", 40),
+                              _dated("OPS-1", "ops", 0)])
+    assert panel.headings()[0] == "Today"
+    assert "Other cycles" in panel.headings()
+    assert panel.headings()[panel.headings().index("Other cycles") + 1] == "Today"
+    assert panel.row_ids() == [cs.NEW_RUN, "dev:QA-1", "dev:QA-2", "ops:OPS-1"]
+
+
+def test_more_on_the_core_puts_a_row_at_the_foot_that_asks_for_them(panel):
+    asked = []
+    panel.more_requested.connect(lambda: asked.append(True))
+    panel.set_state(sessions=[session("QA-1")], more=True, total=80)
+    assert panel.row_ids()[-1] == cs.MORE
+    assert "79 older" in panel.list.item(panel.list.count() - 1).text()
+
+    panel._clicked(panel.list.item(panel.list.count() - 1))
+    panel._clicked(panel.list.item(panel.list.count() - 1))
+    assert asked == [True], "asked once, not again while it is loading"
+    assert panel.list.item(panel.list.count() - 1).text().startswith("Loading 50")
+
+
+def test_scrolling_to_the_end_asks_for_the_next_page(panel):
+    asked = []
+    panel.more_requested.connect(lambda: asked.append(True))
+    panel.resize(300, 200)
+    panel.show()
+    panel.set_state(sessions=[_dated("QA-%d" % one, "dev", 0) for one in range(30)],
+                    more=True, total=200)
+    bar = panel.list.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum())
+    assert asked == [True]
+
+
+def test_the_next_page_goes_under_the_list_without_drawing_it_again(panel):
+    panel.set_state(sessions=[_dated("QA-1", "dev", 0)], more=True, total=3)
+    first = panel.list.itemWidget(_item(panel, 0))
+    panel.append_sessions([_dated("QA-1", "dev", 0), _dated("QA-2", "dev", 45)],
+                          more=False)
+    assert panel.row_ids() == ["dev:QA-1", "dev:QA-2"], "no footer, no duplicate"
+    assert panel.list.itemWidget(_item(panel, 0)) is first
+    assert panel.headings()[-1] not in ("Today", "Yesterday")
+
+
+def test_a_page_that_could_not_be_read_is_offered_again(panel):
+    asked = []
+    panel.more_requested.connect(lambda: asked.append(True))
+    panel.set_state(sessions=[session("QA-1")], more=True, total=60)
+    panel._ask_more()
+    panel.more_failed()
+    panel._ask_more()
+    assert asked == [True, True]

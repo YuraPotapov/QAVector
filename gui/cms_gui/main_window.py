@@ -249,6 +249,8 @@ class MainWindow(QMainWindow):
         self.metrics_label.setStyleSheet("padding: 0 10px;")
 
         self.loader_thread = None
+        #: A refresh asked for while one was running - see refresh_inventory.
+        self._inventory_stale = False
         # New tasks in the queues cycles watch. Asked about one at a time, and
         # only when nothing is running - see _offer_next.
         self.listener = Listener(self.core, self)
@@ -630,6 +632,9 @@ class MainWindow(QMainWindow):
         # writing one changes nothing else - but the inventory is
         # what its own list is built from.
         self.cycles.saved.connect(self.refresh_inventory)
+        # What a write answered with, already in the page's own list: only
+        # what else reads the cycles needs telling, not a whole --describe.
+        self.cycles.cycles_changed.connect(self._cycles_changed)
         self.cycles.run_requested.connect(self.start_cycle_run)
         self.cycles.stop_requested.connect(self.stop_run)
         self.environments.directories_changed.connect(self._directories_changed)
@@ -953,7 +958,12 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if self.loader_thread and self.loader_thread.isRunning():
+            # Asked while a read is still going: that read may have taken the
+            # files before this change was written, so one more follows it -
+            # dropping the request left the tree showing the older state.
+            self._inventory_stale = True
             return
+        self._inventory_stale = False
 
         self.command.set_core(self.core)
         self.launch.set_core(self.core)
@@ -1069,7 +1079,25 @@ class MainWindow(QMainWindow):
         self.loader_thread.progress.connect(_splash_msg)
         self.loader_thread.error.connect(_on_error)
         self.loader_thread.finished_inventory.connect(_on_finished)
+        self.loader_thread.finished.connect(self._inventory_read)
         self.loader_thread.start()
+
+    def _inventory_read(self):
+        """The read thread is done: read again if somebody asked meanwhile."""
+        if self._inventory_stale and not self._closing:
+            self._inventory_stale = False
+            QTimer.singleShot(0, self.refresh_inventory)
+
+    def _cycles_changed(self, rows):
+        """The Cycles page wrote cycles and holds their rows: tell the rest.
+
+        The listener builds its triggers from the inventory's cycles, so the
+        inventory is brought up to date in place rather than read again.
+        """
+        if self.inventory is None:
+            return
+        self.inventory.payload["cycles"] = list(rows)
+        self.listener.set_inventory(self.inventory)
 
     def _restore_selected_cycle(self, cycle_id):
         """The cycle's last run, read back when the cycle is opened.

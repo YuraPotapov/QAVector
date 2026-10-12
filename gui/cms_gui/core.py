@@ -492,6 +492,15 @@ class Core:
     def cycle_import(self, path):
         return self._flow_json("--cycle-import=" + path)
 
+    def cycle_move(self, moves):
+        """Put cycles in other projects: ``[{"id", "project"}]``, "" for none.
+
+        One process for all of them, where a show and a save each used to be
+        one per cycle. Answers ``{ok, moved: [row, ...], failed: [...]}``.
+        """
+        return self._with_document("--cycle-move", list(moves),
+                                   prefix="cms-cycle-move-")
+
     def _with_document(self, command, document, prefix="cms-doc-", extra=()):
         """Run ``command`` with ``document`` in a --from= file, then clean up.
 
@@ -610,9 +619,21 @@ class Core:
         """Take one entry off the plan."""
         return self._flow_json("--cycle-plan-remove=" + entry_id, *self.memory_flag())
 
-    def cycle_sessions(self, cycle_id=""):
-        """Every session, the most recently active first."""
-        return self._flow_json("--cycle-sessions=" + cycle_id,
+    def cycle_sessions(self, cycle_id="", first="", limit=0, offset=0):
+        """Sessions, the most recently active first - all, or one page.
+
+        ``first`` puts that cycle's sessions ahead of the rest; ``limit`` and
+        ``offset`` cut a page out of that order, and the answer then also says
+        ``total`` and ``more``. Without them it is every session, as before.
+        """
+        paging = []
+        if first:
+            paging.append("--cycle-sessions-first=" + first)
+        if limit:
+            paging.append("--cycle-sessions-limit=%d" % int(limit))
+        if offset:
+            paging.append("--cycle-sessions-offset=%d" % int(offset))
+        return self._flow_json("--cycle-sessions=" + cycle_id, *paging,
                                *self.memory_flag())
 
     def cycle_session_delete(self, session_id):

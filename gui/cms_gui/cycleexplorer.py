@@ -154,6 +154,8 @@ class Explorer(QWidget):
     cycle_imported = Signal()
     #: Move a cycle to another project: (cycle id, project, "" for none).
     cycle_moved = Signal(str, str)
+    #: A person opened or shut a group: every answer so far, {name: open}.
+    folds_changed = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -161,6 +163,12 @@ class Explorer(QWidget):
         self._projects = {}              # project name -> item
         self._listed = []                # the names the projects file has
         self._cycles = []
+        #: group name -> open, for every group somebody opened or shut. Only
+        #: their choices: a group nobody touched opens, as it always did.
+        self._folds = {}
+        #: Set while fill puts the groups back, so restoring a fold is not
+        #: taken for somebody making one.
+        self._filling = False
         #: cycle id -> {"when": epoch seconds, "status": ...}, from the sessions.
         self._last_runs = {}
         layout = QVBoxLayout(self)
@@ -219,6 +227,8 @@ class Explorer(QWidget):
         self.tree.setProperty("role", "panel")
         self.tree.installEventFilter(self)
         self.tree.currentItemChanged.connect(lambda *_a: self.selection_changed.emit())
+        self.tree.itemExpanded.connect(lambda item: self._folded(item, True))
+        self.tree.itemCollapsed.connect(lambda item: self._folded(item, False))
 
         self.empty = widgets.empty_zone(
             "No cycles yet",
@@ -241,8 +251,18 @@ class Explorer(QWidget):
         grey the instant you made the project you wanted to rename.
         """
         was_cycle, was_project = self.current_id(), self._selected_project()
-        folded = {name for name, item in self._projects.items()
-                  if not item.isExpanded()}
+        self._filling = True
+        try:
+            self._fill(cycles, projects)
+        finally:
+            self._filling = False
+        if was_cycle:
+            self.select(was_cycle)
+        elif was_project:
+            self.select_project(was_project)
+        self._filter(self.search.text())
+
+    def _fill(self, cycles, projects):
         self.tree.clear()
         self._rows, self._projects = {}, {}
         self._cycles = list(cycles)
@@ -261,21 +281,55 @@ class Explorer(QWidget):
                 unlisted.setdefault(name, []).append(row)
 
         for name in self._listed:
-            self._group(name, grouped.get(name) or [], "project", folded)
+            self._group(name, grouped.get(name) or [], "project")
         for name in sorted(unlisted, key=str.casefold):
-            self._group(name, unlisted[name], "unlisted", folded)
+            self._group(name, unlisted[name], "unlisted")
         # Only when there is something in it: an empty Unassigned group is a
         # question nobody asked.
         if grouped.get(UNASSIGNED):
-            self._group(UNASSIGNED, grouped[UNASSIGNED], "unassigned", folded)
+            self._group(UNASSIGNED, grouped[UNASSIGNED], "unassigned")
 
         self.stack.setCurrentWidget(self.tree if (cycles or self._listed)
                                     else self.empty)
-        if was_cycle:
-            self.select(was_cycle)
-        elif was_project:
-            self.select_project(was_project)
-        self._filter(self.search.text())
+
+    # -- which groups are open ------------------------------------------------
+    def set_folds(self, states):
+        """Which groups somebody opened or shut before, as {name: open}.
+
+        A view preference, kept by the page the way Services & Logs keeps its
+        own (``Settings.folds``): folding Work Projects shut once should not
+        have to be done again after every restart.
+        """
+        self._folds = {str(name): bool(value)
+                       for name, value in dict(states or {}).items()}
+        for name, item in self._projects.items():
+            self._filling = True
+            try:
+                item.setExpanded(self._folds.get(name, True))
+            finally:
+                self._filling = False
+
+    def folds(self):
+        return dict(self._folds)
+
+    def forget_fold(self, name, new_name=None):
+        """A project renamed (its fold moves along) or deleted (it goes)."""
+        if name not in self._folds:
+            return
+        value = self._folds.pop(name)
+        if new_name:
+            self._folds[new_name] = value
+        self.folds_changed.emit(dict(self._folds))
+
+    def _folded(self, item, expanded):
+        if self._filling or item.data(0, ROLE_KIND) not in (
+                "project", "unlisted", "unassigned"):
+            return
+        name = item.text(0)
+        if self._folds.get(name) == expanded:
+            return
+        self._folds[name] = expanded
+        self.folds_changed.emit(dict(self._folds))
 
     def set_error(self, text):
         """Say the projects file could not be read, or stop saying it."""
@@ -289,7 +343,7 @@ class Explorer(QWidget):
         for cycle_id, item in self._rows.items():
             self._describe(item, item.data(0, ROLE_ROW) or {})
 
-    def _group(self, name, rows, kind, folded=()):
+    def _group(self, name, rows, kind):
         item = QTreeWidgetItem(self.tree, [name])
         item.setData(0, ROLE_KIND, kind)
         item.setData(0, ROLE_ID, name if kind != "unassigned" else "")
@@ -315,7 +369,7 @@ class Explorer(QWidget):
         for row in sorted(rows, key=lambda one: (one.get("name")
                                                  or one.get("id", "")).lower()):
             self._leaf(item, row)
-        item.setExpanded(name not in folded)
+        item.setExpanded(self._folds.get(name, True))
 
     def _leaf(self, parent, row):
         item = QTreeWidgetItem(parent, [row.get("name") or row.get("id", "")])

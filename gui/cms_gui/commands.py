@@ -113,6 +113,9 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # Scenarios page's: read, write, delete, import.
              "--cycle-show", "--cycle-save", "--cycle-delete", "--cycle-import",
              "--cycle-list",
+             # Putting many cycles in another project at once - what renaming
+             # or deleting a project in the explorer does.
+             "--cycle-move",
              # And running one. Not a form field: a cycle run is a cycle, picked
              # on the page that draws it, plus the variables that cycle declares
              # - which a generic list of flags has no way to know the names of.
@@ -148,6 +151,9 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # The Subjects sidebar lists a cycle's sessions and deletes one;
              # both act on a row the page shows, not on anything typed.
              "--cycle-sessions", "--cycle-session-delete",
+             # And pages through them, fifty at a time as the list scrolls.
+             "--cycle-sessions-first", "--cycle-sessions-limit",
+             "--cycle-sessions-offset",
              # The task listener asks and marks through these, on a schedule
              # the cycle file sets. Nobody types one.
              "--cycle-watch", "--cycle-watch-seen", "--cycle-watch-plan",

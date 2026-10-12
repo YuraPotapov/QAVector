@@ -64,9 +64,17 @@ class FakeCore:
         self.sessions_asked = 0
         self.sessions_deleted = []
 
-    def cycle_sessions(self, cycle_id=""):
+    def cycle_sessions(self, cycle_id="", first="", limit=0, offset=0):
+        """Pages the way the core does: ``first``'s sessions ahead, then cut."""
         self.sessions_asked += 1
-        return {"ok": True, "sessions": list(self.sessions)}
+        self.pages_asked = getattr(self, "pages_asked", []) + [(first, limit, offset)]
+        rows = list(self.sessions)
+        if first:
+            rows = ([one for one in rows if one.get("cycle") == first]
+                    + [one for one in rows if one.get("cycle") != first])
+        page = rows[offset:offset + limit] if limit else rows[offset:]
+        return {"ok": True, "sessions": page, "total": len(rows),
+                "more": offset + len(page) < len(rows)}
 
     def cycle_watch_planned(self):
         return {"ok": True, "planned": list(getattr(self, "planned", []))}
@@ -216,9 +224,13 @@ def settled(*_ignored):
 
 @pytest.fixture
 def page(qapp, dispose):
+    # Which projects are folded is a QSettings value every later test would
+    # read, so each starts from none and leaves none behind.
+    Settings().save_folds("cycles", {})
     made = CyclesPage(Settings())
     yield made
     dispose(made)
+    Settings().save_folds("cycles", {})
 
 
 @pytest.fixture
@@ -2379,6 +2391,74 @@ def test_the_sessions_are_read_once_the_page_opens_a_cycle(page):
     assert page.subjects.row_ids() == ["new", "demo:QA-1"]
 
 
+def _many(count, cycle="demo"):
+    return [_session("QA-%d" % one, "r%d" % one, cycle=cycle) for one in range(count)]
+
+
+def test_the_sessions_come_a_page_at_a_time_the_open_cycle_s_first(page):
+    from cms_gui.cyclesubjects import MORE, PAGE
+    core = FakeCore({"demo": payload()})
+    core.sessions = _many(5, "other") + _many(70)
+    page.set_core(core)
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    settled()      # rows past the first forty are built between frames
+
+    assert core.pages_asked[-1] == ("demo", PAGE, 0)
+    ids = page.subjects.row_ids()
+    assert len(page.subjects.sessions()) == PAGE and ids[-1] == MORE
+    assert all(one.startswith("demo:") for one in ids[1:-1])
+
+
+def test_scrolling_to_the_end_loads_the_next_page_under_the_first(page):
+    from cms_gui.cyclesubjects import PAGE
+    core = FakeCore({"demo": payload()})
+    core.sessions = _many(70)
+    page.set_core(core)
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    settled()      # rows past the first forty are built between frames
+    page.subjects._ask_more()
+    settled()
+
+    assert core.pages_asked[-1] == ("demo", PAGE, PAGE)
+    assert len(page.subjects.sessions()) == 70
+    assert not page.subjects.has_more()
+
+
+def test_a_refresh_keeps_the_pages_already_loaded(page):
+    from cms_gui.cyclesubjects import PAGE
+    core = FakeCore({"demo": payload()})
+    core.sessions = _many(130)
+    page.set_core(core)
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    settled()      # rows past the first forty are built between frames
+    page.subjects._ask_more()
+    settled()
+    page.refresh_sessions()
+
+    assert core.pages_asked[-1] == ("demo", 2 * PAGE, 0)
+    assert len(page.subjects.sessions()) == 2 * PAGE and page.subjects.has_more()
+
+
+def test_when_a_cycle_last_ran_comes_from_every_session_not_the_page(page):
+    core = FakeCore({"demo": payload()})
+    core.sessions = [_session()]
+    answer = FakeCore.cycle_sessions
+
+    def with_last_runs(self, *args, **kwargs):
+        found = answer(self, *args, **kwargs)
+        found["last_runs"] = {"old": {"when": 5.0, "status": "failed"}}
+        return found
+
+    core.cycle_sessions = with_last_runs.__get__(core)
+    page.set_core(core)
+    page.set_inventory(FakeInventory([row(), row("old", "Old cycle")], [SHELL_PLUGIN]))
+    page.open("demo")
+    assert page.explorer._last_runs == {"old": {"when": 5.0, "status": "failed"}}
+
+
 def test_a_run_that_finds_its_subject_says_so_in_the_header(opened):
     state = RunState()
     opened.set_run_state(state)
@@ -2570,6 +2650,84 @@ def test_moving_a_cycle_out_of_every_project_drops_the_key(owning):
     assert "project" not in owning.core.saved[-1][1]
 
 
+class AnsweringCore(FakeCore):
+    """A core that answers a write with the cycle's row and the cycle itself,
+    and moves many cycles in one call - what the page needs to read nothing
+    more after a write."""
+
+    def __init__(self, cycles=None):
+        super().__init__(cycles)
+        self.moves = []
+
+    def cycle_save(self, cycle_id, document, **options):
+        answer = FakeCore.cycle_save(self, cycle_id, document, **options)
+        if options.get("dry_run") or not answer.get("ok"):
+            return answer
+        project = document.get("project", "") if isinstance(document, dict) else ""
+        shown = payload(cycle_id, project=project)
+        shown["digest"] = "after-%d" % len(self.saved)
+        return dict(answer, row=dict(row(cycle_id, name=document.get("name")
+                                         or cycle_id, project=project),
+                                     digest=shown["digest"]),
+                    shown=shown)
+
+    def cycle_move(self, moves):
+        self.moves.append(list(moves))
+        return {"ok": True, "failed": [],
+                "moved": [row(one["id"], project=one["project"]) for one in moves]}
+
+
+@pytest.fixture
+def answering(owning):
+    owning.set_core(AnsweringCore({"demo": payload(project="Portal")}))
+    owning.said_saved = []
+    owning.saved.connect(lambda: owning.said_saved.append(True))
+    owning.changed_rows = []
+    owning.cycles_changed.connect(owning.changed_rows.append)
+    return owning
+
+
+def test_a_save_reads_nothing_back(answering):
+    """The save's answer has the row and the cycle: no --describe (saved), no
+    --cycle-show after it - one process for the whole save."""
+    answering.open("demo")
+    shown_before = list(answering.core.shown)
+    answering._save_yaml("id: demo\nname: Renamed\nsteps: []\n")
+
+    assert answering.core.shown == shown_before
+    assert answering.said_saved == []
+    assert answering._open["digest"] == "after-1"
+    assert answering.changed_rows and answering.changed_rows[-1][0]["id"] == "demo"
+
+
+def test_a_new_cycle_appears_and_opens_at_once(answering, monkeypatch):
+    _answer(monkeypatch, "fresh")
+    answering._new_cycle("Portal")
+    assert "fresh" in answering.explorer._rows
+    assert answering.current_id() == "fresh"
+    assert answering.said_saved == [] and "fresh" not in answering.core.shown
+
+
+def test_renaming_a_project_moves_its_cycles_in_one_call(answering, monkeypatch):
+    answering.set_inventory(FakeInventory([row(project="Portal"),
+                                           row("two", project="Portal"),
+                                           row("three", project="Portal")]))
+    _answer(monkeypatch, "Customer Portal")
+    _agree(monkeypatch)
+    answering._rename_project("Portal")
+
+    assert len(answering.core.moves) == 1 and len(answering.core.moves[0]) == 3
+    assert answering.core.saved == [] and answering.said_saved == []
+    assert {one["project"] for one in answering._cycles} == {"Customer Portal"}
+
+
+def test_deleting_a_cycle_drops_its_row_without_reading(answering, monkeypatch):
+    _agree(monkeypatch)
+    answering._delete_cycle("demo")
+    assert "demo" not in answering.explorer._rows
+    assert answering.said_saved == []
+
+
 def test_a_bundled_cycle_is_not_moved_and_says_why(owning, monkeypatch):
     said = []
     monkeypatch.setattr("cms_gui.widgets.note", lambda *a, **k: said.append(a[2]))
@@ -2671,6 +2829,44 @@ def test_a_folded_project_stays_folded_when_the_tree_is_rebuilt(page):
     page.explorer._projects["Portal"].setExpanded(False)
     page.set_inventory(FakeInventory([row(project="Portal")]))
     assert not page.explorer._projects["Portal"].isExpanded()
+
+
+def test_a_folded_project_is_still_folded_after_a_restart(page, qapp, dispose):
+    """Folding Work Projects shut once should not have to be done every start."""
+    page._projects = projects("Portal", "Shop")
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row(project="Portal"),
+                                      row("other", project="Shop")]))
+    page.explorer._projects["Portal"].setExpanded(False)
+
+    again = CyclesPage(Settings())
+    try:
+        again._projects = projects("Portal", "Shop")
+        again.set_core(FakeCore())
+        again.set_inventory(FakeInventory([row(project="Portal"),
+                                           row("other", project="Shop")]))
+        assert not again.explorer._projects["Portal"].isExpanded()
+        assert again.explorer._projects["Shop"].isExpanded()
+    finally:
+        dispose(again)
+
+
+def test_rebuilding_the_tree_is_not_taken_for_somebody_folding(page):
+    """Only what a person chose is kept - not every group fill opened."""
+    page._projects = projects("Portal")
+    page.set_core(FakeCore())
+    page.set_inventory(FakeInventory([row(project="Portal")]))
+    page.set_inventory(FakeInventory([row(project="Portal")]))
+    assert Settings().folds("cycles") == {}
+
+
+def test_a_renamed_project_keeps_its_fold(owning, monkeypatch):
+    owning.explorer._projects["Portal"].setExpanded(False)
+    _answer(monkeypatch, "Customer Portal")
+    _agree(monkeypatch)
+    owning._rename_project("Portal")
+    assert not owning.explorer._projects["Customer Portal"].isExpanded()
+    assert Settings().folds("cycles") == {"Customer Portal": False}
 
 
 def test_an_unreadable_projects_file_is_said_beside_the_tree(page, tmp_path):
@@ -3354,9 +3550,9 @@ class SlowCore(FakeCore):
         self.gate.wait(5)
         return FakeCore.cycle_show(self, cycle_id)
 
-    def cycle_sessions(self, cycle_id=""):
+    def cycle_sessions(self, cycle_id="", **paging):
         self.gate.wait(5)
-        return FakeCore.cycle_sessions(self, cycle_id)
+        return FakeCore.cycle_sessions(self, cycle_id, **paging)
 
 
 def _settle(qapp, timeout=5.0):

@@ -50,7 +50,7 @@ from ..cycleexplorer import (ROLE_ALERT, ROLE_ID, ROLE_KIND, ROLE_META,  # noqa:
                              ROLE_ROW, UNASSIGNED, Explorer as _Explorer)
 from ..cyclegraph import STATUS_LOOK, CanvasSkeleton, CycleCanvas
 from ..cycleoutput import implementation_html
-from ..cyclesubjects import SPEC as SUBJECTS_SPEC, SubjectsPanel
+from ..cyclesubjects import PAGE as SUBJECTS_PAGE, SPEC as SUBJECTS_SPEC, SubjectsPanel
 from ..stages import StageList
 from ..cycleinteractions import InteractionComposer
 from .cycledialogs import CycleDialog, NodeDialog
@@ -67,6 +67,10 @@ VIEW_SETTLED_MS = 800
 EXPLORER_WIDTH = 240
 SUBJECTS_WIDTH = SUBJECTS_SPEC["width"]
 OUTPUT_HEIGHT = 170
+
+#: Where the explorer's open and shut projects are kept - ``Settings.folds``,
+#: the store Services & Logs keeps its own folds in.
+FOLDS = "cycles"
 
 #: The output panel's tabs, by position. Named because three places set a tab's
 #: text by index and a fourth tab inserted in the middle would otherwise rename
@@ -133,6 +137,10 @@ class CyclesPage(QWidget):
     stop_requested = Signal()
     interaction_requested = Signal(dict)
     saved = Signal()
+    #: The page put the rows a write answered with into its own list - every
+    #: row, as it is now - so the window can follow without reading the whole
+    #: inventory again. ``saved`` is still said by a core too old to answer so.
+    cycles_changed = Signal(list)
     #: Show this on the Artifacts page: (run directory, path relative to it -
     #: "" for the directory itself).
     artifacts_requested = Signal(str, str)
@@ -149,12 +157,15 @@ class CyclesPage(QWidget):
         self._projects = []              # cycleprojectsfile.ProjectRow
         self._projects_path = ""
         self._open = None                # the --cycle-show payload, or None
+        self._written = {}               # the last successful --cycle-save answer
         self._selected = ""              # step id selected on the canvas
         # Repaints asked for but not yet done - see _schedule_paint.
         self._paint_pending = False
         self._buttons_pending = False
         self._sessions_pending = False
         self._sessions_loaded = False
+        #: The cycle the loaded sessions were asked to put first.
+        self._sessions_first = ""
         self._stages_window = None       # stageswindow.StagesWindow, while detached
         self._build()
         self.load_projects()
@@ -350,6 +361,9 @@ class CyclesPage(QWidget):
         self.explorer.cycle_imported.connect(self._import_cycle)
         self.explorer.cycle_moved.connect(self._move_cycle)
         self.explorer.project_listed.connect(self._list_project)
+        if self.settings is not None:
+            self.explorer.set_folds(self.settings.folds(FOLDS))
+            self.explorer.folds_changed.connect(self._remember_folds)
         self.output = _Output(self)
         self.output.composer.submitted.connect(self.interaction_requested.emit)
         self.output.save_requested.connect(self._save_yaml)
@@ -366,6 +380,7 @@ class CyclesPage(QWidget):
         self.subjects.planned_open.connect(self.planned_opened.emit)
         self.subjects.planned_remove.connect(self._remove_planned)
         self.subjects.files_picked.connect(self._open_run_files)
+        self.subjects.more_requested.connect(self._more_sessions)
 
         # Folding splitters: any panel dragged shut leaves a bold line where
         # it went, and clicking the line brings it back.
@@ -536,7 +551,7 @@ class CyclesPage(QWidget):
         if not self._sessions_loaded:
             # Asked beside the cycle rather than after it: the two do not
             # depend on each other, and the list shows it is coming at once.
-            self.refresh_sessions()
+            self.refresh_sessions(first=cycle_id)
 
     def _opened(self, cycle_id, payload, error, then=None):
         """The core's answer to :meth:`open`: draw it."""
@@ -572,6 +587,10 @@ class CyclesPage(QWidget):
         self.explorer.select(cycle_id)
         self.subjects.set_state(cycle=cycle_id, graph=payload.get("cycle"),
                                 live=self._live_cycle())
+        if self._sessions_loaded and self._sessions_first != cycle_id:
+            # The list is paged with the open cycle's sessions first; another
+            # cycle open means another first page.
+            self._schedule_sessions()
         self._describe_state(payload)
         self._update_buttons()
         if then is not None:
@@ -838,7 +857,7 @@ class CyclesPage(QWidget):
         if not self._write_cycle(draft.cycle_id, draft.document, base=draft.base):
             return False
         self._draft = None
-        self.open(draft.cycle_id)
+        self._show_written(draft.cycle_id)
         return True
 
     def _revert_draft(self):
@@ -1431,8 +1450,12 @@ class CyclesPage(QWidget):
             return state
         return None
 
-    def refresh_sessions(self):
+    def refresh_sessions(self, first=None):
         """Ask the core for the sessions and the plan again. Never raises.
+
+        A page of them (``cyclesubjects.PAGE``), the open cycle's first - or
+        as many as are on screen already, so a refresh while a run moves does
+        not take back the pages somebody scrolled down to load.
 
         A list that could not be read is left as it was, not a dialog: this
         runs on its own whenever a run moves, and a dialog nobody asked for,
@@ -1447,9 +1470,19 @@ class CyclesPage(QWidget):
             # step of a run.
             self._loading(("subjects",), True)
         core = self.core
+        first = self.current_id() if first is None else first
+        limit = max(SUBJECTS_PAGE, len(self.subjects.sessions()))
+        self._sessions_first = first
+        # A page still being read is about the list this answer replaces.
+        self._asked["sessions_more"] = self._asked.get("sessions_more", 0) + 1
 
         def work():
-            sessions = core.cycle_sessions()
+            try:
+                sessions = core.cycle_sessions(first=first, limit=limit)
+            except core_mod.CoreError:
+                # A core from before paging refuses the flags: ask it the old
+                # way, for everything.
+                sessions = core.cycle_sessions()
             try:
                 planned = core.cycle_watch_planned()
             except core_mod.CoreError:
@@ -1470,11 +1503,37 @@ class CyclesPage(QWidget):
         self.subjects.set_state(
             sessions=sessions,
             planned=KEEP if planned is None else planned,
-            live=self._live_cycle())
+            live=self._live_cycle(),
+            more=bool((sessions_answer or {}).get("more")),
+            total=(sessions_answer or {}).get("total") or len(sessions))
         if planned is not None:
             self.planned_loaded.emit(planned)
-        self.explorer.set_last_runs(_last_runs(sessions))
+        # Over every session, not only the page: a cycle whose last run is
+        # older than the first fifty sessions still says when it last ran.
+        last_runs = (sessions_answer or {}).get("last_runs")
+        self.explorer.set_last_runs(_last_runs(sessions) if last_runs is None
+                                    else last_runs)
         self._update_buttons()
+
+    def _more_sessions(self):
+        """The Subjects list was scrolled to its end: the next page."""
+        if self.core is None:
+            return
+        core, first = self.core, self._sessions_first
+        offset = len(self.subjects.sessions())
+        self._call("sessions_more",
+                   lambda: core.cycle_sessions(first=first, limit=SUBJECTS_PAGE,
+                                               offset=offset),
+                   self._more_sessions_answered)
+
+    def _more_sessions_answered(self, answer, error):
+        if error is not None:
+            self.subjects.more_failed()
+            return
+        answer = answer or {}
+        self.subjects.append_sessions(answer.get("sessions") or [],
+                                      more=bool(answer.get("more")),
+                                      total=answer.get("total") or KEEP)
 
     def refresh_planned(self):
         """Ask the core what is on the plan. Never raises, for the same reason
@@ -1625,21 +1684,24 @@ class CyclesPage(QWidget):
             return
 
         project.name = name
+        # Before the tree is rebuilt, so the renamed group opens or stays shut
+        # the way the old one was.
+        self.explorer.forget_fold(old, name)
         if not self._write_projects():
+            project.name = old
+            self.explorer.forget_fold(name, old)
             return
         self.explorer.select_project(name)
         # The cycles are rewritten rather than left pointing at a name that no
         # longer exists - otherwise a rename quietly moves every one of them to
         # Unassigned, which is the Services page's lesson about renaming a stack
         # behind its logs' backs.
-        failed = [row["id"] for row in moving
-                  if not self._set_cycle_project(row["id"], name)]
+        _moved, failed = self._move_cycles([(row["id"], name) for row in moving])
         if failed:
             widgets.warn(self, "Rename project",
                                 "Renamed, but these could not be rewritten and "
                                 "now show as unassigned:\n\n- %s"
                                 % "\n- ".join(failed))
-        self.saved.emit()
 
     def _delete_project(self, name):
         project = cpf.find(self._projects, name)
@@ -1656,19 +1718,18 @@ class CyclesPage(QWidget):
         self._projects = [one for one in self._projects if one is not project]
         if not self._write_projects():
             return
+        self.explorer.forget_fold(name)
         # Their files say where they belong, and the tree believes them - so
         # a deleted project whose cycles still named it would come straight
         # back as "not in your projects list". What the question promised is
         # Unassigned, so that is what the files are made to say.
-        kept = [row["id"] for row in orphans
-                if not row.get("writable")
-                or not self._set_cycle_project(row["id"], "")]
+        _moved, failed = self._move_cycles(
+            [(row["id"], "") for row in orphans if row.get("writable")])
+        kept = [row["id"] for row in orphans if not row.get("writable")] + failed
         if kept:
             widgets.warn(self, "Delete project",
                          "Deleted, but these could not be rewritten and still "
                          "show under %r:\n\n- %s" % (name, "\n- ".join(kept)))
-        if orphans:
-            self.saved.emit()
 
     def _list_project(self, name):
         """Put a project cycles already name into the list - nothing else moves."""
@@ -1696,17 +1757,72 @@ class CyclesPage(QWidget):
                          "%s ships with the application, so its file cannot "
                          "be changed. Duplicate it, and move the copy." % cycle_id)
             return
-        if not self._set_cycle_project(cycle_id, project):
+        _moved, failed = self._move_cycles([(cycle_id, project)])
+        if failed:
             widgets.warn(self, "Move to project",
                          "%s could not be rewritten; it stays where it was."
                          % cycle_id)
-            return
-        self.saved.emit()
-        if cycle_id == self.current_id():
-            self.open(cycle_id)
+
+    def _move_cycles(self, moves):
+        """Rewrite ``project:`` in each of ``[(cycle id, project)]``.
+
+        One core call for all of them, behind the page's busy veil, and the
+        rows it answers with go straight into the tree - where renaming a
+        project of fifty cycles used to be a hundred processes, one after
+        another, with the window frozen for all of them. A core from before
+        ``--cycle-move`` is asked the old way, one cycle at a time, and the
+        inventory read again after. Returns (moved ids, failed ids).
+        """
+        moves = list(moves)
+        if not moves:
+            return [], []
+        if self.core is None:
+            return [], [cycle_id for cycle_id, _project in moves]
+        move = getattr(self.core, "cycle_move", None)
+        text = "Moving %d cycle%s..." % (len(moves), "" if len(moves) == 1 else "s")
+        answer = None
+        if move is not None:
+            try:
+                answer = self._waiting(text, lambda: move(
+                    [{"id": cycle_id, "project": project}
+                     for cycle_id, project in moves]))
+            except core_mod.CoreError:
+                answer = None
+        if not isinstance(answer, dict) or "moved" not in answer:
+            moved = self._waiting(text, lambda: [
+                cycle_id for cycle_id, project in moves
+                if self._set_cycle_project(cycle_id, project)])
+            if moved:
+                self.saved.emit()
+        else:
+            rows = [row for row in answer.get("moved") or [] if row.get("id")]
+            moved = [row["id"] for row in rows]
+            if rows:
+                self._take_rows(add=rows)
+        if self.current_id() in moved:
+            self.open(self.current_id())
+        return moved, [cycle_id for cycle_id, _project in moves
+                       if cycle_id not in moved]
+
+    def _take_rows(self, add=(), remove=()):
+        """Put rows a write answered with into the list, and drop ``remove``.
+
+        The tree is rebuilt from the list the page already has, and the window
+        told through ``cycles_changed`` - what a whole ``--describe`` was read
+        for after every write, for the sake of the one row that changed.
+        """
+        add = [dict(row) for row in add if row.get("id")]
+        gone = set(remove) | {row["id"] for row in add}
+        self._cycles = sorted([row for row in self._cycles
+                               if row.get("id") not in gone] + add,
+                              key=lambda row: row.get("id", ""))
+        self.explorer.fill(self._cycles, self._projects)
+        self._update_buttons()
+        self.cycles_changed.emit(list(self._cycles))
 
     def _set_cycle_project(self, cycle_id, project):
-        """Rewrite one cycle's ``project:``. True when it was written."""
+        """Rewrite one cycle's ``project:``, for a core without --cycle-move.
+        True when it was written. Called off the GUI thread: no widgets."""
         if self.core is None:
             return False
         try:
@@ -1745,7 +1861,7 @@ class CyclesPage(QWidget):
 
     def _duplicate_cycle(self, cycle_id):
         try:
-            payload = self.core.cycle_show(cycle_id)
+            payload = self._read_for_edit(cycle_id)
         except core_mod.CoreError as exc:
             widgets.warn(self, "Duplicate", str(exc))
             return
@@ -1774,7 +1890,7 @@ class CyclesPage(QWidget):
         if not self._settled(cycle_id):
             return
         try:
-            payload = self.core.cycle_show(cycle_id)
+            payload = self._read_for_edit(cycle_id)
         except core_mod.CoreError as exc:
             widgets.warn(self, "Rename", str(exc))
             return
@@ -1801,7 +1917,7 @@ class CyclesPage(QWidget):
         if not self._settled(cycle_id):
             return
         try:
-            payload = self.core.cycle_show(cycle_id)
+            payload = self._read_for_edit(cycle_id)
         except core_mod.CoreError as exc:
             widgets.warn(self, "Change id", str(exc))
             return
@@ -1829,12 +1945,28 @@ class CyclesPage(QWidget):
                                  source=cycle_id):
             return
         try:
-            self.core.cycle_delete(cycle_id)
+            removed = self.core.cycle_delete(cycle_id)
         except core_mod.CoreError as exc:
             widgets.warn(self, "Change id",
                                 "Written as %s, but %s could not be removed: %s"
                                 % (new_id, cycle_id, exc))
-        self.saved.emit()
+            return
+        if removed.get("ok", True):
+            self._take_rows(remove=[cycle_id])
+
+    def _read_for_edit(self, cycle_id):
+        """``cycle_id`` as ``--cycle-show`` answers, for a file action on it.
+
+        The open cycle is not read a second time while its file is the one
+        it was opened from; anything else is read behind the busy veil rather
+        than on this thread with the window frozen. Raises CoreError.
+        """
+        if (self._open and self._open.get("id") == cycle_id
+                and self._open.get("digest") and not self._changed_since_opened()):
+            return dict(self._open,
+                        document=dict(self._open.get("document") or {}) or None)
+        core = self.core
+        return self._waiting("Reading...", lambda: core.cycle_show(cycle_id))
 
     def _editable(self, payload, title):
         """True when this cycle may be written to. Says why when it may not."""
@@ -1874,7 +2006,8 @@ class CyclesPage(QWidget):
                          cycle_id)
         if self.current_id() == cycle_id:
             self._close()
-        self.saved.emit()
+        # The file is gone: its row goes, and nothing else needs reading.
+        self._take_rows(remove=[cycle_id])
 
     def _import_cycle(self):
         from PySide6.QtWidgets import QFileDialog
@@ -1893,7 +2026,10 @@ class CyclesPage(QWidget):
                                     "\n".join(str(one) for one in
                                                answer.get("problems") or []))
             return
-        self.saved.emit()
+        if answer.get("row"):
+            self._take_rows(add=[answer["row"]])
+        else:
+            self.saved.emit()
 
     def _write_cycle(self, cycle_id, document, then_open=False, source="",
                      base=None):
@@ -1912,6 +2048,7 @@ class CyclesPage(QWidget):
         """
         if self.core is None:
             return False
+        self._written = {}
         options = {}
         digest = base if base is not None else (
             (self._open or {}).get("digest", "") if cycle_id == self.current_id()
@@ -1940,11 +2077,37 @@ class CyclesPage(QWidget):
                               % "\n- ".join(str(one) for one in
                                              answer.get("problems") or []))
             return False
+        self._written = answer
+        if answer.get("row"):
+            # The core answered with the cycle's row: put it in the tree now,
+            # rather than reading every cycle and scenario on the machine.
+            self._take_rows(add=[answer["row"]])
+            if then_open:
+                self._show_written(cycle_id)
+            return True
         if then_open:
             # A saved listener may refresh the inventory immediately.
             self._pending_open = cycle_id
         self.saved.emit()
         return True
+
+    def _show_written(self, cycle_id):
+        """Draw ``cycle_id`` as the save just wrote it.
+
+        From the save's own answer when it carries the cycle as an editor
+        opens it - a second process for the file written a moment ago is
+        what made a save take as long as two. Otherwise, or when leaving a
+        draft of another cycle needs asking about first, it is read as usual.
+        """
+        shown = (self._written or {}).get("shown")
+        if (not shown or shown.get("id") != cycle_id
+                or (self._draft is not None and self._draft.cycle_id != cycle_id
+                    and self._draft.dirty)):
+            self.open(cycle_id)
+            return
+        # Whatever an earlier open is still reading is older than this.
+        self._asked["open"] = self._asked.get("open", 0) + 1
+        self._opened(cycle_id, shown, None)
 
     def _changed_on_disk(self, cycle_id, answer):
         """The file moved under us. Reload it, or leave the edit unwritten."""
@@ -1984,7 +2147,7 @@ class CyclesPage(QWidget):
             else:
                 document.pop(key, None)
         if self._write_cycle(cycle_id, document):
-            self.open(cycle_id)
+            self._show_written(cycle_id)
 
     def _save_yaml(self, text):
         """The YAML tab: the file as somebody typed it."""
@@ -1992,7 +2155,7 @@ class CyclesPage(QWidget):
         if not cycle_id:
             return
         if self._write_cycle(cycle_id, {"yaml": text}):
-            self.open(cycle_id)
+            self._show_written(cycle_id)
 
     def _close(self):
         """Nothing open: what deleting whatever was on screen leaves behind."""
@@ -2471,6 +2634,12 @@ class CyclesPage(QWidget):
             if self._down.indexOf(self.output) in self._down.folded():
                 self._down.unfold(self._down.indexOf(self.output))
         self.output.stages.setFocus(Qt.ShortcutFocusReason)
+
+    def _remember_folds(self, states):
+        try:
+            self.settings.save_folds(FOLDS, states)
+        except Exception:                # noqa: BLE001 - a view preference
+            pass
 
     def _remember_detached(self, detached):
         if self.settings is not None:
