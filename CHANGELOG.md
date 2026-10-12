@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.23] - 2026-10-12
+
+### Fixed
+- **Resume runs a failed scenario step again.** Resume leaves a failed step
+  alone when its outputs say `passed`, so that a gate which refused is not
+  asked until it agrees. `scenario.run` also has a `passed` - a count of the
+  scenarios that passed - so a run that failed on one flaky click was taken
+  for a refusal and never run again. Only a yes/no `passed` counts as one now.
+
 ## [0.16.22] - 2026-10-12
 
 ### Added
