@@ -16,6 +16,46 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.21] - 2026-10-12
+
+### Added
+- **Folded projects stay folded.** Shutting Work Projects or Demo Shop in the
+  Cycles explorer is remembered across restarts, the way Services & Logs
+  remembers its own. A renamed project keeps its fold.
+- **The Subjects list loads fifty sessions at a time.** Scrolling to the end,
+  or clicking the row at the foot, loads the next fifty under the ones already
+  there. Headings - Today, Yesterday, Last 7 days, Last 30 days, then the
+  month - say how far back the list reaches, and Other cycles marks where the
+  open cycle's sessions end. A refresh while a run moves keeps every page
+  already loaded.
+- `--cycle-sessions-limit`, `--cycle-sessions-offset` and
+  `--cycle-sessions-first` page through `--cycle-sessions`; the answer says
+  how many there are and whether more follow.
+- `--cycle-move --from=FILE` puts many cycles in other projects in one go,
+  keeping the rest of each file, comments included.
+
+### Changed
+- **Saving a cycle is one process.** A save used to be followed by a whole
+  `--describe` (every scenario and cycle read again, about 4 s) and another
+  `--cycle-show`; a new or renamed cycle appeared only after both. The save's
+  answer now carries the cycle's row and the cycle as the editor opens it, so
+  the tree and the canvas update at once. Renaming or deleting a project
+  rewrites its cycles in one call, behind the busy veil, instead of two
+  processes per cycle with the window frozen.
+- **YAML is read with libyaml.** Every parse - `--describe`, opening, checking
+  and saving a cycle - uses PyYAML's C loader when it is there: `--describe`
+  went from 1.75 s to 0.45 s, a canvas save from 0.5 s to 0.28 s. The answers
+  are byte for byte the same.
+
+### Fixed
+- **Sessions older than the last 500 runs no longer vanish.** The run index
+  kept only the newest 500 runs, and Subjects is built from it, so older
+  sessions disappeared from the list while their runs stayed on disk. The
+  index now keeps every run.
+- **A second change during a refresh is no longer lost.** A refresh asked for
+  while one was still reading was dropped, so the tree could keep showing the
+  state before the second change. It now reads again once the first is done.
+
 ## [0.16.20] - 2026-10-09
 
 ### Added
