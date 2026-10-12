@@ -64,7 +64,7 @@ class NullOverlay:
     def flow_start(self, root, role=None, scenario_id=None):
         pass
 
-    def step_start(self, index):
+    def step_start(self, index, acting=False):
         pass
 
     def step_end(self, index, status, attempt=1, message=""):
@@ -91,8 +91,11 @@ class ExecutionOverlay:
 
     enabled = True
 
-    def __init__(self, components, adapter):
+    def __init__(self, components, adapter, collapsed=False):
         self._components = list(components)
+        # Start folded to the header: asked for when every step is
+        # photographed, so the pictures keep a strip rather than a card.
+        self._collapsed = bool(collapsed)
         self._adapter = adapter
         self._setup_done = False
         self._pushing = False       # reentrancy guard (log-bridge can re-enter)
@@ -108,6 +111,7 @@ class ExecutionOverlay:
                         "state": "-", "startedAt": None}
         self._logs = deque(maxlen=_LOG_MAXLEN)
         self._banner = None
+        self._acting = False        # a clicking step is under way - see step_start
         # Whole-session view: every scenario this window will run, so a finished
         # or failed one stays on screen instead of being replaced by the next.
         self._planned = []          # [{"id", "node", "tree"}] in run order
@@ -235,7 +239,10 @@ class ExecutionOverlay:
         self._ensure_setup()
         self._adapter.overlay_mark(selector, label, timeout)
 
-    def step_start(self, index):
+    def step_start(self, index, acting=False):
+        """A step begins. ``acting`` when it clicks: the HUD then lets the mouse
+        through until the step ends, so it cannot sit on what is being clicked."""
+        self._acting = bool(acting)
         node_id = self._index_to_id.get(index)
         if node_id is not None:
             self._node_states[node_id] = _RUNNING
@@ -246,6 +253,7 @@ class ExecutionOverlay:
         self._push()
 
     def step_end(self, index, status, attempt=1, message=""):
+        self._acting = False
         node_id = self._index_to_id.get(index)
         if node_id is not None:
             if status == PASS:
@@ -308,6 +316,8 @@ class ExecutionOverlay:
             "status": dict(self._status),
             "logs": list(self._logs),
             "banner": self._banner,
+            "acting": self._acting,
+            "collapsed": self._collapsed,
         }
 
     def _push(self):

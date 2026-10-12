@@ -10,6 +10,14 @@
 // Because an interactive card can sit over an element the automation needs to
 // click, the header has a "pass-through" toggle (▣/▢) that turns the whole card
 // click-through again - and dragging/minimizing gets it out of the way too.
+// And while the automation itself clicks (state.acting), the whole HUD lets the
+// mouse through on its own: a card over the target swallowed the click, and the
+// step failed for a reason that had nothing to do with the page.
+// When every step is photographed (state.collapsed) it starts folded down to its
+// header, whose background fills left to right with the progress: the pictures
+// keep a strip, not a card over the page - and nothing is hidden for the capture,
+// which would make the HUD blink in the window. Folding or unfolding it by hand
+// wins over that default.
 //
 // State lives in Python (engine/overlay.py); this is a pure renderer. It exposes
 // window.__ExecHud.render(state) / .remove(). render() is a diff: it rebuilds the
@@ -53,6 +61,9 @@
     // (so you can always toggle it back / drag / restore)
     ".card.ghost{pointer-events:none;opacity:.85}" +
     ".card.ghost .header{pointer-events:auto}" +
+    // automation clicking: nothing in the HUD may take the click, header included.
+    // Every element, because a child's pointer-events:auto overrides its parent's none.
+    ".wrap.acting,.wrap.acting *{pointer-events:none !important}" +
     // header / drag handle
     ".header{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;" +
       "user-select:none;border-bottom:1px solid rgba(255,255,255,0.08);" +
@@ -67,6 +78,12 @@
     ".body{display:flex;flex-direction:column;gap:10px;padding:10px;overflow:auto;" +
       "min-height:0}" +
     ".card.min .body{display:none}" +
+    // folded: the header alone, its background the progress, left to right
+    // folded, the title is the step under way: up to two lines of it
+    ".card.min .h-title{white-space:normal;word-break:break-word;display:-webkit-box;" +
+      "-webkit-line-clamp:2;-webkit-box-orient:vertical}" +
+    ".card.min .header{border-bottom:none;background:linear-gradient(90deg," +
+      "rgba(77,163,255,0.42) var(--p,0%),rgba(255,255,255,0.04) var(--p,0%))}" +
     ".panel{background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.06);" +
       "border-radius:10px;padding:10px 12px}" +
     ".title{font-size:11px;letter-spacing:.08em;text-transform:uppercase;" +
@@ -81,6 +98,7 @@
     ".grid{display:grid;grid-template-columns:auto 1fr;gap:3px 10px}" +
     ".grid b{color:#9aa0a6;font-weight:500}" +
     ".grid span{color:#e8eaed;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
+    ".grid span.full{white-space:normal;word-break:break-word;overflow:visible}" +
     // tree
     ".tree{overflow:auto;max-height:46vh}" +
     ".node{display:block}" +
@@ -94,6 +112,12 @@
     ".node.collapsed>.row .caret{transform:rotate(-90deg)}" +
     ".row .ico{width:14px;text-align:center;flex:0 0 auto}" +
     ".row .lbl{overflow:hidden;text-overflow:ellipsis}" +
+    // The step under way, and one that failed, wrap instead of being cut off:
+    // the card has a fixed width, and a long selector ended in "..." exactly
+    // where it said what was being done. Every label keeps a tooltip as well.
+    ".row.running,.row.failed{white-space:normal;align-items:flex-start}" +
+    ".row.running .lbl,.row.failed .lbl{overflow:visible;text-overflow:clip;" +
+      "word-break:break-word}" +
     ".row.running{background:rgba(79,157,255,0.16)}" +
     ".row.running .ico{animation:hudpulse 1s ease-in-out infinite}" +
     ".row.failed{background:rgba(255,92,92,0.14)}" +
@@ -165,6 +189,7 @@
 
       this._shadow = shadow;
       this._wrap = wrap; this._card = card; this._body = body; this._titleEl = title;
+      this._header = header; this._minBtn = header.lastChild;
       this._els = {}; this._treeVersion = null; this._nodeEls = {};
       this._wireDrag(header);
       var self = this;
@@ -196,9 +221,16 @@
     },
 
     _toggleMinimize: function (btn) {
-      var min = this._card.classList.toggle("min");
-      btn.textContent = min ? "▢" : "–";
-      btn.title = min ? "Restore" : "Minimize";
+      this._userMin = !this._card.classList.contains("min");   // a person's choice
+      this._setMin(this._userMin);
+    },
+
+    _setMin: function (min) {
+      this._card.classList.toggle("min", min);
+      if (this._minBtn) {
+        this._minBtn.textContent = min ? "▢" : "–";
+        this._minBtn.title = min ? "Restore" : "Minimize";
+      }
     },
 
     _toggleCollapseAll: function (btn) {
@@ -256,11 +288,31 @@
         var comp = {};
         (state.components || []).forEach(function (c) { comp[c] = true; });
 
+        if (this._wrap) this._wrap.classList.toggle("acting", !!state.acting);
+        // Folded by default when asked, unless a person folded or unfolded it.
+        var folded = this._userMin === undefined ? !!state.collapsed : this._userMin;
+        if (this._card && this._card.classList.contains("min") !== folded) this._setMin(folded);
+        var pr = state.progress || {};
+        if (this._header) {
+          this._header.style.setProperty("--p", (pr.total ? Math.round(100 * (pr.done || 0) / pr.total) : 0) + "%");
+          this._header.title = pr.total ? (pr.done || 0) + " / " + pr.total + " steps" : "";
+        }
         this._renderBanner(state.banner);
         if (comp.status) this._renderStatus(state.status);
         if (comp.progress) this._renderProgress(state.progress);
         if (comp.tree) this._renderTree(state);
         if (comp.logs) this._renderLogs(state.logs);
+        // Folded, the header names the step under way rather than the scenario:
+        // the one line left should say what is being done. Unfolded, the
+        // status panel says it, and the header goes back to the scenario.
+        var stt = state.status || {};
+        if (stt.flow) this._flowName = stt.flow;
+        if (this._titleEl) {
+          var doing = stt.action && stt.action !== "-" ? stt.action : "";
+          var text = folded && doing ? doing : (this._flowName || this._titleEl.textContent);
+          this._titleEl.textContent = text;
+          this._titleEl.title = (this._flowName || "") + (doing ? "\n" + doing : "");
+        }
       } catch (e) { /* never throw into the page */ }
     },
 
@@ -296,7 +348,8 @@
         var rows = {};
         ["Role", "Current", "State", "Elapsed"].forEach(function (k) {
           var b = elem("b"); b.textContent = k + ":";
-          var v = elem("span");
+          // What is being done is the line worth reading whole.
+          var v = elem("span", k === "Current" ? "full" : "");
           grid.appendChild(b); grid.appendChild(v);
           rows[k] = v;
         });
@@ -307,6 +360,7 @@
       if (st.flow && this._titleEl) this._titleEl.textContent = st.flow;
       p._rows.Role.textContent = st.role || "-";
       p._rows.Current.textContent = st.action || "-";
+      p._rows.Current.title = st.action || "";
       p._rows.State.textContent = st.state || "-";
       // Elapsed ticks locally (once/sec) so Python never pushes just for the clock;
       // it freezes once flow_end stamps stoppedAt (the HUD lingers after the run).
@@ -399,6 +453,7 @@
         var ico = elem("span", "ico"); ico.textContent = ICON.pending;
         ico.style.color = COLOR.pending;
         var lbl = elem("span", "lbl"); lbl.textContent = node.label || node.id;
+        lbl.title = node.label || node.id;
         row.appendChild(caret); row.appendChild(ico); row.appendChild(lbl);
         wrapper.appendChild(row);
         container.appendChild(wrapper);

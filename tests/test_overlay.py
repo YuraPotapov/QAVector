@@ -347,3 +347,60 @@ def test_every_scenario_passing_still_says_completed():
             ov.step_end(i, PASS)
         ov.flow_end(PASS, passed=3, total=3)
     assert adapter.renders[-1]["banner"]["kind"] == "success"
+
+
+# --- clicking steps: the HUD lets the mouse through ----------------------------
+def test_a_clicking_step_makes_the_hud_click_through_until_it_ends():
+    """A card over the target swallowed the automation's click (Playwright:
+    "__exec_hud_host__ intercepts pointer events") and failed a working page."""
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    assert adapter.renders[-1]["acting"] is False
+    ov.step_start(2, acting=True)
+    assert adapter.renders[-1]["acting"] is True
+    ov.step_end(2, PASS)
+    assert adapter.renders[-1]["acting"] is False
+    ov.step_start(0)
+    assert adapter.renders[-1]["acting"] is False
+
+
+def test_the_renderer_turns_every_hud_element_click_through_while_acting():
+    import engine.overlay as overlay_mod
+    js = overlay_mod.HUD_JS
+    # Every element: a child's pointer-events:auto would beat its parent's none.
+    assert ".wrap.acting,.wrap.acting *{pointer-events:none !important}" in js
+    assert 'classList.toggle("acting", !!state.acting)' in js
+
+
+def test_the_null_overlay_takes_the_acting_flag():
+    NullOverlay().step_start(0, acting=True)
+
+
+# --- folded when every step is photographed --------------------------------------
+def test_the_hud_starts_folded_only_when_asked():
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    assert adapter.renders[-1]["collapsed"] is False
+    folded = ExecutionOverlay(["tree", "progress"], FakeAdapter(), collapsed=True)
+    folded.flow_start(_tree(), role="Admin")
+    assert folded.state()["collapsed"] is True
+
+
+def test_the_folded_header_fills_with_the_progress_and_a_person_s_choice_wins():
+    import engine.overlay as overlay_mod
+    js = overlay_mod.HUD_JS
+    assert ".card.min .header{border-bottom:none;background:linear-gradient(90deg," in js
+    assert 'setProperty("--p"' in js
+    assert "this._userMin === undefined ? !!state.collapsed : this._userMin" in js
+
+
+def test_the_step_under_way_is_never_cut_off_by_the_hud_s_width():
+    """A long selector ended in "..." just where it said what was being done."""
+    import engine.overlay as overlay_mod
+    js = overlay_mod.HUD_JS
+    assert ".row.running,.row.failed{white-space:normal" in js
+    assert ".grid span.full{white-space:normal" in js
+    assert 'k === "Current" ? "full" : ""' in js
+    assert "lbl.title = node.label || node.id" in js
+    # folded, the header names the step rather than the scenario
+    assert "folded && doing ? doing" in js

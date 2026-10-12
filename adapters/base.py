@@ -73,6 +73,14 @@ class BrowserAdapter(ABC):
     def console_logs(self):
         """Return console messages captured since connect (list of strings)."""
 
+    def settle(self, timeout_ms=3000):
+        """Wait, briefly, until what the last step set off has finished drawing.
+
+        Asked for right before a step's screenshot, so it shows the page the step
+        led to rather than the one it left. Concrete and a no-op here: an adapter
+        with no page, or a test double, has nothing to wait for.
+        """
+
     # --- execution overlay (optional; default no-op) -------------------------
     # The HUD is rendered *inside* the page by injecting an isolated overlay over
     # the existing browser connection. These are concrete no-ops so an adapter

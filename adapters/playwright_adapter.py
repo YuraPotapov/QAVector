@@ -18,6 +18,19 @@ log = logging.getLogger("flowengine.adapter")
 # exception, so assertions report pass/fail rather than crashing the run.
 DEFAULT_TIMEOUT_MS = 30000
 
+# settle(): how long a step's requests may keep the page busy before the
+# screenshot is taken anyway, how long it has to stay quiet to count as done,
+# and the pause before looking - a click's handler sends its request a moment
+# after the click, not during it.
+SETTLE_QUIET_MS = 400
+SETTLE_FIRST_MS = 150
+SETTLE_POLL_MS = 50
+
+# Connections that stay open on purpose - Odoo's bus - and so never finish:
+# counted, they would keep every screenshot waiting for the full timeout.
+_LONG_LIVED_TYPES = ("websocket", "eventsource")
+_LONG_LIVED_PATHS = ("/websocket", "/longpolling")
+
 
 class PlaywrightAdapter(BrowserAdapter):
     def __init__(self, playwright, browser, page):
@@ -25,11 +38,18 @@ class PlaywrightAdapter(BrowserAdapter):
         self._browser = browser
         self._page = page
         self._console = []
+        # Requests the page has in flight, for settle(). Odoo is a single-page
+        # app: a click starts an RPC and a redraw, with no navigation for
+        # Playwright's own load states to notice.
+        self._in_flight = set()
         # Import here so the symbol is available for except-clauses without a
         # module-level Playwright import.
         from playwright.sync_api import TimeoutError as _Timeout
         self._Timeout = _Timeout
         page.on("console", self._on_console)
+        page.on("request", self._on_request)
+        page.on("requestfinished", self._on_request_done)
+        page.on("requestfailed", self._on_request_done)
 
     # ------------------------------------------------------------------ setup
     @classmethod
@@ -66,6 +86,42 @@ class PlaywrightAdapter(BrowserAdapter):
             self._console.append("%s: %s" % (msg.type, msg.text))
         except Exception:  # never let logging break a run
             pass
+
+    def _on_request(self, request):
+        try:
+            if request.resource_type in _LONG_LIVED_TYPES:
+                return
+            if any(part in request.url for part in _LONG_LIVED_PATHS):
+                return
+            self._in_flight.add(request)
+        except Exception:  # never let bookkeeping break a run
+            pass
+
+    def _on_request_done(self, request):
+        self._in_flight.discard(request)
+
+    def settle(self, timeout_ms=3000):
+        """Wait until the page has had no request in flight for a moment, then
+        for two frames to be drawn - or until ``timeout_ms`` is up. Never raises:
+        a screenshot taken a little early beats none at all.
+
+        ``wait_for_load_state("networkidle")`` would not do: it answers for the
+        document, and an Odoo click loads data into the same document, so that
+        state was reached long before and returns at once.
+        """
+        try:
+            page = self._page
+            page.wait_for_timeout(SETTLE_FIRST_MS)
+            waited, quiet = SETTLE_FIRST_MS, 0
+            while waited < timeout_ms and quiet < SETTLE_QUIET_MS:
+                # Waiting is also what lets the sync API deliver request events.
+                page.wait_for_timeout(SETTLE_POLL_MS)
+                waited += SETTLE_POLL_MS
+                quiet = quiet + SETTLE_POLL_MS if not self._in_flight else 0
+            page.evaluate("() => new Promise(done => requestAnimationFrame("
+                          "() => requestAnimationFrame(done)))")
+        except Exception as exc:
+            log.debug("settle gave up: %s", exc)
 
     # ---------------------------------------------------------------- actions
     def goto(self, url, timeout=None):

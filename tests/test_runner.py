@@ -1151,7 +1151,7 @@ class _NullReporter:
     def capture_start(self):
         pass
 
-    def capture_step(self):
+    def capture_step(self, index=None):
         pass
 
     def finalize(self, result, failed=False):
@@ -1366,3 +1366,32 @@ def test_a_passing_scenario_still_gets_its_server_log(monkeypatch, tmp_path):
     assert code == 0                     # it passed...
     assert os.path.exists(os.path.join(str(tmp_path), "dev-agent", "smoke",
                                        "server_log-app.log"))   # ...and kept it
+
+
+# ------------------------------------------------ the HUD and clicking steps
+def test_only_a_click_tells_the_overlay_it_is_clicking(broker, monkeypatch, tmp_path):
+    """fill and select set a value without a mouse click, so only a click makes
+    the HUD let the mouse through."""
+    for action, acting in (("click", True), ("fill", False), ("select", False)):
+        _compiled(monkeypatch, [Step(action, target=".x", value="y")])
+        seen = []
+
+        class Overlay(runner.NullOverlay):
+            def step_start(self, index, acting=False):
+                seen.append((index, acting))
+
+        runner._run_scenario(Recorder(), "claim75_dashboard_backend",
+                             "dev-agent", None, {}, runner.RunContext(), str(tmp_path),
+                             overlay=Overlay())
+        assert seen == [(0, acting)], action
+
+
+def test_the_hud_is_folded_when_every_step_is_photographed(monkeypatch):
+    made = []
+    monkeypatch.setattr(runner, "ExecutionOverlay",
+                        lambda components, adapter, collapsed=False: made.append(collapsed) or runner.NullOverlay())
+    from engine import artifacts
+    runner._make_overlay(["tree"], None, "s", collapsed=artifacts.ReportConfig.from_cli(
+        level="screen", screen="each").wants_screen("each"))
+    runner._make_overlay(["tree"], None, "s", collapsed=False)
+    assert made == [True, False]

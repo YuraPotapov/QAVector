@@ -309,3 +309,49 @@ def test_written_server_logs_are_announced_like_every_other_artifact(tmp_path,
                  FakeAdapter(), server=_server(app=["boom"]))
     r.finalize(_flow(), failed=True)
     assert seen["dir"] == str(tmp_path)
+
+
+# --- the page settles before a step's screenshot -------------------------------
+class SettlingAdapter(FakeAdapter):
+    """Says when it was asked to settle, in the order of everything else."""
+
+    def __init__(self):
+        FakeAdapter.__init__(self)
+        self.calls = []
+
+    def settle(self, timeout_ms=3000):
+        self.calls.append("settle")
+
+    def screenshot(self, path):
+        self.calls.append(os.path.basename(path))
+        FakeAdapter.screenshot(self, path)
+
+
+def test_a_step_screenshot_waits_for_the_page_and_is_named_after_the_step(tmp_path):
+    """Right after a click Odoo still showed the page it left, or half the new
+    one; and the file's number is the step's, so a viewer can pair them."""
+    adapter = SettlingAdapter()
+    r = Reporter(ReportConfig.from_cli(level="screen", screen="start,each,finish"),
+                 str(tmp_path), adapter)
+    r.capture_start()
+    r.capture_step(0)
+    r.capture_step(4)
+    r.finalize(_flow(), failed=False)
+    assert adapter.calls == ["screenshot_start.png", "settle", "screenshot_001.png",
+                             "settle", "screenshot_005.png", "settle",
+                             "screenshot_finish.png"]
+
+
+def test_nothing_waits_when_no_screenshot_is_taken(tmp_path):
+    adapter = SettlingAdapter()
+    r = Reporter(ReportConfig.from_cli(level="result"), str(tmp_path), adapter)
+    r.capture_step(0)
+    r.finalize(_flow(), failed=False)
+    assert "settle" not in adapter.calls
+
+
+def test_an_adapter_without_settle_still_gets_its_screenshots(tmp_path):
+    r = Reporter(ReportConfig.from_cli(level="screen", screen="each"),
+                 str(tmp_path), FakeAdapter())
+    r.capture_step(2)
+    assert _files(tmp_path) == {"screenshot_003.png"}

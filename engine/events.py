@@ -142,7 +142,7 @@ class EventObserver:
         self._emit("flow.start", scenario=root.label, id=scenario_id, role=role,
                    tree=root.to_dict(), steps=sum(1 for _ in root.leaves()))
 
-    def step_start(self, index):
+    def step_start(self, index, acting=False):
         self._emit("step.start", index=index)
 
     def step_end(self, index, status, attempt=1, message=""):
@@ -196,8 +196,8 @@ class Tee:
     def flow_start(self, root, role=None, scenario_id=None):
         self._fan("flow_start", root, role=role, scenario_id=scenario_id)
 
-    def step_start(self, index):
-        self._fan("step_start", index)
+    def step_start(self, index, acting=False):
+        self._fan("step_start", index, acting=acting)
 
     def step_end(self, index, status, attempt=1, message=""):
         self._fan("step_end", index, status, attempt, message)

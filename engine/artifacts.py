@@ -204,10 +204,17 @@ class Reporter:
         if self._cfg.wants_screen("start"):
             self._shot("screenshot_start.png")
 
-    def capture_step(self):
-        """Screenshot after a step passes (``--report-screen=each``); numbers them."""
+    def capture_step(self, index=None):
+        """Screenshot after a step passes (``--report-screen=each``).
+
+        Named after the step - ``screenshot_004.png`` is step index 3 - so a
+        viewer can put each picture beside the step it shows. Taken once the
+        page has settled: right after a click it still showed the page the click
+        left, or one half drawn.
+        """
         if self._cfg.wants_screen("each"):
-            self._each_n += 1
+            self._each_n = self._each_n + 1 if index is None else index + 1
+            self._settle()
             self._shot("screenshot_%03d.png" % self._each_n)
 
     def finalize(self, flow_result, failed):
@@ -230,6 +237,7 @@ class Reporter:
             self._finalize_legacy(flow_result, failed)
             return
         if self._cfg.wants_screen("finish"):
+            self._settle()
             self._shot("screenshot_finish.png")
         wanted = self._cfg.outcome_artifacts(failed)
         if "result" in wanted:
@@ -261,6 +269,13 @@ class Reporter:
         if failed:
             capture_failure(self._adapter, self._out)
         write_result(flow_result, self._out)
+
+    def _settle(self):
+        """Let the page finish what the last step set off - see adapter.settle.
+        An adapter without it (a test double, an older one) does not wait."""
+        settle = getattr(self._adapter, "settle", None)
+        if settle is not None:
+            _safe(settle, "settle")
 
     def _shot(self, name):
         _safe(lambda: self._adapter.screenshot(os.path.join(self._out, name)),

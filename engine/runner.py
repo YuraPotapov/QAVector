@@ -132,7 +132,7 @@ def _install_session_prefix():
     return remove
 
 
-def _make_overlay(overlay_components, adapter, session_name=None):
+def _make_overlay(overlay_components, adapter, session_name=None, collapsed=False):
     """The observer the runner notifies at every execution transition.
 
     Two independent consumers can want the same transitions: the in-page HUD
@@ -143,7 +143,7 @@ def _make_overlay(overlay_components, adapter, session_name=None):
     """
     observers = []
     if overlay_components:
-        observers.append(ExecutionOverlay(overlay_components, adapter))
+        observers.append(ExecutionOverlay(overlay_components, adapter, collapsed=collapsed))
     if events.enabled():
         observers.append(events.EventObserver(session_name))
     if not observers:
@@ -743,7 +743,10 @@ def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
                 cls=cls, profile=profile, origin=origin)
     ctx = RunContext(user={"login": login, "class": cls},
                      env={"origin": origin, "url": env.get("url")})
-    overlay = _make_overlay(overlay_components, adapter, session_name)
+    # A screenshot after every step: the HUD starts folded, so each picture
+    # keeps a strip of it rather than a card over the page.
+    overlay = _make_overlay(overlay_components, adapter, session_name,
+                            collapsed=bool(report) and report.wants_screen("each"))
     bridge = None
     if overlay_components:
         # Feeds the HUD's Logs widget only - the event stream's consumer already
@@ -890,7 +893,7 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
             result.error = "stopped at step %d of %d" % (index + 1, len(steps))
             log.warning("[%s] stopped at step %d of %d", scenario_id, index + 1, len(steps))
             break
-        overlay.step_start(index)
+        overlay.step_start(index, acting=step.action in _CLICKING_ACTIONS)
         step_result = _run_step(adapter, index, step, overlay)
         result.steps.append(step_result)
         overlay.step_end(index, step_result.status, step_result.attempts, step_result.message)
@@ -905,7 +908,7 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
             result.error = "%s(%s): %s" % (
                 step.action, step.target or step.value or "", step_result.message)
             break
-        reporter.capture_step()
+        reporter.capture_step(index)
 
     result.duration_ms = (time.time() - started) * 1000
     reporter.finalize(result, failed=result.status != PASS)
@@ -919,6 +922,11 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
 # Steps that DO something to an element, as opposed to asserting about one. Only
 # these get a marker: outlining every assertion target would strobe the page.
 _MARKED_ACTIONS = ("click", "fill", "select", "press")
+
+# Steps that land a mouse click on the page. Playwright refuses a click whose
+# point another element covers, and the HUD can be that element; fill and select
+# set the value without one.
+_CLICKING_ACTIONS = ("click",)
 
 
 def _mark_label(step):
