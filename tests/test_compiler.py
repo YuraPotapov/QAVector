@@ -320,3 +320,54 @@ def test_compile_unknown_param_raises(tmp_path):
     _write(tmp_path, "scenarios/s.yaml", 'id: s\nsteps:\n  - goto: "{{env.missing}}"\n')
     with pytest.raises(ParamError):
         compiler.compile_scenario("s", str(tmp_path), {}, RunContext(env={}))
+
+
+# --- doc: the sentence a run's guide shows for a step ---------------------------
+def test_a_shorthand_step_takes_a_doc_beside_its_action():
+    step = compiler.parse_step({"click": "new_button", "doc": "Press New"})
+    assert (step.action, step.target, step.doc) == ("click", "new_button", "Press New")
+
+
+def test_a_verbose_step_takes_a_doc_too():
+    step = compiler.parse_step({"type": "assert_visible", "target": "form_view",
+                                "doc": "The empty form opens", "timeout": 500})
+    assert step.doc == "The empty form opens" and step.timeout == 500
+
+
+def test_a_doc_is_not_a_second_action():
+    # Two action keys are still refused; the doc is the one key allowed beside one.
+    with pytest.raises(compiler.CompileError):
+        compiler.parse_step({"click": "a", "fill": {"target": "b", "value": "c"}})
+    with pytest.raises(compiler.CompileError):
+        compiler.parse_step({"doc": "Nothing to do"})
+
+
+def test_a_doc_must_be_text():
+    with pytest.raises(compiler.CompileError, match="doc must be text"):
+        compiler.parse_step({"click": "a", "doc": True})
+
+
+def test_a_doc_is_templated_and_blocks_carry_their_description(tmp_path):
+    _write(tmp_path, "shop/sign_in.yaml", """
+        id: shop.sign_in
+        name: Sign in
+        description: Every guide starts here
+        steps:
+          - fill: {target: "#login", value: "{{user.login}}"}
+            doc: "Enter your login, {{user.login}}"
+    """)
+    _write(tmp_path, "scenarios/guide.yaml", """
+        id: guide
+        name: A guide
+        tags: []
+        steps:
+          - use: shop.sign_in
+          - click: "#save"
+    """)
+    ctx = RunContext(user={"login": "ann"}, env={})
+    steps, root = compiler.compile_plan("guide", str(tmp_path), ctx=ctx)
+    assert steps[0].doc == "Enter your login, ann"
+    assert steps[1].doc is None
+    block = root.children[0]
+    assert (block.kind, block.label, block.description) == (
+        GROUP, "Sign in", "Every guide starts here")

@@ -44,7 +44,7 @@ FALLBACK_ACTIONS = {
     "states": ["visible", "attached", "hidden", "detached"],
 }
 
-STEP_HEADERS = ["Action", "Target", "Value", "Timeout", "Resolves to"]
+STEP_HEADERS = ["Action", "Target", "Value", "Timeout", "Resolves to", "Doc"]
 # Tags are deliberately not a column: at this width they cost the name
 # every character it has, and the search box already matches on them.
 LIST_HEADERS = ["Flow", "Name", ""]
@@ -54,6 +54,9 @@ SELECTOR_HEADERS = ["Name", "Selector", ""]
 #: from --describe and never editable: it is what selectors.yaml says, and the
 #: place to change it is the Selectors tab.
 RESOLVED_COLUMN = 4
+#: Column of the steps table holding a step's ``doc:`` - the sentence the run's
+#: guide shows for it. Prose for a person, so not in the mono face of the rest.
+DOC_COLUMN = 5
 
 
 class ScenariosPage(QWidget):
@@ -287,6 +290,10 @@ class ScenariosPage(QWidget):
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(RESOLVED_COLUMN, QHeaderView.Interactive)
+        header.setSectionResizeMode(DOC_COLUMN, QHeaderView.Stretch)
+        self.steps.horizontalHeaderItem(DOC_COLUMN).setToolTip(
+            "What the run's step-by-step guide says for this step. Steps without "
+            "one are left out of it.")
         # Target is the field being edited and the one that varies most, so it
         # takes the slack; the rest get just enough to be read.
         header.resizeSection(0, 120)
@@ -587,6 +594,10 @@ class ScenariosPage(QWidget):
             item = QTableWidgetItem("" if value is None else str(value))
             item.setFont(theme.mono_font(9))
             self.steps.setItem(index, column, item)
+        doc = step.get("doc")
+        item = QTableWidgetItem("" if doc is None else str(doc))
+        item.setToolTip(item.text())
+        self.steps.setItem(index, DOC_COLUMN, item)
 
     def _fit_step_rows(self, combo):
         """Make every step row tall enough for the inputs that sit in it.
@@ -641,7 +652,7 @@ class ScenariosPage(QWidget):
             if not action:
                 continue
             step = {"action": action}
-            for key, column in (("target", 1), ("value", 2)):
+            for key, column in (("target", 1), ("value", 2), ("doc", DOC_COLUMN)):
                 item = self.steps.item(index, column)
                 text = item.text().strip() if item is not None else ""
                 if text:

@@ -222,8 +222,13 @@ def test_reveal_of_the_folder_already_shown_picks_up_new_files(page, tmp_path):
     assert page.reveal(str(run), "reports/run.html")
 
 
-# ------------------------------------------------- a scenario's run as a flow
-def _scenario(tmp_path):
+# ------------------------------------------------ a scenario's step-by-step guide
+GUIDE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<h1>Place an order</h1><p id="first">%s</p>
+<div style="height: 3000px"></div><p id="latest">newest step</p></body></html>"""
+
+
+def _scenario(tmp_path, guide=True):
     folder = tmp_path / "run" / "localhost:8069-admin" / "s"
     folder.mkdir(parents=True)
     (folder / "result.json").write_text(json.dumps({
@@ -231,40 +236,125 @@ def _scenario(tmp_path):
         "steps": [{"index": 0, "action": "click", "status": "pass", "target": ".x",
                    "message": "ok", "duration_ms": 10, "attempts": 1}]}),
         encoding="utf-8")
-    image = QPixmap(40, 30)
-    image.fill(Qt.blue)
-    image.save(str(folder / "screenshot_001.png"), "PNG")
+    if guide:
+        (folder / "documentation.html").write_text(GUIDE % "Press New", encoding="utf-8")
     (folder / "console.log").write_text("hello", encoding="utf-8")
     return folder
 
 
-def test_a_scenario_folder_opens_as_a_flow_and_switches_to_its_json(page, tmp_path):
+def test_a_scenario_folder_opens_on_its_guide_and_switches_to_its_json(page, tmp_path):
     folder = _scenario(tmp_path)
     page.show_dir(str(tmp_path / "run"))
     page._select_path(str(folder))
-    assert page.flow_mode.isVisibleTo(page)
-    assert page.flow is not None and page.flow.isVisibleTo(page)
-    assert len(page.flow.cards) == 1
-    page.flow_mode.setCurrentIndex(1)                    # Source
-    assert not page.flow.isVisibleTo(page)
+    assert page.guide_mode.isVisibleTo(page)
+    assert page.html is not None and page.html.isVisibleTo(page)
+    assert page.export_pdf.isVisibleTo(page)
+    wait_for(lambda: "Press New" in javascript(page.html, "document.body.innerText"))
+    page.guide_mode.setCurrentIndex(1)                    # Source
+    assert not page.html.isVisibleTo(page) and not page.export_pdf.isVisibleTo(page)
     assert '"action": "click"' in page.text.toPlainText()
 
 
-def test_result_json_offers_the_flow_and_other_files_do_not(page, tmp_path):
-    folder = _scenario(tmp_path)
+def test_a_run_without_a_guide_says_how_to_get_one(page, tmp_path):
+    folder = _scenario(tmp_path, guide=False)
     page.show_dir(str(tmp_path / "run"))
     page._select_path(str(folder / "result.json"))
-    assert page.flow_mode.isVisibleTo(page)
+    assert page.guide_mode.isVisibleTo(page)
+    assert page.no_guide is not None and page.no_guide.isVisibleTo(page)
+    assert not page.export_pdf.isVisibleTo(page)
     page._select_path(str(folder / "console.log"))
-    assert not page.flow_mode.isVisibleTo(page)
+    assert not page.guide_mode.isVisibleTo(page) and not page.no_guide.isVisibleTo(page)
     assert page.text.toPlainText() == "hello"
 
 
-def test_clicking_a_card_s_picture_shows_that_file(page, tmp_path, qapp):
+def test_the_guide_selected_as_a_file_offers_the_export_too(page, tmp_path):
     folder = _scenario(tmp_path)
     page.show_dir(str(tmp_path / "run"))
+    page._select_path(str(folder / "documentation.html"))
+    assert page.html.isVisibleTo(page) and page.export_pdf.isVisibleTo(page)
+    page._select_path(str(folder / "console.log"))
+    assert not page.export_pdf.isVisibleTo(page)
+
+
+def test_a_guide_being_written_follows_the_run(page, tmp_path):
+    folder = _scenario(tmp_path)
+    page.show_dir(str(tmp_path / "run"))
+    loaded = []
     page._select_path(str(folder))
-    page.flow.picked.emit(str(folder / "screenshot_001.png"))
-    qapp.processEvents()                                 # the pick is queued
-    assert page._selected_path().endswith("screenshot_001.png")
-    assert page.image_area.isVisibleTo(page)
+    page.html.loadFinished.connect(loaded.append)
+    wait_for(lambda: "Press New" in javascript(page.html, "document.body.innerText"))
+    assert javascript(page.html, "window.scrollY") == 0       # chosen: from the top
+
+    # A rescan with nothing new leaves the page alone, where the reader had it.
+    count = len(loaded)
+    page.rescan()
+    QTest.qWait(150)
+    assert len(loaded) == count
+
+    # The run writes a step: the page is read again, and shows the newest one.
+    (folder / "documentation.html").write_text(GUIDE % "Save the order",
+                                               encoding="utf-8")
+    page.rescan()
+    wait_for(lambda: "Save the order" in javascript(page.html, "document.body.innerText"))
+    wait_for(lambda: javascript(page.html, "window.scrollY") > 1000)
+
+
+def test_export_writes_a_pdf_into_the_scenario_folder(page, tmp_path, monkeypatch):
+    from cms_gui.pages import artifacts as artifacts_page
+
+    folder = _scenario(tmp_path)
+    page.show_dir(str(tmp_path / "run"))
+    loaded = []
+    page._select_path(str(folder))
+    page.html.loadFinished.connect(loaded.append)
+    wait_for(lambda: bool(loaded))
+    offered = []
+
+    def save_as(_parent, _caption, suggested, _filter):
+        offered.append(suggested)
+        return str(folder / "guide"), "PDF (*.pdf)"
+
+    monkeypatch.setattr(artifacts_page.QFileDialog, "getSaveFileName", save_as)
+    page.export_pdf.click()
+    assert offered == [str(folder / "s.pdf")]
+    wait_for(lambda: page.export_pdf.isEnabled())
+    pdf = folder / "guide.pdf"
+    assert pdf.read_bytes().startswith(b"%PDF")
+    assert page.path_label.text().startswith("Saved")
+
+
+# ------------------------------------------------- files announced during a run
+def _count_rescans(page, monkeypatch):
+    calls = []
+    real = page.rescan
+    monkeypatch.setattr(page, "rescan", lambda: calls.append(1) or real())
+    return calls
+
+
+def test_files_announced_during_a_run_are_read_in_one_go(page, monkeypatch):
+    # A guide is rewritten after every step it describes; reading the whole run
+    # for each announcement kept the window busy.
+    from cms_gui.pages.artifacts import RESCAN_GATHER_MS
+
+    calls = _count_rescans(page, monkeypatch)
+    for _ in range(5):
+        page.note_artifacts({})
+    assert calls == []
+    wait_for(lambda: len(calls) == 1)
+    QTest.qWait(RESCAN_GATHER_MS + 200)
+    assert len(calls) == 1
+
+
+def test_a_page_nobody_is_looking_at_catches_up_when_it_is_shown(page, monkeypatch):
+    from cms_gui.pages.artifacts import RESCAN_GATHER_MS
+
+    page.hide()
+    calls = _count_rescans(page, monkeypatch)
+    page.note_artifacts({})
+    QTest.qWait(RESCAN_GATHER_MS + 200)
+    assert calls == []
+    page.show()
+    assert calls == [1]
+    page.hide()
+    page.show()
+    assert calls == [1]                     # nothing new: not read again

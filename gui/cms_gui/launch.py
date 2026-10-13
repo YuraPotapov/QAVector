@@ -67,7 +67,8 @@ DEFAULTS = {
     "extensions": {"mode": EXT_ALL, "names": []},
     "server_logs": {"mode": LOGS_OFF, "names": []},
     "scenarios": {"mode": SCENARIOS_NONE, "selected": []},
-    "reports": {"level": REPORTS_RESULTS, "artifacts": [], "always": False},
+    "reports": {"level": REPORTS_RESULTS, "artifacts": [], "always": False,
+                "doc": False},
     "screenshots": {"mode": SHOTS_OFF},
     "overlay": {"enabled": False, "components": []},
     "advanced": {"url": "", "profile_prefix": "", "log_level": "INFO",
@@ -124,6 +125,7 @@ def to_command_state(config, inventory=None):
         "--report-level": ",".join(report_level(config, inventory)),
         "--report-screen": _report_screen(config["screenshots"]),
         "--report-always": bool(config["reports"]["always"]),
+        "--report-doc": bool(config["reports"]["doc"]),
     }
     return state
 
@@ -278,6 +280,8 @@ def notes(config, inventory=None):
             ignored.append("screenshots")
         if config["reports"]["level"] != REPORTS_RESULTS or config["reports"]["always"]:
             ignored.append("reports")
+        if config["reports"]["doc"]:
+            ignored.append("the step-by-step guide")
         if config["overlay"]["enabled"]:
             ignored.append("the execution overlay")
         if not config["sessions"]["keep_open"]:

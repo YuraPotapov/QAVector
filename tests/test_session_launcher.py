@@ -2355,3 +2355,21 @@ def test_cycle_message_control_survives_invalid_json_shapes(monkeypatch, refusal
     else:
         # Queueing for the scheduler is not a durable acceptance.
         assert emitted == []
+
+
+# ------------------------------------------------------------------ --report-doc
+
+def test_report_doc_asks_for_the_guide_and_nothing_else(launched, monkeypatch, config):
+    captured, code = _run_without_browser(launched, monkeypatch, config, "--report-doc")
+    assert code == 0
+    report = captured["report"]
+    assert report.doc is True
+    assert report.configured is False       # result.json and the rest, as without it
+    # The guide's words come from beside the users.json the run was given.
+    assert report.doc_labels == os.path.join(os.path.dirname(os.path.abspath(config)),
+                                             "doc_labels.json")
+
+
+def test_report_doc_needs_flows_to_run(monkeypatch, config):
+    message = _main(monkeypatch, config, "--url=http://x", "--report-doc")
+    assert "--report-doc" in message and "require" in message

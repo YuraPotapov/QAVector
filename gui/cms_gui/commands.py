@@ -87,6 +87,9 @@ FLAGS = [
          choices=["start", "each", "finish"], needs_run_tests=True),
     Flag("--report-always", "flag", REPORTS,
          "Produce a full report on success too.", needs_run_tests=True),
+    Flag("--report-doc", "flag", REPORTS,
+         "Write a step-by-step guide while each scenario runs.",
+         needs_run_tests=True),
 ]
 
 BY_NAME = {f.name: f for f in FLAGS}
@@ -200,11 +203,12 @@ def for_background(args):
 
     ``--no-browser`` goes first, ahead of --events (which build_argv always puts
     last). What only means something to a window comes out: ``--detach`` (there
-    is none to leave running), ``--execution-overlay`` (no page to draw it in) and
-    ``--report-screen`` (nothing to photograph). Everything else - --jobs above
-    all - is the run exactly as it was configured.
+    is none to leave running), ``--execution-overlay`` (no page to draw it in),
+    ``--report-screen`` (nothing to photograph) and ``--report-doc`` (a guide is a
+    picture of every page). Everything else - --jobs above all - is the run
+    exactly as it was configured.
     """
-    drop = {"--detach", "--execution-overlay", "--report-screen"}
+    drop = {"--detach", "--execution-overlay", "--report-screen", "--report-doc"}
     return ["--no-browser"] + [a for a in args if a.split("=", 1)[0] not in drop]
 
 

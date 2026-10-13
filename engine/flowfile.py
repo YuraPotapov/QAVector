@@ -180,7 +180,20 @@ def render(meta, steps):
 
 
 def _render_step(step):
-    """One step as YAML lines: shorthand when it fits, verbose when it must."""
+    """One step as YAML lines: shorthand when it fits, verbose when it must.
+
+    A ``doc`` goes on a line of its own under either shape - in the shorthand it
+    is the step mapping's second key, the one the compiler allows beside the
+    action.
+    """
+    lines = _render_action(step)
+    doc = step.get("doc")
+    if doc is not None and str(doc).strip():
+        lines.append("    doc: %s" % _scalar(str(doc).strip()))
+    return lines
+
+
+def _render_action(step):
     action = (step.get("action") or "").strip()
     target, value = step.get("target"), step.get("value")
     timeout, state, retry = step.get("timeout"), step.get("state"), step.get("retry")
@@ -234,7 +247,8 @@ def step_to_json(raw):
         # get fixed. Show it as the mapping it is.
         return {"action": "", "target": "", "value": None, "raw": raw}
     return {"action": step.action, "target": step.target, "value": step.value,
-            "state": step.state, "timeout": step.timeout, "retry": step.retry}
+            "state": step.state, "timeout": step.timeout, "retry": step.retry,
+            "doc": step.doc}
 
 
 def save(flow_id, flows_dir=None, yaml_text=None, meta=None, steps=None):

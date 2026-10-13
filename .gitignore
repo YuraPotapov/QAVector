@@ -20,6 +20,8 @@ users.json
 # Server log sources name real hosts and can carry an access token - copy
 # logsources.example.json
 logsources.json
+# The guide's own words in the user's language (runtime_paths.doc_labels_path)
+doc_labels.json
 
 # The stacks on the Services & Logs page: absolute paths into somebody's own
 # checkouts, and the container names beside them - copy services.example.json

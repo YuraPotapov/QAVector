@@ -447,6 +447,15 @@ class LaunchSessionsPage(QWidget):
                                        "passes")
         self.report_always.toggled.connect(self._changed)
         panel.layout().addWidget(self.report_always)
+        # The guide is a document for people, not a diagnostic: its own switch,
+        # read in Artifacts and exported to PDF from there.
+        self.report_doc = QCheckBox("Write a step-by-step guide while it runs")
+        self.report_doc.setToolTip(
+            "Each scenario leaves documentation.html in its report folder: the "
+            "steps that have a doc:, grouped by page, with pictures. Artifacts "
+            "shows it and exports it to PDF.")
+        self.report_doc.toggled.connect(self._changed)
+        panel.layout().addWidget(self.report_doc)
         panel.layout().addStretch(1)
         return panel
 
@@ -607,7 +616,8 @@ class LaunchSessionsPage(QWidget):
                           "selected": self.scenario_list.checked()},
             "reports": {"level": self._report_mode_value(),
                         "artifacts": self.report_list.checked(),
-                        "always": self.report_always.isChecked()},
+                        "always": self.report_always.isChecked(),
+                        "doc": self.report_doc.isChecked()},
             "screenshots": {"mode": self.shots.currentData() or launch.SHOTS_OFF},
             "overlay": {"enabled": self.overlay.isChecked(),
                         "components": self.overlay_list.checked()},
@@ -665,6 +675,7 @@ class LaunchSessionsPage(QWidget):
                                          notify=False)
             self._populate_artifacts(reports["artifacts"])
             self.report_always.setChecked(bool(reports["always"]))
+            self.report_doc.setChecked(bool(reports["doc"]))
             index = self.shots.findData(config["screenshots"]["mode"])
             self.shots.setCurrentIndex(index if index >= 0 else 0)
 

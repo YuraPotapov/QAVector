@@ -176,6 +176,7 @@ def test_nothing_scripted_drops_every_flag_that_would_be_rejected():
         assert _flag(argv, flag) is None, flag
     assert "--close-after" not in argv
     assert "--report-always" not in argv
+    assert "--report-doc" not in argv
     # And it says so, rather than dropping them behind the user's back.
     assert any("not apply" in note for note in launch.notes(config))
 
@@ -540,3 +541,27 @@ def test_the_run_header_says_background_and_keeps_how_many_at_once():
         "as many as the machine allows, in the background"
     assert launch.sessions_label(config) == \
         "as many as the machine allows, windows stay open"
+
+
+def test_the_guide_is_asked_for_on_its_own():
+    config = _config(scenarios={"mode": launch.SCENARIOS_ALL, "selected": []},
+                     reports={"level": launch.REPORTS_RESULTS, "artifacts": [],
+                              "always": False, "doc": True})
+    argv = launch.argv(config)
+    assert "--report-doc" in argv
+    assert _flag(argv, "--report-level") is None      # nothing else changes with it
+
+
+def test_a_saved_configuration_from_before_the_guide_has_it_off():
+    config = _config(scenarios={"mode": launch.SCENARIOS_ALL, "selected": []},
+                     reports={"level": launch.REPORTS_RESULTS, "artifacts": [],
+                              "always": False})
+    assert "--report-doc" not in launch.argv(config)
+
+
+def test_a_guide_with_nothing_scripted_is_said_to_not_apply():
+    config = _config(reports={"level": launch.REPORTS_RESULTS, "artifacts": [],
+                              "always": False, "doc": True})
+    assert "--report-doc" not in launch.argv(config)
+    assert any("step-by-step guide" in note for note in launch.notes(config))
+

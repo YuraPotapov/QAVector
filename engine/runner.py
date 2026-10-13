@@ -882,6 +882,8 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
             return result
 
     overlay.flow_start(plan, role=ctx.user.get("class"), scenario_id=scenario_id)
+    reporter.doc_start(plan, steps, scenario_id, session=session_name,
+                       role=ctx.user.get("class"))
     reporter.capture_start()
     for index, step in enumerate(steps):
         if _stopping(session_name):
@@ -893,10 +895,15 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
             result.error = "stopped at step %d of %d" % (index + 1, len(steps))
             log.warning("[%s] stopped at step %d of %d", scenario_id, index + 1, len(steps))
             break
+        # The guide pictures a step that acts BEFORE it does - the page as the
+        # reader will find it, the element still there to point at - and before
+        # the HUD is told, so the picture is not taken mid-redraw.
+        reporter.doc_before(index, step)
         overlay.step_start(index, acting=step.action in _CLICKING_ACTIONS)
         step_result = _run_step(adapter, index, step, overlay)
         result.steps.append(step_result)
         overlay.step_end(index, step_result.status, step_result.attempts, step_result.message)
+        reporter.step_ended(index, step, step_result)
         if step_result.status != PASS:
             if _stopping(session_name):
                 # The window was closed under this step. Report what happened

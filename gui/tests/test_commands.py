@@ -153,7 +153,7 @@ def test_filling_run_tests_enables_the_flow_and_report_flags(qapp):
     # --flows-dir is deliberately absent: it is Settings -> Scenarios now, and
     # rides on every call from Core.argv the way --config does.
     for name in ("--jobs", "--execution-overlay", "--close-after",
-                 "--report-level", "--report-screen", "--report-always"):
+                 "--report-level", "--report-screen", "--report-always", "--report-doc"):
         assert page._flag_rows[name].isEnabled(), name
 
 
@@ -224,7 +224,7 @@ def test_recording_still_gets_the_flows_dir_now_that_it_is_a_setting():
 def test_background_is_the_same_run_with_no_browser():
     args = ["--env=localhost", "--run-tests=restart", "--jobs=auto", "--detach",
             "--execution-overlay=tree", "--report-level=result,screen",
-            "--report-screen=finish", "--events=-", "--control=-"]
+            "--report-screen=finish", "--report-doc", "--events=-", "--control=-"]
     kept = commands.for_background(args)
     assert kept[0] == "--no-browser" and kept.count("--no-browser") == 1
     # What only a window could use goes; the run as configured stays, --jobs

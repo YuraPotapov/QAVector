@@ -76,3 +76,21 @@ def test_settle_gives_up_at_its_timeout():
     adapter.settle(timeout_ms=1000)
     assert 1000 <= page.now < 1200
 
+
+def test_a_quiet_page_is_not_waited_out():
+    # Nothing started or ended through the first pause: the page is not busy,
+    # and the quiet spell would only be sat through - on every picture.
+    adapter, page = _adapter()
+    adapter.settle()
+    assert page.now == pa.SETTLE_FIRST_MS
+    assert page.evaluated, "two frames are still awaited"
+
+
+def test_a_request_that_ended_during_the_pause_still_counts_as_busy():
+    adapter, page = _adapter()
+    rpc = FakeRequest("http://localhost:8069/web/dataset/call_kw")
+    page.emit("request", rpc)                       # the step's own request
+    page.scheduled = [(100, lambda: page.emit("requestfinished", rpc))]
+    adapter.settle()
+    assert page.now >= pa.SETTLE_FIRST_MS + pa.SETTLE_QUIET_MS
+

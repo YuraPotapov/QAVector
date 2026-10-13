@@ -376,3 +376,13 @@ def test_a_usable_log_leaves_the_note_silent(page):
     page._select_env("localhost")
     page._populate_server_logs([])
     assert page.logs_note.text() == ""
+
+
+def test_the_guide_checkbox_is_saved_and_restored(page):
+    assert not page.report_doc.isChecked()
+    page.report_doc.setChecked(True)
+    state = page.state()
+    assert state["reports"]["doc"] is True
+    page.report_doc.setChecked(False)
+    page.set_state(state)
+    assert page.report_doc.isChecked()

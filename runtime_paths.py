@@ -212,6 +212,20 @@ def logsources_path():
     return os.path.join(user_data_root(), "logsources.json")
 
 
+def doc_labels_path():
+    """The doc_labels.json a run's guide takes its own words from.
+
+    The guide (engine.livedoc) adds a few words to what the scenario says - a
+    heading, "expected result", the sentences it drafts for steps nobody
+    described - and ships them in English. This file is where a user puts them
+    in the language their guides are read in; it is theirs, like users.json.
+
+    The launcher reads the one beside the users.json it was given; this is the
+    answer when nobody gave one.
+    """
+    return os.path.join(user_data_root(), "doc_labels.json")
+
+
 def bundled_flows_dir():
     """The flows tree that ships with the app: read-only, replaced on upgrade."""
     return os.path.join(app_root(), "flows")

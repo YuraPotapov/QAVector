@@ -2,8 +2,8 @@
 
 import os
 
-from PySide6.QtCore import QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QMarginsF, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPageLayout, QPageSize
 from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineSettings,
                                     QWebEngineUrlRequestInterceptor)
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -72,20 +72,48 @@ class _ReportPage(QWebEnginePage):
             self.local_file_requested.emit(os.path.abspath(url.toLocalFile()))
 
 
+#: What a page is printed on: A4, with the margins the run's guide is laid out
+#: for (engine.livedoc's @page rule), in millimetres.
+PDF_MARGINS = QMarginsF(14, 14, 14, 16)
+
+
 class HtmlPreview(QWebEngineView):
     local_file_requested = Signal(str)
+    #: export_pdf finished: the file, and whether it was written.
+    pdf_exported = Signal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         page = _ReportPage(self)
         self.setPage(page)
         page.local_file_requested.connect(self.local_file_requested)
+        page.pdfPrintingFinished.connect(self.pdf_exported)
 
-    def load_file(self, path, root):
+    def load_file(self, path, root, fragment=""):
+        """Show ``path``; with ``fragment``, scrolled to that anchor.
+
+        A fragment alone is a jump inside the page already on show - the same
+        document, not read again - so a fragment comes with the file's time of
+        change in the query too: a new address, which is read from disk anew.
+        """
         self.stop()
         page = self.page()
         page.requests.root = os.path.realpath(root)
-        page.document_url = QUrl.fromLocalFile(os.path.abspath(path))
+        url = QUrl.fromLocalFile(os.path.abspath(path))
+        if fragment:
+            try:
+                url.setQuery("v=%d" % os.stat(path).st_mtime_ns)
+            except OSError:
+                pass
+        page.document_url = QUrl(url)
+        if fragment:
+            url.setFragment(fragment)
         # Loading from disk avoids setHtml's data-URL size limit, and preserves
         # the base URL for relative links, images and stylesheets.
-        self.load(page.document_url)
+        self.load(url)
+
+    def export_pdf(self, path):
+        """Print what is on show to ``path`` as an A4 PDF; pdf_exported tells."""
+        layout = QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait,
+                             PDF_MARGINS, QPageLayout.Millimeter)
+        self.page().printToPdf(path, layout)

@@ -246,6 +246,25 @@ def test_adding_and_moving_steps(page):
     assert page.steps.rowCount() == 3
 
 
+def test_a_step_s_doc_is_shown_and_kept(page):
+    from cms_gui.pages.scenarios import DOC_COLUMN
+
+    page.core = FakeCore({"alpha": _flow("alpha", steps=[
+        {"action": "click", "target": "first", "doc": "Press the first one"},
+        {"action": "click", "target": "second"}])})
+    page.set_inventory(_inventory(_row("alpha")))
+    page.open("alpha")
+    assert page.steps.horizontalHeaderItem(DOC_COLUMN).text() == "Doc"
+    assert page.steps.item(0, DOC_COLUMN).text() == "Press the first one"
+    page.steps.item(1, DOC_COLUMN).setText("  Then the second  ")
+    rows = page.step_rows()
+    assert [row.get("doc") for row in rows] == ["Press the first one", "Then the second"]
+    page.steps.selectRow(0)
+    page.move_step(1)                     # a doc moves with its step
+    assert [row.get("doc") for row in page.step_rows()] == [
+        "Then the second", "Press the first one"]
+
+
 def test_a_timeout_is_only_carried_when_it_is_a_number(page):
     page.core = FakeCore({"alpha": _flow("alpha")})
     page.set_inventory(_inventory(_row("alpha")))

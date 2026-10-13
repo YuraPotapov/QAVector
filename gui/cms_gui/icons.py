@@ -106,6 +106,22 @@ def _copy(painter, ink):
     painter.drawRect(QRectF(4, 7.5, 12, 14))
 
 
+def _export(painter, ink):
+    """A sheet with an arrow leaving it: this, written out as a file to keep."""
+    _stroke(painter, ink)
+    path = QPainterPath()
+    path.moveTo(13.5, 3.5)
+    path.lineTo(4.5, 3.5)
+    path.lineTo(4.5, 20.5)
+    path.lineTo(17.5, 20.5)
+    path.lineTo(17.5, 15.5)
+    painter.drawPath(path)
+    painter.drawLine(QPointF(10.5, 11.5), QPointF(19.5, 4.5))
+    _fill(painter, ink)
+    painter.drawPolygon(QPolygonF([QPointF(21, 3), QPointF(14.5, 3.6),
+                                   QPointF(20.4, 9.5)]))
+
+
 def _refresh(painter, ink):
     """An open circle with a head on it: a cycle, not a full ring."""
     _stroke(painter, ink)
@@ -470,6 +486,7 @@ DRAWINGS = {
     "stop": _stop,
     "copy": _copy,
     "refresh": _refresh,
+    "export": _export,
     "settings": _settings,
     "environments": _environments,
     "credentials": _credentials,

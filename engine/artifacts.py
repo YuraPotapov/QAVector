@@ -20,7 +20,7 @@ import os
 import time
 from dataclasses import asdict, dataclass
 
-from engine import events
+from engine import events, livedoc
 
 log = logging.getLogger("flowengine.artifacts")
 
@@ -32,6 +32,14 @@ SCREEN_MODES = ("start", "each", "finish")
 
 # The non-screenshot artifacts captured from live page state on a full report.
 _DIAGNOSTIC = ("console", "dom", "url")
+
+# Steps after which the page can still be busy with what they set off - a
+# click's view loading, a goto's document - so the next picture waits for it.
+# After any other step (a check, a wait, a service step) the page is as the last
+# of these left it, and once that has been waited for there is nothing left to
+# wait for: a scenario of value checks spent most of its time settling a page
+# that had not moved since the last picture.
+CHANGES_PAGE = ("click", "fill", "select", "press", "goto")
 
 # Backend logs are deliberately NOT one of ARTIFACTS. Everything in that tuple is
 # captured from the browser, and --report-level decides which. A server log is not
@@ -109,9 +117,16 @@ class ReportConfig:
     always: bool = False          # --report-always: full report on success too
     screen: frozenset = None      # None => default capture point (finish)
     configured: bool = False      # any --report-* flag was given
+    # --report-doc: write the run's step-by-step guide (engine.livedoc). Its own
+    # switch, outside ``configured`` for the reason --server-log is outside the
+    # level: it adds a document, and changes nothing about the others.
+    doc: bool = False
+    # Where the guide's own words are read from: doc_labels.json beside the
+    # users.json the launcher was given. None reads runtime_paths' default.
+    doc_labels: str = None
 
     @classmethod
-    def from_cli(cls, level=None, always=False, screen=None):
+    def from_cli(cls, level=None, always=False, screen=None, doc=False, doc_labels=None):
         """Build from raw CLI strings, validating artifact names / screen modes.
 
         ``level`` / ``screen`` are the raw comma-separated strings (or ``None`` when
@@ -124,7 +139,7 @@ class ReportConfig:
         screen_set = None if screen is None else _parse_choices(
             screen, SCREEN_MODES, "report-screen", "mode")
         return cls(level=level_set, always=bool(always), screen=screen_set,
-                   configured=configured)
+                   configured=configured, doc=bool(doc), doc_labels=doc_labels)
 
     @property
     def effective_level(self):
@@ -198,6 +213,10 @@ class Reporter:
         # so the reporter never learns where the lines came from.
         self._server = server
         self._each_n = 0
+        self._doc = None
+        # Whether a step may have set the page moving since it last settled.
+        # True at the start: the window has only just been reached.
+        self._unsettled = True
 
     def capture_start(self):
         """Screenshot immediately before the first step (``--report-screen=start``)."""
@@ -217,6 +236,36 @@ class Reporter:
             self._settle()
             self._shot("screenshot_%03d.png" % self._each_n)
 
+    # -- the guide (--report-doc) ---------------------------------------------
+    def doc_start(self, plan, steps, scenario, session=None, role=None):
+        """Open the run's guide, once the scenario has compiled."""
+        if not self._cfg.doc:
+            return
+
+        def written():
+            events.emit_artifacts(self._out, scenario=scenario, session=session)
+
+        doc = livedoc.LiveDoc(self._out, self._adapter,
+                              labels=livedoc.load_labels(self._cfg.doc_labels),
+                              settle=self._settle, written=written)
+        _safe(lambda: doc.start(plan, steps, scenario, session=session, role=role),
+              "guide")
+        self._doc = doc
+
+    def doc_before(self, index, step):
+        """Before a step runs: a step that acts is pictured now."""
+        if self._doc is not None:
+            _safe(lambda: self._doc.before(index, step), "guide")
+
+    def step_ended(self, index, step, step_result):
+        """After every step, before its own screenshot: note whether it may have
+        set the page moving, then let the guide picture a check that passed or
+        record a failure."""
+        if step.action in CHANGES_PAGE:
+            self._unsettled = True
+        if self._doc is not None:
+            _safe(lambda: self._doc.after(index, step, step_result), "guide")
+
     def finalize(self, flow_result, failed):
         """Write the finish screenshot and the outcome's report artifacts."""
         try:
@@ -227,6 +276,8 @@ class Reporter:
             # decision. No provider (no --server-log) writes nothing.
             write_server_logs(self._server, self._out)
         finally:
+            if self._doc is not None:
+                _safe(lambda: self._doc.finish(flow_result), "guide")
             # Announce what actually landed on disk, whichever branch ran, so a
             # consumer never has to guess the artifact names from the config.
             events.emit_artifacts(self._out, scenario=flow_result.scenario,
@@ -272,7 +323,14 @@ class Reporter:
 
     def _settle(self):
         """Let the page finish what the last step set off - see adapter.settle.
-        An adapter without it (a test double, an older one) does not wait."""
+
+        Only once per change: after a step in CHANGES_PAGE, the first picture
+        waits and the ones after it, until the next such step, do not. An
+        adapter without it (a test double, an older one) does not wait.
+        """
+        if not self._unsettled:
+            return
+        self._unsettled = False
         settle = getattr(self._adapter, "settle", None)
         if settle is not None:
             _safe(settle, "settle")

@@ -34,6 +34,7 @@ class PlanNode:
     step_index: int = None                  # leaf only: index into the flat step list
     action: str = None                      # leaf only
     target: str = None                      # leaf only: friendly label (named selector / value)
+    description: str = None                 # group only: the flow's own description
 
     def to_dict(self):
         """Plain nested dict for JSON serialization to the overlay renderer."""

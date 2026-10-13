@@ -50,6 +50,9 @@ KNOWN = (SELECTOR_ONLY | SELECTOR_AND_VALUE | VALUE_ONLY | URL_TARGET
 # which the GUI performs, and the HTTP probe, which is urllib. Every other action
 # acts on a page.
 NO_BROWSER = SERVICE_TARGET | SERVICE_TARGET_AND_VALUE | {"assert_host_up"}
+# The one key a step may carry beside its action, in either shape: the sentence
+# the run's guide shows for it (engine.livedoc). It changes nothing the step does.
+DOC = "doc"
 
 
 def parse_step(raw, source=None):
@@ -57,16 +60,21 @@ def parse_step(raw, source=None):
     if not isinstance(raw, dict):
         raise CompileError("step must be a mapping, got %r" % (raw,))
 
+    doc = raw.get(DOC)
+    if doc is not None and not isinstance(doc, str):
+        # Quoted or not, a sentence: ``doc: yes`` would reach the guide as True.
+        raise CompileError("doc must be text: %r" % (raw,))
+
     if "type" in raw:  # verbose form: supports timeout/retry/state
         step = Step(action=raw["type"], target=raw.get("target"), value=raw.get("value"),
                     state=raw.get("state"), timeout=raw.get("timeout"),
-                    retry=raw.get("retry"), source=source)
-    else:  # shorthand form: exactly one action key
-        keys = list(raw.keys())
+                    retry=raw.get("retry"), source=source, doc=doc)
+    else:  # shorthand form: exactly one action key, and perhaps its doc
+        keys = [key for key in raw if key != DOC]
         if len(keys) != 1:
             raise CompileError("shorthand step needs exactly one action key: %r" % (raw,))
         action, arg = keys[0], raw[keys[0]]
-        step = Step(action=action, source=source)
+        step = Step(action=action, source=source, doc=doc)
         if (action == USE or action in URL_TARGET or action in SELECTOR_ONLY
                 or action in SERVICE_TARGET):
             step.target = arg
@@ -131,6 +139,8 @@ def _finalize(step, selectors, ctx):
         step.target = substitute(step.target, ctx)
     if step.value is not None:
         step.value = substitute(step.value, ctx)
+    if step.doc is not None:
+        step.doc = substitute(step.doc, ctx)
     if step.action == "wait_for_out":
         # After substitution, because the pattern may be built from a param -
         # and here rather than in _validate for the same reason. A regex that
@@ -200,7 +210,8 @@ def _expand(scenario_id, flows_dir, finish):
             raise CompileError("cyclic use: %s" % " -> ".join(stack + [flow_id]))
         flow = loader.load_flow(flow_id, flows_dir)
         stack.append(flow_id)
-        group = PlanNode(id=node_id, label=flow.name or flow.id, kind=GROUP)
+        group = PlanNode(id=node_id, label=flow.name or flow.id, kind=GROUP,
+                         description=flow.description)
         for i, raw in enumerate(flow.steps):
             child_id = "%s/%d" % (node_id, i)
             step = parse_step(raw, source=flow_id)

@@ -1160,6 +1160,15 @@ class _NullReporter:
     def finalize_compile_error(self, result):
         pass
 
+    def doc_start(self, *args, **kwargs):
+        pass
+
+    def doc_before(self, index, step):
+        pass
+
+    def step_ended(self, index, step, step_result):
+        pass
+
 
 def test_stop_lands_between_steps_not_at_the_end_of_the_scenario(monkeypatch, tmp_path):
     # THE fix: a forty-step flow whose remaining steps each time out at 30 s took
@@ -1395,3 +1404,53 @@ def test_the_hud_is_folded_when_every_step_is_photographed(monkeypatch):
         level="screen", screen="each").wants_screen("each"))
     runner._make_overlay(["tree"], None, "s", collapsed=False)
     assert made == [True, False]
+
+
+# ---------------------------------------------------------------------- the guide
+
+def test_the_guide_pictures_a_step_before_the_hud_marks_it_and_checks_after(
+        monkeypatch, tmp_path):
+    """--report-doc: an action's picture is taken before anything touches the
+    page for it - the HUD's step, its marker, the click - and a check's once it
+    has passed, after the HUD has been told."""
+    order = []
+
+    class Overlay(runner.NullOverlay):
+        def step_start(self, index, acting=False):
+            order.append(("hud.start", index))
+
+        def mark(self, selector, label=None, timeout=None):
+            order.append(("mark", selector))
+
+        def step_end(self, index, status, attempts=1, message=""):
+            order.append(("hud.end", index))
+
+    class Reporter(_NullReporter):
+        def doc_start(self, plan, steps, scenario, session=None, role=None):
+            order.append(("doc.start", scenario, session, role))
+
+        def doc_before(self, index, step):
+            order.append(("doc.before", index))
+
+        def step_ended(self, index, step, step_result):
+            order.append(("doc.after", index, step_result.status))
+
+    class Adapter(_SlowAdapter):
+        def click(self, selector, timeout=None):
+            order.append(("click", selector))
+
+    monkeypatch.setattr(runner.compiler, "compile_plan",
+                        lambda *a, **k: ([Step("click", target=".b"),
+                                          Step("assert_visible", target=".c")], None))
+    monkeypatch.setattr(runner.artifacts, "Reporter", lambda *a, **k: Reporter())
+    monkeypatch.setattr(runner.artifacts, "scenario_dir", lambda *a: str(tmp_path))
+    ctx = runner.RunContext(user={"login": "agent", "class": "Agent"},
+                            env={"origin": "http://x", "url": "http://x"})
+    runner._run_scenario(Adapter(), "s", "dev-agent", None, {}, ctx, str(tmp_path),
+                         overlay=Overlay())
+    assert order == [("doc.start", "s", "dev-agent", "Agent"),
+                     ("doc.before", 0), ("hud.start", 0), ("mark", ".b"), ("click", ".b"),
+                     ("hud.end", 0), ("doc.after", 0, "pass"),
+                     ("doc.before", 1), ("hud.start", 1), ("hud.end", 1),
+                     ("doc.after", 1, "pass")]
+

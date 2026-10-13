@@ -31,6 +31,82 @@ SETTLE_POLL_MS = 50
 _LONG_LIVED_TYPES = ("websocket", "eventsource")
 _LONG_LIVED_PATHS = ("/websocket", "/longpolling")
 
+# doc_capture(): how long the element a step is about to act on may take to show
+# before its picture is taken without it. An element of an earlier step is not
+# waited for at all: it is on the page or it is not, and waiting for one that
+# had gone cost every later picture of that page the wait again.
+DOC_TARGET_MS = 3000
+
+# The guide is about the app, not about the test tool: its pictures leave the
+# HUD out. Applied by Playwright for the length of the capture only.
+DOC_HIDE = "#__exec_hud_host__ { visibility: hidden !important; }"
+
+# Which page the window is on, as the guide groups steps: the path with its
+# record ids (and "new", what a record is before it is saved) blanked out, so a
+# form stays one page across its save - and the dialog on top of it, if any.
+_DOC_PAGE_JS = r"""() => {
+  const shown = el => {
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== "hidden";
+  };
+  const open = [...document.querySelectorAll(
+      '[role="dialog"], [aria-modal="true"], dialog[open]')].filter(shown);
+  const top = open[open.length - 1];
+  let dialog = "";
+  if (top) {
+    const by = top.getAttribute("aria-labelledby");
+    const head = (by && document.getElementById(by)) ||
+        top.querySelector(".modal-title, h1, h2, h3, h4");
+    dialog = ((head && head.innerText) || top.getAttribute("aria-label") || "")
+        .split("\n")[0].replace(/\s+/g, " ").trim().slice(0, 120) || "dialog";
+  }
+  const path = location.pathname.split("/")
+      .map(part => /^(\d+|new)$/.test(part) ? "*" : part).join("/");
+  return {key: location.origin + path + (top ? "|dialog:" + dialog : ""),
+          title: (document.title || "").trim(), dialog: dialog,
+          width: window.innerWidth, height: window.innerHeight};
+}"""
+
+# What a person would call an element, and where it is in the window. A field is
+# named by its <label>, which in a form sits apart from the input.
+_DOC_ELEMENT_JS = r"""el => {
+  if (!el || !el.getBoundingClientRect) return null;
+  const clean = text => (text || "").replace(/\s+/g, " ").trim();
+  const field = el.matches("input, textarea, select") ? el :
+      (el.matches("button, a") ? null : el.querySelector("input, textarea, select"));
+  let label = el.getAttribute("aria-label");
+  if (!label && field && field.labels && field.labels.length) label = field.labels[0].innerText;
+  if (!label && field && field.id) {
+    const by = document.querySelector('label[for="' + CSS.escape(field.id) + '"]');
+    if (by) label = by.innerText;
+  }
+  if (!label && field) label = field.getAttribute("placeholder");
+  // A field with no label of its own is named by the text just before it.
+  if (!label && field) {
+    const before = field.previousElementSibling;
+    // textContent: innerText is the text as styled, and a caption is often
+    // set in capitals by CSS alone.
+    if (before && !before.matches("input, textarea, select")) label = before.textContent;
+  }
+  // A list's own text is its options, not its name.
+  if (!label && !(field && field.tagName === "SELECT"))
+    label = (el.innerText || "").split("\n").map(clean).find(Boolean);
+  if (!label) label = el.getAttribute("title") || el.getAttribute("name");
+  // An icon with nothing to say for itself acts on the row it sits in.
+  if (!label) {
+    const row = el.closest("tr, li, [role='row'], [role='treeitem']");
+    const first = row && (row.querySelector("td, th") || row);
+    if (first) label = (first.innerText || "").split("\n").map(clean).find(Boolean);
+  }
+  const r = el.getBoundingClientRect();
+  const choices = field && field.tagName === "SELECT" ?
+      [...field.options].slice(0, 300).map(o => [o.value, clean(o.text)]) : null;
+  return {label: clean(label).slice(0, 60),
+          secret: !!(field && field.type === "password"),
+          choices: choices,
+          box: [r.left, r.top, r.width, r.height]};
+}"""
+
 
 class PlaywrightAdapter(BrowserAdapter):
     def __init__(self, playwright, browser, page):
@@ -42,6 +118,12 @@ class PlaywrightAdapter(BrowserAdapter):
         # app: a click starts an RPC and a redraw, with no navigation for
         # Playwright's own load states to notice.
         self._in_flight = set()
+        # Counts the page's own requests starting and ending: settle() tells a
+        # quiet page from one that has just been busy by whether it moved.
+        self._net_events = 0
+        # doc_capture(): the elements of the steps already on the guide's page,
+        # by selector, so they are measured again in one call, not one each.
+        self._doc_handles = {}
         # Import here so the symbol is available for except-clauses without a
         # module-level Playwright import.
         from playwright.sync_api import TimeoutError as _Timeout
@@ -94,11 +176,14 @@ class PlaywrightAdapter(BrowserAdapter):
             if any(part in request.url for part in _LONG_LIVED_PATHS):
                 return
             self._in_flight.add(request)
+            self._net_events += 1
         except Exception:  # never let bookkeeping break a run
             pass
 
     def _on_request_done(self, request):
-        self._in_flight.discard(request)
+        if request in self._in_flight:
+            self._in_flight.discard(request)
+            self._net_events += 1
 
     def settle(self, timeout_ms=3000):
         """Wait until the page has had no request in flight for a moment, then
@@ -111,8 +196,14 @@ class PlaywrightAdapter(BrowserAdapter):
         """
         try:
             page = self._page
+            before = self._net_events
             page.wait_for_timeout(SETTLE_FIRST_MS)
             waited, quiet = SETTLE_FIRST_MS, 0
+            if not self._in_flight and self._net_events == before:
+                # Nothing started or ended through the first pause - which is
+                # also when the events of the step itself arrive - so the page
+                # is not busy, and the quiet spell would only be waited out.
+                quiet = SETTLE_QUIET_MS
             while waited < timeout_ms and quiet < SETTLE_QUIET_MS:
                 # Waiting is also what lets the sync API deliver request events.
                 page.wait_for_timeout(SETTLE_POLL_MS)
@@ -259,6 +350,124 @@ class PlaywrightAdapter(BrowserAdapter):
             # full_page can fail on some layouts; fall back to the viewport.
             self._page.screenshot(path=path)
 
+    def doc_capture(self, path, targets, focus=False):
+        """The window as it is now, for the guide - see BrowserAdapter.doc_capture.
+
+        The first target is the step's own: it is scrolled into view and given
+        a moment to appear. The rest belong to earlier steps on the same page
+        and are only looked for. Everything is measured before the picture is
+        taken, against the same viewport, so the boxes land where the picture
+        shows them. Best-effort: an element that cannot be found is None.
+        """
+        page = self._page
+        targets = list(targets or [])
+        found = []
+        if targets:
+            found.append(self._doc_element(page, targets[0], first=True, focus=focus))
+            found.extend(self._doc_again(page, targets[1:]))
+        state = page.evaluate(_DOC_PAGE_JS)
+        try:
+            page.screenshot(path=path, style=DOC_HIDE)
+        except TypeError:
+            # Playwright before 1.41 has no style=: a picture with the HUD in it
+            # beats none.
+            page.screenshot(path=path)
+        width = float(state.get("width") or 0) or 1.0
+        height = float(state.get("height") or 0) or 1.0
+        elements = []
+        for info in found:
+            box = _fraction(info.get("box"), width, height) if info else None
+            elements.append(None if box is None else
+                            {"box": box, "label": info.get("label") or "",
+                             "secret": bool(info.get("secret")),
+                             "choices": info.get("choices") or []})
+        return {"page": {"key": state.get("key") or "",
+                         "title": state.get("title") or "",
+                         "dialog": state.get("dialog") or "",
+                         "size": [width, height]},
+                "elements": elements}
+
+    def _doc_element(self, page, selector, first, focus):
+        """The step's own element: waited for, brought into view, measured."""
+        try:
+            if selector is None:
+                if not (first and focus):
+                    return None
+                return page.evaluate(
+                    "() => { const el = document.activeElement;"
+                    " return el && el !== document.body ? (%s)(el) : null; }"
+                    % _DOC_ELEMENT_JS)
+            target = page.locator(selector).first
+            target.wait_for(state="visible", timeout=DOC_TARGET_MS)
+            target.scroll_into_view_if_needed(timeout=DOC_TARGET_MS)
+            handle = target.element_handle(timeout=DOC_TARGET_MS)
+            self._keep_handle(selector, handle)
+            return handle.evaluate(_DOC_ELEMENT_JS)
+        except Exception as exc:
+            log.debug("doc_capture: %r not found: %s", selector, exc)
+            return None
+
+    def _doc_again(self, page, selectors):
+        """The elements of earlier steps, measured again in one call.
+
+        Each is looked up once - query_selector answers at once, with nothing
+        when nothing matches - and kept; after that the page is asked about all
+        of them together. One the page has drawn anew since is looked up again.
+        Measured one call each, they cost every picture of a busy page a call
+        per step already on it.
+        """
+        wanted = set(selectors)
+        for selector in list(self._doc_handles):
+            if selector not in wanted:
+                self._drop_handle(selector)
+        handles = []
+        for selector in selectors:
+            if selector is not None and selector not in self._doc_handles:
+                self._keep_handle(selector, self._query(page, selector))
+            handles.append(self._doc_handles.get(selector))
+        measured = self._measure(page, handles)
+        for position, selector in enumerate(selectors):
+            if measured[position] is None and handles[position] is not None:
+                # Drawn anew: the old element is gone, a new one may match.
+                handle = self._query(page, selector)
+                self._keep_handle(selector, handle)
+                measured[position] = self._measure(page, [handle])[0]
+        return measured
+
+    @staticmethod
+    def _query(page, selector):
+        try:
+            return page.query_selector(selector)
+        except Exception as exc:
+            log.debug("doc_capture: %r not found: %s", selector, exc)
+            return None
+
+    @staticmethod
+    def _measure(page, handles):
+        if not any(handle is not None for handle in handles):
+            return [None] * len(handles)
+        try:
+            return page.evaluate(
+                "handles => handles.map(el => el && el.isConnected ? (%s)(el) : null)"
+                % _DOC_ELEMENT_JS, handles)
+        except Exception as exc:
+            log.debug("doc_capture: elements not measured: %s", exc)
+            return [None] * len(handles)
+
+    def _keep_handle(self, selector, handle):
+        if self._doc_handles.get(selector) is not handle:
+            self._drop_handle(selector)
+        if handle is not None:
+            self._doc_handles[selector] = handle
+
+    def _drop_handle(self, selector):
+        handle = self._doc_handles.pop(selector, None)
+        if handle is not None:
+            try:
+                handle.dispose()
+            except Exception:
+                pass
+
     def content(self):
         return self._page.content()
 
@@ -273,3 +482,18 @@ class PlaywrightAdapter(BrowserAdapter):
             self._pw.stop()
         except Exception:
             pass
+
+
+def _fraction(box, width, height):
+    """``[x, y, w, h]`` in CSS pixels as fractions of the window, or None when
+    the element is not in it - hidden, or scrolled out of sight."""
+    try:
+        x, y, w, h = (float(part) for part in box)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0 or x + w <= 0 or y + h <= 0 or x >= width or y >= height:
+        return None
+    left, top = max(x, 0.0), max(y, 0.0)
+    right, bottom = min(x + w, width), min(y + h, height)
+    return [round(left / width, 4), round(top / height, 4),
+            round((right - left) / width, 4), round((bottom - top) / height, 4)]

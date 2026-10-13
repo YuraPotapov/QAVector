@@ -53,7 +53,8 @@ steps:
 
 Two forms, interchangeable:
 
-**Shorthand** — exactly one key, the action name:
+**Shorthand** — exactly one key, the action name (a `doc:` may sit beside it, see
+[Documenting a scenario](#documenting-a-scenario-doc)):
 
 ```yaml
 - click: submit_button
@@ -265,6 +266,73 @@ the URL the window opened.
 
 An unknown placeholder is an **error at compile time**, not a silent empty string — a
 typo fails before the browser is touched.
+
+## Documenting a scenario (`doc:`)
+
+A run can write a step-by-step guide to what it did: `--report-doc` on the command line,
+or **Launch -> Reports and screenshots -> Write a step-by-step guide while it runs** in the
+GUI. Each scenario then leaves `documentation.html` in its report folder, with its
+pictures in `doc/`. It is rewritten after every step it describes, so it can be read
+while the run goes, and **Artifacts** shows it and exports it as an A4 PDF.
+
+What a step means to a reader is its `doc:`, in either step shape:
+
+```yaml
+steps:
+  - use: auth.login
+  - click: new_button
+    doc: "Press New to open an empty order"
+  - fill: {target: customer_input, value: "ACME"}
+    doc: "Choose the customer"
+  - press: ArrowDown                  # no doc: not in the guide
+  - type: assert_visible
+    target: order_number
+    doc: "The order gets its number"
+```
+
+- **What is described is decided for each chapter.** A chapter - a top-level `use:`
+  block, or the scenario's own steps - with a `doc:` in it shows the steps that carry
+  one. A chapter with none gets a draft instead, made from its clicks, fills, selects
+  and gotos and the names the page gives their elements (a field's label, a button's
+  text). So a scenario made of other scenarios documents each of them, even when its
+  own steps are written by hand. A password is never shown.
+- **An action is pictured before it acts**, the window as the reader will find it, with
+  the element outlined. A check (`assert_*`, `wait_for`) is pictured once it has passed,
+  as an *expected result*.
+- **Steps are grouped by the page they happen on.** Consecutive steps on one page, or in
+  one dialog, make one section with one picture: every step that acts is numbered on it,
+  in order, joined by a path. A check is outlined without a number - it is not a step
+  the reader takes. A step whose element is gone by then, such as an option in a dropdown
+  that has closed, keeps a picture of its own. A record's id in the address does not
+  make a new page, so a form stays one section across its save.
+- **A top-level `use:` block is a chapter**, titled by its `name`, with its
+  `description` as the introduction.
+- `doc:` is free text in whatever language the guide is for, and takes `{{...}}`
+  parameters like any other field. It is never matched against the page.
+- If the run fails, the guide says where it stopped, with the error and a picture.
+
+The few words the guide adds itself (contents, "expected result", the draft's
+sentences) are English. Put them in your own language in `doc_labels.json` in the data
+folder, beside `users.json`; any key left out stays English:
+
+```json
+{
+  "lang": "de",
+  "contents": "Inhalt",
+  "result": "Erwartetes Ergebnis",
+  "click": "Klicken Sie auf \u201c{label}\u201d",
+  "fill": "Geben Sie \u201c{value}\u201d in \u201c{label}\u201d ein"
+}
+```
+
+The keys are `lang`, `contents`, `result`, `stopped`, `incomplete`, `running`,
+`complete`, `draft`, `dialog`, and the draft's `click`, `fill`, `select`, `goto` and
+`press`, which take `{label}` and `{value}`. `click_marked`, `fill_marked` and
+`select_marked` are used when neither the page nor the scenario names the element -
+an icon, say - and the picture is what points at it.
+
+The file is read from beside the `users.json` the run was given (`--config`), so a
+checkout run from the GUI uses the same one as an installed build.
 
 ## Tags
 

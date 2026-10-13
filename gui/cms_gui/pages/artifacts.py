@@ -4,6 +4,10 @@ During a run it is fed by two events - ``run.dir`` names the run directory,
 ``artifacts.written`` announces each scenario's files as they land - so the tree
 fills in as the run goes rather than after it.
 
+A scenario's folder opens on its step-by-step guide, when the run wrote one
+(``--report-doc``): ``documentation.html``, which follows the run as it is
+written and exports to PDF.
+
 Between runs it remembers. The run directory used to arrive in an event and
 disappear with the process, which left this page blank on every restart even
 though the reports were still sitting on disk. Now the last directory is stored,
@@ -16,7 +20,7 @@ import json
 import os
 import time
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
@@ -29,9 +33,15 @@ TEXT_SUFFIXES = (".json", ".log", ".txt", ".html", ".yaml", ".yml", ".md", ".csv
 HTML_SUFFIXES = (".html", ".htm")
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 PREVIEW_LIMIT = 400_000     # bytes of a text file worth putting on screen
+#: How long the files announced during a run gather before the tree is read
+#: again. A guide is rewritten after every step it describes, and reading a run
+#: of several hundred files for each of them kept the window busy.
+RESCAN_GATHER_MS = 700
 
 CURRENT = "Current run"
 NO_RUNS = "no reports yet"
+#: The guide a run writes into each scenario's folder (engine.livedoc).
+GUIDE_NAME = "documentation.html"
 
 
 class ArtifactsPage(QWidget):
@@ -45,7 +55,16 @@ class ArtifactsPage(QWidget):
         self._shown_dir = ""        # what the tree is showing
         self._loading = False
         self.html = None             # start WebEngine only when opening HTML
-        self.flow = None             # the storyboard, made the first time it is shown
+        self.no_guide = None         # the empty state, made the first time it is needed
+        self._guide_path = ""        # the guide on show, and when it last changed:
+        self._guide_mtime = None     # a rescan reloads it only if it has
+        self._rescanning = False
+        # Files announced by a run, read in one go: see note_artifacts.
+        self._stale = False
+        self._gather = QTimer(self)
+        self._gather.setSingleShot(True)
+        self._gather.setInterval(RESCAN_GATHER_MS)
+        self._gather.timeout.connect(self._rescan_announced)
         # Reserve Qt Quick composition before the main window is shown. The
         # WebEngine view creates its own Quick widget only when first loaded;
         # adding that to a visible raster window destroys and recreates the
@@ -121,15 +140,20 @@ class ArtifactsPage(QWidget):
         self.preview_mode.setVisible(False)
         self.preview_mode.currentIndexChanged.connect(self._preview_selected)
         path_row.addWidget(self.preview_mode)
-        # A scenario's folder, or its result.json: the run as a storyboard of
-        # its steps and their screenshots, or the JSON it is read from.
-        self.flow_mode = QComboBox()
-        self.flow_mode.addItems(["Flow", "Source"])
-        self.flow_mode.setToolTip("Show the steps as a flow of screenshots, or "
-                                  "result.json as written")
-        self.flow_mode.setVisible(False)
-        self.flow_mode.currentIndexChanged.connect(self._preview_selected)
-        path_row.addWidget(self.flow_mode)
+        # A scenario's folder, or its result.json: the run's guide, or the JSON
+        # its result is in.
+        self.guide_mode = QComboBox()
+        self.guide_mode.addItems(["Guide", "Source"])
+        self.guide_mode.setToolTip("Show the run's step-by-step guide, or "
+                                   "result.json as written")
+        self.guide_mode.setVisible(False)
+        self.guide_mode.currentIndexChanged.connect(self._preview_selected)
+        path_row.addWidget(self.guide_mode)
+        self.export_pdf = icons.button(QPushButton("Export PDF"), "export")
+        self.export_pdf.setToolTip("Save the guide as an A4 PDF")
+        self.export_pdf.setVisible(False)
+        self.export_pdf.clicked.connect(self._export_pdf)
+        path_row.addWidget(self.export_pdf)
         path_row.addWidget(self.open_file)
         path_layout.addLayout(path_row)
         right_layout.addWidget(path_bar)
@@ -218,10 +242,37 @@ class ArtifactsPage(QWidget):
         return False
 
     def note_artifacts(self, _event):
-        """A scenario finished writing; the cheapest correct answer is a rescan."""
-        self.rescan()
+        """A run wrote files; the tree is read again - once for a burst of them.
+
+        Announcements come after every scenario and after every step a guide
+        describes, so they are gathered for a moment and read in one rescan.
+        A page nobody is looking at only notes that it is behind, and catches
+        up when it is shown.
+        """
+        self._stale = True
+        if self.isVisible() and not self._gather.isActive():
+            self._gather.start()
+
+    def _rescan_announced(self):
+        if self._stale and self.isVisible():
+            self.rescan()
+
+    def showEvent(self, event):              # noqa: N802 - Qt's own spelling
+        QWidget.showEvent(self, event)
+        if self._stale:
+            self.rescan()
 
     def rescan(self):
+        self._stale = False
+        # Marked, so the preview can tell the same file chosen again by a rescan
+        # from a reader choosing it: a guide being written follows the run.
+        self._rescanning = True
+        try:
+            self._rescan()
+        finally:
+            self._rescanning = False
+
+    def _rescan(self):
         selected = self._selected_path()
         self.tree.clear()
         directory = self._shown_dir
@@ -344,13 +395,18 @@ class ArtifactsPage(QWidget):
         is_html = bool(path and not os.path.isdir(path) and suffix in HTML_SUFFIXES)
         self.preview_mode.setVisible(is_html)
         if self.html is not None:
-            self.html.stop()
+            if not self._rescanning:
+                self.html.stop()
             self.html.setVisible(False)
-        if self.flow is not None:
-            self.flow.setVisible(False)
+        if self.no_guide is not None:
+            self.no_guide.setVisible(False)
+        self.export_pdf.setVisible(False)
+        if not self._rescanning:
+            self._guide_path, self._guide_mtime = "", None
         folder = _scenario_folder(path)
-        self.flow_mode.setVisible(bool(folder))
-        if folder and self.flow_mode.currentIndex() == 0 and self._show_flow(folder):
+        self.guide_mode.setVisible(bool(folder))
+        if folder and self.guide_mode.currentIndex() == 0:
+            self._show_guide(os.path.join(folder, GUIDE_NAME))
             return
         if folder and os.path.isdir(path):
             # Source, for the folder itself: the file its flow is read from.
@@ -359,7 +415,10 @@ class ArtifactsPage(QWidget):
             self._show_text("" if not path else "Directory")
             return
         if is_html and self.preview_mode.currentIndex() == 0:
-            self._show_html(path)
+            if os.path.basename(path) == GUIDE_NAME:
+                self._show_guide(path)
+            else:
+                self._show_html(path)
             return
         if suffix in IMAGE_SUFFIXES:
             pixmap = QPixmap(path)
@@ -388,22 +447,68 @@ class ArtifactsPage(QWidget):
                 return
         self._show_text("(no preview for %s — use Open in OS)" % (suffix or "this file"))
 
-    def _show_flow(self, folder):
-        """The scenario as a storyboard. False when its result.json cannot be read."""
-        if self.flow is None:
-            from ..flowview import FlowView
+    def _show_guide(self, path):
+        """The run's guide, or a word on how to get one.
 
-            self.flow = FlowView(self)
-            # Queued: the click arrives inside the card that the new selection
-            # is about to replace.
-            self.flow.picked.connect(self._select_path, Qt.QueuedConnection)
-            self._preview_layout.addWidget(self.flow, 1)
-        if not self.flow.show_folder(folder):
-            return False
+        A rescan picks the selection again every time a scenario writes - while
+        a run goes, after every step it describes. A guide that has not changed
+        is left exactly as it is, scrolled where the reader left it; one that
+        has is read again and scrolled to its newest step, so it follows the run
+        the way a log pane follows its tail.
+        """
+        if not os.path.isfile(path):
+            self._show_no_guide()
+            return
+        mtime = _mtime(path)
+        again = self._rescanning and path == self._guide_path
+        if again and mtime == self._guide_mtime and self.html is not None:
+            self.text.setVisible(False)
+            self.image_area.setVisible(False)
+            self.html.setVisible(True)
+        else:
+            self._show_html(path, fragment="latest" if again else "")
+        self._guide_path, self._guide_mtime = path, mtime
+        self.export_pdf.setVisible(True)
+
+    def _show_no_guide(self):
+        if self.no_guide is None:
+            # At the top of the pane, as History's empty state is: stretched over
+            # all of it, the title and its hint drift a screen apart.
+            self.no_guide = QWidget()
+            column = QVBoxLayout(self.no_guide)
+            column.setContentsMargins(16, 16, 16, 16)
+            column.addWidget(widgets.empty_zone(
+                "No guide for this run",
+                "Tick \"Write a step-by-step guide while it runs\" under Launch, "
+                "Reports and screenshots, and run the scenario again. Source shows "
+                "its result.json."))
+            column.addStretch(1)
+            self._preview_layout.addWidget(self.no_guide, 1)
         self.text.setVisible(False)
         self.image_area.setVisible(False)
-        self.flow.setVisible(True)
-        return True
+        self.no_guide.setVisible(True)
+
+    def _export_pdf(self):
+        if not self._guide_path or self.html is None:
+            return
+        folder = os.path.dirname(self._guide_path)
+        name = os.path.basename(folder.rstrip(os.sep)) or "guide"
+        target, _kind = QFileDialog.getSaveFileName(
+            self, "Export the guide as PDF", os.path.join(folder, name + ".pdf"),
+            "PDF (*.pdf)")
+        if not target:
+            return
+        if not target.lower().endswith(".pdf"):
+            target += ".pdf"
+        self.export_pdf.setEnabled(False)
+        self.path_label.setText("Writing %s ..." % target)
+        self.html.export_pdf(target)
+
+    def _pdf_exported(self, path, ok):
+        self.export_pdf.setEnabled(True)
+        if ok:
+            self.rescan()            # it may have landed in the folder on show
+        self.path_label.setText(("Saved %s" if ok else "Could not write %s") % path)
 
     def _show_text(self, body):
         if self.html is not None:
@@ -412,7 +517,7 @@ class ArtifactsPage(QWidget):
         self.text.setVisible(True)
         self.text.setPlainText(body)
 
-    def _show_html(self, path):
+    def _show_html(self, path, fragment=""):
         if not os.path.isfile(path):
             self._show_text("Cannot read: file no longer exists")
             return
@@ -421,11 +526,12 @@ class ArtifactsPage(QWidget):
 
             self.html = HtmlPreview(self)
             self.html.local_file_requested.connect(self._select_path, Qt.QueuedConnection)
+            self.html.pdf_exported.connect(self._pdf_exported)
             self._preview_layout.addWidget(self.html, 1)
         self.text.setVisible(False)
         self.image_area.setVisible(False)
         self.html.setVisible(True)
-        self.html.load_file(path, self._shown_dir)
+        self.html.load_file(path, self._shown_dir, fragment)
 
     # -- opening --------------------------------------------------------------
     def _open_selected(self):

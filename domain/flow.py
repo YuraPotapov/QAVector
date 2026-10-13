@@ -29,6 +29,10 @@ class Step:
       - ``assert_url_contains`` / ``assert_title``: ``value`` is the expected
         substring.
       - ``use``: ``target`` is the referenced flow id (compile-time only).
+
+    ``doc`` is the sentence a person reads in the guide a run writes
+    (``--report-doc``, engine.livedoc): free text in whatever language the
+    guide is for, never matched against the page.
     """
 
     action: str
@@ -38,6 +42,7 @@ class Step:
     timeout: float = None      # milliseconds; None -> engine default
     retry: dict = None         # {"attempts": int, "delay": float(seconds)}
     source: str = None         # flow id this step came from (diagnostics)
+    doc: str = None            # what the step means to a reader of the guide
 
 
 @dataclass

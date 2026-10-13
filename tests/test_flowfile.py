@@ -201,7 +201,7 @@ def test_describe_carries_both_the_text_and_the_steps(tree):
     assert payload["meta"]["name"] == "Shown"
     assert payload["steps"][0] == {"action": "click", "target": "menu_settings",
                                    "value": None, "state": None, "timeout": None,
-                                   "retry": None}
+                                   "retry": None, "doc": None}
     assert "click:" in payload["yaml"]
     assert payload["problems"] == []
 
@@ -261,3 +261,27 @@ def test_importing_something_that_does_not_compile_is_refused(tree, tmp_path):
     source.write_text("id: bad\nsteps:\n  - wat: x\n", encoding="utf-8")
     assert not flowfile.import_file(str(source))["ok"]
     assert not os.path.exists(os.path.join(str(tree), "scenarios", "bad.yaml"))
+
+
+# ----------------------------------------------------------------------- doc:
+
+def test_a_doc_rides_along_with_a_shorthand_step():
+    parsed, text = _roundtrip([{"action": "click", "target": "new_button",
+                                "doc": "Press New to open an empty form"}])
+    assert '  - click: "new_button"\n    doc: "Press New to open an empty form"' in text
+    assert parsed[0].doc == "Press New to open an empty form"
+
+
+def test_a_doc_rides_along_with_a_verbose_step():
+    parsed, _text = _roundtrip([{"action": "wait_for", "target": "form_view",
+                                 "state": "visible", "doc": "The form opens"}])
+    assert parsed[0].state == "visible" and parsed[0].doc == "The form opens"
+
+
+def test_a_blank_doc_is_left_out():
+    _parsed, text = _roundtrip([{"action": "click", "target": "a", "doc": "  "}])
+    assert "doc:" not in text
+
+
+def test_the_editor_sees_a_step_s_doc():
+    assert flowfile.step_to_json({"click": "a", "doc": "Press A"})["doc"] == "Press A"

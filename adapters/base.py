@@ -81,6 +81,21 @@ class BrowserAdapter(ABC):
         with no page, or a test double, has nothing to wait for.
         """
 
+    def doc_capture(self, path, targets, focus=False):
+        """A picture for the run's guide, and where its elements are on it.
+
+        Writes what the window shows (the viewport, not the whole page) to
+        ``path``, and answers ``{"page": {"key", "title", "dialog"}, "elements":
+        [...]}``: one entry per selector in ``targets`` - ``{"box": [x, y, w, h]
+        as fractions of the picture, "label", "secret"}``, or None when that
+        element is not on it. ``focus`` stands the focused element in for a
+        first target of None (what a bare ``press`` acts on).
+
+        None - the default - means there is no page to take, and the guide
+        carries the step as text only (see engine.livedoc).
+        """
+        return None
+
     # --- execution overlay (optional; default no-op) -------------------------
     # The HUD is rendered *inside* the page by injecting an isolated overlay over
     # the existing browser connection. These are concrete no-ops so an adapter

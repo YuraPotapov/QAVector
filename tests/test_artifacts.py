@@ -327,6 +327,14 @@ class SettlingAdapter(FakeAdapter):
         FakeAdapter.screenshot(self, path)
 
 
+def _ended(reporter, index, action):
+    from domain.flow import Step
+    from domain.result import PASS, StepResult
+
+    reporter.step_ended(index, Step(action, target="#x"),
+                        StepResult(index, action, PASS))
+
+
 def test_a_step_screenshot_waits_for_the_page_and_is_named_after_the_step(tmp_path):
     """Right after a click Odoo still showed the page it left, or half the new
     one; and the file's number is the step's, so a viewer can pair them."""
@@ -334,12 +342,47 @@ def test_a_step_screenshot_waits_for_the_page_and_is_named_after_the_step(tmp_pa
     r = Reporter(ReportConfig.from_cli(level="screen", screen="start,each,finish"),
                  str(tmp_path), adapter)
     r.capture_start()
+    _ended(r, 0, "click")
     r.capture_step(0)
+    _ended(r, 4, "goto")
     r.capture_step(4)
     r.finalize(_flow(), failed=False)
     assert adapter.calls == ["screenshot_start.png", "settle", "screenshot_001.png",
-                             "settle", "screenshot_005.png", "settle",
+                             "settle", "screenshot_005.png", "screenshot_finish.png"]
+
+
+def test_a_page_nothing_has_moved_since_is_not_waited_for_again(tmp_path):
+    """A check, a wait or a service step leaves the page as it was: a scenario of
+    value checks settled the same still page before every one of them, about
+    0.95 s a step for a picture identical to the one before."""
+    adapter = SettlingAdapter()
+    r = Reporter(ReportConfig.from_cli(level="screen", screen="each,finish"),
+                 str(tmp_path), adapter)
+    _ended(r, 0, "click")
+    r.capture_step(0)
+    for index, action in enumerate(("assert_visible", "wait_for", "assert_not_visible",
+                                    "service_restart"), start=1):
+        _ended(r, index, action)
+        r.capture_step(index)
+    _ended(r, 5, "fill")
+    r.capture_step(5)
+    _ended(r, 6, "assert_text_contains")
+    r.finalize(_flow(), failed=True)
+    assert adapter.calls.count("settle") == 2
+    assert adapter.calls == ["settle", "screenshot_001.png", "screenshot_002.png",
+                             "screenshot_003.png", "screenshot_004.png",
+                             "screenshot_005.png", "settle", "screenshot_006.png",
                              "screenshot_finish.png"]
+
+
+def test_the_first_picture_of_a_run_waits_for_the_page(tmp_path):
+    # Nothing has been waited for yet when the window is first reached.
+    adapter = SettlingAdapter()
+    r = Reporter(ReportConfig.from_cli(level="screen", screen="each"), str(tmp_path),
+                 adapter)
+    _ended(r, 0, "assert_visible")
+    r.capture_step(0)
+    assert adapter.calls == ["settle", "screenshot_001.png"]
 
 
 def test_nothing_waits_when_no_screenshot_is_taken(tmp_path):
@@ -355,3 +398,72 @@ def test_an_adapter_without_settle_still_gets_its_screenshots(tmp_path):
                  str(tmp_path), FakeAdapter())
     r.capture_step(2)
     assert _files(tmp_path) == {"screenshot_003.png"}
+
+
+# --- the guide (--report-doc) ---------------------------------------------------
+def _guide_plan():
+    from domain.flow import Step
+    from domain.plan import STEP, PlanNode
+
+    steps = [Step("click", target="#new", doc="Press New")]
+    plan = PlanNode(id="0", label="Make one", children=[
+        PlanNode(id="0/0", label="click #new", kind=STEP, step_index=0,
+                 action="click", target="#new")])
+    return plan, steps
+
+
+def test_the_guide_is_its_own_switch():
+    cfg = ReportConfig.from_cli(doc=True)
+    assert cfg.doc is True
+    assert cfg.configured is False          # every other artifact stays as it was
+    assert ReportConfig.from_cli(level="result").doc is False
+
+
+def test_no_guide_unless_asked_for(tmp_path):
+    reporter = Reporter(ReportConfig(), str(tmp_path), FakeAdapter())
+    plan, steps = _guide_plan()
+    reporter.doc_start(plan, steps, "s", session="sess")
+    reporter.doc_before(0, steps[0])
+    reporter.finalize(_flow(), failed=False)
+    assert "documentation.html" not in _files(tmp_path)
+
+
+def test_the_guide_is_written_and_announced(tmp_path, monkeypatch):
+    from domain.result import PASS, StepResult
+    from engine import artifacts as artifacts_mod
+
+    announced = []
+    monkeypatch.setattr(artifacts_mod.events, "emit_artifacts",
+                        lambda out, scenario=None, session=None: announced.append(scenario))
+    # An adapter with no doc_capture at all: the guide is text only, never a crash.
+    reporter = Reporter(ReportConfig.from_cli(doc=True), str(tmp_path), FakeAdapter())
+    plan, steps = _guide_plan()
+    reporter.doc_start(plan, steps, "s", session="sess", role="Agent")
+    reporter.doc_before(0, steps[0])
+    reporter.step_ended(0, steps[0], StepResult(0, "click", PASS))
+    reporter.finalize(_flow(), failed=False)
+    assert {"documentation.html", "doc", "result.json"} <= _files(tmp_path)
+    page = (tmp_path / "documentation.html").read_text(encoding="utf-8")
+    assert "Press New" in page and "Make one" in page
+    assert announced and set(announced) == {"s"}
+
+
+def test_the_guide_speaks_the_language_beside_the_users_file(tmp_path):
+    import json as _json
+    from domain.result import PASS, StepResult
+
+    labels = tmp_path / "doc_labels.json"
+    labels.write_text(_json.dumps({"lang": "xx", "complete": "Done-xx"}), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    reporter = Reporter(ReportConfig.from_cli(doc=True, doc_labels=str(labels)), str(out),
+                        FakeAdapter())
+    plan, steps = _guide_plan()
+    reporter.doc_start(plan, steps, "s", session="sess")
+    reporter.step_ended(0, steps[0], StepResult(0, "click", PASS))
+    flow = _flow()
+    flow.status = PASS
+    reporter.finalize(flow, failed=False)
+    page = (out / "documentation.html").read_text(encoding="utf-8")
+    assert 'lang="xx"' in page and "Done-xx" in page
+

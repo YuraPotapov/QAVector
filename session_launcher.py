@@ -3535,6 +3535,10 @@ Reports (require --run-tests):
                             on failure.
   --report-screen=LIST      When to capture screenshots: start,each,finish
                             (only when 'screen' is in --report-level).
+  --report-doc              Write a step-by-step guide while each scenario runs:
+                            documentation.html in its report folder, its
+                            pictures in doc/. Steps with a doc: are described;
+                            a scenario with none gets a draft.
 
 Example:
   %s --user=admin --password=admin --url=http://localhost:8069 \\
@@ -3593,6 +3597,7 @@ def main():
     report_level = None   # raw --report-level value (None = flag absent -> default artifacts)
     report_always = False # --report-always: produce a full report on success too
     report_screen = None  # raw --report-screen value (None = flag absent -> default capture)
+    report_doc = False    # --report-doc: write the step-by-step guide (engine.livedoc)
     extensions = None     # --extensions: None = the default set (every local one)
     extensions_given = False
     excluded_extensions = set()   # from the deprecated --no-odoo-debug
@@ -3951,6 +3956,10 @@ def main():
             # When screenshots are captured: start,each,finish (any combination).
             # Only has effect when 'screen' is among the report artifacts.
             report_screen = arg.split("=", 1)[1].strip()
+        elif arg == "--report-doc":
+            # The run's step-by-step guide, written as each scenario runs. Its
+            # own switch: it adds a document, and changes no other artifact.
+            report_doc = True
         elif arg.startswith("--user="):
             cli_user = arg.split("=", 1)[1].strip()
         elif arg.startswith("--password="):
@@ -4118,23 +4127,31 @@ def main():
                                 if part.strip() != "server_log")
         if not report_level.strip():
             report_level = None
-    if report_level is not None or report_always or report_screen is not None:
+    if (report_level is not None or report_always or report_screen is not None
+            or report_doc):
         if run_tests is None:
-            sys.exit("--report-level/--report-always/--report-screen require --run-tests "
-                     "(reports are only produced when flows run).")
+            sys.exit("--report-level/--report-always/--report-screen/--report-doc require "
+                     "--run-tests (reports are only produced when flows run).")
         from engine.artifacts import ReportConfig
         try:
-            report_config = ReportConfig.from_cli(level=report_level, always=report_always,
-                                                   screen=report_screen)
+            # The guide's words in the user's language sit beside their users.json:
+            # a checkout run from the GUI is handed ~/QAVector/users.json, and its
+            # own data root - the checkout - is not where they keep anything.
+            report_config = ReportConfig.from_cli(
+                level=report_level, always=report_always, screen=report_screen,
+                doc=report_doc,
+                doc_labels=os.path.join(os.path.dirname(os.path.abspath(config_path)),
+                                        "doc_labels.json"))
         except ValueError as exc:
             sys.exit("Error: %s" % exc)
         if report_screen is not None and not report_config.screen_enabled:
             log.warning("--report-screen has no effect: 'screen' is not in --report-level, "
                         "so no screenshots will be captured.")
-        if no_browser and (report_screen is not None
+        if no_browser and (report_screen is not None or report_doc
                            or (report_config.level or frozenset()) - {"result"}):
             log.info("--no-browser: only result.json and server logs are written; "
-                     "screenshots, dom, console and url need a page.")
+                     "screenshots, dom, console, url and the guide's pictures "
+                     "need a page.")
     # Resolve --env before the URL check: it names the environment to launch AND
     # supplies that environment's URL, so --url only has to be typed to override it.
     envs = environments_from_config(config_path, strict=(env_name is not None
