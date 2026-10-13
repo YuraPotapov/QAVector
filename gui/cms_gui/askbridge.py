@@ -35,6 +35,9 @@ from .approvaltext import ApprovalText, review_facts
 #: A review is a document, with room to read it and resize handles to grow it.
 REVIEW_WIDTH, REVIEW_HEIGHT = 960, 860
 
+#: The longest text an input question sends back; the core refuses more.
+MAX_TEXT = 8000
+
 #: A dismissed question, on the wire. Empty because the core reads an empty
 #: answer as nobody having answered, and because no option can be spelled this
 #: way - a blank button would have nothing written on it.
@@ -45,16 +48,20 @@ class AskDialog(QDialog):
     """One question, its detail, and the answers it takes as buttons."""
 
     def __init__(self, question, detail="", options=(), parent=None, revision=None,
-                 auto=""):
+                 auto="", text=None):
         super().__init__(parent)
         #: The answer the question takes by itself when its time runs out.
         self.auto = str(auto or "")
-        self.setWindowTitle("Review and decide")
         self.setModal(False)
         self.answer = DISMISSED
         self._answered = False
         self.feedback = ""
         self.revise = False
+        #: What was written, for a question that asks for text; None otherwise.
+        self.text = None
+        self._text = dict(text) if text is not None else None
+        self.setWindowTitle("Write and send" if self._text is not None
+                            else "Review and decide")
         revision = dict(revision or {})
         self._approving = {str(one).strip().lower() for one in
                            revision.get("approvals", (options or ("Approve",))[:1])}
@@ -68,7 +75,8 @@ class AskDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 18)
         layout.setSpacing(14)
-        layout.addWidget(widgets.kicker("Your decision"))
+        layout.addWidget(widgets.kicker(
+            "Your input" if self._text is not None else "Your decision"))
 
         self.question = widgets.heading(question)
         self.question.setTextFormat(Qt.PlainText)
@@ -76,6 +84,8 @@ class AskDialog(QDialog):
         self.question.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.question)
         layout.addWidget(widgets.lede(
+            "Write your answer below; later steps of this run use it."
+            if self._text is not None else
             "Review the details below before choosing how this step should continue."
             if detail else "Choose an answer to continue this step."))
 
@@ -108,8 +118,15 @@ class AskDialog(QDialog):
             self.detail_tabs.addTab(self.review, "Review")
             self.detail_tabs.addTab(self.original, "Original text")
             layout.addWidget(self.detail_tabs, 1)
-        else:
+        elif self._text is None:
             layout.addStretch(1)
+
+        self.text_editor = None
+        if self._text is not None:
+            self.text_editor = QPlainTextEdit(str(self._text.get("default") or ""))
+            self.text_editor.setPlaceholderText(
+                str(self._text.get("placeholder") or "") or "Write here")
+            layout.addWidget(self.text_editor, 1)
 
         self.feedback_editor = None
         if revision:
@@ -162,16 +179,34 @@ class AskDialog(QDialog):
             self.answer_buttons.append(button)
         if self.feedback_editor is not None:
             self.feedback_editor.textChanged.connect(self._feedback_changed)
+        if self.text_editor is not None:
+            self.text_editor.textChanged.connect(self._text_changed)
+            self._text_changed()
         layout.addLayout(row)
         note = widgets.lede(
             "If nobody answers, the counting button is pressed when it reaches "
             "zero. Closing this window ends the request without approval."
             if self.auto else
+            "Closing this window ends the request without an answer; the step fails."
+            if self._text is not None else
             "Closing this window ends the request without approval.")
         note.setProperty("role", "hint")
         layout.addWidget(note)
-        if detail:
+        if self.text_editor is not None:
+            self.text_editor.setFocus(Qt.OtherFocusReason)
+        elif detail:
             self.review.setFocus(Qt.OtherFocusReason)
+
+    def _text_changed(self):
+        """The first answer sends the text on, so it waits for some when required."""
+        text = self.text_editor.toPlainText().strip()
+        empty = self._text.get("required", True) and not text
+        long = len(text) > MAX_TEXT
+        first = self.answer_buttons[0] if self.answer_buttons else None
+        if first is not None:
+            first.setEnabled(not empty and not long)
+            first.setToolTip("Keep it within 8,000 characters." if long else
+                             "Write something first." if empty else "")
 
     def _feedback_changed(self):
         text = self.feedback_editor.toPlainText().strip()
@@ -224,6 +259,8 @@ class AskDialog(QDialog):
 
     def _choose(self, text):
         self.answer = text
+        if self.text_editor is not None:
+            self.text = self.text_editor.toPlainText().strip()
         self._answered = True
         self.accept()
 
@@ -267,7 +304,8 @@ class AskBridge(QObject):
                            options=[str(one) for one in
                                     (event.get("options") or [])],
                            parent=self._parent, revision=event.get("revision"),
-                           auto=str(event.get("auto") or ""))
+                           auto=str(event.get("auto") or ""),
+                           text=event.get("text"))
         dialog.finished.connect(lambda _code, rid=request_id: self._done(rid))
 
         timer = QTimer(self)
@@ -340,6 +378,8 @@ class AskBridge(QObject):
         dialog, timer = found
         timer.stop()
         extra = {"revise": True, "feedback": dialog.feedback} if dialog.revise else {}
+        if dialog.text is not None:
+            extra["text"] = dialog.text
         self._send(command="ask.result", id=request_id, answer=dialog.answer,
                    who=_who(), **extra)
         dialog.deleteLater()

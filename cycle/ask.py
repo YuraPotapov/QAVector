@@ -40,6 +40,10 @@ DEFAULT_TIMEOUT_MS = 600000
 #: what they will remember agreeing to.
 DEFAULT_OPTIONS = ("Approve", "Reject")
 
+#: The longest text a person may hand back with an answer. The same bound as
+#: revision feedback: room for a task description, not for a pasted log.
+MAX_TEXT = 8000
+
 _lock = threading.Lock()
 _enabled = False
 _next_id = 0
@@ -92,7 +96,7 @@ def abandon_all():
 
 
 def ask(question, detail="", options=(), timeout_ms=None, step="",
-        cancel=None, revision=None, auto=""):
+        cancel=None, revision=None, auto="", text=None):
     """Put a question to whoever is watching. Blocks until answered or not.
 
     Returns ``{answered, answer, who, message}``. ``answered`` is the only
@@ -104,6 +108,9 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
     by itself when its time runs out with nobody answering. Then the result is
     answered, with that answer and ``automatic`` true. A window closed by hand
     is still no answer, and a stopped run is still stopped.
+
+    ``text`` asks for written text along with the answer - ``{placeholder,
+    required}``. The answer then carries ``text``, what was written.
     """
     if not enabled():
         return {"answered": False, "answer": "", "who": "",
@@ -117,12 +124,14 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
         global _next_id
         _next_id += 1
         request_id = _next_id
-        slot = _pending[request_id] = [threading.Event(), None, dict(revision or {})]
+        slot = _pending[request_id] = [threading.Event(), None, dict(revision or {}),
+                                       dict(text) if text is not None else None]
 
     events.emit("cycle.ask", id=request_id, step=step or "",
                 question=str(question or ""), detail=str(detail or ""),
                 options=choices, timeout_ms=timeout_ms, revision=dict(revision or {}),
-                auto=str(auto or ""))
+                auto=str(auto or ""),
+                **({"text": dict(text)} if text is not None else {}))
 
     answered = _wait(slot[0], timeout_ms / 1000.0, cancel)
     with _lock:
@@ -172,7 +181,7 @@ def _wait(event, seconds, cancel):
     return event.is_set()
 
 
-def deliver(request_id, answer="", who="", revise=False, feedback=""):
+def deliver(request_id, answer="", who="", revise=False, feedback="", text=""):
     """Hand one answer back to whoever is waiting. True when it was wanted.
 
     Called on the launcher's control thread. An id nobody waits for is ignored
@@ -200,6 +209,13 @@ def deliver(request_id, answer="", who="", revise=False, feedback=""):
         elif chosen:
             slot[1] = {"answered": True, "answer": chosen, "who": str(who or ""),
                        "message": "answered %r" % chosen}
+            if slot[3] is not None:
+                # Only for a question that asked for text: written text sent
+                # to a plain question is not something anybody will read.
+                written = str(text or "").strip()
+                if len(written) > MAX_TEXT:
+                    return False
+                slot[1]["text"] = written
         else:
             # A window closed without a decision. Delivered rather than left
             # silent, so the run is not blocked for the rest of its deadline by

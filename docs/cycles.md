@@ -265,6 +265,7 @@ appears to the left of something it depends on.
 | `memory.remember` | Writes something into a key's record, or moves a counter. |
 | `memory.claim` | Takes a task for this run; given back when the run ends. |
 | `approval.gate` | Stops and asks a person. Anything but an answer fails the step. |
+| `user.input` | Stops and asks a person to write something; later steps read it as `outputs.text`. |
 | `check.gate` | Several things that must all hold. Names the one that did not. |
 | `report.json` | Writes the whole run record as JSON. |
 | `report.html` | Writes a readable page describing the run. |
@@ -903,6 +904,35 @@ after it runs. But the question is kept on the plan with the run it belongs to:
 the Subjects list shows *QA-4 waiting for your approval*, and **Resume** there
 continues that run and asks again. A refusal is an answer and is not planned;
 nor is a run somebody stopped.
+
+### Asking a person to write something
+
+`user.input` asks for words rather than a decision - the task an agent is to
+do, a branch name, a note - and hands them on as `${steps.<id>.outputs.text}`.
+
+```yaml
+  - id: task
+    plugin: user.input
+    timeout: 1800
+    with:
+      question: What should the agent do?
+      placeholder: Describe the task - what to change and how to tell it is done.
+
+  - id: implement
+    plugin: agent.implement
+    needs: [task]
+    with:
+      task: Do the task in inputs.task.
+      inputs:
+        task: ${steps.task.outputs.text}
+```
+
+The window offers **Send** and **Cancel**. It keeps the gate's rule about
+silence: Cancel, a closed window, the deadline passing or no application to
+ask in all fail the step, and so does sending an empty box unless
+`required: false`. `default:` puts text in the box to start from. Unlike a
+gate, what it collected is reused: resuming a run or running part of a cycle
+takes the text written last time instead of asking again.
 ### Merging with an agent
 
 `agent.merge` is for the one job `agent.edit` cannot do: the work is `git

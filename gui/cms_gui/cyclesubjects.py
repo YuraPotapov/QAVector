@@ -188,6 +188,8 @@ def status_word(session):
     if session.get("running"):
         if session.get("reached_plugin") == "approval.gate":
             return "waiting for approval"
+        if session.get("reached_plugin") == "user.input":
+            return "waiting for input"
         return "running - %s" % reached if reached else "running"
     remembered = ((session.get("memory") or {}).get("fields") or {}).get("state")
     if remembered in REMEMBERED_STATES:

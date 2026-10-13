@@ -330,3 +330,61 @@ def test_without_an_auto_answer_the_window_reads_as_before(qapp, bridge):
     bridge.handle(_event(timeout_ms=180000))
     assert "minutes left" in _dialog(bridge)._left.text()
     assert _button(_dialog(bridge), "Approve").text() == "Approve"
+
+
+# ------------------------------------------------------------ asking for text
+def _text_event(**fields):
+    return _event(question="What should the agent do?", options=["Send", "Cancel"],
+                  text=dict({"placeholder": "Describe the task", "default": "",
+                             "required": True}, **fields))
+
+
+def test_a_text_question_puts_up_a_box_to_write_in(qapp, bridge):
+    bridge.handle(_text_event(default="Start here"))
+
+    dialog = _dialog(bridge)
+    assert dialog.text_editor is not None
+    assert dialog.text_editor.toPlainText() == "Start here"
+    assert dialog.text_editor.placeholderText() == "Describe the task"
+
+
+def test_send_waits_for_text_when_it_is_required(qapp, bridge):
+    bridge.handle(_text_event())
+    dialog = _dialog(bridge)
+    send = dialog.answer_buttons[0]
+
+    assert not send.isEnabled()
+    dialog.text_editor.setPlainText("Add a filter")
+    assert send.isEnabled()
+
+
+def test_send_carries_what_was_written(qapp, bridge):
+    bridge.handle(_text_event())
+    dialog = _dialog(bridge)
+    dialog.text_editor.setPlainText("  Add a filter  ")
+    dialog.answer_buttons[0].click()
+
+    assert _pump(qapp, lambda: bridge.sent)
+    assert bridge.sent[0]["answer"] == "Send"
+    assert bridge.sent[0]["text"] == "Add a filter"
+
+
+def test_closing_a_text_question_sends_no_text(qapp, bridge):
+    bridge.handle(_text_event())
+    dialog = _dialog(bridge)
+    dialog.text_editor.setPlainText("half a thought")
+    dialog.close()
+
+    assert _pump(qapp, lambda: bridge.sent)
+    assert bridge.sent[0]["answer"] == ""
+    assert "text" not in bridge.sent[0]
+
+
+def test_a_plain_question_has_no_box_and_sends_no_text(qapp, bridge):
+    bridge.handle(_event())
+    dialog = _dialog(bridge)
+    assert dialog.text_editor is None
+    dialog.answer_buttons[0].click()
+
+    assert _pump(qapp, lambda: bridge.sent)
+    assert "text" not in bridge.sent[0]
