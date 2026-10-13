@@ -16,6 +16,81 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.26] - 2026-10-14
+
+### Added
+- **A run can write a step-by-step guide to what it did** - live documentation:
+  `--report-doc`, or *Write a step-by-step guide while it runs* under Launch ->
+  Reports and screenshots. Each scenario leaves `documentation.html` in its
+  report folder, rewritten after every step it describes, with its pictures in
+  `doc/`. A step says what it means to a reader with a new optional `doc:`,
+  beside its action in either step shape; a scenario with none gets a draft made
+  from its clicks, fills, selects and gotos and the labels the page gives their
+  elements. A password is never shown.
+- **The guide is grouped the way a person goes through the app.** A top-level
+  `use:` block is a chapter, and consecutive steps on one page - or in one
+  dialog - are one section with one picture. Every step that acts is numbered on
+  it where its element is, in order, joined by a path; a check is outlined with
+  no number, since finding an element is not a step the reader takes. A record's
+  id in the address does not make a new page, so a form stays one section across
+  its save. A step whose element is gone by then, such as a dropdown's option,
+  keeps a picture of its own. Each picture is taken just before the step acts,
+  without the HUD, and cut off a little below the lowest element it points at.
+- **Artifacts shows the guide and exports it as an A4 PDF.** A scenario's folder
+  opens on *Guide* (or *Source*, its result.json); while a run is writing it, the
+  page follows the newest step, and one that has not changed is left where the
+  reader scrolled it. A run without a guide says how to get one.
+- **Each chapter of the guide is documented or drafted on its own.** A
+  top-level `use:` block - or the scenario's own steps - with a `doc:` shows the
+  steps that carry one; a chapter with none gets a draft. A scenario made of
+  other scenarios documents every one of them even when its own steps are
+  written by hand; decided for the whole scenario, one `doc:` left a guide of
+  four lines out of 750 steps. A draft names an element by its label, the text
+  just before a field, or the row an icon sits in, and says "the marked element"
+  when nothing names it rather than quoting a CSS selector. Steps on the same
+  element share one numbered box on the picture.
+- **The guide's own words in your language:** `doc_labels.json` in the data
+  folder overrides the few words it adds and the draft's sentences; anything left
+  out stays English.
+- The Scenarios editor has a **Doc** column, so saving from the table keeps a
+  step's `doc:`.
+
+### Fixed
+- **The window no longer freezes during a long scenario.** The Run page built
+  every row of the step tree again on every step event, each label with a
+  stylesheet of its own: on a scenario of 750 steps that was 1.5 s per event,
+  two events a step, and the whole window - scrolling, switching pages - stopped
+  answering. The rows are now built once per scenario and a step event repaints
+  its own row, about 3 ms; the rows are styled through theme roles.
+- **Screenshots wait for the page only when a step may have moved it.** With
+  `--report-screen=each` every picture first waited for the page to go quiet,
+  about 0.95 s a step, even after a check that changed nothing. The wait now
+  follows a click, fill, select, press or goto, once; a scenario of value checks
+  takes a picture after each check in about 0.2 s. The guide's pictures share
+  the same rule, and a page that has made no request since the step ended is not
+  waited on at all.
+- **The HUD no longer slows a long scenario down.** It sent the whole plan - for
+  a scenario made of eight others, 780 steps and some 280 KB - into the page on
+  every update, several a step, and repainted every row of it each time. The
+  plan now goes once per scenario (and again to a page that has just navigated),
+  and only rows whose state changed are repainted: about 0.09 s a step instead
+  of 0.28 s on that plan.
+- **A guide's pictures are measured in one call.** The elements of the steps
+  already on a page were measured one call each for every new picture, which on
+  a busy page grew with every step; they are kept and measured together.
+- **The guide is in the language of `doc_labels.json` beside your `users.json`.**
+  A checkout run from the GUI looked for it in the checkout and wrote English.
+- **A service no longer inherits the GUI's own `PYTHONPATH`** (nor `PYTHONHOME`,
+  `PYTHONSTARTUP`). A GUI started with `PYTHONPATH=<gui>:` - the trailing ':' is
+  the current directory - put an Odoo service's working directory on its
+  `sys.path`; a second Odoo checkout there joined Odoo's namespace package,
+  shadowed `base_setup`, and the database failed to load with an ImportError. A
+  runner that wants one of these sets it in its own environment.
+
+### Removed
+- Artifacts' *Flow* view of a scenario - a card per step with its screenshot -
+  is replaced by the guide. It showed the same files the tree already did.
+
 ## [0.16.25] - 2026-10-13
 
 ### Added
