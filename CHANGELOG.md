@@ -16,6 +16,40 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.25] - 2026-10-13
+
+### Added
+- **`user.input`: a step that asks a person to write something.** It opens a
+  window with a text box and Send / Cancel, and later steps read what was
+  written as `${steps.<id>.outputs.text}` - the task for an agent, a branch
+  name, a note. Like `approval.gate`, anything but an answer fails the step:
+  Cancel, a closed window, the deadline, no application, or an empty box when
+  `required` is on (the default). Unlike a gate, the text is reused when a
+  run is resumed or part of a cycle is run again.
+- **`user.choice`: a step that asks a person to pick from a list.** The list
+  an earlier step made - a Jira queue, say - is shown as a table with a tick
+  column, a search box over each column when it is long, and the selected
+  row's detail underneath; later steps read what was ticked as
+  `${steps.<id>.outputs.values}` (and `items`, `value`, `item`, `joined`).
+  `mode: single` takes exactly one, `multiple` one or more; `checked` says what
+  is ticked when it opens, and `choose` takes values without asking, for a
+  run started on one task. An empty list never opens a window: `when_empty`
+  skips, continues with nothing chosen, or fails. A list that cannot be chosen
+  from - an item with no key, two with the same one, a column no item has, a
+  task asked for that the list does not hold - fails the step saying which.
+  However long the list, it scrolls inside the table and the window keeps to
+  the screen.
+
+### Changed
+- **Search boxes over a table start their text where the column's values do.**
+  They read one pixel to the right of their column; on the services page as
+  well.
+
+### Fixed
+- **`user.input` no longer waits out its deadline on text that is too long.**
+  The answer is taken and the step fails at once, saying why, rather than the
+  question being left open after its window had closed.
+
 ## [0.16.24] - 2026-10-13
 
 ### Fixed
