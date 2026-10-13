@@ -222,7 +222,7 @@ class Store:
                 continue
             if step.status != RUNNING and "still running when the run ended" not in step.message:
                 continue
-            if step.plugin in ("approval.gate", "user.input"):
+            if step.plugin in ("approval.gate", "user.input", "user.choice"):
                 continue  # an interrupted human question is asked again
             plugin = registry.get(step.plugin)
             recoverable = (getattr(plugin.metadata, "recoverable", False) and receipts

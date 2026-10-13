@@ -84,6 +84,9 @@ class UserInput(CyclePlugin):
         sent = bool(answer.get("answered")) and answer.get("answer") == SEND
         if sent and required and not text:
             sent, message = False, "nothing was written"
+        elif sent and len(text) > ask_mod.MAX_TEXT:
+            sent, message = False, ("what was written is longer than %d characters"
+                                    % ask_mod.MAX_TEXT)
         elif sent:
             message = "written: %d character(s)" % len(text)
         elif answer.get("answered"):

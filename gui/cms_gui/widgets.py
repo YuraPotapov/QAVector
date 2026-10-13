@@ -12,15 +12,15 @@ import os
 import weakref
 
 from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
-                            QPointF, QPropertyAnimation, QRectF, Qt, QTimer,
-                            Signal)
+                            QPointF, QPropertyAnimation, QRectF, QSize, Qt,
+                            QTimer, Signal)
 from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox,
-                               QApplication, QComboBox, QDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
+                               QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QSizePolicy,
-                               QSpinBox, QSplitter, QToolButton,
+                               QSpinBox, QSplitter, QTableWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
 from . import icons, theme
@@ -2041,3 +2041,209 @@ class FoldingSplitter(QSplitter):
             mark.show()
             mark.raise_()
 
+
+# --- tables ------------------------------------------------------------------
+# The services page's table and its search row, shared: a dialog that shows rows
+# to pick from is a table too, and two recipes for one thing is how the columns
+# and the boxes over them stop lining up.
+
+class Table(QTableWidget):
+    """A table whose selected row can be un-selected, and which can carry a
+    search row under its header.
+
+    **Selection.** Clicking a selected row clears it. Selection is what aims Open
+    Tail and Open Full at a log, and what narrows a project's Start and Stop to
+    part of it, so there has to be a way to aim at nothing. With one row in the
+    list there was none: the first click selected it and every click after that
+    re-selected the same thing, and a list of one could never be returned to
+    having nothing chosen. Where the table selects several rows at a time, Qt
+    already toggles on click, so this stands aside.
+
+    **The search row** is a child of the *view* rather than of the page, parked
+    in the margin between the header and the first row: that way it stays put
+    while the rows change under it, and it is measured in the table's own
+    coordinates, which is what lets a box line up with the column it searches.
+    That margin belongs to QTableView - it recomputes it on every geometry change
+    to make room for the header - so the only place to claim a strip of it is
+    here, straight after the base class has had its say.
+    """
+
+    def __init__(self, *args, reclick_clears=True, **kwargs):
+        """``reclick_clears=False`` keeps a row selected when it is clicked
+        again: for a table whose selection only says which row is being looked
+        at, where clearing it would blank what is shown for that row."""
+        super().__init__(*args, **kwargs)
+        self._reclick_clears = reclick_clears
+        self._search_row = None
+        # updateGeometries runs again from inside setViewportMargins, and the
+        # nested call would hand the margins back to the header alone - which is
+        # exactly the strip we are claiming.
+        self._laying_out = False
+
+    def set_search_row(self, widget):
+        self._search_row = widget
+        widget.setParent(self)
+        widget.show()
+        self.updateGeometries()
+
+    def top_margin(self):
+        """Header plus search row: everything above the first row of data."""
+        return self.viewportMargins().top()
+
+    def updateGeometries(self):
+        if not hasattr(self, "_laying_out"):
+            # Called by Qt from its own constructor and destructor, when the
+            # Python half of this table is not there yet or no longer is - a
+            # table given its own header is laid out while that header is
+            # swapped in, and again while both are torn down.
+            try:
+                super().updateGeometries()
+            except RuntimeError:
+                pass
+            return
+        if self._laying_out:
+            return
+        self._laying_out = True
+        try:
+            super().updateGeometries()
+            row = self._search_row
+            if row is None:
+                return
+            margins = self.viewportMargins()
+            height = row.sizeHint().height()
+            self.setViewportMargins(margins.left(), margins.top() + height,
+                                    margins.right(), margins.bottom())
+            row.setGeometry(margins.left() + self.frameWidth(),
+                            margins.top() + self.frameWidth(),
+                            self.viewport().width(), height)
+        finally:
+            self._laying_out = False
+
+    def mousePressEvent(self, event):
+        index = self.indexAt(event.position().toPoint())
+        if (self._reclick_clears
+                and self.selectionMode() == QAbstractItemView.SingleSelection
+                and index.isValid()
+                and index.row() in {i.row() for i in self.selectedIndexes()}):
+            self.clearSelection()
+            self.setCurrentIndex(self.model().index(-1, -1))
+            return
+        super().mousePressEvent(event)
+
+
+class SearchRow(QWidget):
+    """One search box per column, under the table's header.
+
+    A box per column rather than one over the whole row, because the columns ask
+    different questions: "postgres" in Name finds a service, in Config it finds
+    every service that mentions the container, and in Status it finds nothing at
+    all. Typing in more than one narrows - they are joined with AND, which is what
+    a row of boxes looks like it does.
+
+    What is searched is what the table *says*, cell by cell, not the rows behind
+    it. So a search matches exactly what a person can read on screen, including
+    the columns that are computed rather than stored - a service's status, a log's
+    format - and no column needs a rule of its own here.
+    """
+
+    changed = Signal()
+
+    #: The strip's height, and the box's inside it. Sized from the row rather
+    #: than from a form field: this stands between the header and the first row
+    #: and has to read as part of the table's own furniture.
+    HEIGHT = 26
+    INSET = 3
+
+    def __init__(self, table, skip=(), parent=None):
+        super().__init__(parent)
+        self.setProperty("role", "searchrow")
+        # A plain QWidget paints no background from a stylesheet without this,
+        # so the strip would show the page through it.
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(self.HEIGHT)
+        self._table = table
+        self._edits = {}
+        for column in range(table.columnCount()):
+            if column in set(skip):
+                continue
+            edit = QLineEdit(self)
+            heading = table.horizontalHeaderItem(column)
+            edit.setPlaceholderText((heading.text() if heading else "").lower()
+                                    or "search")
+            edit.setProperty("role", "search")
+            edit.textChanged.connect(self.apply)
+            self._edits[column] = edit
+        table.set_search_row(self)
+        header = table.horizontalHeader()
+        header.sectionResized.connect(self._place)
+        table.horizontalScrollBar().valueChanged.connect(self._place)
+
+    def sizeHint(self):
+        return QSize(self._table.viewport().width(), self.HEIGHT)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place()
+
+    def _place(self, *_args):
+        """Every box over the column it searches, at whatever width that is now.
+
+        Flush with the column's own edges rather than inset inside them. Inset,
+        the first box sat against the table's border while every other one had a
+        gap on each side, so a row of boxes meant to line up with the columns
+        read as a row of unevenly spaced ones. Sharing edges also means the boxes
+        divide the strip exactly where the header divides its sections.
+        """
+        header = self._table.horizontalHeader()
+        for column, edit in self._edits.items():
+            if self._table.isColumnHidden(column):
+                edit.hide()
+                continue
+            edit.show()
+            # One pixel wider than the column, so this box's right border lands
+            # under the next box's left one and the two read as a single rule
+            # rather than as a double.
+            edit.setGeometry(header.sectionViewportPosition(column), self.INSET,
+                             max(header.sectionSize(column) + 1, 0),
+                             self.HEIGHT - 2 * self.INSET)
+
+    def box(self, column):
+        """The search box over one column, or None where there is not one."""
+        return self._edits.get(column)
+
+    def needles(self):
+        """{column: what to look for}, lower-cased, empty boxes left out."""
+        return {column: edit.text().strip().lower()
+                for column, edit in self._edits.items() if edit.text().strip()}
+
+    def searching(self):
+        return bool(self.needles())
+
+    def clear(self):
+        for edit in self._edits.values():
+            edit.clear()
+
+    def state(self):
+        """What is typed here, keyed by column, for putting back after a rebuild."""
+        return {str(column): edit.text() for column, edit in self._edits.items()
+                if edit.text()}
+
+    def set_state(self, state):
+        for column, edit in self._edits.items():
+            edit.setText((state or {}).get(str(column), ""))
+
+    def apply(self, *_args):
+        """Hide what does not match. Called again whenever the rows are rebuilt."""
+        needles = self.needles()
+        table = self._table
+        for row in range(table.rowCount()):
+            table.setRowHidden(row, not self._matches(row, needles))
+        self._place()
+        self.changed.emit()
+
+    def _matches(self, row, needles):
+        for column, needle in needles.items():
+            item = self._table.item(row, column)
+            if needle not in (item.text().lower() if item is not None else ""):
+                return False
+        return True

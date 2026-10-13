@@ -388,3 +388,73 @@ def test_a_plain_question_has_no_box_and_sends_no_text(qapp, bridge):
 
     assert _pump(qapp, lambda: bridge.sent)
     assert "text" not in bridge.sent[0]
+
+
+# ------------------------------------------------------------ asking for a choice
+def _choice_event(mode="multiple", checked=()):
+    rows = [{"cells": [key, title], "detail": "", "checked": index in checked}
+            for index, (key, title) in enumerate([("QA-1", "One"), ("QA-2", "Two"),
+                                                  ("QA-3", "Three")])]
+    return _event(question="Which tasks?", options=["Choose", "Cancel"],
+                  choice={"mode": mode, "columns": ["key", "summary"],
+                          "value_column": 0, "rows": rows})
+
+
+def test_a_choice_puts_up_its_table_and_says_what_it_asks(qapp, bridge):
+    bridge.handle(_choice_event())
+
+    dialog = _dialog(bridge)
+    assert dialog.choice_table is not None
+    assert dialog.choice_table.table.rowCount() == 3
+    assert dialog.windowTitle() == "Choose and send"
+    assert dialog.text_editor is None
+
+
+def test_choose_waits_for_a_valid_choice(qapp, bridge):
+    bridge.handle(_choice_event())
+    dialog = _dialog(bridge)
+    choose = dialog.answer_buttons[0]
+
+    assert not choose.isEnabled()
+    assert choose.toolTip() == "Tick at least one row."
+    dialog.choice_table.set_checked(1)
+    assert choose.isEnabled()
+
+
+def test_in_single_mode_choose_waits_for_one(qapp, bridge):
+    bridge.handle(_choice_event(mode="single"))
+    dialog = _dialog(bridge)
+    choose = dialog.answer_buttons[0]
+
+    assert not choose.isEnabled()
+    assert choose.toolTip() == "Pick one row."
+    dialog.choice_table.set_checked(2)
+    assert choose.isEnabled()
+
+
+def test_choose_sends_the_ticked_rows_in_the_list_s_order(qapp, bridge):
+    bridge.handle(_choice_event(checked=(2,)))
+    dialog = _dialog(bridge)
+    dialog.choice_table.set_checked(0)
+    dialog.answer_buttons[0].click()
+
+    assert _pump(qapp, lambda: bridge.sent)
+    assert bridge.sent[0]["answer"] == "Choose"
+    assert bridge.sent[0]["chosen"] == [0, 2]
+
+
+def test_closing_a_choice_sends_no_rows(qapp, bridge):
+    bridge.handle(_choice_event(checked=(0,)))
+    _dialog(bridge).close()
+
+    assert _pump(qapp, lambda: bridge.sent)
+    assert bridge.sent[0]["answer"] == ""
+    assert "chosen" not in bridge.sent[0]
+
+
+def test_cancel_on_a_choice_sends_no_rows_to_act_on(qapp, bridge):
+    bridge.handle(_choice_event(checked=(0,)))
+    _dialog(bridge).answer_buttons[1].click()
+
+    assert _pump(qapp, lambda: bridge.sent)
+    assert bridge.sent[0]["answer"] == "Cancel"

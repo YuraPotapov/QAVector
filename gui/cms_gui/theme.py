@@ -109,6 +109,7 @@ PLUGIN_TINT = {
     "report": "#edeef1",       # what is written out at the end
     "check": "#f4f0e2",        # a decision - these two are the gates
     "approval": "#f4f0e2",
+    "user": "#f4f0e2",         # a person asked for words or a pick: a gate too
 }
 
 # --- log levels --------------------------------------------------------------
@@ -177,6 +178,7 @@ def set_dark_mode(enabled: bool):
             "report": "#2e2f33",
             "check": "#38352a",
             "approval": "#38352a",
+            "user": "#38352a",
         }
 
         # The node canvas. A surface of its own, cooler and a shade deeper than
@@ -231,6 +233,7 @@ def set_dark_mode(enabled: bool):
             "report": "#edeef1",
             "check": "#f4f0e2",
             "approval": "#f4f0e2",
+            "user": "#f4f0e2",
         }
 
         # See the dark branch. Cooler and a shade deeper than SURFACE, which
@@ -519,9 +522,13 @@ QLineEdit[mono="true"], QComboBox[mono="true"] {{ font-family: {mono}; font-size
    would stand taller than the rows it filters. The strip behind it carries the
    header's own tone so the two read as one band. */
 QWidget[role="searchrow"] {{ background: {n200}; }}
+/* 4px, not 5: with the border and the 2px QLineEdit keeps inside itself, the
+   typed text starts 7px into its column - where the cell's text starts (the
+   item padding below and the style's 3px margin) and where the header's title
+   does. At 5px every search box read one pixel to the right of its column. */
 QLineEdit[role="search"] {{
     background: {bg}; border: 1px solid {divider}; border-radius: 0;
-    padding: 0 5px; min-height: 0; font-size: 11px;
+    padding: 0 4px; min-height: 0; font-size: 11px;
 }}
 QLineEdit[role="search"]:focus {{ border-color: {accent}; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
@@ -866,6 +873,17 @@ def _paint_box(painter, rect, state):
                       for x, y in _CHECK]
             painter.drawPolyline(points)
     painter.restore()
+
+
+def paint_box(painter, rect, state):
+    """A tick box centred in ``rect``, for a widget that draws its own - a
+    header or a cell that is nothing but the box. ``state`` is QStyle flags."""
+    _paint_box(painter, rect, state)
+
+
+def paint_dot(painter, rect, state):
+    """A radio dot centred in ``rect``; see :func:`paint_box`."""
+    _paint_dot(painter, rect, state)
 
 
 def _paint_dot(painter, rect, state):

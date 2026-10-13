@@ -96,7 +96,7 @@ def abandon_all():
 
 
 def ask(question, detail="", options=(), timeout_ms=None, step="",
-        cancel=None, revision=None, auto="", text=None):
+        cancel=None, revision=None, auto="", text=None, choice=None):
     """Put a question to whoever is watching. Blocks until answered or not.
 
     Returns ``{answered, answer, who, message}``. ``answered`` is the only
@@ -110,7 +110,16 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
     is still no answer, and a stopped run is still stopped.
 
     ``text`` asks for written text along with the answer - ``{placeholder,
-    required}``. The answer then carries ``text``, what was written.
+    default, required}``. The answer then carries ``text``, what was written.
+
+    ``choice`` asks to pick rows from a table - ``{mode, columns,
+    value_column, rows}``. The answer then carries ``chosen``, the indexes of
+    the rows picked.
+
+    What comes with an answer is handed back as it arrived. The step that
+    asked judges it, so a bad one fails that step at once with its reason:
+    refusing it here would leave the question waiting out its deadline for an
+    answer the window, already closed, is never going to send again.
     """
     if not enabled():
         return {"answered": False, "answer": "", "who": "",
@@ -125,13 +134,18 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
         _next_id += 1
         request_id = _next_id
         slot = _pending[request_id] = [threading.Event(), None, dict(revision or {}),
-                                       dict(text) if text is not None else None]
+                                       dict(text) if text is not None else None,
+                                       dict(choice) if choice is not None else None]
+    extra = {}
+    if text is not None:
+        extra["text"] = dict(text)
+    if choice is not None:
+        extra["choice"] = dict(choice)
 
     events.emit("cycle.ask", id=request_id, step=step or "",
                 question=str(question or ""), detail=str(detail or ""),
                 options=choices, timeout_ms=timeout_ms, revision=dict(revision or {}),
-                auto=str(auto or ""),
-                **({"text": dict(text)} if text is not None else {}))
+                auto=str(auto or ""), **extra)
 
     answered = _wait(slot[0], timeout_ms / 1000.0, cancel)
     with _lock:
@@ -181,7 +195,8 @@ def _wait(event, seconds, cancel):
     return event.is_set()
 
 
-def deliver(request_id, answer="", who="", revise=False, feedback="", text=""):
+def deliver(request_id, answer="", who="", revise=False, feedback="", text="",
+            chosen=None):
     """Hand one answer back to whoever is waiting. True when it was wanted.
 
     Called on the launcher's control thread. An id nobody waits for is ignored
@@ -193,7 +208,7 @@ def deliver(request_id, answer="", who="", revise=False, feedback="", text=""):
         request_id = int(request_id)
     except (TypeError, ValueError):
         return False
-    chosen = str(answer or "")
+    picked = str(answer or "")
     with _lock:
         slot = _pending.get(request_id)
         if slot is None:
@@ -206,16 +221,16 @@ def deliver(request_id, answer="", who="", revise=False, feedback="", text=""):
             slot[1] = {"answered": True, "answer": "", "who": str(who or ""),
                        "revision_requested": True, "feedback": feedback,
                        "message": "plan revision requested"}
-        elif chosen:
-            slot[1] = {"answered": True, "answer": chosen, "who": str(who or ""),
-                       "message": "answered %r" % chosen}
+        elif picked:
+            slot[1] = {"answered": True, "answer": picked, "who": str(who or ""),
+                       "message": "answered %r" % picked}
+            # Only for a question that asked for them: text or rows sent with
+            # a plain question are not something anybody will read.
             if slot[3] is not None:
-                # Only for a question that asked for text: written text sent
-                # to a plain question is not something anybody will read.
-                written = str(text or "").strip()
-                if len(written) > MAX_TEXT:
-                    return False
-                slot[1]["text"] = written
+                slot[1]["text"] = str(text or "").strip()
+            if slot[4] is not None:
+                slot[1]["chosen"] = (list(chosen) if isinstance(chosen, (list, tuple))
+                                     else chosen)
         else:
             # A window closed without a decision. Delivered rather than left
             # silent, so the run is not blocked for the rest of its deadline by

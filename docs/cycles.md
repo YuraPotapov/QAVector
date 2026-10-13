@@ -266,6 +266,7 @@ appears to the left of something it depends on.
 | `memory.claim` | Takes a task for this run; given back when the run ends. |
 | `approval.gate` | Stops and asks a person. Anything but an answer fails the step. |
 | `user.input` | Stops and asks a person to write something; later steps read it as `outputs.text`. |
+| `user.choice` | Stops and asks a person to pick from a list an earlier step made; later steps read `outputs.values`. |
 | `check.gate` | Several things that must all hold. Names the one that did not. |
 | `report.json` | Writes the whole run record as JSON. |
 | `report.html` | Writes a readable page describing the run. |
@@ -933,6 +934,64 @@ ask in all fail the step, and so does sending an empty box unless
 `required: false`. `default:` puts text in the box to start from. Unlike a
 gate, what it collected is reused: resuming a run or running part of a cycle
 takes the text written last time instead of asking again.
+
+### Asking a person to choose
+
+`user.choice` shows a list an earlier step made as a table and hands on what
+was ticked. A queue of tasks is the usual list: a lighter step reads the queue,
+the choice is made, and a third step reads the one chosen in full - so every
+step after it keeps reading `todo` as it always did.
+
+```yaml
+  - id: queue
+    plugin: jira.issues
+    with:
+      status: To Do, REOPEN
+      issue: ${vars.task_key}       # a run started on one task lists just that one
+      limit: 50
+      comments: false
+      attachments: none
+
+  - id: pick
+    plugin: user.choice
+    needs: [queue]
+    timeout: 3600
+    with:
+      question: Which task should this run take?
+      items: ${steps.queue.outputs.issues}
+      value: key
+      columns: [key, summary, status, assignee]
+      item_detail: "{summary}\n\n{description}"
+      mode: single
+      choose: ${vars.task_key}       # ...and takes it without asking
+      when_empty: skip
+
+  - id: todo
+    plugin: jira.issues
+    needs: [pick]
+    with:
+      issue: ${steps.pick.outputs.value}
+```
+
+`mode: single` takes exactly one row, `multiple` one or more. `checked` is what
+is ticked when the window opens: `all`, `none`, or values such as `QA-1, QA-4`.
+The outputs are `values` and `items` (in the list's order, which the table
+keeps), `value` and `item` (the first), `joined` (the values with commas, for a
+shell step) and `count`.
+
+**What it does when the data is not there.** An empty list never opens a
+window; `when_empty` decides: `skip` passes the step and everything that needs
+it, `continue` succeeds with nothing chosen, `fail` stops the run. A `choose`
+value the list does not hold fails the step, empty list or not - a run started
+on a task that is not there is an error, not an absence of work. So does an
+item with no `value`, two items with the same one, a mixture of mappings and
+plain values, and a column no item has; each says which. In the window, an
+empty cell is a dash, a row with no detail says so, and a search that hides
+every row says that instead of showing an empty table.
+
+As with a gate, Cancel, a closed window, the deadline or no application to ask
+in all fail the step. What was chosen is reused by Resume and by a partial
+run.
 ### Merging with an agent
 
 `agent.merge` is for the one job `agent.edit` cannot do: the work is `git

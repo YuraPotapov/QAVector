@@ -44,6 +44,10 @@ def _item(panel, index):
 def test_a_session_waiting_on_a_person_says_so():
     assert cs.status_word(session(running=True, reached="approve",
                                   plugin="approval.gate")) == "waiting for approval"
+    assert cs.status_word(session(running=True, reached="task",
+                                  plugin="user.input")) == "waiting for input"
+    assert cs.status_word(session(running=True, reached="pick",
+                                  plugin="user.choice")) == "waiting for a choice"
 
 
 def test_a_running_session_says_where_it_is():

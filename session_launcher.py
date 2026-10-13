@@ -2979,7 +2979,8 @@ def read_commands(windows_by_session):
                               who=message.get("who", ""),
                               revise=message.get("revise") is True,
                               feedback=message.get("feedback", ""),
-                              text=message.get("text", ""))
+                              text=message.get("text", ""),
+                              chosen=message.get("chosen"))
         elif command == "cycle.stop":
             # Imported here rather than at the top of the function: a scenario
             # run never reaches this branch and must not pay for the import.

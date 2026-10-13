@@ -27,13 +27,16 @@ import getpass
 
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
-                               QPushButton, QTabWidget, QVBoxLayout)
+                               QPushButton, QTabWidget, QTextEdit, QVBoxLayout)
 
 from . import theme, widgets
 from .approvaltext import ApprovalText, review_facts
+from .choicetable import SINGLE, ChoiceTable
 
 #: A review is a document, with room to read it and resize handles to grow it.
 REVIEW_WIDTH, REVIEW_HEIGHT = 960, 860
+#: The tallest a choice's own detail grows above its table, before it scrolls.
+CHOICE_DETAIL_HEIGHT = 120
 
 #: The longest text an input question sends back; the core refuses more.
 MAX_TEXT = 8000
@@ -48,7 +51,7 @@ class AskDialog(QDialog):
     """One question, its detail, and the answers it takes as buttons."""
 
     def __init__(self, question, detail="", options=(), parent=None, revision=None,
-                 auto="", text=None):
+                 auto="", text=None, choice=None):
         super().__init__(parent)
         #: The answer the question takes by itself when its time runs out.
         self.auto = str(auto or "")
@@ -60,22 +63,29 @@ class AskDialog(QDialog):
         #: What was written, for a question that asks for text; None otherwise.
         self.text = None
         self._text = dict(text) if text is not None else None
-        self.setWindowTitle("Write and send" if self._text is not None
+        #: The rows ticked, for a question that asks for a choice; None otherwise.
+        self.chosen = None
+        self._choice = dict(choice) if choice is not None else None
+        self.setWindowTitle("Choose and send" if self._choice is not None
+                            else "Write and send" if self._text is not None
                             else "Review and decide")
         revision = dict(revision or {})
         self._approving = {str(one).strip().lower() for one in
                            revision.get("approvals", (options or ("Approve",))[:1])}
         self.frame = widgets.dress(self)
         available = self.screen().availableGeometry()
-        width = min(REVIEW_WIDTH if detail else 640, max(320, available.width() - 48))
-        height = min(REVIEW_HEIGHT if detail else 320, max(240, available.height() - 48))
-        self.setMinimumSize(min(640, width), min(440 if detail else 240, height))
+        # A table to pick from needs the room a review does, whatever its detail.
+        roomy = bool(detail) or self._choice is not None
+        width = min(REVIEW_WIDTH if roomy else 640, max(320, available.width() - 48))
+        height = min(REVIEW_HEIGHT if roomy else 320, max(240, available.height() - 48))
+        self.setMinimumSize(min(640, width), min(440 if roomy else 240, height))
         self.resize(width, height)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 18)
         layout.setSpacing(14)
         layout.addWidget(widgets.kicker(
+            "Your choice" if self._choice is not None else
             "Your input" if self._text is not None else "Your decision"))
 
         self.question = widgets.heading(question)
@@ -83,7 +93,11 @@ class AskDialog(QDialog):
         self.question.setWordWrap(True)
         self.question.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.question)
+        single = (self._choice or {}).get("mode") == SINGLE
         layout.addWidget(widgets.lede(
+            ("Pick the one this run should take." if single else
+             "Tick every one this run should take.")
+            if self._choice is not None else
             "Write your answer below; later steps of this run use it."
             if self._text is not None else
             "Review the details below before choosing how this step should continue."
@@ -91,7 +105,9 @@ class AskDialog(QDialog):
 
         self.facts = []
         facts = QHBoxLayout()
-        for label, value in review_facts(detail):
+        # A review's figures, read off its text. A choice's detail is a note
+        # above a table, not a review, and has none.
+        for label, value in (review_facts(detail) if self._choice is None else ()):
             card = QFrame()
             card.setProperty("role", "panel")
             column = QVBoxLayout(card)
@@ -109,7 +125,14 @@ class AskDialog(QDialog):
         if self.facts:
             layout.addLayout(facts)
 
-        if detail:
+        self.choice_table = None
+        if self._choice is not None:
+            if detail:
+                self.choice_note = _fitted_note(detail)
+                layout.addWidget(self.choice_note)
+            self.choice_table = ChoiceTable(self._choice)
+            layout.addWidget(self.choice_table, 1)
+        elif detail:
             self.detail_tabs = QTabWidget()
             self.review = ApprovalText(detail)
             self.original = QPlainTextEdit(detail)
@@ -182,17 +205,22 @@ class AskDialog(QDialog):
         if self.text_editor is not None:
             self.text_editor.textChanged.connect(self._text_changed)
             self._text_changed()
+        if self.choice_table is not None:
+            self.choice_table.changed.connect(self._choice_changed)
+            self._choice_changed()
         layout.addLayout(row)
         note = widgets.lede(
             "If nobody answers, the counting button is pressed when it reaches "
             "zero. Closing this window ends the request without approval."
             if self.auto else
             "Closing this window ends the request without an answer; the step fails."
-            if self._text is not None else
+            if self._text is not None or self._choice is not None else
             "Closing this window ends the request without approval.")
         note.setProperty("role", "hint")
         layout.addWidget(note)
-        if self.text_editor is not None:
+        if self.choice_table is not None:
+            self.choice_table.table.setFocus(Qt.OtherFocusReason)
+        elif self.text_editor is not None:
             self.text_editor.setFocus(Qt.OtherFocusReason)
         elif detail:
             self.review.setFocus(Qt.OtherFocusReason)
@@ -207,6 +235,17 @@ class AskDialog(QDialog):
             first.setEnabled(not empty and not long)
             first.setToolTip("Keep it within 8,000 characters." if long else
                              "Write something first." if empty else "")
+
+    def _choice_changed(self):
+        """The first answer hands the ticked rows on, so it waits for a valid set."""
+        first = self.answer_buttons[0] if self.answer_buttons else None
+        if first is None:
+            return
+        ready = self.choice_table.valid()
+        first.setEnabled(ready)
+        first.setToolTip("" if ready else
+                         "Pick one row." if self.choice_table.mode == SINGLE else
+                         "Tick at least one row.")
 
     def _feedback_changed(self):
         text = self.feedback_editor.toPlainText().strip()
@@ -261,6 +300,8 @@ class AskDialog(QDialog):
         self.answer = text
         if self.text_editor is not None:
             self.text = self.text_editor.toPlainText().strip()
+        if self.choice_table is not None:
+            self.chosen = self.choice_table.chosen()
         self._answered = True
         self.accept()
 
@@ -305,7 +346,7 @@ class AskBridge(QObject):
                                     (event.get("options") or [])],
                            parent=self._parent, revision=event.get("revision"),
                            auto=str(event.get("auto") or ""),
-                           text=event.get("text"))
+                           text=event.get("text"), choice=event.get("choice"))
         dialog.finished.connect(lambda _code, rid=request_id: self._done(rid))
 
         timer = QTimer(self)
@@ -380,9 +421,32 @@ class AskBridge(QObject):
         extra = {"revise": True, "feedback": dialog.feedback} if dialog.revise else {}
         if dialog.text is not None:
             extra["text"] = dialog.text
+        if dialog.chosen is not None:
+            extra["chosen"] = dialog.chosen
         self._send(command="ask.result", id=request_id, answer=dialog.answer,
                    who=_who(), **extra)
         dialog.deleteLater()
+
+
+def _fitted_note(text):
+    """The note above a choice's table: as tall as its text, then it scrolls.
+
+    One line stays one line rather than a tall empty box, and a page of text
+    stops at :data:`CHOICE_DETAIL_HEIGHT` and scrolls in place - the table is
+    what the window is for, and a long note must not push it, or the window,
+    off the bottom of the screen.
+    """
+    note = QTextEdit()
+    note.setReadOnly(True)
+    note.setPlainText(text)
+
+    def fit(size):
+        wanted = int(size.height()) + 2 * note.frameWidth()
+        note.setFixedHeight(min(CHOICE_DETAIL_HEIGHT, wanted))
+
+    note.document().documentLayout().documentSizeChanged.connect(fit)
+    fit(note.document().size())
+    return note
 
 
 def _who():

@@ -129,19 +129,16 @@ def test_with_no_application_it_fails_at_once(tmp_path, step_runner):
     assert time.monotonic() - started < 5
 
 
-def test_text_longer_than_the_limit_is_refused(asking):
-    result = []
-    thread = threading.Thread(target=lambda: result.append(ask_mod.ask(
-        "Write?", options=["Send", "Cancel"], timeout_ms=2000, text={})))
-    thread.start()
-    for _ in range(100):
-        if asking.exists() and _asked(asking):
-            break
-        time.sleep(0.01)
-    assert not ask_mod.deliver(1, answer="Send", text="x" * (ask_mod.MAX_TEXT + 1))
-    assert ask_mod.deliver(1, answer="Send", text="short")
-    thread.join(3)
-    assert result[0]["text"] == "short"
+def test_text_longer_than_the_limit_fails_the_step_at_once(asking, step_runner):
+    """Refused at delivery it would leave the step waiting out its deadline for
+    an answer the window, already closed, never sends again."""
+    _answer_soon("Send", text="x" * (ask_mod.MAX_TEXT + 1))
+    started = time.monotonic()
+    result = step_runner(_timeout=30)
+
+    assert not result.ok
+    assert "longer than" in result.message
+    assert time.monotonic() - started < 5
 
 
 def test_a_plain_question_carries_no_text(asking):
