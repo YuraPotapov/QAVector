@@ -128,6 +128,12 @@ class SessionPanel(widgets.BlueprintPanel):
         # The running scenario's time label and its record, so the page's clock
         # can move it on without rebuilding the tree twice a second.
         self._live = None
+        # What the step tree was built for, and its rows, so an event repaints
+        # the rows that changed instead of building every one again (see
+        # _render_tree).
+        self._shape = None
+        self._headers = {}        # run key -> _ScenarioHeader
+        self._rows = {}           # run key -> {step index: _StepCells}
 
         # --server-log only. Folded away and hidden entirely until the first line
         # arrives, so a run without it looks exactly as it did before.
@@ -324,35 +330,73 @@ class SessionPanel(widgets.BlueprintPanel):
         it read was overwritten at every flow.start. Reading the per-scenario
         records instead puts the same picture here - and the ones still to come
         are listed too, so the shape of the run is visible from the start.
+
+        The rows are built once for each shape of the run - a scenario starting,
+        or the list still to come changing - and after that only repainted: a
+        step ending changes its own row's mark and colour. Building every row
+        again on every event cost a second and a half per event on a scenario of
+        750 steps, two events a step, and the whole window stopped answering.
         """
+        runs = session.get("runs") or {}
+        pending = [one for one in session.get("scenarios") or [] if one not in runs]
+        waiting = not runs and not session.get("scenarios")
+        shape = (tuple((key, id(run.get("tree"))) for key, run in runs.items()),
+                 tuple(pending), waiting)
+        if shape != self._shape:
+            self._shape = shape
+            self._build_tree(runs, pending, waiting)
+        self._paint_tree(runs)
+
+    def _build_tree(self, runs, pending, waiting):
         while self.steps_layout.count():
             item = self.steps_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self._live = None
+        self._headers, self._rows, self._live = {}, {}, None
 
-        runs = session.get("runs") or {}
-        if not runs and not session.get("scenarios"):
-            hint = QLabel("waiting for the first scenario…")
+        if waiting:
+            hint = QLabel("waiting for the first scenario\u2026")
             hint.setStyleSheet("color: %s; font-size: 12px;" % theme.NEUTRAL[600])
             self.steps_layout.addWidget(hint)
             return
 
-        # Filed under the scenario's id; shown by its name, which is what the
-        # overlay shows too.
+        # Not drawn while it is filled: hundreds of rows each asking for a
+        # layout pass and a repaint is most of what building them costs.
+        self.steps.setUpdatesEnabled(False)
+        try:
+            # Filed under the scenario's id; shown by its name, which is what the
+            # overlay shows too.
+            for key, run in runs.items():
+                header = _ScenarioHeader(run.get("scenario") or key)
+                self._headers[key] = header
+                self.steps_layout.addWidget(header.row)
+                cells = self._rows[key] = {}
+                for node, depth in _walk(run.get("tree") or {}):
+                    if depth == 0:
+                        continue        # the header above already names the flow
+                    row, step = _step_row(node, depth)
+                    if step is not None:
+                        cells[node.get("step_index")] = step
+                    self.steps_layout.addWidget(row)
+            for scenario in pending:
+                header = _ScenarioHeader(scenario)
+                header.paint({"status": "pending"})
+                self.steps_layout.addWidget(header.row)
+        finally:
+            self.steps.setUpdatesEnabled(True)
+
+    def _paint_tree(self, runs):
+        """Bring the built rows up to date; a row that has not changed is not touched."""
+        self._live = None
         for key, run in runs.items():
-            header, took = _scenario_header(run.get("scenario") or key, run)
-            if run.get("status") == "running" and run.get("started"):
-                self._live = (took, run)
-            self.steps_layout.addWidget(header)
-            for node, depth in _walk(run.get("tree") or {}):
-                if depth == 0:
-                    continue        # the header above already names the flow
-                self.steps_layout.addWidget(_step_row(node, depth, run))
-        for scenario in session.get("scenarios") or []:
-            if scenario not in runs:
-                header, _took = _scenario_header(scenario, {"status": "pending"})
-                self.steps_layout.addWidget(header)
+            header = self._headers.get(key)
+            if header is not None:
+                header.paint(run)
+                if run.get("status") == "running" and run.get("started"):
+                    self._live = (header.took, run)
+            steps = run.get("steps") or {}
+            for index, cells in self._rows.get(key, {}).items():
+                cells.paint(steps.get(index) or {})
 
     def tick(self, now=None):
         """Move the running scenario's time on, and nothing else."""
@@ -361,33 +405,79 @@ class SessionPanel(widgets.BlueprintPanel):
             label.setText(_took(run, now))
 
 
-def _scenario_header(scenario, run):
+def _restyle(widget, **properties):
+    """Set style properties and have the stylesheet read them again."""
+    for name, value in properties.items():
+        widget.setProperty(name, value)
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+
+
+class _ScenarioHeader:
     """One scenario's own line: its mark, its name, how far it got, how long it took.
 
-    Returns ``(row, time label)`` - the label so a running scenario's time can be
-    moved on without the tree being rebuilt.
+    Styled through theme roles (QLabel[role="runscenario"][status=...]), so a
+    scenario finishing changes a property instead of a stylesheet of its own.
+    ``took`` is kept apart so the page's clock can move a running scenario's
+    time on without anything else being touched.
     """
-    status = run.get("status", "pending")
-    counts = ""
-    if run.get("total"):
-        counts = "   %s/%s" % (run.get("done", 0), run["total"])
-    name, colour = _mark(status)
-    label = QLabel("%s%s" % (scenario, counts))
-    label.setStyleSheet("font-family: %s; font-size: 12px; font-weight: 600; "
-                        "color: %s;" % (theme.MONO_CSS, colour))
-    took = QLabel(_took(run))
-    took.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
-                       % (theme.MONO_CSS, theme.NEUTRAL[600]))
-    row = QWidget()
-    line = QHBoxLayout(row)
-    line.setContentsMargins(0, 6, 0, 0)
-    line.setSpacing(0)
-    line.addWidget(_mark_label(name, colour))
-    line.addWidget(label)
-    line.addSpacing(14)
-    line.addWidget(took)
-    line.addStretch(1)
-    return row, took
+
+    def __init__(self, scenario):
+        self.scenario = scenario
+        self.mark = _mark_label(*_mark("pending"))
+        self.label = QLabel(scenario)
+        self.label.setProperty("role", "runscenario")
+        self.took = QLabel("")
+        self.took.setProperty("role", "runtook")
+        self.row = QWidget()
+        line = QHBoxLayout(self.row)
+        line.setContentsMargins(0, 6, 0, 0)
+        line.setSpacing(0)
+        line.addWidget(self.mark)
+        line.addWidget(self.label)
+        line.addSpacing(14)
+        line.addWidget(self.took)
+        line.addStretch(1)
+        self._painted = None
+
+    def paint(self, run):
+        status = run.get("status", "pending")
+        counts = ""
+        if run.get("total"):
+            counts = "   %s/%s" % (run.get("done", 0), run["total"])
+        took = _took(run)
+        painted = (status, counts, took)
+        if painted == self._painted:
+            return
+        if self._painted is None or self._painted[0] != status:
+            name, colour = _mark(status)
+            self.mark.setPixmap(icons.pixmap(name, 13, colour))
+            _restyle(self.label, status=status)
+        self.label.setText("%s%s" % (self.scenario, counts))
+        self.took.setText(took)
+        self._painted = painted
+
+
+class _StepCells:
+    """A step row's mark and label, repainted only when its state changes."""
+
+    def __init__(self, mark, label):
+        self.mark, self.label = mark, label
+        # Built as a step still to come, so most rows never need a paint at all.
+        self._painted = ("pending", "")
+
+    def paint(self, state):
+        status = state.get("status", "pending")
+        message = state.get("message") if status in ("fail", "error") else ""
+        painted = (status, message or "")
+        if painted == self._painted:
+            return
+        name, colour = _mark(status)
+        self.mark.setPixmap(icons.pixmap(name, 12, colour))
+        _restyle(self.label, status=status)
+        self.label.setToolTip(message or "")
+        self._painted = painted
 
 
 def _walk(node, depth=0):
@@ -397,32 +487,23 @@ def _walk(node, depth=0):
         yield from _walk(child, depth + 1)
 
 
-def _step_row(node, depth, session):
+def _step_row(node, depth):
+    """A row of the tree, and for a step the cells that show its state."""
     is_step = node.get("kind") == "step"
-    index = node.get("step_index")
-    state = session["steps"].get(index, {}) if is_step else {}
-    status = state.get("status", "pending" if is_step else "")
     row = QWidget()
     line = QHBoxLayout(row)
     line.setContentsMargins(depth * INDENT_PX, 0, 0, 0)
     line.setSpacing(0)
-
-    if is_step:
-        name, colour = _mark(status)
-    else:
-        name, colour = "group", theme.ACCENT_RAMP[800]
     label = QLabel(node.get("label", ""))
     if is_step:
-        label.setStyleSheet("font-family: %s; font-size: 12px; color: %s;"
-                            % (theme.MONO_CSS, colour))
+        mark = _mark_label(*_mark("pending"), size=12)
+        label.setProperty("role", "runstep")
     else:
-        label.setStyleSheet("font-family: %s; font-size: 13px; font-weight: 600;"
-                            "color: %s;" % (theme.HEADING_CSS, theme.ACCENT_RAMP[800]))
-    if state.get("message") and status in ("fail", "error"):
-        label.setToolTip(state["message"])
-    line.addWidget(_mark_label(name, colour, 12 if is_step else 13))
+        mark = _mark_label("group", theme.ACCENT_RAMP[800], 13)
+        label.setProperty("role", "rungroup")
+    line.addWidget(mark)
     line.addWidget(label, 1)
-    return row
+    return row, (_StepCells(mark, label) if is_step else None)
 
 
 class RunPage(QWidget):

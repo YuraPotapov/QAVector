@@ -360,6 +360,28 @@ QLabel[role="lede"] {{ font-size: 13px; color: {n700}; }}
 QLabel[role="mono"] {{ font-family: {mono}; font-size: 12px; color: {n700}; }}
 QLabel[role="muted"] {{ color: {n600}; }}
 QLabel[role="hint"] {{ font-size: 11px; color: {n600}; }}
+/* Run page step tree (pages/run.py). The rows are built once per scenario and a
+   step's state is a property, so a step ending restyles one label - not the page
+   building hundreds of rows again, each with a stylesheet of its own. A state
+   without a rule of its own reads as a step still to come. */
+QLabel[role="runstep"] {{ font-family: {mono}; font-size: 12px; color: {n500}; }}
+QLabel[role="runscenario"] {{
+    font-family: {mono}; font-size: 12px; font-weight: 600; color: {n500};
+}}
+QLabel[role="runstep"][status="pass"], QLabel[role="runscenario"][status="pass"] {{
+    color: {ok};
+}}
+QLabel[role="runstep"][status="fail"], QLabel[role="runstep"][status="error"],
+QLabel[role="runscenario"][status="fail"], QLabel[role="runscenario"][status="error"] {{
+    color: {bad};
+}}
+QLabel[role="runstep"][status="running"], QLabel[role="runscenario"][status="running"] {{
+    color: {accent};
+}}
+QLabel[role="rungroup"] {{
+    font-family: {heading}; font-size: 13px; font-weight: 600; color: {a800};
+}}
+QLabel[role="runtook"] {{ font-family: {mono}; font-size: 12px; color: {n600}; }}
 QLabel[role="summary"] {{ font-size: 12px; color: {n800}; }}
 /* The line an empty zone leads with: the subject, said once, in the page's own
    heading face so it is plainly a state and not a row that lost its text. */
