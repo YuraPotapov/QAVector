@@ -187,10 +187,13 @@ class PlaywrightAdapter(BrowserAdapter):
             log.debug("overlay_setup failed: %s", exc)
 
     def overlay_render(self, state):
+        """Paint ``state``; answers the tree version the page now holds, or None."""
         try:
-            self._page.evaluate("s => window.__ExecHud && window.__ExecHud.render(s)", state)
+            return self._page.evaluate(
+                "s => window.__ExecHud ? window.__ExecHud.render(s) : null", state)
         except Exception as exc:
             log.debug("overlay_render failed: %s", exc)
+            return None
 
     def overlay_mark(self, selector, label=None, timeout=None):
         """Flash the HUD's marker over the element a step is about to act on.

@@ -89,7 +89,12 @@ class BrowserAdapter(ABC):
         """Inject the overlay renderer now and re-inject it on future loads."""
 
     def overlay_render(self, state):
-        """Push an overlay state dict into the page for the renderer to paint."""
+        """Push an overlay state dict into the page for the renderer to paint.
+
+        May answer the ``treeVersion`` the page now holds, so the tree - the
+        largest part of the state - is sent only when the page lacks it. None
+        (the default) means "not known", and the tree is sent every time.
+        """
 
     def overlay_mark(self, selector, label=None, timeout=None):
         """Flash a marker over the element a step is acting on.

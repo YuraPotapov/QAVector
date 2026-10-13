@@ -99,6 +99,7 @@ class ExecutionOverlay:
         self._adapter = adapter
         self._setup_done = False
         self._pushing = False       # reentrancy guard (log-bridge can re-enter)
+        self._sent_version = None   # the tree version the page last said it holds
         # per-flow state
         self._version = 0
         self._tree_dict = None
@@ -321,10 +322,27 @@ class ExecutionOverlay:
         }
 
     def _push(self):
+        """Send the state; the tree only when the page does not hold this one.
+
+        The tree is the whole plan - for a scenario made of eight others, 780
+        steps and some 280 KB of JSON - and it was sent on every push, three or
+        more a step, while the renderer rebuilds it only when its version
+        changes. Now the page answers the version it holds: a page that has it
+        is sent the rest, and one that does not (a new document, after a
+        navigation) is sent the tree at once.
+        """
         if self._pushing:   # a log emitted mid-push must not recurse
             return
         self._pushing = True
         try:
-            self._adapter.overlay_render(self.state())
+            payload = self.state()
+            wants_tree = "tree" in self._components
+            if not wants_tree or self._sent_version == self._version:
+                payload.pop("tree", None)
+            held = self._adapter.overlay_render(payload)
+            if wants_tree:
+                if "tree" not in payload and held != self._version:
+                    held = self._adapter.overlay_render(dict(payload, tree=self._tree_dict))
+                self._sent_version = self._version if held == self._version else None
         finally:
             self._pushing = False

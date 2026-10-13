@@ -404,3 +404,48 @@ def test_the_step_under_way_is_never_cut_off_by_the_hud_s_width():
     assert "lbl.title = node.label || node.id" in js
     # folded, the header names the step rather than the scenario
     assert "folded && doing ? doing" in js
+
+
+class HoldingAdapter(FakeAdapter):
+    """Answers like the real page: the tree version its renderer now holds."""
+
+    def __init__(self):
+        FakeAdapter.__init__(self)
+        self.held = None
+
+    def overlay_render(self, state):
+        FakeAdapter.overlay_render(self, dict(state))
+        if "tree" in state:
+            self.held = state["treeVersion"]
+        return self.held
+
+
+def test_the_tree_is_sent_once_for_each_version_the_page_lacks():
+    # 280 KB of plan on every push, three or more a step, slowed a 780-step run
+    # by a quarter of a second a step.
+    adapter = HoldingAdapter()
+    ov = ExecutionOverlay(["tree", "progress", "status"], adapter)
+    ov.flow_start(_tree(), role="Admin")
+    for index in range(3):
+        ov.step_start(index)
+        ov.step_end(index, PASS)
+    with_tree = [state for state in adapter.renders if "tree" in state]
+    assert len(with_tree) == 1 and with_tree[0] is adapter.renders[0]
+    assert all("nodeStates" in state for state in adapter.renders)
+
+    # A navigation: the new document's renderer holds no tree. The same push
+    # sends it again at once, and the pushes after it do not.
+    adapter.held = None
+    before = len(adapter.renders)
+    ov.step_start(3)
+    assert ["tree" in state for state in adapter.renders[before:]] == [False, True]
+    ov.step_end(3, PASS)
+    assert "tree" not in adapter.renders[-1]
+
+
+def test_without_the_tree_panel_the_tree_is_never_sent():
+    adapter = HoldingAdapter()
+    ov = ExecutionOverlay(["progress", "status"], adapter)
+    ov.flow_start(_tree(), role="Admin")
+    ov.step_start(0)
+    assert not any("tree" in state for state in adapter.renders)

@@ -314,6 +314,9 @@
           this._titleEl.title = (this._flowName || "") + (doing ? "\n" + doing : "");
         }
       } catch (e) { /* never throw into the page */ }
+      // The tree this document holds: Python sends the tree again only when this
+      // is not the one it has - a new document starts with none.
+      return this._treeVersion;
     },
 
     // --- banner (flow completion) ---------------------------------------
@@ -457,7 +460,7 @@
         row.appendChild(caret); row.appendChild(ico); row.appendChild(lbl);
         wrapper.appendChild(row);
         container.appendChild(wrapper);
-        self._nodeEls[node.id] = { row: row, ico: ico };
+        self._nodeEls[node.id] = { row: row, ico: ico, state: null };
         if (parentId != null) self._parents[node.id] = parentId;
 
         if (isGroup) {
@@ -520,7 +523,11 @@
 
     _paint: function (id, state) {
       var n = this._nodeEls[id];
-      if (!n) return;
+      // Only a node whose state changed touches the DOM: every push repaints
+      // the whole tree, and writing all of it each time had the browser
+      // restyle 780 rows twice a step.
+      if (!n || n.state === state) return;
+      n.state = state;
       n.ico.textContent = ICON[state] || ICON.pending;
       n.ico.style.color = COLOR[state] || COLOR.pending;
       // keep the "group" class so the caret/hover styling survives a repaint
