@@ -1234,3 +1234,29 @@ def test_a_restart_is_not_killed_by_the_timer_that_stopped_it(qapp, tmp_path,
         time.sleep(0.02)
     assert service.status == RUNNING, "the stop timer killed the new process"
     assert int(service._proc.processId()) == survivor
+
+
+# ------------------------------------------------- the GUI's Python stays its own
+
+@pytest.mark.parametrize("build", ["_environ", "_qt_environ"])
+def test_a_service_does_not_inherit_the_gui_s_python_path(monkeypatch, build):
+    """The GUI started with PYTHONPATH=<gui>: - a trailing ':' is the current
+    directory - put an Odoo service's working directory on its sys.path, and a
+    second Odoo checkout there shadowed its addons."""
+    monkeypatch.setenv("PYTHONPATH", "/path/to/qavector/gui:")
+    monkeypatch.setenv("PYTHONSTARTUP", "/path/to/pythonrc.py")
+    monkeypatch.setenv("QA_KEPT", "yes")
+    environment = getattr(services, build)({})
+    get = environment.get if build == "_environ" else (
+        lambda key: environment.value(key) if environment.contains(key) else None)
+    assert get("PYTHONPATH") is None and get("PYTHONSTARTUP") is None
+    assert get("QA_KEPT") == "yes"                  # everything else is passed on
+
+
+@pytest.mark.parametrize("build", ["_environ", "_qt_environ"])
+def test_a_runner_can_still_set_its_own_python_path(monkeypatch, build):
+    monkeypatch.setenv("PYTHONPATH", "/path/to/qavector/gui:")
+    environment = getattr(services, build)({"env": {"PYTHONPATH": "/srv/shop/lib"}})
+    value = (environment.get("PYTHONPATH") if build == "_environ"
+             else environment.value("PYTHONPATH"))
+    assert value == "/srv/shop/lib"

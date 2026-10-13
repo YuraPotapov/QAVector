@@ -319,9 +319,19 @@ def terminate_pid(pid):
     return signal_tree(pid, signal.SIGTERM)
 
 
+#: How this GUI's own Python was started, which is no service's business. A
+#: service runs an interpreter of its own - an Odoo in its virtualenv, say - and
+#: the GUI's PYTHONPATH reaching it put the GUI's folders on its sys.path, and,
+#: when the variable ended in ":" (an empty entry means the current directory),
+#: the service's working directory too: a checkout there named odoo/ then joined
+#: Odoo's namespace package and shadowed its addons, and the database would not
+#: load. A runner that does want one of these sets it in its own env.
+GUI_PYTHON = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+
+
 def _environ(settings):
-    """The child's environment: ours, plus whatever the runner adds."""
-    values = dict(os.environ)
+    """The child's environment: ours, less our Python's, plus the runner's."""
+    values = {key: value for key, value in os.environ.items() if key not in GUI_PYTHON}
     for key, value in (settings.get("env") or {}).items():
         if str(key).strip():
             values[str(key)] = str(value)
@@ -330,6 +340,8 @@ def _environ(settings):
 
 def _qt_environ(settings):
     environment = QProcessEnvironment.systemEnvironment()
+    for name in GUI_PYTHON:
+        environment.remove(name)
     for key, value in (settings.get("env") or {}).items():
         if str(key).strip():
             environment.insert(str(key), str(value))
