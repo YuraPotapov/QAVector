@@ -21,8 +21,12 @@ on the steps that restart a server left a guide of four lines out of 750 steps.
 
 How it groups them: a top-level ``use:`` block is a chapter, and inside it a run
 of steps on the same page - or in the same dialog - is one section with one
-picture, every step numbered on it where its element is. A step whose element is
-gone by then (an option in a dropdown that has closed) keeps a picture of its own.
+picture, every step numbered on it where its element is - numbered through the
+chapter, so the numbers go on from one section to the next. A step whose
+element is gone by then (an option in a dropdown that has closed) keeps a
+picture of its own; so does one pictured with something open over the steps
+before it (the dropdown it chooses in), and the section keeps the picture that
+shows them.
 
 What it deliberately does not do: run a script, reach the network or anything
 outside the folder - the page is opened in the GUI's preview and printed to PDF
@@ -172,6 +176,9 @@ class LiveDoc:
         self._chapters = []
         self._chapter_key = object()
         self._segment = None
+        # Ids of the steps covered already on the open section's picture: only
+        # what a new picture covers anew makes it keep the old one.
+        self._covered = set()
         self._ids = 0
         self._latest = None
         self._started = None
@@ -282,18 +289,32 @@ class LiveDoc:
             item["text"] = _say(self._labels, key, label=label,
                                 value="" if value is None else value)
         if kind == "step":
-            item["n"] = 1 + sum(1 for one in segment["items"] if one["kind"] == "step")
+            # Numbered through the chapter, not the section: a run of pages with
+            # one step each read "1, 1, 1".
+            item["n"] = 1 + sum(1 for one in chapter["segments"]
+                                for each in one["items"] if each["kind"] == "step")
         segment["items"].append(item)
 
         if capture:
-            boxes = {}
-            if item["box"]:
-                boxes[str(item["id"])] = item["box"]
-            if same:
-                for before, again in zip(earlier, found[1:]):
-                    if again and again.get("box"):
-                        boxes[str(before["id"])] = again["box"]
-            segment["shot"], segment["boxes"], segment["ratio"] = shot, boxes, ratio
+            again = list(zip(earlier, found[1:])) if same else []
+            covered = {str(before["id"]) for before, one in again
+                       if one and one.get("covered")}
+            if element.get("covered"):
+                covered.add(str(item["id"]))
+            if covered & (set(segment["boxes"]) - self._covered):
+                # Something opened over what the section's picture shows - the
+                # dropdown this step chooses in. The picture stays, and this
+                # step keeps the one it took (_item shows it beside its text).
+                pass
+            else:
+                boxes = {}
+                if item["box"]:
+                    boxes[str(item["id"])] = item["box"]
+                for before, one in again:
+                    if one and one.get("box"):
+                        boxes[str(before["id"])] = one["box"]
+                segment["shot"], segment["boxes"], segment["ratio"] = shot, boxes, ratio
+                self._covered = covered
         self._latest = item["id"]
         self._write()
 

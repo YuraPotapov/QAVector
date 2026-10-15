@@ -31,6 +31,7 @@ class FakeAdapter:
         self.boxes = {}
         self.labels = {}
         self.secret = set()
+        self.covered = set()
         self.calls = []
 
     def doc_capture(self, path, targets, focus=False):
@@ -41,7 +42,8 @@ class FakeAdapter:
                 "elements": [None if target not in self.boxes else
                              {"box": self.boxes[target],
                               "label": self.labels.get(target, ""),
-                              "secret": target in self.secret}
+                              "secret": target in self.secret,
+                              "covered": target in self.covered}
                              for target in targets]}
 
 
@@ -143,7 +145,8 @@ def test_steps_on_one_page_share_a_picture_that_numbers_them_all(tmp_path):
     assert form["shot"] == "doc/step_006.png"
     assert adapter.calls[-1][1] == ["#number", "#customer", "#save"]
     assert sorted(form["boxes"]) == sorted(str(item["id"]) for item in form["items"])
-    assert [item.get("n") for item in form["items"]] == [1, 2, None]
+    # Numbered on from "Press New" on the list before it.
+    assert [item.get("n") for item in form["items"]] == [2, 3, None]
 
     page = (out / "documentation.html").read_text(encoding="utf-8")
     assert page.count('<figure class="overview">') == 2
@@ -498,3 +501,95 @@ def test_steps_on_the_same_element_share_one_numbered_box(tmp_path):
     assert page.count('<span class="box act"') == 2
     assert "<b>2, 3</b>" in page and "<b>1</b>" in page
 
+
+
+def test_steps_are_numbered_through_the_chapter_and_start_again_in_the_next(tmp_path):
+    # One step on each of three pages read "1, 1, 1".
+    _write(tmp_path, "flows/shop/sign_in.yaml", """
+        id: shop.sign_in
+        name: Sign in
+        steps:
+          - fill: {target: "#login", value: "{{user.login}}"}
+            doc: "Enter your login"
+          - click: "#enter"
+            doc: "Sign in"
+    """)
+    _write(tmp_path, "flows/scenarios/hops.yaml", """
+        id: hops
+        name: Hops
+        tags: []
+        steps:
+          - use: shop.sign_in
+          - click: "#orders"
+            doc: "Open the orders"
+          - click: "#new"
+            doc: "Press New"
+          - click: "#save"
+            doc: "Save the order"
+    """)
+    doc, steps, adapter, out, _w = _guide(tmp_path, "hops")
+
+    def to(page):
+        return lambda fake: setattr(fake, "page", dict(page))
+    _run(doc, steps, adapter, script={1: to(FORM), 3: to(LIST), 4: to(FORM)})
+    chapters = doc.data()["chapters"]
+    numbers = [[[item["n"] for item in segment["items"]] for segment in chapter["segments"]]
+               for chapter in chapters]
+    assert numbers == [[[1], [2]], [[1], [2], [3]]]
+
+
+CRON = """
+    id: cron
+    name: Run a scheduled action
+    tags: []
+    steps:
+      - click: "#run"
+        doc: "Press Run manually"
+      - type: wait_for
+        target: "#run:not([disabled])"
+        doc: "The action has run"
+      - click: "#apps"
+        doc: "Open the app menu"
+      - click: "#claims"
+        doc: "Go to Claims"
+"""
+
+
+def test_a_step_pictured_with_a_dropdown_over_earlier_steps_keeps_its_own_picture(tmp_path):
+    # The app menu, open for "Go to Claims", lay over "Run manually": its box
+    # was drawn on the menu, round a button the picture did not show.
+    _write(tmp_path, "flows/scenarios/cron.yaml", CRON)
+    doc, steps, adapter, out, _w = _guide(tmp_path, "cron")
+    adapter.page = dict(FORM)
+    adapter.boxes = {"#run": [0.01, 0.12, 0.07, 0.03],
+                     "#run:not([disabled])": [0.01, 0.12, 0.07, 0.03],
+                     "#apps": [0.0, 0.0, 0.03, 0.05], "#claims": [0.0, 0.06, 0.1, 0.03]}
+
+    def menu_opens(fake):
+        fake.covered = {"#run", "#run:not([disabled])"}
+    _run(doc, steps, adapter, script={3: menu_opens})
+
+    segment, = doc.data()["chapters"][0]["segments"]
+    run, ran, apps, claims = segment["items"]
+    assert segment["shot"] == "doc/step_003.png"         # before the menu opened
+    assert sorted(segment["boxes"]) == sorted(str(item["id"]) for item in (run, ran, apps))
+    assert claims["shot"] == "doc/step_004.png" and claims["box"]
+    page = (out / "documentation.html").read_text(encoding="utf-8")
+    assert page.count('<figure class="own">') == 1
+    assert 'src="doc/step_004.png"' in page
+
+
+def test_what_was_covered_already_does_not_hold_the_picture_back(tmp_path):
+    # Covered on the section's picture too (a label floating over its field, say):
+    # the next picture is no worse for it, and takes the section's place.
+    _write(tmp_path, "flows/scenarios/cron.yaml", CRON)
+    doc, steps, adapter, out, _w = _guide(tmp_path, "cron")
+    adapter.page = dict(FORM)
+    adapter.boxes = {"#run": [0.01, 0.12, 0.07, 0.03], "#apps": [0.0, 0.0, 0.03, 0.05],
+                     "#claims": [0.0, 0.06, 0.1, 0.03]}
+    adapter.covered = {"#run"}
+    _run(doc, steps, adapter)
+    segment, = doc.data()["chapters"][0]["segments"]
+    assert segment["shot"] == "doc/step_004.png"
+    assert '<figure class="own">' not in (out / "documentation.html").read_text(
+        encoding="utf-8")

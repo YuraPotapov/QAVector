@@ -87,8 +87,9 @@ class BrowserAdapter(ABC):
         Writes what the window shows (the viewport, not the whole page) to
         ``path``, and answers ``{"page": {"key", "title", "dialog"}, "elements":
         [...]}``: one entry per selector in ``targets`` - ``{"box": [x, y, w, h]
-        as fractions of the picture, "label", "secret"}``, or None when that
-        element is not on it. ``focus`` stands the focused element in for a
+        as fractions of the picture, "label", "secret", "covered"}``, or None
+        when that element is not on it. ``covered``: it is, but something is
+        drawn over it (a dropdown opened on top). ``focus`` stands the focused element in for a
         first target of None (what a bare ``press`` acts on).
 
         None - the default - means there is no page to take, and the guide

@@ -101,9 +101,21 @@ _DOC_ELEMENT_JS = r"""el => {
   const r = el.getBoundingClientRect();
   const choices = field && field.tagName === "SELECT" ?
       [...field.options].slice(0, 300).map(o => [o.value, clean(o.text)]) : null;
+  // Still there, but under something drawn over it since - a dropdown opened
+  // on top: the picture would outline what it does not show. Asked in the
+  // middle of what of it is in the window; the HUD is not on the picture.
+  const left = Math.max(r.left, 0), right = Math.min(r.right, innerWidth);
+  const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+  let covered = false;
+  if (right > left && bottom > top) {
+    const hit = document.elementsFromPoint((left + right) / 2, (top + bottom) / 2)
+        .find(one => !one.closest("#__exec_hud_host__"));
+    covered = !!hit && hit !== el && !el.contains(hit) && !hit.contains(el);
+  }
   return {label: clean(label).slice(0, 60),
           secret: !!(field && field.type === "password"),
           choices: choices,
+          covered: covered,
           box: [r.left, r.top, r.width, r.height]};
 }"""
 
@@ -380,6 +392,7 @@ class PlaywrightAdapter(BrowserAdapter):
             elements.append(None if box is None else
                             {"box": box, "label": info.get("label") or "",
                              "secret": bool(info.get("secret")),
+                             "covered": bool(info.get("covered")),
                              "choices": info.get("choices") or []})
         return {"page": {"key": state.get("key") or "",
                          "title": state.get("title") or "",

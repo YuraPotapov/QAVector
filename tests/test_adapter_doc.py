@@ -104,7 +104,12 @@ def test_boxes_come_back_as_fractions_of_the_picture():
     assert answer["page"] == {"key": STATE["key"], "title": "New order", "dialog": "",
                               "size": [1000.0, 500.0]}
     assert answer["elements"] == [{"box": [0.8, 0.1, 0.1, 0.05], "label": "Save",
-                                   "secret": False, "choices": []}]
+                                   "secret": False, "covered": False, "choices": []}]
+
+
+def test_an_element_something_is_drawn_over_says_so():
+    page = FakePage({"#run": {"label": "Run", "covered": True, "box": [10, 60, 70, 15]}})
+    assert _capture(page, ["#run"])["elements"][0]["covered"] is True
 
 
 def test_everything_is_measured_before_the_picture_and_the_hud_is_left_out():

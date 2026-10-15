@@ -303,8 +303,12 @@ steps:
   one dialog, make one section with one picture: every step that acts is numbered on it,
   in order, joined by a path. A check is outlined without a number - it is not a step
   the reader takes. A step whose element is gone by then, such as an option in a dropdown
-  that has closed, keeps a picture of its own. A record's id in the address does not
-  make a new page, so a form stays one section across its save.
+  that has closed, keeps a picture of its own. So does a step pictured with something
+  open over the steps before it - the dropdown it chooses in: the section keeps the
+  picture that shows them. A record's id in the address does not make a new page, so a
+  form stays one section across its save.
+- **Steps are numbered through the chapter**, not the section: the numbers go on from
+  one page to the next, and start again at 1 in the next chapter.
 - **A top-level `use:` block is a chapter**, titled by its `name`, with its
   `description` as the introduction.
 - `doc:` is free text in whatever language the guide is for, and takes `{{...}}`
