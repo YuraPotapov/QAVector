@@ -16,6 +16,17 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.27] - 2026-10-15
+
+### Fixed
+- **The guide numbers steps through the chapter**, not the section: a run of
+  pages with one step each no longer reads "1, 1, 1". The numbers start again at
+  1 in the next chapter (a top-level `use:` block).
+- **A picture in the guide no longer outlines what something covers.** When the
+  dropdown a step chooses in opens over the steps before it on the page, the
+  section keeps the picture that shows them, and the step keeps its own picture
+  beside its text - instead of boxes drawn round a button hidden under the menu.
+
 ## [0.16.26] - 2026-10-14
 
 ### Added
