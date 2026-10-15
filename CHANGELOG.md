@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.28] - 2026-10-15
+
+### Fixed
+- **Launch shows what "Use each account's own list" will run.** The scenario
+  list now ticks the scenarios set on the Credentials page for the accounts
+  being launched, narrowed to Selected, and follows the account and environment
+  choice. It used to show the *Choose scenarios* selection, which this mode
+  ignores; that selection is kept and comes back when you switch to it.
+
 ## [0.16.27] - 2026-10-15
 
 ### Fixed
