@@ -542,12 +542,22 @@ class CheckList(QWidget):
         # Only where Selected can empty the list: an empty Selected is a state to
         # explain ("nothing ticked yet"), not a list that failed to fill.
         self._empty = empty_note(self.list, "") if selected_view else None
+        self._nothing_selected = ""
         self._update_count()
 
     # -- contents -------------------------------------------------------------
     def set_noun(self, noun):
         """What the count line calls the things in the list."""
         self._noun = noun
+        self._update_count()
+
+    def set_nothing_selected(self, text=""):
+        """What an empty Selected view says; "" for the usual "tick some" line.
+
+        For a list whose ticks come from somewhere else, where telling the user to
+        tick rows would point at something they cannot do.
+        """
+        self._nothing_selected = text
         self._update_count()
 
     def clear(self):
@@ -657,8 +667,9 @@ class CheckList(QWidget):
         if self._empty is not None:
             # Hiding a row is not a change to the model, so the note is told.
             if self.selected_only() and not ticked:
-                self._empty.say_filtered("Nothing selected yet - tick %s under All."
-                                         % self._noun)
+                self._empty.say_filtered(
+                    self._nothing_selected
+                    or "Nothing selected yet - tick %s under All." % self._noun)
             elif self._needle:
                 self._empty.say_filtered("Nothing here matches the search.")
             else:

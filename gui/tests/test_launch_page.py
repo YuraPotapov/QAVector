@@ -14,7 +14,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cms_gui import theme
-from cms_gui.pages.launch import UNSAVED, LaunchSessionsPage
+from cms_gui import launch
+from cms_gui.pages.launch import SCENARIO_MODES, UNSAVED, LaunchSessionsPage
 from cms_gui.settings import Settings
 
 
@@ -386,3 +387,55 @@ def test_the_guide_checkbox_is_saved_and_restored(page):
     page.report_doc.setChecked(False)
     page.set_state(state)
     assert page.report_doc.isChecked()
+
+
+# ------------------------------------------------- each account's own scenarios
+
+def _accounts_inventory():
+    from cms_gui import core as core_mod
+    return core_mod.Inventory({
+        "envs": [{"alias": "local", "value": "localhost:8069", "count": 2}],
+        "users": [{"env": "localhost:8069", "login": "admin",
+                   "tests": ["shop_order", "tag:smoke"]},
+                  {"env": "localhost:8069", "login": "agent",
+                   "tests": ["shop_refund"]}],
+        "scenarios": [{"id": "shop_order"}, {"id": "shop_refund"},
+                      {"id": "shop_cancel"}],
+        "extensions": [], "tags": ["smoke"],
+    })
+
+
+def _per_user(page):
+    for index, (mode, _label, _hint) in enumerate(SCENARIO_MODES):
+        if mode == launch.SCENARIOS_PER_USER:
+            page.scenario_mode.button(index).setChecked(True)
+
+
+def test_each_account_s_own_list_shows_the_chosen_accounts_scenarios(page):
+    page.reset()                       # earlier tests leave their environment
+    page.set_inventory(_accounts_inventory())
+    _per_user(page)
+    assert set(page.scenario_list.checked()) == {"shop_order", "tag:smoke",
+                                                 "shop_refund"}
+    assert page.scenario_list.selected_only()
+    assert not page.scenario_list.isEnabled()
+
+    page.users_mode.set_current("Choose accounts")
+    page.users_list.set_checked(["agent"], notify=True)
+    assert page.scenario_list.checked() == ["shop_refund"]
+    page.users_list.set_checked([], notify=True)
+    assert page.scenario_list.checked() == []
+    page.reset()                                    # the page persists; leave it
+
+
+def test_showing_the_accounts_lists_leaves_the_pick_alone(page):
+    page.reset()
+    page.set_inventory(_accounts_inventory())
+    page.scenario_mode.button(3).setChecked(True)            # Choose scenarios
+    page.scenario_list.set_checked(["shop_cancel"], notify=True)
+    _per_user(page)
+    assert page.state()["scenarios"]["selected"] == ["shop_cancel"]
+    page.scenario_mode.button(3).setChecked(True)
+    assert page.scenario_list.checked() == ["shop_cancel"]
+    assert not page.scenario_list.selected_only()   # the view it had comes back
+    page.reset()                                    # the page persists; leave it

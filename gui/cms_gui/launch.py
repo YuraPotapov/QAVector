@@ -370,6 +370,26 @@ def selected_logins(config, inventory=None):
     return list(_available_logins(config, inventory))
 
 
+def account_scenarios(config, inventory=None):
+    """What "each account's own list" adds up to for the accounts this would launch.
+
+    Each entry as the Credentials page stores it - a scenario id or ``tag:name`` -
+    de-duplicated, in account order. Empty with no inventory yet, which is
+    "cannot say" here just as it is for :func:`selected_logins`.
+    """
+    if inventory is None:
+        return []
+    config = merged(config)
+    chosen = set(selected_logins(config, inventory))
+    alias = config["environment"]
+    env_value = inventory.env_value(alias) if alias else None
+    items = [test for user in inventory.users
+             if user.get("login") in chosen
+             and env_value in (None, user.get("env"))
+             for test in user.get("tests") or ()]
+    return list(dict.fromkeys(items))
+
+
 def _available_logins(config, inventory):
     alias = config.get("environment") or ""
     if not alias:

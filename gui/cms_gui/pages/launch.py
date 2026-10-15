@@ -127,6 +127,13 @@ class LaunchSessionsPage(QWidget):
         # since can be told from the file on disk. None while nothing is opened.
         self._baseline = None
         self._dirty = False
+        # What "Choose scenarios" has ticked. The scenario list is shared with
+        # "each account's own list", which shows the accounts' scenarios there
+        # instead - so the pick is kept here, where showing those cannot touch it.
+        self._picked = []
+        # The All / Selected view the list had before the accounts' lists took it
+        # over; None while they have not.
+        self._view_before = None
         self._developer = bool(settings.developer_mode)
         self._configs = store.NamedConfigs(
             os.path.join(store.app_data_dir(), "configs.json"))
@@ -226,7 +233,7 @@ class LaunchSessionsPage(QWidget):
                                              self.users_mode))
         self.users_list = widgets.CheckList(placeholder="Search accounts…")
         self.users_list.set_noun("accounts")
-        self.users_list.changed.connect(self._changed)
+        self.users_list.changed.connect(self._users_changed)
         panel.layout().addWidget(self.users_list, 1)
         all_button = QPushButton("Select all")
         all_button.setProperty("variant", "ghost")
@@ -420,7 +427,7 @@ class LaunchSessionsPage(QWidget):
         self.scenario_list = widgets.CheckList(placeholder="Search scenarios and tags…",
                                                selected_view=True)
         self.scenario_list.set_noun("scenarios")
-        self.scenario_list.changed.connect(self._changed)
+        self.scenario_list.changed.connect(self._scenario_list_changed)
         panel.layout().addWidget(self.scenario_list, 1)
         return panel
 
@@ -612,8 +619,11 @@ class LaunchSessionsPage(QWidget):
                            "names": self.ext_list.checked()},
             "server_logs": {"mode": self._logs_mode_value(),
                             "names": self.logs_list.checked()},
-            "scenarios": {"mode": SCENARIO_MODES[self._scenario_mode_id()][0],
-                          "selected": self.scenario_list.checked()},
+            "scenarios": {"mode": self._scenario_mode_value(),
+                          "selected": (self.scenario_list.checked()
+                                       if self._scenario_mode_value()
+                                       == launch.SCENARIOS_PICK
+                                       else list(self._picked))},
             "reports": {"level": self._report_mode_value(),
                         "artifacts": self.report_list.checked(),
                         "always": self.report_always.isChecked(),
@@ -662,11 +672,12 @@ class LaunchSessionsPage(QWidget):
             self._populate_server_logs(server_logs["names"])
 
             scenarios = config["scenarios"]
+            self._picked = list(scenarios["selected"])
             for index, (mode, _label, _hint) in enumerate(SCENARIO_MODES):
                 if mode == scenarios["mode"]:
                     self.scenario_mode.button(index).setChecked(True)
                     break
-            self._populate_scenarios(scenarios["selected"])
+            self._refresh_scenarios()
 
             reports = config["reports"]
             self.report_mode.set_current({launch.REPORTS_FULL: "Full diagnostics",
@@ -774,12 +785,20 @@ class LaunchSessionsPage(QWidget):
         # environment cannot be part of this run any more.
         self._populate_users(self.users_list.checked())
         self._populate_server_logs(self.logs_list.checked())
+        self._refresh_scenarios()
+        self._changed()
+
+    def _users_changed(self):
+        if not self._building:
+            self._refresh_scenarios()
         self._changed()
 
     def _users_mode_changed(self):
         if not self._building and self.users_mode.current() == "Choose accounts" \
                 and not self.users_list.checked():
             self.users_list.set_all(True)     # "choose" starts from everything
+        if not self._building:
+            self._refresh_scenarios()
         self._changed()
 
     def _ext_mode_changed(self):
@@ -796,7 +815,16 @@ class LaunchSessionsPage(QWidget):
 
     def _scenario_mode_changed(self, _id, checked):
         if checked:
+            if not self._building:
+                self._refresh_scenarios()
             self._changed()
+
+    def _scenario_list_changed(self):
+        # Only a tick made under "Choose scenarios" is a pick; the list is
+        # read-only in every other mode.
+        if self._scenario_mode_value() == launch.SCENARIOS_PICK:
+            self._picked = self.scenario_list.checked()
+        self._changed()
 
     def _summary_toggled(self, expanded):
         """Fold the footer's prose away, leaving the buttons and any problem.
@@ -842,6 +870,9 @@ class LaunchSessionsPage(QWidget):
         checked = self.scenario_mode.checkedId()
         return checked if checked >= 0 else 0
 
+    def _scenario_mode_value(self):
+        return SCENARIO_MODES[self._scenario_mode_id()][0]
+
     # -- context --------------------------------------------------------------
     def set_core(self, core):
         self.core = core
@@ -865,7 +896,8 @@ class LaunchSessionsPage(QWidget):
             self._populate_users(config["users"]["logins"])
             self._populate_extensions(config["extensions"]["names"])
             self._populate_server_logs(config["server_logs"]["names"])
-            self._populate_scenarios(config["scenarios"]["selected"])
+            self._picked = list(config["scenarios"]["selected"])
+            self._refresh_scenarios()
             self._populate_artifacts(config["reports"]["artifacts"])
             self._populate_overlay(config["overlay"]["components"])
 
@@ -963,6 +995,32 @@ class LaunchSessionsPage(QWidget):
                 self.scenario_list.add(value, value, "(not found)")
                 known.add(value)
         self.scenario_list.set_checked(keep)
+
+    def _refresh_scenarios(self):
+        """Fill the scenario list for the mode it is answering.
+
+        Under "each account's own list" it shows what the accounts this run would
+        launch carry on the Credentials page, ticked and narrowed to Selected - the
+        list is read-only there, so it is a view of those lists and nothing else.
+        Every other mode shows the pick, which is kept aside so that looking at the
+        accounts' lists never rewrites it.
+        """
+        view = self.scenario_list.view
+        if self._scenario_mode_value() == launch.SCENARIOS_PER_USER:
+            self._populate_scenarios(
+                launch.account_scenarios(self.state(), self.inventory))
+            self.scenario_list.set_nothing_selected(
+                "None of the chosen accounts has scenarios set on the "
+                "Credentials page.")
+            if self._view_before is None:
+                self._view_before = view.current()
+            view.set_current(widgets.VIEW_SELECTED)
+            return
+        self._populate_scenarios(self._picked)
+        self.scenario_list.set_nothing_selected()
+        if self._view_before is not None:
+            view.set_current(self._view_before)
+            self._view_before = None
 
     def _populate_artifacts(self, keep):
         self.report_list.clear()

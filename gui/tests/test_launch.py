@@ -265,6 +265,29 @@ def test_an_account_missing_from_the_chosen_environment_is_reported():
     assert not any("admin," in p or p.endswith("admin.") for p in problems)
 
 
+def test_account_scenarios_are_those_of_the_accounts_this_would_launch():
+    inventory = core.Inventory({
+        "envs": [{"alias": "local", "value": "localhost:8069"},
+                 {"alias": "dev", "value": "https://dev.example.invalid/"}],
+        "users": [{"env": "localhost:8069", "login": "admin",
+                   "tests": ["shop_order", "tag:smoke"]},
+                  {"env": "localhost:8069", "login": "agent",
+                   "tests": ["tag:smoke", "shop_refund"]},
+                  {"env": "https://dev.example.invalid/", "login": "admin",
+                   "tests": ["dev_only"]}],
+    })
+    picked = _config(users={"mode": launch.USERS_PICK, "logins": ["agent"]})
+    assert launch.account_scenarios(picked, inventory) == ["tag:smoke", "shop_refund"]
+    # Every account, de-duplicated in account order.
+    assert launch.account_scenarios(_config(), inventory) == \
+        ["shop_order", "tag:smoke", "shop_refund", "dev_only"]
+    # The same login in another environment is not this run's account.
+    local = _config(environment="local",
+                    users={"mode": launch.USERS_PICK, "logins": ["admin"]})
+    assert launch.account_scenarios(local, inventory) == ["shop_order", "tag:smoke"]
+    assert launch.account_scenarios(local) == []
+
+
 def test_an_unknown_environment_is_reported():
     inventory = core.Inventory({"envs": [{"alias": "localhost:8069"}]})
     problems = launch.validate(_config(environment="staging"), inventory)
