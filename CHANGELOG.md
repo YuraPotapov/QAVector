@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.29] - 2026-10-16
+
 ### Added
 - RUN ▾ → **Empty Sessions** (`--empty-sessions`): the same launch with every
   profile emptied first - cache, cookies, site storage, history and form data -
@@ -51,6 +53,11 @@ app-agnostic, since that will break things on purpose.
   run's folder it writes a .zip with one file per session; on a session folder,
   one file holding its scenarios' guides in the order they ran; on a scenario,
   its guide. HTML files carry their pictures, so each can be sent on its own.
+
+### Fixed
+- **Status pills in the dark theme** - a service's state, a run's result -
+  were drawn in the light theme's colours, the brightest thing on the screen.
+  They now take the dark theme's.
 
 ## [0.16.28] - 2026-10-15
 
