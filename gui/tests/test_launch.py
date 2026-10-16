@@ -108,6 +108,40 @@ def test_sessions_at_once_and_closing_afterwards():
     assert "--detach" in argv
 
 
+def test_maximized_and_locked_windows_reach_the_command_line():
+    config = _config(scenarios={"mode": launch.SCENARIOS_ALL, "selected": []},
+                     sessions={"maximized": True, "lock_windows": True})
+    argv = launch.argv(config)
+    assert "--maximized" in argv and "--lock-windows" in argv
+    assert ("Windows", "maximized · locked while scenarios run") in \
+        launch.summarise(config)
+
+
+def test_windows_open_as_they_always_did_by_default():
+    config = _config(scenarios={"mode": launch.SCENARIOS_ALL, "selected": []})
+    argv = launch.argv(config)
+    assert "--maximized" not in argv and "--lock-windows" not in argv
+    assert "Windows" not in dict(launch.summarise(config))
+
+
+def test_a_configuration_saved_before_these_existed_reads_as_off():
+    old = {"sessions": {"jobs": 2, "all_at_once": False, "keep_open": True,
+                        "detach": False}}
+    sessions = launch.merged(old)["sessions"]
+    assert sessions["maximized"] is False and sessions["lock_windows"] is False
+
+
+def test_with_nothing_scripted_the_window_opens_maximized_but_is_not_locked():
+    # Maximizing is about the window and applies to a plain launch; the lock is
+    # held while scenarios run, so with none the core would refuse it.
+    config = _config(sessions={"maximized": True, "lock_windows": True})
+    argv = launch.argv(config)
+    assert "--maximized" in argv
+    assert "--lock-windows" not in argv
+    assert any("locking the windows" in note for note in launch.notes(config))
+    assert ("Windows", "maximized") in launch.summarise(config)
+
+
 def test_one_session_at_a_time_is_the_default_and_is_not_passed():
     config = _config(scenarios={"mode": launch.SCENARIOS_ALL, "selected": []})
     assert _flag(launch.argv(config), "--jobs") is None

@@ -389,6 +389,26 @@ def test_the_guide_checkbox_is_saved_and_restored(page):
     assert page.report_doc.isChecked()
 
 
+def test_full_screen_and_lock_are_saved_and_restored(page):
+    assert not page.maximized.isChecked() and not page.lock_windows.isChecked()
+    page.maximized.setChecked(True)
+    page.lock_windows.setChecked(True)
+    state = page.state()
+    assert state["sessions"]["maximized"] is True
+    assert state["sessions"]["lock_windows"] is True
+    page.maximized.setChecked(False)
+    page.lock_windows.setChecked(False)
+    page.set_state(state)
+    assert page.maximized.isChecked() and page.lock_windows.isChecked()
+
+
+def test_ticking_full_screen_is_an_edit(page):
+    page.maximized.setChecked(False)        # whatever an earlier test left behind
+    _open_saved(page)
+    page.maximized.setChecked(True)
+    assert _marked(page) == {"true"}
+
+
 # ------------------------------------------------- each account's own scenarios
 
 def _accounts_inventory():

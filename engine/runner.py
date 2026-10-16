@@ -453,7 +453,7 @@ def _governor(slots, ceiling, stop_event, unit="windows"):
 
 def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
                   overlay_components=None, report=None, jobs=1, windows=None,
-                  server_logs=None, browser=True):
+                  server_logs=None, browser=True, lock_windows=False):
     """Run ``which`` scenarios against every launched ``sessions`` entry.
 
     ``sessions`` is a list of ``(cls, proc, profile, login, origin[, tests])``
@@ -487,6 +487,9 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
     an adapter that refuses every page operation, and a scenario with a step that
     needs one is an ERROR before its first step. Nothing else changes: sessions,
     ``jobs``, the governor and stopping work exactly as they do with a browser.
+
+    ``lock_windows`` (``--lock-windows``) makes each page ignore the person at the
+    machine from the moment it is attached until its scenarios are done.
     """
     env = env or {}
     # flows_dir stays None when it was not given: the loader turns that into its
@@ -539,7 +542,7 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
             return _run_one_session(session, session_name, scenarios, env, flows_dir,
                                     selectors, run_dir, overlay_components, report,
                                     log_prefix=log_prefix, server_logs=server_logs,
-                                    browser=browser)
+                                    browser=browser, lock_windows=lock_windows)
         if not slot_pool.acquire():
             return []            # stopping: this session never started
         proc = None
@@ -548,13 +551,14 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
                 return _run_one_session(session, session_name, scenarios, env, flows_dir,
                                         selectors, run_dir, overlay_components, report,
                                         log_prefix=log_prefix, slots=yielding,
-                                        server_logs=server_logs, browser=browser)
+                                        server_logs=server_logs, browser=browser,
+                                        lock_windows=lock_windows)
             proc = windows.open(session)
             opened = (session[0], proc) + tuple(session[2:])
             return _run_one_session(opened, session_name, scenarios, env, flows_dir,
                                     selectors, run_dir, overlay_components, report,
                                     log_prefix=log_prefix, server_logs=server_logs,
-                                    browser=browser)
+                                    browser=browser, lock_windows=lock_windows)
         finally:
             # Close BEFORE releasing: the next window must not start while this
             # one is still flushing cookies, or the two overlap for the seconds
@@ -700,7 +704,7 @@ def _plan_sessions(sessions, per_session, shared, flows_dir, slots):
 
 def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors,
                      run_dir, overlay_components, report, log_prefix=None, slots=None,
-                     server_logs=None, browser=True):
+                     server_logs=None, browser=True, lock_windows=False):
     """Drive ONE window: attach, run its scenarios, disconnect. Returns its results.
 
     Everything here - the CDP attach, every step, every screenshot and the
@@ -719,7 +723,7 @@ def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors
     try:
         return _drive_session(session, session_name, scenarios, env, flows_dir,
                               selectors, run_dir, overlay_components, report, results,
-                              slots, server_logs, browser)
+                              slots, server_logs, browser, lock_windows)
     finally:
         if token is not None:
             _session_ctx.reset(token)
@@ -727,7 +731,7 @@ def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors
 
 def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
                    run_dir, overlay_components, report, results, slots=None,
-                   server_logs=None, browser=True):
+                   server_logs=None, browser=True, lock_windows=False):
     cls, _proc, profile, login, origin = session[:5]
     log.info("--- session %s: %s ---", session_name, ", ".join(scenarios))
     # No browser means nothing to attach to. The session is otherwise the same
@@ -756,6 +760,12 @@ def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
     # Show the whole plan up front, so a finished or failed scenario stays visible
     # when the next one starts instead of being replaced by it.
     overlay.session_start(scenarios)
+    # Held for the whole session and let go in the finally below, before the
+    # disconnect - so a window kept open for inspection answers again.
+    locked = bool(lock_windows) and adapter.lock_input(True)
+    if locked:
+        log.info("Locked: this window ignores your mouse and keyboard until its "
+                 "scenarios finish.")
     try:
         for scenario_id in scenarios:
             if _stopping(session_name):
@@ -772,6 +782,8 @@ def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
     finally:
         if bridge is not None:
             logging.getLogger("flowengine").removeHandler(bridge)
+        if locked and adapter.lock_input(False):
+            log.info("Unlocked: the window is yours again.")
         # Deliberately do NOT tear the overlay down: the HUD stays in the page
         # (with its final tree + completion banner) so it can be inspected
         # after the run. It disappears naturally when the window is closed

@@ -138,5 +138,16 @@ class BrowserAdapter(ABC):
         """
         return None
 
+    # --- input lock (optional; default no-op) ---------------------------------
+    def lock_input(self, on):
+        """Make the page ignore the person at the machine (``--lock-windows``).
+
+        The adapter's own actions must still reach the page while it is locked.
+        Answers whether the page is now in the state asked for; False - the
+        default, for an adapter with no page or no way to lock one - means the
+        run goes on with the window as it was.
+        """
+        return False
+
     def disconnect(self):
         """Release the backend. Default: no-op."""

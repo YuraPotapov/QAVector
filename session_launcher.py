@@ -70,6 +70,7 @@ import re
 import shutil
 import tempfile
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -2183,12 +2184,16 @@ def seed_password(chrome, profile, origin, login, password):
         con.close()
 
 
-def set_profile_name(profile, name):
+def set_profile_name(profile, name, maximized=False):
     """Name the Chrome profile so the label shows in the top-right profile pill.
 
     Persists across page navigation (unlike the title bar, which follows the page).
     Merged into the existing Preferences so a logged-in session is not wiped.
     Only takes effect on the next launch, so run this while the window is closed.
+
+    ``maximized`` False also makes Chrome forget a window it last closed maximized:
+    it reopens a window the way it last saw it, so without this a single run with
+    --maximized would keep every later one maximized too.
     """
     default = os.path.join(profile, "Default")
     os.makedirs(default, exist_ok=True)
@@ -2211,6 +2216,9 @@ def set_profile_name(profile, name):
     # (which is how close_all/CTRL+C stops it). Mark the last exit clean to suppress that.
     prefs["profile"]["exit_type"] = "Normal"
     prefs["profile"]["exited_cleanly"] = True
+    placement = prefs.get("browser", {}).get("window_placement")
+    if not maximized and isinstance(placement, dict):
+        placement["maximized"] = False
     with open(prefs_path, "w", encoding="utf-8") as fh:
         json.dump(prefs, fh)
 
@@ -2254,6 +2262,91 @@ def clear_devtools_port(profile):
         os.remove(os.path.join(profile, "DevToolsActivePort"))
     except OSError:
         pass  # fresh profile, or already cleaned up by a clean exit
+
+
+# What --empty-sessions leaves in Default/: what makes the profile this launcher's
+# (the extensions, their settings and their registrations in the two Preferences
+# files) and the one credential seeded into it, which would otherwise take a
+# headless Chrome start to recreate (_ensure_login_db). The extension keys live
+# under Extensions/, so the extension ids stay as they were. A keep-list rather
+# than a list of what to delete: whatever a newer Chrome stores next goes too.
+EMPTY_SESSION_KEEPS = frozenset({
+    "Preferences", "Secure Preferences", "Extensions", "Local Extension Settings",
+    "Login Data", "Login Data-journal",
+    "Login Data For Account", "Login Data For Account-journal",
+})
+# Caches Chrome keeps beside Default/ rather than inside it.
+_PROFILE_ROOT_CACHES = ("GrShaderCache", "ShaderCache", "GraphiteDawnCache")
+
+
+def clear_session_data(profile):
+    """Delete everything a visit left in this profile: --empty-sessions.
+
+    Cache, cookies, local/session storage, IndexedDB, service workers, history,
+    form data, saved tabs - all of Default/ but :data:`EMPTY_SESSION_KEEPS`. The
+    auto-login extension then signs in on a page that has never seen this account.
+    Run this only while the window is closed (see :func:`profile_in_use`). Returns
+    how many entries were removed.
+    """
+    removed = 0
+    default = os.path.join(profile, "Default")
+    names = sorted(os.listdir(default)) if os.path.isdir(default) else []
+    targets = [os.path.join(default, name) for name in names
+               if name not in EMPTY_SESSION_KEEPS]
+    targets += [os.path.join(profile, name) for name in _PROFILE_ROOT_CACHES
+                if os.path.exists(os.path.join(profile, name))]
+    for path in targets:
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            removed += 1
+        except OSError as exc:
+            log.warning("Could not clear %s: %s", path, exc)
+    return removed
+
+
+def profile_in_use(profile):
+    """Whether a Chrome is running on this profile right now.
+
+    Asked before --empty-sessions deletes anything: emptying a profile under a
+    running browser corrupts what it has open, and launching onto it would only
+    add a window to that browser, with the old session still in it. Windows keeps
+    ``lockfile`` open for as long as the browser runs, so failing to remove it is
+    the answer. Elsewhere ``SingletonLock`` is a link to ``host-PID``; a stale one
+    (the browser was killed) names a process that is gone, or one that is not a
+    browser on this profile any more.
+    """
+    if os.name == "nt":
+        try:
+            os.remove(os.path.join(profile, "lockfile"))
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return False
+    try:
+        target = os.readlink(os.path.join(profile, "SingletonLock"))
+    except OSError:
+        return False
+    host, _sep, pid = target.rpartition("-")
+    if host and host != socket.gethostname():
+        return True           # another machine's browser; Chrome would refuse it too
+    try:
+        pid = int(pid)
+        os.kill(pid, 0)
+    except (ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True           # alive, and someone else's
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as fh:
+            cmdline = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return True           # no /proc (macOS): alive is the best answer there is
+    # The PID may have been handed to something else since the browser died.
+    return os.path.abspath(profile) in cmdline or os.path.basename(profile) in cmdline
 
 
 # Default login-form selectors, used when nothing overrides them. Names are the
@@ -3003,7 +3096,7 @@ def read_commands(windows_by_session):
 
 
 def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
-                bind_lifetime=False):
+                bind_lifetime=False, maximized=False):
     """Start one Chrome on one profile and announce it. Returns the Popen.
 
     Split out of the launch loop because a --run-tests run may open a window long
@@ -3013,6 +3106,8 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
     kill-on-close job, so a hard kill takes the browsers with it. False for
     --detach, where the windows are meant to outlive us. On Linux the same tie is
     made by the child itself through preexec_fn, so this does nothing there.
+
+    ``maximized`` is --maximized.
     """
     clear_devtools_port(profile)  # so --run-tests cannot attach to a dead/reused port
     log.info("Launching %-8s (login: %s)", cls, login)
@@ -3031,6 +3126,8 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
         "--no-default-browser-check",
         "--new-window",
     ]
+    if maximized:
+        chrome_args.append("--start-maximized")
     if debug_port:
         # Flow-execution and recording only: open a CDP endpoint so the engine
         # can attach and drive this window. Port 0 = auto-pick a free port;
@@ -3077,7 +3174,8 @@ class WindowSource:
 
     def __init__(self, chrome, url, spawn_kwargs, procs, stagger_s=0.4,
                  by_session=None, bind_lifetime=True, extension_dirs=None,
-                 log_hub=None, session_envs=None):
+                 log_hub=None, session_envs=None, maximized=False):
+        self._maximized = maximized
         self._extension_dirs = extension_dirs or {}
         # Staged windows open here rather than in the launch loop, so this is where
         # they have to be registered with the log hub - and the correlation window
@@ -3104,7 +3202,8 @@ class WindowSource:
         with self._lock:
             proc = open_window(self._chrome, profile, cls, login, self._url,
                                debug_port=True, spawn_kwargs=self._spawn_kwargs,
-                               bind_lifetime=self._bind_lifetime)
+                               bind_lifetime=self._bind_lifetime,
+                               maximized=self._maximized)
             self._procs.append((cls, proc))
             self._names[proc] = cls
             if EXTENSIONS_NEED_CDP:
@@ -3294,7 +3393,16 @@ Options:
   --password=PASS           Password to use, overriding the config's. With --user
                             it applies to that user; alone, to every selected one.
   --detach                  Fire-and-forget: leave windows running after exit.
-  --extensions=LIST         Which extensions to install into every profile.
+  --maximized               Open every window maximized. Without it a window
+                            opens at its normal size, even one that was
+                            maximized the last time it closed.
+  --empty-sessions          Start every profile empty: its cache, cookies, site
+                            storage, history and form data are deleted before
+                            the window opens, so each account signs in from
+                            scratch. The folder, its extensions and the saved
+                            password stay. Refused while a profile's window is
+                            still open.
+  --extensions=LIST        Which extensions to install into every profile.
                             Default (no flag): every usable one in extensions/.
                             LIST is comma-separated names, raw 32-char store ids
                             or name=id; "none" installs nothing, "all" is the
@@ -3519,7 +3627,12 @@ Flow execution (require --run-tests):
   --close-after             Close the browser windows once the run finishes;
                             without it they stay open for inspection - which
                             also means every window is launched up front.
-  --no-browser              Run with no browser at all, for scenarios made only
+  --lock-windows            While a window's scenarios run, its page ignores
+                            your mouse and keyboard, so a stray click cannot
+                            steer the run. It unlocks when they finish. The
+                            browser's own tabs, address bar and close button
+                            still work.
+  --no-browser            Run with no browser at all, for scenarios made only
                             of service steps and assert_host_up (use: blocks
                             included). Any other scenario is refused before the
                             run starts. Sessions, --jobs and the load governor
@@ -3594,6 +3707,9 @@ def main():
     overlay_components = None  # None = no HUD; else list of --execution-overlay components
     close_after = False   # with --run-tests: close windows after the run (default: keep open)
     no_browser = False    # --no-browser: service-only scenarios, no Chrome at all
+    maximized = False     # --maximized: every window opens maximized
+    empty_sessions = False   # --empty-sessions: clear each profile's data first
+    lock_windows = False  # --lock-windows: pages ignore the user while scenarios run
     report_level = None   # raw --report-level value (None = flag absent -> default artifacts)
     report_always = False # --report-always: produce a full report on success too
     report_screen = None  # raw --report-screen value (None = flag absent -> default capture)
@@ -3639,6 +3755,16 @@ def main():
             # service steps and assert_host_up. Checked after the loop: it needs
             # --run-tests, and every scenario is vetted before anything runs.
             no_browser = True
+        elif arg == "--maximized":
+            maximized = True
+        elif arg == "--empty-sessions":
+            # Checked after the loop: every profile must be closed before any of
+            # them is emptied.
+            empty_sessions = True
+        elif arg == "--lock-windows":
+            # Flow-execution mode only (checked after the loop): the engine holds
+            # the lock, so without a run there is nobody to hold it.
+            lock_windows = True
         elif arg.startswith("--extensions="):
             # Comma-separated friendly names (see KNOWN_EXTENSIONS) or raw Web Store
             # ids. Nothing is installed by default.
@@ -4060,6 +4186,9 @@ def main():
     if overlay_components and run_tests is None:
         sys.exit("--execution-overlay requires --run-tests (there is no flow "
                  "execution to visualize without it).")
+    if lock_windows and run_tests is None:
+        sys.exit("--lock-windows requires --run-tests (the windows are locked while "
+                 "their scenarios run; with none, there is nothing to lock them for).")
     if no_browser:
         if recorder:
             sys.exit("--no-browser cannot record: the recorder is used by clicking in "
@@ -4071,6 +4200,15 @@ def main():
             log.warning("--execution-overlay does nothing with --no-browser: there is "
                         "no page to draw it in. Running without it.")
             overlay_components = None
+        # Said and dropped, as the overlay is: each is about a window, and a run
+        # with none is still the run that was asked for.
+        for flag, given in (("--lock-windows", lock_windows),
+                            ("--maximized", maximized),
+                            ("--empty-sessions", empty_sessions)):
+            if given:
+                log.info("%s does nothing with --no-browser: there are no windows "
+                         "and no profiles to open.", flag)
+        lock_windows = maximized = empty_sessions = False
         if detach:
             # Before the --server-log check below: a detach that is about to be
             # ignored must not cost the run its server logs.
@@ -4280,6 +4418,18 @@ def main():
     if not chrome and not no_browser:
         sys.exit(chrome_missing_message())
 
+    # --empty-sessions deletes files a running browser has open, and launching onto
+    # that browser would only add a window to the old session. Every profile is
+    # checked before any is emptied, so a refusal never leaves half of them empty.
+    if empty_sessions:
+        open_now = [u.login for u in users
+                    if profile_in_use(os.path.join(
+                        sessions_dir, session_dir_for(session_prefix, u.env, u.login)))]
+        if open_now:
+            sys.exit("--empty-sessions: the window of %s is still open. Close it and "
+                     "run again - a profile cannot be emptied under a running browser."
+                     % ", ".join(open_now))
+
     # Everything is resolved and valid from here on, so this event describes the
     # run a consumer is about to watch (never the passwords, which stay in the
     # config and the profile).
@@ -4376,7 +4526,11 @@ def main():
                 log_hub.add_session(os.path.basename(profile), entry_prefix)
             continue
         os.makedirs(profile, exist_ok=True)
-        set_profile_name(profile, "%s - %s" % (cls, login))
+        if empty_sessions:
+            # First, so everything below plants into the emptied profile.
+            log.info("Emptying %s: %d item(s) of cache, cookies, storage and history "
+                     "removed.", session_dir, clear_session_data(profile))
+        set_profile_name(profile, "%s - %s" % (cls, login), maximized=maximized)
         clear_previous_tabs(profile)  # always start with one tab, keep the login
         # Install the auto-login extension into the profile (must run after
         # set_profile_name, which writes the Preferences file this merges into).
@@ -4410,7 +4564,8 @@ def main():
         proc = open_window(chrome, profile, cls, login, url,
                            bool(run_tests or recorder)
                            or bool(EXTENSIONS_NEED_CDP and wanted),
-                           spawn_kwargs, bind_lifetime=not detach)
+                           spawn_kwargs, bind_lifetime=not detach,
+                           maximized=maximized)
         procs.append((cls, proc))
         if EXTENSIONS_NEED_CDP and wanted:
             _install_extensions_for(profile, wanted)
@@ -4495,9 +4650,11 @@ def main():
                                                     bind_lifetime=not detach,
                                                     extension_dirs=extension_dirs,
                                                     log_hub=log_hub,
-                                                    session_envs=session_envs)
+                                                    session_envs=session_envs,
+                                                    maximized=maximized)
                                        if staged else None,
-                               browser=not no_browser)
+                               browser=not no_browser,
+                               lock_windows=lock_windows)
         except KeyboardInterrupt:
             stopped = True
             raise

@@ -518,6 +518,18 @@ class LaunchSessionsPage(QWidget):
         self.overlay_list.list.setMaximumHeight(120)
         self.overlay_list.changed.connect(self._changed)
         inner.addWidget(self.overlay_list)
+        self.maximized = QCheckBox("Open the windows full screen (maximized)")
+        self.maximized.toggled.connect(self._changed)
+        inner.addWidget(self.maximized)
+        self.lock_windows = QCheckBox("Lock the windows while scenarios run")
+        self.lock_windows.setToolTip(
+            "While a window's scenarios run, its page ignores your mouse and "
+            "keyboard, so a stray click cannot steer the run. It unlocks when they "
+            "finish. The browser's own tabs, address bar and close button still "
+            "work; a tab the scenario opens is not locked, and the execution "
+            "overlay cannot be scrolled until then.")
+        self.lock_windows.toggled.connect(self._changed)
+        inner.addWidget(self.lock_windows)
         self.detach = QCheckBox("Leave the windows running after the launcher exits")
         self.detach.toggled.connect(self._changed)
         inner.addWidget(self.detach)
@@ -614,7 +626,9 @@ class LaunchSessionsPage(QWidget):
                          "all_at_once": self.jobs_all.isChecked(),
                          "auto_jobs": self.jobs_auto.isChecked(),
                          "keep_open": self.keep_open.isChecked(),
-                         "detach": self.detach.isChecked()},
+                         "detach": self.detach.isChecked(),
+                         "maximized": self.maximized.isChecked(),
+                         "lock_windows": self.lock_windows.isChecked()},
             "extensions": {"mode": self._ext_mode_value(),
                            "names": self.ext_list.checked()},
             "server_logs": {"mode": self._logs_mode_value(),
@@ -657,6 +671,8 @@ class LaunchSessionsPage(QWidget):
             self.jobs_auto.setChecked(bool(sessions["auto_jobs"]))
             self.keep_open.setChecked(bool(sessions["keep_open"]))
             self.detach.setChecked(bool(sessions["detach"]))
+            self.maximized.setChecked(bool(sessions["maximized"]))
+            self.lock_windows.setChecked(bool(sessions["lock_windows"]))
 
             extensions = config["extensions"]
             self.ext_mode.set_current({launch.EXT_NONE: "None",

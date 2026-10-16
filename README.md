@@ -357,6 +357,13 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
   `tag:NAME` selectors. `config` runs each user's **own** `run-tests` field from
   `users.json` (see below).
 - `--detach` — fire-and-forget: leave windows running after the script exits.
+- `--maximized` — open every window maximized. Without it a window opens at its
+  normal size, even one Chrome last closed maximized.
+- `--empty-sessions` — start every profile empty: its cache, cookies, site storage,
+  history and form data are deleted before the window opens, so each account signs
+  in from scratch. The profile folder, its extensions and the saved password stay.
+  Refused while a profile's window is still open. In the GUI: RUN ▾ → *Empty
+  Sessions*.
 - `--log-level=LEVEL` — `DEBUG`/`INFO`/`WARNING`/`ERROR` (default `INFO`; also via
   the `OPEN_USERS_LOG_LEVEL` env var).
 - `--execution-overlay=LIST` — show the in-page execution HUD while running flows
@@ -468,6 +475,14 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
   the Execution Overlay, if enabled); close them manually or with CTRL+C. The
   launcher still exits with the aggregate run result either way. Only valid together
   with `--run-tests`.
+- `--lock-windows` — while a window's scenarios run, its page ignores your mouse and
+  keyboard, so a stray click cannot steer the run; it unlocks when they finish. The
+  browser's own tabs, address bar and close button still work, a tab the scenario
+  opens is not locked, and the execution overlay cannot be scrolled meanwhile. The
+  lock is lifted for the instant each scripted click or key press is sent (a few
+  hundredths of a second, its checks made while still locked): too short for a
+  person's click, whose button is held longer, but a key pressed at that very
+  moment can get through. Only valid together with `--run-tests`.
 - `--no-browser` — run the scenarios with no browser at all. Only for scenarios made
   of service steps and `assert_host_up`, their `use:` blocks included; any other is
   refused before the run starts, named with the page steps it takes. Sessions,

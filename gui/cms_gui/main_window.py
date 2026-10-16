@@ -132,6 +132,10 @@ def _running_and_failed(up, down):
                                     "%d failed" % down if down else ""]))
 
 
+# How a run on emptied profiles announces itself, on the Run page and in History.
+EMPTY_PREFIX = "empty sessions · "
+
+
 def _background_tip(blockers):
     """The In Background entry's tooltip: what it does, or what stands in its way."""
     if not blockers:
@@ -451,6 +455,15 @@ class MainWindow(QMainWindow):
             "Continues the selected scenario if there is one.")
         self.record_action.triggered.connect(self.start_recording)
         self.run_menu.addAction(self.record_action)
+        # The same launch again, on profiles emptied first. Always offered: any
+        # run that opens windows can start from empty ones.
+        self.empty_action = QAction("Empty Sessions", self)
+        self.empty_action.setToolTip(
+            "Open every window with its cache, cookies, site storage and history "
+            "cleared first; each account signs in from scratch. The profile "
+            "folders and their extensions stay.")
+        self.empty_action.triggered.connect(self.start_empty_run)
+        self.run_menu.addAction(self.empty_action)
         self.run_menu.aboutToShow.connect(self._update_background_action)
         self.run_button.setMenu(self.run_menu)
         # Stop mirrors RUN: the button is the whole run, the arrow is the one
@@ -1460,7 +1473,12 @@ class MainWindow(QMainWindow):
             return
         self.start_run(background=True)
 
-    def start_run(self, source=None, recorder=False, only_login=None, background=False):
+    def start_empty_run(self):
+        """RUN's menu -> Empty Sessions: the same launch, every profile emptied first."""
+        self.start_run(empty=True)
+
+    def start_run(self, source=None, recorder=False, only_login=None, background=False,
+                  empty=False):
         if self.process.is_running():
             return
         if not self.core.is_configured():
@@ -1482,6 +1500,8 @@ class MainWindow(QMainWindow):
         args = page.argv()
         if background:
             args = commands.for_background(args)
+        if empty:
+            args = commands.for_empty_sessions(args)
         if recorder:
             args = commands.for_recording(args)
             if only_login:
@@ -1505,23 +1525,27 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self._stopping = False
         self._entry_id = self.history.begin(
-            *self._history_payload(source, page, args, argv, background))
+            *self._history_payload(source, page, args, argv, background, empty))
         if recorder:
             self.run.run_started(
                 ("continuing %s · " % recorder if recorder is not True else "")
                 + "recorder · press Capture Step (or F2) in a window")
         elif source == "launch":
-            self.run.run_started("%s · events on stdout" % page.run_meta(background))
+            self.run.run_started("%s%s · events on stdout"
+                                 % (EMPTY_PREFIX if empty else "",
+                                    page.run_meta(background)))
         else:
             state = page.state()
-            self.run.run_started("%sjobs=%s · %s · events on stdout"
-                                 % ("in the background · " if background else "",
+            self.run.run_started("%s%sjobs=%s · %s · events on stdout"
+                                 % (EMPTY_PREFIX if empty else "",
+                                    "in the background · " if background else "",
                                     state.get("--jobs") or "1",
                                     state.get("--run-tests") or "(launch only)"))
         self.show_page("run")
         self.process.start(argv, working_dir=self.core.spawn_dir())
 
-    def _history_payload(self, source, page, args, argv, background=False):
+    def _history_payload(self, source, page, args, argv, background=False,
+                         empty=False):
         """(kind, entry fields) for the run about to start.
 
         Both halves go in: what the user asked for, and the command it became.
@@ -1536,7 +1560,8 @@ class MainWindow(QMainWindow):
             config = page.state()
             return history_mod.LAUNCH, {
                 "argv": list(argv), "display_command": display,
-                "summary": page.describe_line(background), "launch_config": config,
+                "summary": (EMPTY_PREFIX if empty else "") + page.describe_line(background),
+                "launch_config": config,
                 "command_state": launch_mod.to_command_state(config, self.inventory)}
         state = page.state()
         return history_mod.COMMAND, {
@@ -1822,9 +1847,12 @@ class MainWindow(QMainWindow):
 
     def rerun_entry(self, entry):
         source = self.restore_entry(entry)
-        # Running in the background is part of what was asked for, even though no
-        # saved configuration keeps it - the command it became does.
-        self.start_run(source, background="--no-browser" in (entry.get("argv") or []))
+        # Running in the background, or on emptied profiles, is part of what was
+        # asked for, even though no saved configuration keeps it - the command it
+        # became does.
+        argv = entry.get("argv") or []
+        self.start_run(source, background="--no-browser" in argv,
+                       empty="--empty-sessions" in argv)
 
     def _open_log(self, path):
         """Show an archived log on the Log page, where the filters are.

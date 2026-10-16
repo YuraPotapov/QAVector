@@ -327,6 +327,78 @@ def _parallel_harness(monkeypatch, tmp_path, on_scenario):
     return captured
 
 
+# --------------------------------------------------------------- --lock-windows
+
+class _LockingAdapter(_FakeAdapter):
+    """Says what was done to it, in order, alongside the scenarios run on it."""
+
+    def __init__(self, calls, takes=True):
+        self.calls = calls
+        self.takes = takes
+
+    def lock_input(self, on):
+        self.calls.append(("lock", on))
+        return self.takes
+
+    def disconnect(self):
+        self.calls.append(("disconnect",))
+
+
+def _lock_harness(monkeypatch, tmp_path, on_scenario=None, takes=True):
+    calls = []
+    captured = _parallel_harness(
+        monkeypatch, tmp_path,
+        lambda name: (calls.append(("scenario", name)),
+                      on_scenario and on_scenario(name)))
+    monkeypatch.setattr(runner, "_attach",
+                        lambda profile, name: _LockingAdapter(calls, takes))
+    return calls, captured
+
+
+def test_a_locked_window_is_locked_for_its_scenarios_and_let_go_before_detaching(
+        monkeypatch, tmp_path):
+    calls, _captured = _lock_harness(monkeypatch, tmp_path)
+    runner.run_scenarios(_sessions(("a", ("s1", "s2"))), "config",
+                         reports_dir=str(tmp_path), lock_windows=True)
+    assert calls == [("lock", True), ("scenario", "a"), ("scenario", "a"),
+                     ("lock", False), ("disconnect",)]
+
+
+def test_a_window_is_unlocked_even_when_its_run_blows_up(monkeypatch, tmp_path):
+    def explode(_name):
+        raise RuntimeError("boom")
+
+    calls, _captured = _lock_harness(monkeypatch, tmp_path, explode)
+    with pytest.raises(RuntimeError):
+        runner.run_scenarios(_sessions(("a", ("s1",))), "config",
+                             reports_dir=str(tmp_path), lock_windows=True)
+    assert calls[-2:] == [("lock", False), ("disconnect",)]
+
+
+def test_a_lock_that_cannot_be_taken_does_not_stop_the_run(monkeypatch, tmp_path):
+    calls, captured = _lock_harness(monkeypatch, tmp_path, takes=False)
+    runner.run_scenarios(_sessions(("a", ("s1",))), "config",
+                         reports_dir=str(tmp_path), lock_windows=True)
+    # Nothing to let go of afterwards: it was never held.
+    assert calls == [("lock", True), ("scenario", "a"), ("disconnect",)]
+    assert [f.status for f in captured["run"].flows] == [PASS]
+
+
+def test_windows_are_not_locked_unless_asked(monkeypatch, tmp_path):
+    calls, _captured = _lock_harness(monkeypatch, tmp_path)
+    runner.run_scenarios(_sessions(("a", ("s1",))), "config",
+                         reports_dir=str(tmp_path))
+    assert ("lock", True) not in calls
+
+
+def test_every_parallel_window_is_locked(monkeypatch, tmp_path):
+    calls, _captured = _lock_harness(monkeypatch, tmp_path)
+    runner.run_scenarios(_sessions(("a", ("s",)), ("b", ("s",))), "config",
+                         reports_dir=str(tmp_path), jobs=2, lock_windows=True)
+    assert calls.count(("lock", True)) == 2
+    assert calls.count(("lock", False)) == 2
+
+
 def test_jobs_preserves_session_order_regardless_of_completion(monkeypatch, tmp_path):
     # Session A is the slowest, so it finishes last - but must still be reported
     # first, because the summary follows session order, not completion order.

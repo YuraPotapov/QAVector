@@ -16,6 +16,24 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- RUN ▾ → **Empty Sessions** (`--empty-sessions`): the same launch with every
+  profile emptied first - cache, cookies, site storage, history and form data -
+  so each account signs in from scratch. The profile folders, their extensions
+  and the saved passwords stay. Refused while a profile's window is still open.
+- Launch Sessions → Advanced → **Open the windows full screen (maximized)**
+  (`--maximized`). Unticked, windows open at their normal size again, even ones
+  Chrome last closed maximized.
+- Launch Sessions → Advanced → **Lock the windows while scenarios run**
+  (`--lock-windows`): each page ignores the mouse and keyboard until its
+  scenarios finish, so a stray click cannot steer the run. The browser's own
+  tabs, address bar and close button stay usable; a tab the scenario opens is
+  not locked; the execution overlay cannot be scrolled while its window is
+  locked. Chrome drops scripted input under the lock too, so it is lifted for
+  the instant each click or key press is sent - a few hundredths of a second,
+  every check made beforehand - which a person's click is too long to fit
+  into, though a key pressed at that very moment can get through.
+
 ## [0.16.28] - 2026-10-15
 
 ### Fixed

@@ -63,7 +63,8 @@ DEFAULTS = {
     "environment": "",                                  # "" = every environment
     "users": {"mode": USERS_ALL, "logins": []},
     "sessions": {"jobs": 1, "all_at_once": False, "auto_jobs": False,
-                 "keep_open": True, "detach": False},
+                 "keep_open": True, "detach": False, "maximized": False,
+                 "lock_windows": False},
     "extensions": {"mode": EXT_ALL, "names": []},
     "server_logs": {"mode": LOGS_OFF, "names": []},
     "scenarios": {"mode": SCENARIOS_NONE, "selected": []},
@@ -113,6 +114,7 @@ def to_command_state(config, inventory=None):
         "--server-log": _server_logs(config["server_logs"]),
         "--log-level": advanced["log_level"] or "INFO",
         "--detach": bool(sessions["detach"]),
+        "--maximized": bool(sessions["maximized"]),
 
         "--run-tests": _run_tests(config["scenarios"]),
         "--jobs": ("auto" if sessions["auto_jobs"] else
@@ -121,6 +123,7 @@ def to_command_state(config, inventory=None):
         "--execution-overlay": _overlay(config["overlay"], inventory),
         "--reports-dir": advanced["reports_dir"],
         "--close-after": not bool(sessions["keep_open"]),
+        "--lock-windows": bool(sessions["lock_windows"]),
 
         "--report-level": ",".join(report_level(config, inventory)),
         "--report-screen": _report_screen(config["screenshots"]),
@@ -286,6 +289,8 @@ def notes(config, inventory=None):
             ignored.append("the execution overlay")
         if not config["sessions"]["keep_open"]:
             ignored.append("closing the windows afterwards")
+        if config["sessions"]["lock_windows"]:
+            ignored.append("locking the windows")
         if ignored:
             result.append("Nothing is scripted, so %s will not apply."
                           % _join(ignored))
@@ -452,6 +457,22 @@ def sessions_label(config, background=False):
     return "%s, %s" % (at_once, after)
 
 
+def windows_label(config):
+    """How the windows open and whether they are locked; "" when neither is asked.
+
+    The lock is left out when nothing is scripted: it is held while scenarios run,
+    and notes() already says it will not apply.
+    """
+    config = merged(config)
+    sessions = config["sessions"]
+    parts = []
+    if sessions["maximized"]:
+        parts.append("maximized")
+    if sessions["lock_windows"] and config["scenarios"]["mode"] != SCENARIOS_NONE:
+        parts.append("locked while scenarios run")
+    return " · ".join(parts)
+
+
 def extensions_label(config):
     config = merged(config)
     extensions = config["extensions"]
@@ -470,6 +491,9 @@ def summarise(config, inventory=None):
             ("Sessions", sessions_label(config)),
             ("Extensions", extensions_label(config)),
             ("Scenarios", scenarios_label(config))]
+    windows = windows_label(config)
+    if windows:
+        rows.append(("Windows", windows))
     if config["scenarios"]["mode"] != SCENARIOS_NONE:
         level = report_level(config, inventory)
         rows.append(("Reports", "%s%s" % (

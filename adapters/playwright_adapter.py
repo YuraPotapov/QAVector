@@ -7,6 +7,7 @@ imported lazily inside :meth:`connect`, keeping this module importable (for unit
 tests) without the package installed.
 """
 
+import contextlib
 import logging
 
 from adapters.base import BrowserAdapter
@@ -136,6 +137,10 @@ class PlaywrightAdapter(BrowserAdapter):
         # doc_capture(): the elements of the steps already on the guide's page,
         # by selector, so they are measured again in one call, not one each.
         self._doc_handles = {}
+        # The CDP session the input lock is set through, opened on first use, and
+        # whether the page is locked now (see lock_input).
+        self._cdp = None
+        self._locked = False
         # Import here so the symbol is available for except-clauses without a
         # module-level Playwright import.
         from playwright.sync_api import TimeoutError as _Timeout
@@ -234,7 +239,18 @@ class PlaywrightAdapter(BrowserAdapter):
         self._page.fill(selector, value, timeout=timeout)
 
     def click(self, selector, timeout=None):
-        self._page.click(selector, timeout=timeout)
+        if not self._locked:
+            self._page.click(selector, timeout=timeout)
+            return
+        # Locked: every check a click makes - scrolled into view, visible, stable,
+        # enabled, not covered - is made while the lock is still on (trial), and
+        # the lock is lifted only for the press and release themselves. Lifted for
+        # the whole click, it stayed open for the actionability waits and the wait
+        # for a navigation the click might start, and a person's click landed in
+        # one of those gaps about one time in four.
+        self._page.click(selector, timeout=timeout, trial=True)
+        with self._unlocked():
+            self._page.click(selector, timeout=timeout, force=True, no_wait_after=True)
 
     def select(self, selector, value, timeout=None):
         # By option VALUE, not label: values are field names (company_id), which are
@@ -246,7 +262,8 @@ class PlaywrightAdapter(BrowserAdapter):
 
     def press_key(self, key):
         # Press on whatever is currently focused (e.g. right after a click:).
-        self._page.keyboard.press(key)
+        with self._unlocked():
+            self._page.keyboard.press(key)
 
     # ---------------------------------------------------------------- queries
     def exists(self, selector, timeout=None):
@@ -274,6 +291,47 @@ class PlaywrightAdapter(BrowserAdapter):
 
     def title(self):
         return self._page.title()
+
+    # ------------------------------------------------------------- input lock
+    # Input.setIgnoreInputEvents makes Chrome drop the page's mouse and keyboard
+    # input - and not only the person's. The mouse and key events Playwright
+    # dispatches over CDP are dropped too, silently: the click "succeeds" and
+    # nothing is clicked. Text from fill() arrives through Input.insertText, which
+    # the lock does not stop. So the lock is lifted for the click or the key press
+    # itself and is back before the step waits for anything (_unlocked).
+    # The setting belongs to the CDP session: once that detaches - disconnect(),
+    # or a launcher that died - Chrome lifts it, so no window stays locked.
+    def lock_input(self, on):
+        try:
+            if self._cdp is None:
+                self._cdp = self._page.context.new_cdp_session(self._page)
+            self._cdp.send("Input.setIgnoreInputEvents", {"ignore": bool(on)})
+        except Exception as exc:
+            log.warning("Could not %s the window: %s", "lock" if on else "unlock", exc)
+            self._locked = False
+            return False
+        self._locked = bool(on)
+        return True
+
+    @contextlib.contextmanager
+    def _unlocked(self):
+        """Let the adapter's own input through for the length of the block.
+
+        An unlock that fails raises: carrying on would drop the click without a
+        word, and a step that passes having done nothing is the worst outcome.
+        """
+        if not self._locked:
+            yield
+            return
+        self._cdp.send("Input.setIgnoreInputEvents", {"ignore": False})
+        try:
+            yield
+        finally:
+            try:
+                self._cdp.send("Input.setIgnoreInputEvents", {"ignore": True})
+            except Exception as exc:
+                log.warning("Could not lock the window again: %s", exc)
+                self._locked = False
 
     # -------------------------------------------------------------- overlay
     # The HUD lives inside the page as an isolated, pointer-events:none Shadow
@@ -491,6 +549,7 @@ class PlaywrightAdapter(BrowserAdapter):
         # Only detach Playwright; do NOT close the browser. The launcher owns
         # the Chrome process and closes it gracefully (close_all) so the login
         # session is flushed to disk. Closing it here would look like a crash.
+        # Stopping also detaches the lock's CDP session, which lifts the lock.
         try:
             self._pw.stop()
         except Exception:

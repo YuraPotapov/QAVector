@@ -789,7 +789,8 @@ def test_a_chosen_account_replaces_the_configurations_own_filter(window, monkeyp
 
 def test_run_offers_to_run_in_the_background(window):
     assert [a.text() for a in window.run_menu.actions()] == ["In Background",
-                                                             "With Recorder"]
+                                                             "With Recorder",
+                                                             "Empty Sessions"]
 
 
 def test_in_background_is_greyed_out_for_a_scenario_that_needs_a_browser(window,
@@ -868,11 +869,40 @@ def test_a_background_run_is_run_again_in_the_background(window, monkeypatch):
              "argv": ["python3", "session_launcher.py", "--no-browser",
                       "--run-tests=restart"]}
     window.rerun_entry(entry)
-    assert started == [("launch", {"background": True})]
+    assert started == [("launch", {"background": True, "empty": False})]
     started.clear()
     entry["argv"] = ["python3", "session_launcher.py", "--run-tests=restart"]
     window.rerun_entry(entry)
-    assert started == [("launch", {"background": False})]
+    assert started == [("launch", {"background": False, "empty": False})]
+
+
+# ------------------------------------------------------ RUN ▾ -> Empty Sessions
+
+def test_empty_sessions_runs_the_same_command_on_emptied_profiles(window, monkeypatch):
+    sent = {}
+    monkeypatch.setattr(window.process, "start",
+                        lambda argv, working_dir=None: sent.update(argv=argv) or True)
+    monkeypatch.setattr(window.core, "is_configured", lambda: True)
+    monkeypatch.setattr(window.core, "argv", lambda *a: list(a))
+    monkeypatch.setattr(window.launch, "argv",
+                        lambda: ["--run-tests=restart", "--maximized", "--events=-"])
+    monkeypatch.setattr(window.launch, "problem_list", lambda: [])
+    window._run_source = "launch"
+    window.empty_action.trigger()
+    assert sent["argv"] == ["--empty-sessions", "--run-tests=restart", "--maximized",
+                            "--events=-"]
+    assert window.run.meta.text().startswith("empty sessions")
+
+
+def test_an_empty_sessions_run_is_run_again_on_emptied_profiles(window, monkeypatch):
+    started = []
+    monkeypatch.setattr(window, "start_run",
+                        lambda source=None, **kw: started.append((source, kw)))
+    entry = {"kind": history_mod.LAUNCH, "launch_config": launch.merged({}),
+             "argv": ["python3", "session_launcher.py", "--empty-sessions",
+                      "--run-tests=restart"]}
+    window.rerun_entry(entry)
+    assert started == [("launch", {"background": False, "empty": True})]
 
 
 def test_closing_with_no_run_asks_nothing(window, monkeypatch):

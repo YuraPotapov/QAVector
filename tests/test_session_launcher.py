@@ -1,6 +1,9 @@
 import json
 import os
 import pathlib
+import socket
+import subprocess
+import sys
 
 import pytest
 
@@ -1563,7 +1566,7 @@ def launched(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "find_chrome", lambda: "/usr/bin/chrome")
     monkeypatch.setattr(sl.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(sl, "clear_devtools_port", lambda profile: None)
-    monkeypatch.setattr(sl, "set_profile_name", lambda profile, name: None)
+    monkeypatch.setattr(sl, "set_profile_name", lambda profile, name, **kw: None)
     monkeypatch.setattr(sl, "clear_previous_tabs", lambda profile: None)
     monkeypatch.setattr(sl, "install_autologin_extension",
                         lambda *a, **k: None)
@@ -1846,6 +1849,228 @@ def test_describe_says_which_scenarios_can_run_without_a_browser(monkeypatch, co
     by_id = {s["id"]: s for s in payload["scenarios"]}
     assert by_id["demo_simple"]["browser_actions"] == []
     assert "assert_exists" in by_id["demo_smoke"]["browser_actions"]
+
+
+# ============================================== --maximized, --empty-sessions, --lock-windows
+
+def test_open_window_maximizes_only_when_asked(monkeypatch):
+    opened = []
+    monkeypatch.setattr(sl, "clear_devtools_port", lambda profile: None)
+    monkeypatch.setattr(sl.subprocess, "Popen",
+                        lambda argv, **kw: opened.append(argv) or _FakeProc(argv))
+    sl.open_window("/usr/bin/chrome", "/tmp/p", "Agent", "a", "http://x", False, {})
+    sl.open_window("/usr/bin/chrome", "/tmp/p", "Agent", "a", "http://x", False, {},
+                   maximized=True)
+    assert "--start-maximized" not in opened[0]
+    assert "--start-maximized" in opened[1]
+    assert opened[1][-1] == "http://x"          # the URL stays last
+
+
+def test_a_staged_window_opens_maximized_too(monkeypatch):
+    opened = []
+    monkeypatch.setattr(sl, "clear_devtools_port", lambda profile: None)
+    monkeypatch.setattr(sl.subprocess, "Popen",
+                        lambda argv, **kw: opened.append(argv) or _FakeProc(argv))
+    source = sl.WindowSource("/usr/bin/chrome", "http://x", {}, [], stagger_s=0,
+                             maximized=True)
+    source.open(("Agent", None, "/tmp/dev-agent", "agent", "http://x", ()))
+    assert "--start-maximized" in opened[0]
+
+
+def _placement(tmp_path, **placement):
+    default = tmp_path / "Default"
+    default.mkdir(parents=True, exist_ok=True)
+    (default / "Preferences").write_text(json.dumps(
+        {"browser": {"window_placement": placement}}), encoding="utf-8")
+    return default / "Preferences"
+
+
+def test_an_unmaximized_launch_forgets_the_window_chrome_closed_maximized(tmp_path):
+    # Chrome reopens a window as it last saw it, so one --maximized run would
+    # otherwise keep every later one maximized with the box unticked.
+    prefs = _placement(tmp_path, maximized=True, left=10, right=900)
+    sl.set_profile_name(str(tmp_path), "Agent - a")
+    placement = json.loads(prefs.read_text())["browser"]["window_placement"]
+    assert placement == {"maximized": False, "left": 10, "right": 900}
+
+
+def test_a_maximized_launch_leaves_the_placement_to_chrome(tmp_path):
+    prefs = _placement(tmp_path, maximized=True, left=10)
+    sl.set_profile_name(str(tmp_path), "Agent - a", maximized=True)
+    assert json.loads(prefs.read_text())["browser"]["window_placement"] == \
+        {"maximized": True, "left": 10}
+
+
+def test_a_profile_with_no_placement_is_not_given_one(tmp_path):
+    sl.set_profile_name(str(tmp_path), "Agent - a")
+    prefs = json.loads((tmp_path / "Default" / "Preferences").read_text())
+    assert "browser" not in prefs
+
+
+def _used_profile(root):
+    """A profile as a few visits leave it: the launcher's parts and the visits'."""
+    files = {
+        # What makes it this launcher's profile - kept.
+        "Default/Preferences": "{}",
+        "Default/Secure Preferences": "{}",
+        "Default/Extensions/.autologin_key": "KEY",
+        "Default/Extensions/abcdef/1.0_0/manifest.json": "{}",
+        "Default/Local Extension Settings/abcdef/000001.log": "x",
+        "Default/Login Data": "db",
+        "Default/Login Data-journal": "",
+        "Local State": "{}",
+        # What the visits left - removed.
+        "Default/Cookies": "c",
+        "Default/Network/Cookies": "c",
+        "Default/Cache/Cache_Data/index": "i",
+        "Default/Code Cache/js/index": "i",
+        "Default/Local Storage/leveldb/000003.log": "l",
+        "Default/Session Storage/000003.log": "s",
+        "Default/IndexedDB/http_localhost_8069.indexeddb.leveldb/LOG": "",
+        "Default/Service Worker/Database/LOG": "",
+        "Default/History": "h",
+        "Default/Web Data": "w",
+        "Default/Sessions/Session_1": "s",
+        "GrShaderCache/data_0": "g",
+    }
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def test_clear_session_data_empties_the_profile_but_keeps_what_makes_it_ours(tmp_path):
+    _used_profile(tmp_path)
+    removed = sl.clear_session_data(str(tmp_path))
+    left = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")
+                  if p.is_file())
+    assert left == sorted([
+        "Default/Preferences", "Default/Secure Preferences",
+        "Default/Extensions/.autologin_key",
+        "Default/Extensions/abcdef/1.0_0/manifest.json",
+        "Default/Local Extension Settings/abcdef/000001.log",
+        "Default/Login Data", "Default/Login Data-journal", "Local State"])
+    # Counted by what was at the top: a folder is one item, however deep.
+    assert removed == 12
+
+
+def test_clear_session_data_on_a_new_profile_does_nothing(tmp_path):
+    assert sl.clear_session_data(str(tmp_path / "never-launched")) == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SingletonLock is the POSIX lock")
+class TestProfileInUse:
+    @staticmethod
+    def _lock(profile, target):
+        os.makedirs(profile, exist_ok=True)
+        os.symlink(target, os.path.join(profile, "SingletonLock"))
+
+    def test_no_lock_is_not_in_use(self, tmp_path):
+        assert sl.profile_in_use(str(tmp_path)) is False
+
+    def test_a_browser_on_the_profile_is(self, tmp_path):
+        # Stands in for Chrome: alive, and its command line names the profile.
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                                 "--user-data-dir=%s" % tmp_path])
+        try:
+            self._lock(str(tmp_path), "%s-%d" % (socket.gethostname(), proc.pid))
+            assert sl.profile_in_use(str(tmp_path)) is True
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_a_lock_left_by_a_killed_browser_is_not(self, tmp_path):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        self._lock(str(tmp_path), "%s-%d" % (socket.gethostname(), proc.pid))
+        assert sl.profile_in_use(str(tmp_path)) is False
+
+    def test_a_pid_handed_to_something_else_is_not(self, tmp_path):
+        # This test process is alive, but it is not a browser on that profile.
+        self._lock(str(tmp_path), "%s-%d" % (socket.gethostname(), os.getpid()))
+        assert sl.profile_in_use(str(tmp_path / "elsewhere")) is False
+
+    def test_another_machines_browser_is(self, tmp_path):
+        self._lock(str(tmp_path), "some-other-host.invalid-4242")
+        assert sl.profile_in_use(str(tmp_path)) is True
+
+
+def test_maximized_opens_every_window_maximized(launched, local_config):
+    argv, = launched(local_config, "--env=localhost", "--maximized")
+    assert "--start-maximized" in argv
+
+
+def test_a_window_is_not_maximized_unless_asked(launched, local_config):
+    argv, = launched(local_config, "--env=localhost")
+    assert "--start-maximized" not in argv
+
+
+def test_empty_sessions_empties_each_profile_before_its_window_opens(
+        launched, local_config, tmp_path, monkeypatch):
+    profile = tmp_path / "profiles" / sl.session_dir_for(None, LOCAL, "admin")
+    _used_profile(profile)
+    cookies = profile / "Default" / "Network" / "Cookies"
+    still_there = []
+    monkeypatch.setattr(sl.subprocess, "Popen",
+                        lambda argv, **kw: still_there.append(cookies.exists())
+                        or _FakeProc(argv))
+    launched(local_config, "--env=localhost", "--empty-sessions")
+    assert still_there == [False]
+    assert (profile / "Default" / "Preferences").exists()
+    assert (profile / "Default" / "Login Data").exists()
+
+
+def test_a_plain_launch_keeps_the_profile_as_it_was(launched, local_config, tmp_path):
+    profile = tmp_path / "profiles" / sl.session_dir_for(None, LOCAL, "admin")
+    _used_profile(profile)
+    launched(local_config, "--env=localhost")
+    assert (profile / "Default" / "Network" / "Cookies").exists()
+
+
+def test_empty_sessions_refuses_while_a_window_is_still_open(launched, config,
+                                                            monkeypatch):
+    # Checked for every profile before any is emptied: a refusal must not leave
+    # half of them empty.
+    monkeypatch.setattr(sl, "profile_in_use", lambda profile: "role_division" in profile)
+    monkeypatch.setattr(sl, "clear_session_data",
+                        lambda profile: pytest.fail("emptied before refusing"))
+    with pytest.raises(SystemExit) as exc:
+        launched(config, "--url=http://localhost:8069", "--empty-sessions")
+    message = str(exc.value)
+    assert "still open" in message
+    assert "role_division, role_division" in message and "admin" not in message
+
+
+def test_lock_windows_needs_scenarios(monkeypatch, config):
+    message = _main(monkeypatch, config, "--env=dev", "--lock-windows")
+    assert "--lock-windows requires --run-tests" in message
+
+
+def test_lock_windows_reaches_the_run(launched, local_config, monkeypatch):
+    from engine import runner as engine_runner
+
+    captured = {}
+
+    def fake_run(sessions, which, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(engine_runner, "run_scenarios", fake_run)
+    with pytest.raises(SystemExit):
+        launched(local_config, "--env=localhost", "--run-tests=anything",
+                 "--lock-windows")
+    assert captured["lock_windows"] is True
+
+
+def test_no_browser_drops_the_window_flags(launched, monkeypatch, config, caplog):
+    with caplog.at_level("INFO"):
+        captured, code = _run_without_browser(launched, monkeypatch, config,
+                                              "--lock-windows", "--maximized",
+                                              "--empty-sessions")
+    assert code == 0
+    assert captured["lock_windows"] is False
+    for flag in ("--lock-windows", "--maximized", "--empty-sessions"):
+        assert "%s does nothing with --no-browser" % flag in caplog.text
 
 
 # --------------------------------------------------------------------- cycles

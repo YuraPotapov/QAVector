@@ -52,6 +52,7 @@ FLAGS = [
          choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO"),
     Flag("--detach", "flag", GENERAL,
          "Fire-and-forget: leave windows running after the launcher exits."),
+    Flag("--maximized", "flag", GENERAL, "Open every window maximized."),
     # No needs_run_tests: a plain launch streams these into the Run page's
     # session panels just as a --run-tests one does. Choices come from
     # --describe (log_sources), filtered to the environment being launched.
@@ -77,6 +78,9 @@ FLAGS = [
          "Where run artifacts are written.", needs_run_tests=True),
     Flag("--close-after", "flag", FLOW,
          "Close the windows once the run finishes.", needs_run_tests=True),
+    Flag("--lock-windows", "flag", FLOW,
+         "Pages ignore your mouse and keyboard while their scenarios run.",
+         needs_run_tests=True),
 
     Flag("--report-level", "list", REPORTS,
          "Which artifacts to generate.",
@@ -166,6 +170,8 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              "--recorder",
              # And RUN ▾ -> "In Background" adds this one, for the same reason.
              "--no-browser",
+             # And RUN ▾ -> "Empty Sessions" this one.
+             "--empty-sessions",
              "--help", "-h", "--version", "-V")
 
 # One-shot commands offered in the Tools menu: (what it is called, what a
@@ -204,12 +210,23 @@ def for_background(args):
     ``--no-browser`` goes first, ahead of --events (which build_argv always puts
     last). What only means something to a window comes out: ``--detach`` (there
     is none to leave running), ``--execution-overlay`` (no page to draw it in),
-    ``--report-screen`` (nothing to photograph) and ``--report-doc`` (a guide is a
-    picture of every page). Everything else - --jobs above all - is the run
-    exactly as it was configured.
+    ``--report-screen`` (nothing to photograph), ``--report-doc`` (a guide is a
+    picture of every page), and ``--maximized`` and ``--lock-windows`` (no window
+    to size or lock). Everything else - --jobs above all - is the run exactly as
+    it was configured.
     """
-    drop = {"--detach", "--execution-overlay", "--report-screen", "--report-doc"}
+    drop = {"--detach", "--execution-overlay", "--report-screen", "--report-doc",
+            "--maximized", "--lock-windows"}
     return ["--no-browser"] + [a for a in args if a.split("=", 1)[0] not in drop]
+
+
+def for_empty_sessions(args):
+    """``args`` for RUN's menu -> Empty Sessions: the same run on emptied profiles.
+
+    Nothing comes out: every account, scenario and window setting is as it was
+    configured, and the launcher clears each profile before its window opens.
+    """
+    return ["--empty-sessions"] + list(args)
 
 
 def flags_for(group):

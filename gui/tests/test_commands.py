@@ -233,6 +233,31 @@ def test_background_is_the_same_run_with_no_browser():
                         "--report-level=result,screen", "--events=-", "--control=-"]
 
 
+def test_background_drops_what_only_a_window_has():
+    kept = commands.for_background(["--run-tests=restart", "--maximized",
+                                    "--lock-windows", "--events=-"])
+    assert kept == ["--no-browser", "--run-tests=restart", "--events=-"]
+
+
 def test_no_browser_is_a_mode_the_gui_adds_not_a_form_field():
     assert "--no-browser" in commands.GUI_OWNED
     assert "--no-browser" not in commands.BY_NAME
+
+
+# ------------------------------------------------------------ empty sessions
+
+def test_empty_sessions_is_the_same_run_on_emptied_profiles():
+    args = ["--env=localhost", "--run-tests=all", "--maximized", "--lock-windows",
+            "--events=-", "--control=-"]
+    assert commands.for_empty_sessions(args) == ["--empty-sessions"] + args
+    assert args[0] == "--env=localhost"         # the caller's list is left alone
+
+
+def test_empty_sessions_is_a_mode_the_gui_adds_not_a_form_field():
+    assert "--empty-sessions" in commands.GUI_OWNED
+    assert "--empty-sessions" not in commands.BY_NAME
+
+
+def test_recording_drops_the_lock_it_would_lock_the_recorder_out_with():
+    # The recorder is used by clicking in the window; the lock needs --run-tests.
+    assert commands.for_recording(["--maximized", "--lock-windows"]) == ["--maximized"]
