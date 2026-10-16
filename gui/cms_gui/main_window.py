@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
 from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
                history as history_mod, icon, icons,
                launch as launch_mod, load as load_mod,
-               logsourcesfile as lsf, stageswindow, theme, titlebar, widgets)
+               logsourcesfile as lsf, search, stageswindow, theme, titlebar,
+               widgets)
 from .askbridge import AskBridge
 from .cyclewatch import Listener
 from .cycleschedule import PlanScheduler
@@ -260,6 +261,16 @@ class MainWindow(QMainWindow):
         self.listener = Listener(self.core, self)
         self.listener.offers_changed.connect(self._offer_next)
         self._offering = False
+        # Search, Ctrl+K from any window. No button and no menu entry: the key
+        # is the way in - an action on the window and in no menu. Text fields
+        # let the key through to it (search.KeyCatcher, attached at startup).
+        self.cycles.set_listener(self.listener)
+        self._search = None
+        self.search_action = QAction("Search", self)
+        self.search_action.setShortcut(QKeySequence(search.SHORTCUT))
+        self.search_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.search_action.triggered.connect(self.open_search)
+        self.addAction(self.search_action)
         # Planned entries somebody asked to start later. Started when their
         # time comes - after the run going on then, if there is one.
         self.scheduler = PlanScheduler(self)
@@ -1603,6 +1614,43 @@ class MainWindow(QMainWindow):
             return
         self.run_state.mark_stopping(name)
         self.status_right.setText("stopping %s — the others carry on" % name)
+
+    # -- search (Ctrl+K) --------------------------------------------------------
+    def open_search(self):
+        """Search, over whichever window of the application is in front."""
+        if self._search is None:
+            self._search = search.SearchPopup(
+                self.search_hits,
+                [(key, label) for key, label, _mark in CONFIGURE + OBSERVE], self)
+            self._search.opened.connect(self.open_hit)
+        self._search.open_over(QApplication.activeWindow() or self)
+
+    def search_hits(self):
+        """What every page on the rail lists, filed under that page."""
+        hits = []
+        for key, _label, _mark in CONFIGURE + OBSERVE:
+            page = self._pages.get(key)
+            rows = getattr(page, "search_rows", None)
+            if rows is None or not self._offered(key):
+                continue
+            try:
+                found = rows()
+            except Exception:           # noqa: BLE001 - one page must not end search
+                logging.exception("Search could not read the %s page", key)
+                continue
+            hits.extend(one._replace(section=key) for one in found)
+        return hits
+
+    def open_hit(self, hit):
+        """Go to where ``hit`` lives, with it on screen - from whatever window."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.show_page(hit.section)
+        page = self._pages.get(hit.section)
+        if page is None or page.show_found(hit.target) is False:
+            self.status_right.setText("%s is no longer there" % hit.title)
 
     def open_clarify(self):
         """The clarification popup, over whichever window is in front."""

@@ -60,3 +60,28 @@ def test_a_running_scenario_s_time_moves_on_between_events(qapp):
     assert "5.0 s" in _texts(panel)
     panel.tick(1090.0)
     assert "1 min 30 s" in _texts(panel)
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_lists_the_runs_sessions_in_their_panels_words(qapp, dispose):
+    from cms_gui.pages.run import RunPage
+    from cms_gui.runner import RunState
+
+    state = RunState()
+    page = RunPage(state)
+    for name, login, now in (("shop-alice", "alice", "running"),
+                             ("shop-bob", "bob", "failed")):
+        session = state._session(name, login)
+        session["state"] = now
+        session["scenario"] = "qa_123_open_order"
+    state.started = True
+    page.refresh()
+    hits = page.search_rows()
+    assert [(h.title, h.status, h.tone, h.live) for h in hits] == [
+        ("shop-alice", "RUNNING", "outline", True), ("shop-bob", "FAIL", "bad", True)]
+    assert hits[0].detail == "alice · qa_123_open_order"
+    assert page.show_found("shop-bob")
+    assert not page.show_found("gone")
+    state.exit_code = 0                       # the run is over: nothing is active
+    assert not any(h.live for h in page.search_rows())
+    dispose(page)

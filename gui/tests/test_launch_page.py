@@ -459,3 +459,28 @@ def test_showing_the_accounts_lists_leaves_the_pick_alone(page):
     assert page.scenario_list.checked() == ["shop_cancel"]
     assert not page.scenario_list.selected_only()   # the view it had comes back
     page.reset()                                    # the page persists; leave it
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_lists_saved_configurations_and_opens_one(page):
+    page._configs.put("Shop smoke", page.state())
+    hits = page.search_rows()
+    assert [h.title for h in hits] == ["Shop smoke"]
+    assert hits[0].target == "Shop smoke" and hits[0].detail
+    assert page.show_found("Shop smoke")
+    assert page._current_config_name() == "Shop smoke"
+    assert not page.show_found("Gone")
+
+
+def test_opening_one_over_unsaved_edits_asks_first(page, monkeypatch):
+    from cms_gui import widgets
+
+    page._configs.put("Shop smoke", page.state())
+    page.jobs.setValue(page.jobs.value() + 2)
+    _open_saved(page, "Mine")
+    page.jobs.setValue(page.jobs.value() + 1)
+    assert page.is_dirty()
+    asked = []
+    monkeypatch.setattr(widgets, "confirm", lambda *a, **k: asked.append(a) or False)
+    assert page.show_found("Shop smoke")
+    assert asked and page._current_config_name() == "Mine"     # kept: they said no

@@ -54,8 +54,8 @@ KIND_LABELS = {TEXT: "text", REGEX: "regex"}
 #: Colour names, and where each one's value comes from. Stored by *name* and
 #: resolved when it is painted, never captured at import: ``theme`` rewrites its
 #: palette in place when dark mode is set, and a value read once would go on
-#: painting the light one forever - the wart already documented on
-#: ``widgets.Tag.STYLES``.
+#: painting the light one forever - which is what ``widgets.Tag`` did until it
+#: read its colours when set (``widgets.Tag.styles()``).
 #:
 #: Amber and red are the theme's own WARN and BAD, which are already one value
 #: for both modes. Green and blue are named here because the theme has no green:

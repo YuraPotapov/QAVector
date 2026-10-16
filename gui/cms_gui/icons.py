@@ -352,6 +352,13 @@ def _minus(painter, ink):
     painter.drawLine(QPointF(5.5, 12), QPointF(18.5, 12))
 
 
+def _close(painter, ink):
+    """A cross: put away what this sits on - a find bar, say."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(6.5, 6.5), QPointF(17.5, 17.5))
+    painter.drawLine(QPointF(17.5, 6.5), QPointF(6.5, 17.5))
+
+
 def _delete(painter, ink):
     """A bin: a lid with a handle over an open-topped can."""
     _stroke(painter, ink)
@@ -516,6 +523,7 @@ DRAWINGS = {
     "expand": _chevron_right,
     "plus": _plus,
     "minus": _minus,
+    "close": _close,
     "delete": _delete,
 }
 

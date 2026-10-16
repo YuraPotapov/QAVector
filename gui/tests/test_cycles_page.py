@@ -4325,3 +4325,94 @@ def test_a_change_is_checked_with_the_page_held_too(editing, qapp):
 def test_a_core_that_answers_at_once_never_holds_the_page(editing):
     editing._add_step("command.shell", after="d")
     assert not editing.busy.active()
+
+
+# ------------------------------------------------------------- Ctrl+F on the page
+def test_ctrl_f_searches_the_reader_the_person_is_in(opened):
+    from PySide6.QtTest import QTest
+
+    from cms_gui import findbar
+
+    opened.resize(1400, 900)
+    opened.show()
+    opened.activateWindow()
+    QTest.qWaitForWindowActive(opened)
+    opened.output.set_summary("", "<p>QA-123: open the order, then save the order.</p>")
+    opened.output.tabs.setCurrentIndex(0)
+    # Anywhere on the page: the output, read as its summary.
+    opened.output.summary.setFocus()
+    QTest.keyClick(opened.output.summary, Qt.Key_F, Qt.ControlModifier)
+    bar = opened.output.find_bar
+    assert bar.isVisible() and bar.target() is findbar.target_for(opened.output.summary)
+    QTest.keyClicks(bar.field, "order")
+    assert bar.count.text() == "1 of 2"
+    # The details on: the open search follows to the log.
+    opened.output.details_button.setChecked(True)
+    assert bar.target() is findbar.target_for(opened.output.log)
+    QTest.keyClick(bar.field, Qt.Key_Escape)
+
+    # In a subject's details: those are what is searched, by their own bar.
+    opened.subjects.details.setHtml("<p>Working on QA-124 - Cancel an order</p>")
+    opened.subjects.details.setFocus()
+    QTest.keyClick(opened.subjects.details, Qt.Key_F, Qt.ControlModifier)
+    assert opened.subjects.find_bar.isVisible()
+    assert opened.subjects.find_bar.target() is findbar.target_for(opened.subjects.details)
+    assert not bar.isVisible()
+
+    # The YAML tab is not a reader this offers: Ctrl+F there does nothing.
+    opened.subjects.find_bar.close_bar()
+    opened.output.tabs.setCurrentIndex(3)
+    opened.output.yaml.setFocus()
+    QTest.keyClick(opened.output.yaml, Qt.Key_F, Qt.ControlModifier)
+    assert not bar.isVisible() and not opened.subjects.find_bar.isVisible()
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+class _Listening:
+    enabled = True
+
+    def __init__(self, triggers, problems=None):
+        self.triggers = dict.fromkeys(triggers, {})
+        self.problems = dict(problems or {})
+
+
+def test_search_lists_cycles_their_runs_and_the_plan_with_their_states(opened):
+    opened.set_inventory(FakeInventory([row("demo", "Demo cycle"),
+                                        row("nightly", "Nightly", project="Shop")]))
+    opened.set_listener(_Listening([("nightly", "watch")]))
+    opened.subjects.set_sessions([
+        {"id": "demo:QA-1", "cycle": "demo", "subject": {"key": "QA-1", "title": "Export"},
+         "status": "success", "runs": []},
+        {"id": "demo:QA-2", "cycle": "demo", "subject": {"key": "QA-2"},
+         "running": True, "status": "running", "runs": []}])
+    opened.subjects.set_planned([{"id": "p1", "cycle": "nightly", "key": "QA-3",
+                                  "title": "Refund", "at": 0, "run_at": 4102444800}])
+    hits = {h.title: h for h in opened.search_rows()}
+    assert hits["Nightly"].status == "Listening" and hits["Nightly"].live
+    assert hits["Nightly"].detail == "Shop · nightly"
+    assert hits["Demo cycle"].status == "" and not hits["Demo cycle"].live
+    assert (hits["QA-1  Export"].status, hits["QA-1  Export"].tone) == ("Passed", "accent")
+    assert hits["QA-2"].status == "Running" and hits["QA-2"].live
+    assert hits["QA-3  Refund"].status == "Scheduled" and hits["QA-3  Refund"].live
+
+    opened.set_listener(_Listening([("nightly", "watch")],
+                                   {("nightly", "watch"): "401 Unauthorized"}))
+    assert {h.title: h.status for h in opened.search_rows()}["Nightly"] == "Listener problem"
+
+
+def test_a_found_cycle_opens_and_a_found_run_is_picked_as_a_click_would(opened, monkeypatch):
+    asked = []
+    monkeypatch.setattr(opened, "open", lambda cycle_id, then=None: asked.append(cycle_id))
+    assert opened.show_found(("cycle", "demo"))
+    assert asked == ["demo"]
+    assert not opened.show_found(("cycle", "gone"))
+
+    picked = []
+    opened.subjects.activated.connect(picked.append)
+    opened.subjects.set_sessions([{"id": "demo:QA-1", "cycle": "demo",
+                                   "subject": {"key": "QA-1"}, "status": "success",
+                                   "runs": []}])
+    assert opened.show_found(("session", "demo:QA-1"))
+    assert [one["id"] for one in picked] == ["demo:QA-1"]
+    assert opened.subjects.picked()["id"] == "demo:QA-1"
+    assert not opened.show_found(("session", "demo:QA-9"))

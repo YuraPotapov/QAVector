@@ -114,3 +114,13 @@ def test_the_wording_goes_back_when_the_mode_does(page):
     page.set_developer_mode(True)
     page.set_developer_mode(False)
     assert "--" not in _labels(page)
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_lists_each_environment_and_reveal_selects_it(page):
+    hits = page.search_rows()
+    assert [h.title for h in hits] == ["local", "staging", "demo"]
+    assert hits[1].detail == "https://staging.example.invalid · 10 accounts"
+    assert page.show_found("demo")
+    assert [index.row() for index in page.table.selectionModel().selectedRows()] == [2]
+    assert not page.show_found("gone")

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFil
                                QLineEdit, QMenu, QPushButton, QRadioButton,
                                QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-from .. import icons, launch, load as load_mod, store, theme, widgets
+from .. import icons, launch, load as load_mod, search, store, theme, widgets
 
 SCENARIO_MODES = [
     (launch.SCENARIOS_NONE, "Just open the windows",
@@ -1348,6 +1348,37 @@ Icon={custom_icon}
         self.settings.launch_config_name = ""
         self._reload_configs(select=UNSAVED)
         self._mark_clean()
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every saved configuration, said the way History says a run."""
+        found = []
+        for name in self._configs.names():
+            config = self._configs.get(name) or {}
+            found.append(search.hit(name, launch.describe_line(config, self.inventory),
+                                    target=name))
+        return found
+
+    def show_found(self, name):
+        """Open the configuration as choosing it in the combo would.
+
+        Asked first when the settings on screen are an unsaved edit: opening
+        another configuration replaces them.
+        """
+        if name not in self._configs.names():
+            return False
+        if name == self._current_config_name():
+            return True
+        if self.is_dirty() and not widgets.confirm(
+                self, "Open \"%s\"" % name,
+                "The settings on screen have unsaved changes.",
+                "Opening \"%s\" replaces them." % name,
+                agree="Open it", kind="warn"):
+            return True
+        if self.config_combo.findText(name) < 0:
+            self._reload_configs()       # saved since the combo was filled
+        self.config_combo.setCurrentText(name)
+        return True
 
     # -- helpers --------------------------------------------------------------
     def reset(self):

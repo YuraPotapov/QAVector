@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
                                QPlainTextEdit, QProgressBar,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
-from .. import icons, theme, widgets
+from .. import icons, search, theme, widgets
 from .serverlogwindow import ServerLogWindow, level_html
 
 #: Lines painted in one session's Server log box. The model keeps more (see
@@ -551,6 +551,7 @@ class RunPage(QWidget):
         self.body_layout.addStretch(1)
         scroll.setWidget(body)
         column.addWidget(scroll, 1)
+        self._scroll = scroll           # Search scrolls a session's panel into view
 
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
@@ -572,6 +573,32 @@ class RunPage(QWidget):
             QTimer.singleShot(0, self.refresh)
 
     # -- lifecycle ------------------------------------------------------------
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """The run's sessions, in the words their own panels use for their state."""
+        state = self.run_state
+        going = bool(state.started and state.exit_code is None)
+        found = []
+        for name in dict.fromkeys(list(state.order) + list(state.sessions)):
+            session = state.sessions.get(name)
+            if session is None:
+                continue
+            label, variant = STATE_TAGS.get(session["state"],
+                                            (session["state"].upper(), "neutral"))
+            found.append(search.hit(
+                name, " · ".join(part for part in (session.get("login") or "",
+                                                   session.get("scenario") or "") if part),
+                label, variant, keys=" ".join(session.get("scenarios") or []),
+                target=name, live=going and session["state"] != "closed"))
+        return found
+
+    def show_found(self, name):
+        panel = self._panels.get(name)
+        if panel is None:
+            return False
+        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(panel))
+        return True
+
     def run_started(self, meta=""):
         self._started_at = time.time()
         self._finished_at = None

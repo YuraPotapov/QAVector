@@ -29,7 +29,7 @@ from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QPushButton, QTabWidget, QTextEdit, QVBoxLayout)
 
-from . import theme, widgets
+from . import findbar, theme, widgets
 from .approvaltext import ApprovalText, review_facts
 from .choicetable import SINGLE, ChoiceTable
 
@@ -140,6 +140,12 @@ class AskDialog(QDialog):
             self.original.setFont(theme.mono_font())
             self.detail_tabs.addTab(self.review, "Review")
             self.detail_tabs.addTab(self.original, "Original text")
+            # Ctrl+F over the review, or the original text - whichever is on show.
+            self.find_bar = findbar.FindBar()
+            self.detail_tabs.currentChanged.connect(
+                lambda _index: self.find_bar.retarget(self._find_target()))
+            findbar.install(self, lambda: (self.find_bar, self._find_target()))
+            layout.addWidget(self.find_bar)
             layout.addWidget(self.detail_tabs, 1)
         elif self._text is None:
             layout.addStretch(1)
@@ -224,6 +230,10 @@ class AskDialog(QDialog):
             self.text_editor.setFocus(Qt.OtherFocusReason)
         elif detail:
             self.review.setFocus(Qt.OtherFocusReason)
+
+    def _find_target(self):
+        """The review or the original text, whichever tab is on show."""
+        return findbar.target_for(self.detail_tabs.currentWidget())
 
     def _text_changed(self):
         """The first answer sends the text on, so it waits for some when required."""

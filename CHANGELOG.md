@@ -33,6 +33,24 @@ app-agnostic, since that will break things on purpose.
   the instant each click or key press is sent - a few hundredths of a second,
   every check made beforehand - which a person's click is too long to fit
   into, though a key pressed at that very moment can get through.
+- **Search, Ctrl+K from any window.** One field over everything the
+  application lists - services, log sources, scenarios and blocks, cycles with
+  their runs and plan, accounts, environments, launch configurations, the
+  current run, runs with reports, History - grouped by section, with each
+  record's state (a service running or failed, a cycle listening, a run going).
+  An empty field shows what is active now. Enter or a click goes to the page
+  with the record selected and in view. No button and no menu entry: the key is
+  the way in, and it works even while a text field has the focus. Passwords and
+  file contents are not searched.
+- **Ctrl+F in every reader**: a run's guide, a Jira task's reading copy and any
+  report on the Artifacts page (or its source, JSON or log as text), a cycle
+  step's summary or log, a subject's details, and an approval's review. Every
+  match is lit and counted ("3 of 12"); Enter / F3 go on, Shift+Enter / Shift+F3
+  go back, Esc closes.
+- **Artifacts → Export Documentation (HTML, PDF)** replaces Export PDF. On a
+  run's folder it writes a .zip with one file per session; on a session folder,
+  one file holding its scenarios' guides in the order they ran; on a scenario,
+  its guide. HTML files carry their pictures, so each can be sent on its own.
 
 ## [0.16.28] - 2026-10-15
 

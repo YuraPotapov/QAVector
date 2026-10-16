@@ -79,6 +79,11 @@ WARN_TINT = "#f7efe2"
 #: a pale pill is the brightest thing on the screen.
 MARK_TINT = ACCENT_RAMP[200]
 MARK_INK = ACCENT_RAMP[800]
+#: A status pill that says "good" (widgets.Tag's accent): the palest accent in
+#: the light theme, and for the same reason as the mark above its own pair in
+#: the dark one.
+TAG_TINT = ACCENT_RAMP[100]
+TAG_INK = ACCENT_RAMP[800]
 #: Red and amber as text, which the marks above can carry on either ground.
 BAD_INK = BAD
 WARN_INK = WARN
@@ -134,6 +139,7 @@ LOG_CRITICAL_BG = "#f7ddda"
 def set_dark_mode(enabled: bool):
     global BG, SURFACE, TEXT, ACCENT, NEUTRAL, ACCENT_RAMP, DIVIDER, DIVIDER_STRONG, OK, WARN, BAD, BAD_TINT
     global WARN_TINT, MARK_TINT, MARK_INK, BAD_INK, WARN_INK, LOG_LEVEL, LOG_CRITICAL_BG
+    global TAG_TINT, TAG_INK
     global SELECT_BG, SELECT_INK, SELECT_MUTED
     global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
 
@@ -155,6 +161,8 @@ def set_dark_mode(enabled: bool):
         WARN_TINT = "#3d3322"
         MARK_TINT = ACCENT_RAMP[800]
         MARK_INK = ACCENT_RAMP[300]
+        TAG_TINT = ACCENT_RAMP[800]
+        TAG_INK = ACCENT_RAMP[300]
         # A band a few steps into the accent, light ink on it: plainly the
         # picked row, and lighter than a table's header so the two are never
         # read as each other.
@@ -217,6 +225,8 @@ def set_dark_mode(enabled: bool):
         WARN_TINT = "#f7efe2"
         MARK_TINT = ACCENT_RAMP[200]
         MARK_INK = ACCENT_RAMP[800]
+        TAG_TINT = ACCENT_RAMP[100]
+        TAG_INK = ACCENT_RAMP[800]
         SELECT_BG = ACCENT_RAMP[200]
         SELECT_INK = ACCENT_RAMP[900]
         SELECT_MUTED = ACCENT_RAMP[800]
@@ -758,6 +768,32 @@ QFrame[role="clarifypopup"] QFrame[role="composer"] {{ border-top: none; }}
 QLabel[role="composernote"] {{ font-size: 11px; color: {n700}; }}
 QLabel[role="composernote"][bad="true"] {{ color: {bad_ink}; }}
 
+/* --- find in a reader (findbar.py) --------------------------------------- */
+/* A strip over the page it searches, capped by a hairline like the path bar
+   above it - part of the reader, not a toolbar of the window. */
+QFrame[role="findbar"] {{
+    background: {n100}; border: none; border-bottom: 1px solid {divider};
+}}
+QLabel[role="keys"][bad="true"] {{ color: {bad_ink}; }}
+
+/* --- search (search.py, Ctrl+K) ------------------------------------------ */
+/* The clarify popup's frame and band (above); under its field, the results on
+   the popup's own ground, a section's name as a kicker, and the row the keys
+   are on in the selection colour - the same answer a menu gives. */
+QListWidget[role="searchresults"] {{
+    background: {bg}; border: none; border-top: 1px solid {divider}; outline: none;
+}}
+QListWidget[role="searchresults"]::item {{ border: none; padding: 0; background: transparent; }}
+QListWidget[role="searchresults"]::item:selected {{ background: transparent; }}
+QFrame[role="searchhit"] {{ background: transparent; }}
+QFrame[role="searchhit"]:hover {{ background: {n100}; }}
+QFrame[role="searchhit"][current="true"] {{ background: {select_bg}; }}
+QLabel[role="searchtitle"] {{ font-size: 13px; color: {text}; }}
+QLabel[role="searchdetail"] {{ font-family: {mono}; font-size: 11px; color: {n600}; }}
+QFrame[role="searchhit"][current="true"] QLabel[role="searchtitle"],
+QFrame[role="searchhit"][current="true"] QLabel[role="searchdetail"] {{ color: {select_ink}; }}
+QLabel[role="searchmore"] {{ font-size: 11px; color: {accent}; }}
+
 /* One message in the feed. The stripe down its left edge is what became of
    it, in the same three inks a step's stripe uses on the canvas. */
 QFrame[role="message"] {{
@@ -922,9 +958,14 @@ class IndicatorStyle(QProxyStyle):
     def polish(self, target):
         result = super().polish(target)
         if isinstance(target, QWidget):
-            guard = getattr(QApplication.instance(), "_no_wheel_steal", None)
+            app = QApplication.instance()
+            guard = getattr(app, "_no_wheel_steal", None)
             if guard is not None:
                 guard.watch(target)
+            # Text fields let Ctrl+K through to Search - see search.KeyCatcher.
+            keys = getattr(app, "_search_keys", None)
+            if keys is not None:
+                keys.watch(target)
         return result
 
     def drawPrimitive(self, element, option, painter, widget=None):

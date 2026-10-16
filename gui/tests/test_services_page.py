@@ -1690,3 +1690,47 @@ def test_an_orphan_log_still_gets_its_block_beside_the_empty_zone(empty_page):
     empty_page._rebuild()
     assert len(_zone(empty_page)) == 1
     assert "" in empty_page._blocks
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_lists_services_with_their_state_logs_and_connections(page):
+    hits = page.search_rows()
+    services = [h for h in hits if h.target[0] == "runner"]
+    assert [(h.title, h.status, h.live) for h in services] == [
+        ("Odoo Local", "Stopped", False), ("PostgreSQL DB", "Stopped", False)]
+    assert services[0].detail.startswith("Claim · ")
+    assert sorted(h.title for h in hits if h.target[0] == "log") == ["app", "nginx"]
+    assert sorted(h.title for h in hits if h.target[0] == "connection") == ["dev", "here"]
+
+
+def test_what_search_says_a_service_is_doing():
+    from cms_gui import runnertypes
+    from cms_gui.pages.services import _search_state
+
+    seeded = [("Seeded", "green", True, ()), ("Error", "red", False, ("x",))]
+    assert _search_state(runnertypes.RUNNING, seeded) == ("Running · Seeded", "accent", True)
+    broken = [("Error", "red", True, ())]
+    assert _search_state(runnertypes.RUNNING, broken) == ("Running · Error", "bad", True)
+    assert _search_state(runnertypes.STARTING, []) == ("Starting…", "outline", True)
+    assert _search_state(runnertypes.STOPPED, []) == ("Stopped", "neutral", False)
+
+
+def test_a_found_service_is_unfolded_shown_and_the_only_one_selected(page):
+    block = page._blocks["Claim"]
+    block.disclosure.set_expanded(False)
+    block.runners.selectRow(0)
+    block.runners_search.box(ProjectBlock.R_NAME).setText("Odoo")   # hides the DB
+    assert block.runners.isRowHidden(1)
+    assert page.show_found(("runner", "Claim", "PostgreSQL DB"))
+    assert block.disclosure.is_expanded()
+    assert not block.runners.isRowHidden(1)
+    assert block.selected_runners() == ["PostgreSQL DB"]
+
+
+def test_a_found_log_and_connection_are_selected(page):
+    assert page.show_found(("log", "", "nginx"))
+    assert [r.row() for r in page._blocks[""].logs.selectionModel().selectedRows()] == [0]
+    assert page.show_found(("connection", "dev"))
+    picked = page.connections.selectionModel().selectedRows()
+    assert [page._connections[page._at(r.row())].name for r in picked] == ["dev"]
+    assert not page.show_found(("runner", "Claim", "gone"))

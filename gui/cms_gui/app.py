@@ -8,7 +8,7 @@ from PySide6.QtCore import QEventLoop, Qt, QRect
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from . import icon, migrate, theme, widgets
+from . import icon, migrate, search, theme, widgets
 from .settings import Settings
 from .main_window import MainWindow
 
@@ -136,6 +136,9 @@ def main(argv=None):
     # The style attaches wheel guards to controls as they are polished. Keep
     # Python event filters off the application's internal WebEngine objects.
     widgets.stop_wheel_stealing(app)
+    # And Ctrl+K past text fields to Search, the same way: on the fields, as
+    # the style polishes them, never on the application itself.
+    search.catch_ctrl_k(app)
     theme.load_fonts()
     
     settings = Settings()

@@ -1018,7 +1018,7 @@ def test_replacing_the_splash_is_a_file_copy_not_a_code_change(tmp_path, monkeyp
     assert os.path.basename(app_mod._splash_file()) == "splash.jpg"   # first wins
 
 
-def test_always_on_top_does_not_show_the_window_early(qapp):
+def test_always_on_top_does_not_show_the_window_early(qapp, dispose):
     """Restoring the setting must not put a half-built window on screen.
 
     set_always_on_top has to re-show the window because changing a flag makes Qt
@@ -1035,7 +1035,10 @@ def test_always_on_top_does_not_show_the_window_early(qapp):
             assert win.always_on_top_action.isChecked()   # the setting was applied
             assert not win.isVisible()                    # ... without showing it
         finally:
-            win.close()
+            # Disposed, not just closed: the splash's own timer shows the window
+            # when it fires, and a closed one came back on screen tests later -
+            # a second window answering Ctrl+K made the key ambiguous for them.
+            dispose(win)
     finally:
         settings.always_on_top = previous
 
@@ -1467,3 +1470,48 @@ def test_a_refresh_after_a_save_does_not_reopen_the_last_run_s_cycle(
     _until(qapp, lambda: False, timeout=0.3)
 
     assert restored == []
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_collects_from_every_page_on_the_rail_under_its_section(window):
+    from cms_gui import search as search_mod
+
+    window.credentials._rows = []
+    window.environments._envs = [{"alias": "shop", "value": "shop.example.invalid",
+                                  "origin": "https://shop.example.invalid", "count": 2}]
+    hits = window.search_hits()
+    assert all(isinstance(hit, search_mod.Hit) for hit in hits)
+    assert ("environments", "shop") in [(hit.section, hit.title) for hit in hits]
+    # A page switched off on the rail is not searched: it could not be shown.
+    window.set_nav_item_visible("environments", False)
+    assert "environments" not in {hit.section for hit in window.search_hits()}
+    window.set_nav_item_visible("environments", True)
+
+
+def test_a_hit_opens_its_page_with_the_record_on_it(window):
+    from cms_gui import search as search_mod
+
+    window.environments._envs = [{"alias": "shop", "value": "shop.example.invalid",
+                                  "origin": "", "count": 0}]
+    window.environments.table.setRowCount(1)
+    window.show_page("history")
+    window.open_hit(search_mod.hit("shop", target="shop", section="environments"))
+    assert window.stack.currentWidget() is window.environments
+    assert window.environments.table.selectionModel().selectedRows()[0].row() == 0
+    window.open_hit(search_mod.hit("gone", target="gone", section="environments"))
+    assert window.status_right.text() == "gone is no longer there"
+
+
+def test_ctrl_k_opens_search_over_the_window(window, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window.activateWindow()
+    QTest.qWaitForWindowActive(window)
+    field = window.launch.url                       # a text field with the focus
+    field.setFocus()
+    field.setText("http://shop.example.invalid")
+    QTest.keyClick(field, Qt.Key_K, Qt.ControlModifier)
+    assert window._search is not None and window._search.isVisible()
+    assert field.text() == "http://shop.example.invalid"
+    window._search.hide()

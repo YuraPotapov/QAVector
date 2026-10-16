@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QHeaderView,
                                QPushButton, QSplitter, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import core as core_mod, theme, widgets
+from .. import core as core_mod, search, theme, widgets
 
 #: Fallback for a core too old to advertise its grammar in --describe.
 FALLBACK_ACTIONS = {
@@ -512,6 +512,35 @@ class ScenariosPage(QWidget):
                   if self.table.item(index, column) else "") for column in range(2)]
                 + [(first.data(Qt.UserRole) or "") if first else ""]).lower()
             self.table.setRowHidden(index, bool(needle) and needle not in haystack)
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every scenario and block: its name, id and tags; found by its words too."""
+        found = []
+        for kind, rows in (("scenario", self.inventory.scenarios),
+                           ("block", self.inventory.blocks)):
+            for row in rows:
+                flow_id = row.get("id", "")
+                tags = row.get("tags") or []
+                found.append(search.hit(
+                    row.get("name") or flow_id,
+                    " · ".join(part for part in (flow_id, ", ".join(tags),
+                                                 "block" if kind == "block" else "")
+                               if part),
+                    keys=row.get("description") or "", target=flow_id))
+        return found
+
+    def show_found(self, flow_id):
+        """Select it in the list - which opens it, the page's own way."""
+        for index in range(self.table.rowCount()):
+            item = self.table.item(index, 0)
+            if item is not None and item.text() == flow_id:
+                if self.table.isRowHidden(index):
+                    self.search.clear()          # the filter would hide it
+                self.select(flow_id)
+                self.table.scrollToItem(item)
+                return True
+        return False
 
     def selected_id(self):
         items = self.table.selectedItems()

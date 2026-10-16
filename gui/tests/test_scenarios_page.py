@@ -565,3 +565,26 @@ def test_revert_is_only_offered_when_there_is_something_to_revert(page):
     assert not page.revert_button.isEnabled()
     page.open("alpha")
     assert not page.revert_button.isEnabled()
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_lists_scenarios_and_blocks_and_reveal_opens_one(page, monkeypatch):
+    page.set_inventory(_inventory(
+        _row("qa_123_open_order", name="Open an order", tags=("smoke", "QA-123")),
+        _row("beta"),
+        blocks=[{"id": "shop.sign_in", "name": "Sign in", "tags": [],
+                 "description": "Signs in as the account's own user"}]))
+    hits = page.search_rows()
+    assert [(h.title, h.target) for h in hits] == [
+        ("Open an order", "qa_123_open_order"), ("Beta", "beta"),
+        ("Sign in", "shop.sign_in")]
+    assert hits[0].detail == "qa_123_open_order · smoke, QA-123"
+    assert hits[2].detail.endswith("block") and "own user" in hits[2].keys
+    opened = []
+    monkeypatch.setattr(page, "open", opened.append)
+    page.search.setText("beta")                       # the list's own filter
+    assert page.show_found("qa_123_open_order")
+    assert page.search.text() == ""                   # set aside: it hid the row
+    assert page.selected_id() == "qa_123_open_order"
+    assert opened == ["qa_123_open_order"]
+    assert not page.show_found("gone")

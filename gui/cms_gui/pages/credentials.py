@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QLabel, QLineEdit
                                QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import theme, usersfile, widgets
+from .. import search, theme, usersfile, widgets
 
 
 class CredentialsPage(QWidget):
@@ -233,3 +233,24 @@ class CredentialsPage(QWidget):
 
     def rows(self):
         return list(self._rows)
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every account: its login, role, environment and scenarios.
+
+        Never the password - Search shows what it matched on, and a password
+        is not something to find by typing it into a box.
+        """
+        return [search.hit(
+            row.login or "(no login)",
+            " · ".join(part for part in (row.cls, row.env, ", ".join(row.tests)) if part),
+            target=(row.env, row.login)) for row in self._rows]
+
+    def show_found(self, target):
+        env, login = target
+        for index, row in enumerate(self._rows):
+            if row.env == env and row.login == login:
+                self.table.selectRow(index)
+                self.table.scrollToItem(self.table.item(index, self.COL_LOGIN))
+                return True
+        return False

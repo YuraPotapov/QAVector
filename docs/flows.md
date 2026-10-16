@@ -273,7 +273,10 @@ A run can write a step-by-step guide to what it did: `--report-doc` on the comma
 or **Launch -> Reports and screenshots -> Write a step-by-step guide while it runs** in the
 GUI. Each scenario then leaves `documentation.html` in its report folder, with its
 pictures in `doc/`. It is rewritten after every step it describes, so it can be read
-while the run goes, and **Artifacts** shows it and exports it as an A4 PDF.
+while the run goes, and **Artifacts** shows it. **Export Documentation** (HTML or PDF)
+writes it out: selected on a scenario, its guide; on a session, one file with that
+session's guides in the order they ran; on the run's own folder, a .zip with one such
+file per session. An HTML file carries its pictures, so it can be sent on its own.
 
 What a step means to a reader is its `doc:`, in either step shape:
 

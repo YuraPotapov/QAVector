@@ -19,14 +19,22 @@ def _inside(path, root):
 
 
 class _LocalRequests(QWebEngineUrlRequestInterceptor):
-    """Styles and images can come from this run, never from the network."""
+    """Styles and images can come from this run, never from the network.
 
-    root = ""
+    ``roots`` is every folder a page may read from: the run on show, or - for
+    a book printed to PDF - the folder it was put together in and the guides'
+    folders its pictures are in.
+    """
+
+    roots = ()
+
+    def allows(self, path):
+        return any(_inside(path, root) for root in self.roots)
 
     def interceptRequest(self, info):
         url = info.requestUrl()
         allowed = (url.scheme() in ("data", "about") or
-                   (url.isLocalFile() and _inside(url.toLocalFile(), self.root)))
+                   (url.isLocalFile() and self.allows(url.toLocalFile())))
         info.block(not allowed)
 
 
@@ -68,7 +76,7 @@ class _ReportPage(QWebEnginePage):
     def _follow(self, url):
         if url.scheme() in ("http", "https"):
             QDesktopServices.openUrl(url)
-        elif url.isLocalFile() and _inside(url.toLocalFile(), self.requests.root):
+        elif url.isLocalFile() and self.requests.allows(url.toLocalFile()):
             self.local_file_requested.emit(os.path.abspath(url.toLocalFile()))
 
 
@@ -77,17 +85,20 @@ class _ReportPage(QWebEnginePage):
 PDF_MARGINS = QMarginsF(14, 14, 14, 16)
 
 
+def page_layout():
+    """The layout a guide is printed with - see :data:`PDF_MARGINS`."""
+    return QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait,
+                       PDF_MARGINS, QPageLayout.Millimeter)
+
+
 class HtmlPreview(QWebEngineView):
     local_file_requested = Signal(str)
-    #: export_pdf finished: the file, and whether it was written.
-    pdf_exported = Signal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         page = _ReportPage(self)
         self.setPage(page)
         page.local_file_requested.connect(self.local_file_requested)
-        page.pdfPrintingFinished.connect(self.pdf_exported)
 
     def load_file(self, path, root, fragment=""):
         """Show ``path``; with ``fragment``, scrolled to that anchor.
@@ -98,7 +109,7 @@ class HtmlPreview(QWebEngineView):
         """
         self.stop()
         page = self.page()
-        page.requests.root = os.path.realpath(root)
+        page.requests.roots = (os.path.realpath(root),)
         url = QUrl.fromLocalFile(os.path.abspath(path))
         if fragment:
             try:
@@ -111,9 +122,3 @@ class HtmlPreview(QWebEngineView):
         # Loading from disk avoids setHtml's data-URL size limit, and preserves
         # the base URL for relative links, images and stylesheets.
         self.load(url)
-
-    def export_pdf(self, path):
-        """Print what is on show to ``path`` as an A4 PDF; pdf_exported tells."""
-        layout = QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait,
-                             PDF_MARGINS, QPageLayout.Millimeter)
-        self.page().printToPdf(path, layout)

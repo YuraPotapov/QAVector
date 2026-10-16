@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QPushButton,
                                QSplitter, QTextBrowser, QVBoxLayout, QWidget)
 
-from . import icons, theme, widgets
+from . import findbar, icons, theme, widgets
 
 #: The id the "start something new" row carries, which no session can have:
 #: every session id has a colon in it.
@@ -213,6 +213,24 @@ def status_colour(session):
     if state in ("failed", "timeout", "error"):
         return theme.BAD
     return theme.WARN
+
+
+def search_state(session):
+    """How Search says where a session is: (word, tone, still going)."""
+    if session.get("running"):
+        waiting = status_word(session).startswith("waiting")
+        return ("Waiting" if waiting else "Running"), "accent", True
+    state = session.get("status") or ""
+    remembered = ((session.get("memory") or {}).get("fields") or {}).get("state")
+    if remembered in REMEMBERED_STATES:
+        return REMEMBERED_STATES[remembered].capitalize(), "accent", False
+    if state == "success":
+        return "Passed", "accent", False
+    if state in ("failed", "timeout", "error"):
+        return "Failed", "bad", False
+    if state in ("cancelled", "interrupted"):
+        return "Stopped", "warn", False
+    return (state.capitalize() if state else ""), "neutral", False
 
 
 def subject_title(session):
@@ -516,6 +534,9 @@ class SubjectsPanel(QWidget):
         below_layout = QVBoxLayout(below)
         below_layout.setContentsMargins(0, 0, 0, 0)
         below_layout.setSpacing(6)
+        # Ctrl+F over the details - a task's description can be long.
+        self.find_bar = findbar.FindBar()
+        below_layout.addWidget(self.find_bar)
         below_layout.addWidget(self.details, 1)
         below_layout.addWidget(widgets.row(None, self.new_button))
 
@@ -658,6 +679,23 @@ class SubjectsPanel(QWidget):
     def picked(self):
         """The session picked, or None - for "+ New run" or nothing at all."""
         return self.session(self._picked)
+
+    def planned(self):
+        """The tasks on the plan, as the list has them."""
+        return list(self._planned)
+
+    def reveal(self, key):
+        """Pick the row standing for ``key`` - a session's id or a plan_id() -
+        as a click on it would, and scroll it into view. False when it has none."""
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.data(ROLE_SESSION) == key:
+                self.list.setCurrentItem(item)
+                self.list.scrollToItem(item)
+                self._clicked(item)
+                return True
+        return False
+
 
     def ordered(self):
         """The open cycle's sessions first, then the rest; newest first in each."""

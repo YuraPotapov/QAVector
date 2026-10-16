@@ -101,6 +101,22 @@ The status bar names whatever is running — `odoo: running` — from wherever y
 are, because a service started on the Services & Logs page and then navigated
 away from is otherwise invisible.
 
+## Keys
+
+`Ctrl+K` opens **Search** from any window of the application: one field over
+everything the pages list, grouped by section, each record with its state. An
+empty field shows what is active now; Enter goes to the page with the record
+selected. There is no button for it - the key is the way in, and it is taken
+even from a text field (where X11 would otherwise read it as "delete to the end
+of the line").
+
+`Ctrl+F` finds in whichever reader has the focus - the Artifacts preview, a
+cycle's summary or log, a subject's details, an approval's review - with every
+match lit; `Enter`/`F3` go on, `Shift+Enter`/`Shift+F3` go back, `Esc` closes.
+
+`Ctrl+Shift+M` clarifies the running cycle and `Ctrl+Shift+S` goes to its
+Stages, from any window too.
+
 ## The pages
 
 **Environments** — the environments `--env` can select, derived from the
@@ -239,7 +255,9 @@ text, styled HTML and screenshots, and each file's write time. HTML opens as a
 formatted page, with a *Preview / Source* selector for inspecting its source.
 Local artifact links select the file in the tree; web links open in the browser.
 The preview loads local styles and images, with scripts and remote resources
-disabled. During a run it fills in as the
+disabled. *Export Documentation* (HTML or PDF) writes the step-by-step guides out:
+one file for a scenario or a session, a .zip of one file per session for the
+whole run. During a run it fills in as the
 files land; between runs *Run* picks any recorded run whose reports still exist,
 newest first, or any folder you point it at. It reopens on whichever run you were
 last looking at.

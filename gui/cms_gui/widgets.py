@@ -57,13 +57,20 @@ class BlueprintPanel(QFrame):
 class Tag(QLabel):
     """Small status pill: accent (good), outline (in flight), neutral, bad."""
 
-    STYLES = {
-        "accent": (theme.ACCENT_RAMP[100], theme.ACCENT_RAMP[800], "transparent"),
-        "outline": ("transparent", theme.ACCENT, theme.ACCENT),
-        "neutral": (theme.NEUTRAL[100], theme.NEUTRAL[800], theme.NEUTRAL[300]),
-        "warn": ("#f7efe2", theme.WARN, "transparent"),
-        "bad": (theme.BAD_TINT, theme.BAD, "transparent"),
-    }
+    @staticmethod
+    def styles():
+        """(background, ink, border) for each variant, read when a pill is set.
+
+        Not a table built at import: dark mode rewrites the theme after the
+        import, and the table kept painting light pills on a dark page.
+        """
+        return {
+            "accent": (theme.TAG_TINT, theme.TAG_INK, "transparent"),
+            "outline": ("transparent", theme.ACCENT, theme.ACCENT),
+            "neutral": (theme.NEUTRAL[100], theme.NEUTRAL[800], theme.NEUTRAL[300]),
+            "warn": (theme.WARN_TINT, theme.WARN, "transparent"),
+            "bad": (theme.BAD_TINT, theme.BAD, "transparent"),
+        }
 
     def __init__(self, text="", variant="neutral", parent=None):
         super().__init__(text, parent)
@@ -71,7 +78,8 @@ class Tag(QLabel):
         self.set_variant(variant)
 
     def set_variant(self, variant):
-        background, fg, border = self.STYLES.get(variant, self.STYLES["neutral"])
+        styles = self.styles()
+        background, fg, border = styles.get(variant, styles["neutral"])
         self.setStyleSheet(
             "background: %s; color: %s; border: 1px solid %s;"
             "font-family: %s; font-size: 10px; letter-spacing: 0.5px;"

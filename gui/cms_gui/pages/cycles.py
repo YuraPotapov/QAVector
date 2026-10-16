@@ -32,7 +32,7 @@ import subprocess
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
-from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout,
                                QLabel, QMenu,
                                QPlainTextEdit, QPushButton, QStackedWidget,
                                QTabWidget, QTextBrowser, QToolButton,
@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout,
 from .. import (core as core_mod, cyclelayoutfile as clf,
                 cyclepresetsfile as presets_file, cycleprojectsfile as cpf,
                 icons, theme, widgets)
-from .. import background, stageswindow
+from .. import background, findbar, search, stageswindow
 from ..cycledraft import Draft
 from ..cyclesubjects import KEEP
 # The explorer lives in its own module; its roles are re-exported here, where
@@ -378,6 +378,8 @@ class CyclesPage(QWidget):
         self.subjects.delete_requested.connect(self._delete_session)
         self.subjects.planned_start.connect(self.planned_started.emit)
         self.subjects.planned_open.connect(self.planned_opened.emit)
+        # One Ctrl+F for the page, sent to the reader the person is in.
+        findbar.install(self, self._find_in)
         self.subjects.planned_remove.connect(self._remove_planned)
         self.subjects.files_picked.connect(self._open_run_files)
         self.subjects.more_requested.connect(self._more_sessions)
@@ -1261,6 +1263,88 @@ class CyclesPage(QWidget):
             if self._selected == step_id:
                 self._selected = ""
             self._draft_changed()
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def set_listener(self, listener):
+        """The task listener, so Search can say which cycles are listening."""
+        self._listener = listener
+
+    def search_rows(self):
+        """Every cycle with its state; its runs and the plan, as the list has them."""
+        from ..cyclesubjects import (plan_id, planned_detail, planned_title,
+                                     row_detail, search_state, subject_title)
+
+        found = []
+        state = getattr(self, "run_state", None)
+        running = ((state.cycle or {}).get("cycle") if state is not None
+                   and state.cycle_running else None)
+        listener = getattr(self, "_listener", None)
+        for row in self._cycles:
+            cycle_id = row.get("id", "")
+            word, tone, live = "", "neutral", False
+            if cycle_id and cycle_id == running:
+                word, tone, live = "Running", "accent", True
+            elif listener is not None and listener.enabled:
+                keys = [key for key in listener.triggers if key[0] == cycle_id]
+                if any(listener.problems.get(key) for key in keys):
+                    word, tone, live = "Listener problem", "warn", True
+                elif keys:
+                    word, tone, live = "Listening", "outline", True
+            found.append(search.hit(
+                row.get("name") or cycle_id,
+                " · ".join(part for part in (row.get("project") or "", cycle_id) if part),
+                word, tone, keys=row.get("description") or "",
+                target=("cycle", cycle_id), live=live))
+        for session in self.subjects.sessions():
+            word, tone, live = search_state(session)
+            subject = session.get("subject") or {}
+            found.append(search.hit(
+                subject_title(session), " · ".join(part for part in row_detail(session)
+                                                   if part),
+                word, tone, keys=" ".join(str(part) for part in (
+                    session.get("cycle", ""), subject.get("kind", ""))),
+                target=("session", session.get("id", "")), live=live))
+        for item in self.subjects.planned():
+            scheduled = bool(item.get("run_at"))
+            found.append(search.hit(
+                planned_title(item), planned_detail(item),
+                "Scheduled" if scheduled else "Planned",
+                "outline" if scheduled else "neutral",
+                keys=item.get("cycle", ""),
+                target=("planned", plan_id(item), item.get("cycle", "")),
+                live=scheduled))
+        return found
+
+    def show_found(self, target):
+        """Open the cycle; or pick a run or a planned task on the right, as a
+        click there would - which opens what that click opens."""
+        kind = target[0] if target else ""
+        if kind == "cycle":
+            if not any(row.get("id") == target[1] for row in self._cycles):
+                return False
+            self.open(target[1])
+            return True
+        if kind == "session":
+            return self.subjects.reveal(target[1])
+        if kind == "planned":
+            _kind, key, cycle_id = target
+            if cycle_id and cycle_id != self.current_id():
+                self.open(cycle_id, then=lambda: self.subjects.reveal(key))
+                return True
+            return self.subjects.reveal(key)
+        return False
+
+    def _find_in(self):
+        """What Ctrl+F searches here: a subject's details when the person is in
+        them, otherwise the output - while its own tab is the one on show."""
+        focus = QApplication.focusWidget()
+        details, bar = self.subjects.details, self.subjects.find_bar
+        if focus is not None and (focus is details or details.isAncestorOf(focus)
+                                  or bar.isAncestorOf(focus)):
+            return bar, findbar.target_for(details)
+        if self.output.tabs.currentIndex() == TAB_OUTPUT:
+            return self.output.find_bar, self.output.find_target()
+        return None
 
     def open_step(self, step_id):
         """Open one step. Double-clicking a node is what calls this."""
@@ -3022,6 +3106,9 @@ class _Output(QWidget):
         self._artifacts_available = False
         output_layout.addWidget(widgets.row(None, self.artifacts_button,
                                             self.details_button))
+        # Ctrl+F over the summary, or over the log when the details are on.
+        self.find_bar = findbar.FindBar()
+        output_layout.addWidget(self.find_bar)
         output_layout.addWidget(self.output_views, 1)
         self.problems = QPlainTextEdit()
         self.problems.setReadOnly(True)
@@ -3226,6 +3313,11 @@ class _Output(QWidget):
         self.output_views.setCurrentWidget(
             self.log if checked or not self._summary_html else self.summary)
         self.details_button.setText("Readable summary" if checked else "Technical details")
+        self.find_bar.retarget(self.find_target())
+
+    def find_target(self):
+        """The reader the output shows - the summary or the log - to search."""
+        return findbar.target_for(self.output_views.currentWidget())
 
     def set_stages(self, stages, named=False, labels=None):
         """The stage rows, and how many there are in the tab's name."""

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import icons, theme, widgets
+from .. import icons, search, theme, widgets
 
 
 class EnvironmentsPage(QWidget):
@@ -158,6 +158,24 @@ class EnvironmentsPage(QWidget):
 
     def directories(self):
         return {key: edit.text().strip() for key, edit in self.dir_edits.items()}
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every environment: its name, where it is, how many accounts it has."""
+        return [search.hit(
+            env.get("alias", ""),
+            " · ".join(part for part in (env.get("origin") or "",
+                                         "%s accounts" % env.get("count", 0)) if part),
+            keys=env.get("value", ""), target=env.get("alias", ""))
+            for env in self._envs]
+
+    def show_found(self, alias):
+        for row, env in enumerate(self._envs):
+            if env.get("alias") == alias:
+                self.table.selectRow(row)
+                self.table.scrollToItem(self.table.item(row, 0))
+                return True
+        return False
 
     # -- editing --------------------------------------------------------------
     def _save_directory(self, key, value):

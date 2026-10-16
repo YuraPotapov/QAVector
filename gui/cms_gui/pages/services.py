@@ -48,7 +48,7 @@ Start, Stop and Restart to those, and the buttons say so.
 import json
 import os
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QHeaderView, QLabel,
@@ -60,6 +60,7 @@ from .. import icons
 from .. import logsourcesfile as lsf
 from .. import criteria as criteria_mod
 from .. import runnertypes
+from .. import search
 from .. import services as svc
 from .. import servicesfile as sf
 from .. import theme, widgets
@@ -79,6 +80,25 @@ STATUS_TEXT = {
     runnertypes.STOPPED: "Stopped",
     runnertypes.FAILED: "Failed",
 }
+
+
+def _search_state(status, criteria):
+    """How Search says what a service is doing: (word, tone, active now).
+
+    A lit criterion says more than the bare status - "Running" is true of a
+    server still migrating, "Seeded/Started" is not - so it is added, and a red
+    one turns the whole row bad.
+    """
+    word = STATUS_TEXT.get(status, status or "")
+    tone = {runnertypes.RUNNING: "accent", runnertypes.FAILED: "bad",
+            runnertypes.STARTING: "outline", runnertypes.STOPPING: "outline",
+            runnertypes.WAITING: "outline"}.get(status, "neutral")
+    lit = [(name, colour) for name, colour, on, _why in criteria or () if on]
+    if lit:
+        word = "%s · %s" % (word, ", ".join(name for name, _colour in lit))
+        if any(str(colour).lower() in ("red", "bad") for _name, colour in lit):
+            tone = "bad"
+    return word, tone, status not in (runnertypes.STOPPED, "", None)
 
 
 def status_color(status):
@@ -1435,6 +1455,7 @@ class ServicesPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll = scroll           # Search scrolls a row into view in it
         inner = QWidget()
         self._column = QVBoxLayout(inner)
         self._column.setContentsMargins(0, 0, 6, 0)
@@ -2247,6 +2268,93 @@ class ServicesPage(QWidget):
         self.status.setStyleSheet("color: %s; font-size: 12px;" % theme.NEUTRAL[700])
 
     # -- closing --------------------------------------------------------------
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every service with its state, every log and every connection."""
+        found = []
+        for project in self._projects:
+            for runner in project.runners:
+                status = self.supervisor.status(project.name, runner.name)
+                word, tone, live = _search_state(
+                    status, self.supervisor.criteria_state(project.name, runner.name))
+                found.append(search.hit(
+                    runner.name or "(unnamed)",
+                    " · ".join(part for part in (project.name,
+                                                 runnertypes.label_of(runner.type),
+                                                 runner.summary()) if part),
+                    word, tone, keys=project.dir,
+                    target=("runner", project.name, runner.name), live=live))
+        for log in self._logs:
+            found.append(search.hit(
+                log.name or "(unnamed)",
+                " · ".join(part for part in ("Log", log.project or "no project",
+                                             log.envs_text(),
+                                             "%s %s" % (log.type, log.target or ""))
+                           if part.strip()),
+                keys=log.connection, target=("log", log.project or "", log.name)))
+        for connection in self._connections:
+            found.append(search.hit(
+                connection.name or "(unnamed)",
+                " · ".join(part for part in ("Connection", connection.type,
+                                             connection.host) if part),
+                keys=connection.user, target=("connection", connection.name)))
+        return found
+
+    def show_found(self, target):
+        """Unfold the record's block, show its row, and select only that row.
+
+        Only it: the selection is what Start and Stop act on, so a service found
+        this way is the one those buttons now mean.
+        """
+        kind = target[0] if target else ""
+        if kind == "runner":
+            _kind, project, name = target
+            block = self._blocks.get(project)
+            rows = block._runner_rows if block is not None else []
+            index = next((i for i, row in enumerate(rows) if row.name == name), -1)
+            return index >= 0 and self._show_row(block.disclosure, block.runners,
+                                                 block.runners_search, index)
+        if kind == "log":
+            _kind, project, name = target
+            for block in self._blocks.values():
+                index = next((i for i, row in enumerate(block._log_rows)
+                              if row.name == name and (row.project or "") == project), -1)
+                if index >= 0:
+                    return self._show_row(block.disclosure, block.logs,
+                                          block.logs_search, index)
+            return False
+        if kind == "connection":
+            for drawn in range(self.connections.rowCount()):
+                index = self._at(drawn)
+                if (index is not None and 0 <= index < len(self._connections)
+                        and self._connections[index].name == target[1]):
+                    return self._show_row(self.connections_fold, self.connections,
+                                          self.connections_search, drawn)
+        return False
+
+    def _show_row(self, fold, table, searching, row):
+        fold.set_expanded(True)
+        if table.isRowHidden(row) and searching is not None:
+            searching.clear()            # a search that hides it would hide it
+        table.clearSelection()
+        table.selectRow(row)
+        # Current without a selection command: in the runners' MultiSelection
+        # mode setCurrentCell toggles, and would take back the row just picked.
+        table.selectionModel().setCurrentIndex(table.model().index(row, 0),
+                                               QItemSelectionModel.NoUpdate)
+        QTimer.singleShot(0, lambda: self._scroll_to(table, row))
+        return True
+
+    def _scroll_to(self, table, row):
+        """The row into view - in the page, which scrolls, not the table."""
+        item = table.item(row, 0)
+        if item is None:
+            return
+        place = table.visualItemRect(item)
+        corner = table.viewport().mapTo(self._scroll.widget(), place.topLeft())
+        self._scroll.ensureVisible(corner.x(), corner.y() + place.height() // 2,
+                                   0, max(60, place.height() * 2))
+
     def detained(self):
         """Running services that would be lost if the window closed now."""
         return self.supervisor.detained()

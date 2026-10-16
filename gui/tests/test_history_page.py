@@ -164,3 +164,23 @@ def test_an_entry_names_its_environment_whichever_page_it_came_from():
     assert page_mod.entry_environment(launch_entry) == "localhost"
     assert page_mod.entry_environment(command_entry) == "dev"
     assert page_mod.entry_environment({"kind": history_mod.LAUNCH}) == ""
+
+
+# ------------------------------------------------------------------ search (Ctrl+K)
+def test_search_lists_every_run_with_how_it_ended(page, record):
+    passed = _add(record, status=history_mod.OK, env="shop")
+    hits = page.search_rows()
+    assert [h.target for h in hits] == [passed]
+    assert hits[0].tone == "accent" and hits[0].status.startswith("passed")
+    assert "shop" in hits[0].detail
+
+
+def test_a_run_found_while_a_filter_hides_it_is_shown_all_the_same(page, record):
+    passed = _add(record, status=history_mod.OK)
+    failed = _add(record, status=history_mod.FAILED, started="2026-09-11 10:00:00")
+    page.result_filter.set_current("Failed")
+    assert _shown(page) == [failed]
+    assert page.show_found(passed)
+    assert page.result_filter.current() == "All"
+    assert page.selected_entry()["id"] == passed
+    assert not page.show_found("no-such-run")

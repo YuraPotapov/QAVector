@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QPushButton, QSplitter, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import commands, history as history_mod, icons, launch, theme, widgets
+from .. import commands, history as history_mod, icons, launch, search, theme, widgets
 
 HEADERS = ["When", "Type", "Environment", "Users", "Scenarios", "Result", "Took"]
 
@@ -237,6 +237,42 @@ class HistoryPage(QWidget):
             if entry.get("id") == entry_id:
                 self.table.selectRow(index)
                 return
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every recorded run: what it ran, when, where, and how it ended."""
+        found = []
+        for entry in self.history.entries():
+            environment, users, scenarios = describe_entry(entry)
+            status = entry.get("status", "")
+            found.append(search.hit(
+                scenarios or entry.get("summary") or "",
+                " · ".join(part for part in (
+                    entry.get("started_at", ""),
+                    KIND_LABELS.get(entry.get("kind"), entry.get("kind", "")),
+                    environment, users,
+                    history_mod.format_duration(entry.get("duration_ms"))) if part),
+                result_text(entry), STATUS_VARIANTS.get(status, "neutral"),
+                keys=entry.get("summary") or "", target=entry.get("id")))
+        return found
+
+    def show_found(self, entry_id):
+        """Select the entry - first setting aside any filter that hides it."""
+        if not any(entry.get("id") == entry_id for entry in self.history.entries()):
+            return False
+        if not any(entry.get("id") == entry_id for entry in self._rows):
+            for control, everything in ((self.result_filter, "All"),
+                                        (self.period_filter, "All time")):
+                control.set_current(everything, notify=False)
+            self.environment_filter.blockSignals(True)
+            self.environment_filter.setCurrentIndex(0)
+            self.environment_filter.blockSignals(False)
+            self.refresh()
+        self._select_id(entry_id)
+        items = self.table.selectedItems()
+        if items:
+            self.table.scrollToItem(items[0])
+        return True
 
     def selected_entry(self):
         rows = {i.row() for i in self.table.selectedIndexes()}

@@ -6,7 +6,9 @@ fills in as the run goes rather than after it.
 
 A scenario's folder opens on its step-by-step guide, when the run wrote one
 (``--report-doc``): ``documentation.html``, which follows the run as it is
-written and exports to PDF.
+written. Export Documentation turns what is selected into files to hand on -
+see :mod:`cms_gui.docexport`: one file for a session or a scenario, a .zip of
+one per session for the whole run, as HTML or PDF.
 
 Between runs it remembers. The run directory used to arrive in an event and
 disappear with the process, which left this page blank on every restart even
@@ -23,11 +25,11 @@ import time
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtQuickWidgets import QQuickWidget
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QMenu,
                                QPlainTextEdit, QPushButton, QScrollArea, QSplitter,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .. import history as history_mod, icons, theme, widgets
+from .. import docexport, findbar, history as history_mod, icons, search, theme, widgets
 
 TEXT_SUFFIXES = (".json", ".log", ".txt", ".html", ".yaml", ".yml", ".md", ".csv")
 HTML_SUFFIXES = (".html", ".htm")
@@ -59,6 +61,7 @@ class ArtifactsPage(QWidget):
         self._guide_path = ""        # the guide on show, and when it last changed:
         self._guide_mtime = None     # a rescan reloads it only if it has
         self._rescanning = False
+        self.exporter = None          # made the first time something is exported
         # Files announced by a run, read in one go: see note_artifacts.
         self._stale = False
         self._gather = QTimer(self)
@@ -149,14 +152,27 @@ class ArtifactsPage(QWidget):
         self.guide_mode.setVisible(False)
         self.guide_mode.currentIndexChanged.connect(self._preview_selected)
         path_row.addWidget(self.guide_mode)
-        self.export_pdf = icons.button(QPushButton("Export PDF"), "export")
-        self.export_pdf.setToolTip("Save the guide as an A4 PDF")
-        self.export_pdf.setVisible(False)
-        self.export_pdf.clicked.connect(self._export_pdf)
-        path_row.addWidget(self.export_pdf)
+        # What is selected, as files to hand on: one for a session or a
+        # scenario, a .zip of one per session for the whole run. Offered
+        # wherever there is a guide to export, whatever the pane shows.
+        self.export_docs = icons.button(QPushButton("Export Documentation"), "export")
+        self.export_docs.setProperty("hasmenu", "true")
+        self.export_docs.setVisible(False)
+        self.export_menu = QMenu(self.export_docs)
+        for label, kind in (("HTML", docexport.HTML), ("PDF", docexport.PDF)):
+            action = self.export_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, k=kind: self.export_documentation(k))
+        self.export_docs.setMenu(self.export_menu)
+        path_row.addWidget(self.export_docs)
         path_row.addWidget(self.open_file)
         path_layout.addLayout(path_row)
         right_layout.addWidget(path_bar)
+        # Ctrl+F over whatever the pane shows: a guide, a Jira task's reading
+        # copy, any report - or the source, JSON or log as text.
+        self.find_bar = findbar.FindBar()
+        right_layout.addWidget(self.find_bar)
+        findbar.install(self, lambda: (self.find_bar, self._find_target()))
 
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
@@ -240,6 +256,28 @@ class ArtifactsPage(QWidget):
         self.tree.clearSelection()
         self.path_label.setText("%s is no longer there" % wanted)
         return False
+
+    # -- search (Ctrl+K) -------------------------------------------------------
+    def search_rows(self):
+        """Every run whose reports are still on disk, the live one first."""
+        found = []
+        if self._run_dir and os.path.isdir(self._run_dir):
+            found.append(search.hit(CURRENT, self._run_dir, "Current run", "accent",
+                                    target=self._run_dir))
+        for entry in (self.history.with_artifacts() if self.history else []):
+            if entry.get("run_dir") == self._run_dir:
+                continue
+            found.append(search.hit(history_mod.entry_label(entry), entry["run_dir"],
+                                    keys=entry.get("summary") or "",
+                                    target=entry["run_dir"]))
+        return found
+
+    def show_found(self, run_dir):
+        if not run_dir or not os.path.isdir(run_dir):
+            return False
+        if os.path.normpath(run_dir) != os.path.normpath(self._shown_dir or os.sep):
+            self.show_dir(run_dir)
+        return True
 
     def note_artifacts(self, _event):
         """A run wrote files; the tree is read again - once for a burst of them.
@@ -400,7 +438,7 @@ class ArtifactsPage(QWidget):
             self.html.setVisible(False)
         if self.no_guide is not None:
             self.no_guide.setVisible(False)
-        self.export_pdf.setVisible(False)
+        self._offer_export(path)
         if not self._rescanning:
             self._guide_path, self._guide_mtime = "", None
         folder = _scenario_folder(path)
@@ -427,6 +465,7 @@ class ArtifactsPage(QWidget):
                 self.image_area.setVisible(True)
                 self.image.setPixmap(pixmap.scaled(
                     1200, 900, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._find_follows()
                 return
         if suffix in TEXT_SUFFIXES or is_html:
             try:
@@ -465,10 +504,10 @@ class ArtifactsPage(QWidget):
             self.text.setVisible(False)
             self.image_area.setVisible(False)
             self.html.setVisible(True)
+            self._find_follows()
         else:
             self._show_html(path, fragment="latest" if again else "")
         self._guide_path, self._guide_mtime = path, mtime
-        self.export_pdf.setVisible(True)
 
     def _show_no_guide(self):
         if self.no_guide is None:
@@ -487,28 +526,55 @@ class ArtifactsPage(QWidget):
         self.text.setVisible(False)
         self.image_area.setVisible(False)
         self.no_guide.setVisible(True)
+        self._find_follows()
 
-    def _export_pdf(self):
-        if not self._guide_path or self.html is None:
+    # -- exporting the documentation ------------------------------------------
+    def _offer_export(self, path):
+        """Show Export Documentation when what is selected has a guide in it."""
+        plan = docexport.plan(path, self._shown_dir) if path else None
+        self.export_docs.setVisible(plan is not None)
+        if plan is not None:
+            self.export_docs.setToolTip("Export the documentation here: %s."
+                                        % docexport.scope(plan))
+
+    def export_documentation(self, kind):
+        """Export what is selected as ``kind`` (HTML or PDF), asking where to."""
+        selected = self._selected_path()
+        plan = docexport.plan(selected, self._shown_dir)
+        if plan is None or (self.exporter is not None and self.exporter.busy()):
             return
-        folder = os.path.dirname(self._guide_path)
-        name = os.path.basename(folder.rstrip(os.sep)) or "guide"
-        target, _kind = QFileDialog.getSaveFileName(
-            self, "Export the guide as PDF", os.path.join(folder, name + ".pdf"),
-            "PDF (*.pdf)")
+        suffix = ".zip" if plan.archive else "." + kind
+        folder = selected if os.path.isdir(selected) else os.path.dirname(selected)
+        described = {docexport.HTML: "HTML", docexport.PDF: "PDF"}[kind]
+        kinds = ("%s files in a zip archive (*.zip)" % described if plan.archive
+                 else "%s (*%s)" % (described, suffix))
+        target, _filter = QFileDialog.getSaveFileName(
+            self, "Export the documentation as %s" % described,
+            os.path.join(folder, docexport.safe_name(plan.name) + suffix), kinds)
         if not target:
             return
-        if not target.lower().endswith(".pdf"):
-            target += ".pdf"
-        self.export_pdf.setEnabled(False)
+        if not target.lower().endswith(suffix):
+            target += suffix
+        if self.exporter is None:
+            self.exporter = docexport.DocExporter(self)
+            self.exporter.progress.connect(self._export_progress)
+            self.exporter.finished.connect(self._exported)
+        self.export_docs.setEnabled(False)
         self.path_label.setText("Writing %s ..." % target)
-        self.html.export_pdf(target)
+        self.exporter.start(plan, kind, target)
 
-    def _pdf_exported(self, path, ok):
-        self.export_pdf.setEnabled(True)
+    def _export_progress(self, done, total):
+        if total > 1:
+            self.path_label.setText("Writing %d of %d ..." % (min(done + 1, total), total))
+
+    def _exported(self, path, ok, problem):
+        self.export_docs.setEnabled(True)
         if ok:
             self.rescan()            # it may have landed in the folder on show
-        self.path_label.setText(("Saved %s" if ok else "Could not write %s") % path)
+            self.path_label.setText("Saved %s" % path)
+        else:
+            self.path_label.setText("Could not write %s%s"
+                                    % (path, ": %s" % problem if problem else ""))
 
     def _show_text(self, body):
         if self.html is not None:
@@ -516,6 +582,21 @@ class ArtifactsPage(QWidget):
         self.image_area.setVisible(False)
         self.text.setVisible(True)
         self.text.setPlainText(body)
+        self._find_follows()
+
+    # -- finding in what is on show -------------------------------------------
+    def _find_target(self):
+        """The reader on show, as something to search; None for a picture."""
+        if self.html is not None and not self.html.isHidden():
+            return findbar.target_for(self.html)
+        if not self.text.isHidden() and (self.no_guide is None
+                                         or self.no_guide.isHidden()):
+            return findbar.target_for(self.text)
+        return None
+
+    def _find_follows(self):
+        """An open search moves to the reader now on show."""
+        self.find_bar.retarget(self._find_target())
 
     def _show_html(self, path, fragment=""):
         if not os.path.isfile(path):
@@ -526,11 +607,11 @@ class ArtifactsPage(QWidget):
 
             self.html = HtmlPreview(self)
             self.html.local_file_requested.connect(self._select_path, Qt.QueuedConnection)
-            self.html.pdf_exported.connect(self._pdf_exported)
             self._preview_layout.addWidget(self.html, 1)
         self.text.setVisible(False)
         self.image_area.setVisible(False)
         self.html.setVisible(True)
+        self._find_follows()
         self.html.load_file(path, self._shown_dir, fragment)
 
     # -- opening --------------------------------------------------------------

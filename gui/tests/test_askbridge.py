@@ -458,3 +458,25 @@ def test_cancel_on_a_choice_sends_no_rows_to_act_on(qapp, bridge):
 
     assert _pump(qapp, lambda: bridge.sent)
     assert bridge.sent[0]["answer"] == "Cancel"
+
+
+def test_ctrl_f_in_the_review_follows_its_tabs(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from cms_gui import findbar
+
+    detail = "## Plan\n\nAdd the order export.\n\nRisk: the order total.\n"
+    dialog = AskDialog("Start work?", detail)
+    dialog.show()
+    dialog.activateWindow()
+    QTest.qWaitForWindowActive(dialog)
+    dialog.review.setFocus()
+    QTest.keyClick(dialog.review, Qt.Key_F, Qt.ControlModifier)
+    assert dialog.find_bar.isVisible()
+    QTest.keyClicks(dialog.find_bar.field, "order")
+    assert dialog.find_bar.count.text().endswith("of 2")
+    dialog.detail_tabs.setCurrentIndex(1)             # the original text
+    assert dialog.find_bar.target() is findbar.target_for(dialog.original)
+    assert dialog.find_bar.count.text().endswith("of 2")
+    dialog.close()
