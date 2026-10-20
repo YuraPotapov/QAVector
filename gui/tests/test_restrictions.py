@@ -7,7 +7,7 @@ click writes. Nothing here starts a sandbox.
 import copy
 
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QDialog
 
 from cms_gui import restrictions as R
@@ -118,14 +118,26 @@ def test_a_service_window_starts_from_the_project_defaults_and_can_set_its_own(q
                                   outer=[("project", {"files": "read_only", "network": "off"})], outer_name="project")
     try:
         assert window.files.button("Read and write").isEnabled()
-        assert window.files.current() == "Same as project" and window.network.current() == "Same as project"
+        assert window.files.current() == "Same as project" and window.network.current() == "Off"
         assert window.value() == {"switched_off": ["network"]}
-        assert not window.banner.isHidden()
-        window.switch_back.click()
-        assert window.value() == {}
         window.network.set_current("On")
         window.files.set_current("Read and write")
         assert window.value() == {"network": "on", "files": "read_write"}
+    finally:
+        dispose(window)
+
+
+def test_switched_off_shows_as_off_and_keeps_what_is_configured_until_changed(qapp, dispose):
+    own = {"network": "on", "files": "read_only", "switched_off": ["network", "files"]}
+    window = R.RestrictionsWindow("Shop", "/work/shop", "project", own)
+    try:
+        # No note about how it was switched off: the switches say it.
+        assert window.network.current() == "Off" and window.files.current() == "No access"
+        assert window.value() == own
+        window.files.set_current("Read and write")
+        assert window.value() == {"network": "on", "files": "read_write", "switched_off": ["network"]}
+        window.network.set_current("On")
+        assert window.value() == {"files": "read_write"}
     finally:
         dispose(window)
 
@@ -331,8 +343,11 @@ def test_the_restrictions_button_needs_a_project_folder(qapp, dispose):
     try:
         assert not plain.restrictions_button.isEnabled()
         assert "Properties" in plain.restrictions_button.toolTip()
-        assert held.restrictions_button.isEnabled() and held.restrictions_button.text() == "Net on · RO"
+        # The lock is the state and the network has its own toggle: no words repeat it.
+        assert held.restrictions_button.isEnabled() and held.restrictions_button.text() == "Restrictions"
         assert held.network_toggle.isVisibleTo(held) and held.network_toggle.text() == "On"
+        assert held.network_toggle.toolButtonStyle() == Qt.ToolButtonIconOnly
+        assert "on" in held.network_toggle.toolTip()
         assert not plain.network_toggle.isVisibleTo(plain)
         assert held._folder_of(held._document_now()) == ("${vars.project_dir}", "/work/shop")
     finally:

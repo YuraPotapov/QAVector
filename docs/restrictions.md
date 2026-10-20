@@ -39,13 +39,16 @@ own window (double-click it) has a **Restrictions** section with the same button
 ## Quick toggles
 
 Service rows, the project's header, cycle steps on the canvas and the cycles
-toolbar show what is set now: **Network** (globe, On/Off), **Files** (folder,
-All/RW/RO/Off) and **Limits** (gauge). They are indicators first; a click:
+toolbar show what is set now: **Network** (a globe, struck through when off),
+**Files** (folder, All/RW/RO/Off) and **Limits** (gauge). In the cycles toolbar the
+globe stands alone and **Restrictions** beside it shows a lock: closed when
+anything is restricted. They are indicators first; a click:
 
 - on **On**, or on a folder that is open, switches that access off;
 - on something this level switched off, turns it back on - to exactly what was
   configured, because switching off is stored beside the configuration
-  (`switched_off`), not instead of it;
+  (`switched_off`), not instead of it. The restrictions window shows it as off;
+  choosing something else there replaces what was configured;
 - on something off by the project's or cycle's default, turns it on for this
   service or step only.
 

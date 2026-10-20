@@ -634,24 +634,14 @@ class RestrictionsWindow(QDialog):
         else:
             parent_effective = resolve([])
 
-        self.switched = QLabel("")
-        self.switched.setProperty("role", "restrictionnote")
-        self.switched.setWordWrap(True)
-        self.switch_back = QPushButton("Turn back on")
-        self.switch_back.setProperty("variant", "ghost")
-        self.switch_back.clicked.connect(self._switch_back)
-        banner = QWidget()
-        banner_layout = QHBoxLayout(banner)
-        banner_layout.setContentsMargins(0, 0, 0, 0)
-        banner_layout.addWidget(self.switched, 1)
-        banner_layout.addWidget(self.switch_back)
-        self.banner = banner
-        column.addWidget(banner)
-
+        # What a quick button switched off shows as off, like anything else
+        # that is off. The value configured under it stays stored beside it
+        # and is kept unless that choice is changed here.
+        self._switched = set(self._own.get("switched_off") or [])
         same = "Same as %s" % outer_name if self.outer else None
         network_options = ([same] if same else []) + ["On", "Off"]
         wanted = network_value(self._own.get("network"))
-        current = {"off": "Off", "on": "On"}.get(wanted, same or "On")
+        current = "Off" if "network" in self._switched else {"off": "Off", "on": "On"}.get(wanted, same or "On")
         self.network = widgets.Segmented(network_options, current)
         column.addWidget(widgets.field("Network", self.network,
             "On is the host's own network: ports, local databases, the internet. "
@@ -659,7 +649,9 @@ class RestrictionsWindow(QDialog):
 
         file_options = ([same] if same else []) + [FILE_WORDS[one] for one in FILES]
         wanted = self._own.get("files")
-        self.files = widgets.Segmented(file_options, FILE_WORDS[wanted] if wanted in FILES else (same or FILE_WORDS["all"]))
+        self.files = widgets.Segmented(file_options, FILE_WORDS["none"] if "files" in self._switched else
+                                       FILE_WORDS[wanted] if wanted in FILES else (same or FILE_WORDS["all"]))
+        self._shown = {"network": self.network.current(), "files": self.files.current()}
         column.addWidget(widgets.field("Files", self.files,
             "Read and write, Read-only and No access hold the program to the project folder and the folders below. "
             "System folders stay readable so programs start; the rest of your home folder is hidden."))
@@ -748,7 +740,7 @@ class RestrictionsWindow(QDialog):
             signal.connect(self._changed)
         self.folders.itemChanged.connect(self._changed)
         if not writable:
-            for widget in (self.network, self.files, self.folders, add, remove, self.limits, self.switch_back):
+            for widget in (self.network, self.files, self.folders, add, remove, self.limits):
                 widget.setEnabled(False)
             self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
         self._load_capabilities()
@@ -815,35 +807,35 @@ class RestrictionsWindow(QDialog):
     def value(self):
         """The stored mapping for this level; raises ValueError when a field is wrong."""
         result = {}
+        # Switched off and left as shown: the configured value under it stays.
+        kept = {kind for kind in self._switched if getattr(self, kind).current() == self._shown[kind]}
         chosen = self.network.current()
-        if chosen == "Off":
+        if "network" in kept:
+            if self._own.get("network") is not None:
+                result["network"] = network_value(self._own["network"])
+        elif chosen == "Off":
             result["network"] = "off"
         elif chosen == "On" and self.outer:
             result["network"] = "on"
         chosen = self.files.current()
-        for key, words in FILE_WORDS.items():
-            if words == chosen and (key != "all" or self.outer):
-                result["files"] = key
+        if "files" in kept:
+            if self._own.get("files") in FILES:
+                result["files"] = self._own["files"]
+        else:
+            for key, words in FILE_WORDS.items():
+                if words == chosen and (key != "all" or self.outer):
+                    result["files"] = key
         folders = self._folder_rows()
         if folders:
             result["folders"] = folders
         limits = self.limits.value()
         if limits:
             result["limits"] = limits
-        if self._own.get("switched_off"):
-            result["switched_off"] = list(self._own["switched_off"])
+        if kept:
+            result["switched_off"] = [one for one in SWITCHES if one in kept]
         return result
 
-    def _switch_back(self):
-        self._own.pop("switched_off", None)
-        self._changed()
-
     def _changed(self, *_):
-        off = self._own.get("switched_off") or []
-        self.banner.setVisible(bool(off))
-        if off:
-            self.switched.setText("%s switched off with the quick button. What is set below comes back when it is "
-                                  "turned on." % " and ".join({"network": "Network", "files": "File access"}[one] for one in off))
         try:
             value = self.value()
             local = problems(value, self.level)

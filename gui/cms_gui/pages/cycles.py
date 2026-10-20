@@ -244,7 +244,9 @@ class CyclesPage(QWidget):
         # like any other change, so Undo takes it back.
         self.network_toggle = QToolButton()
         self.network_toggle.setProperty("variant", "restriction")
-        self.network_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        # The globe, struck through when off, is the state - as on the nodes.
+        # Its text stays for the tooltip's reader and accessibility.
+        self.network_toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.network_toggle.setAccessibleName("Cycle network")
         self.network_toggle.clicked.connect(self._toggle_cycle_network)
         self.network_toggle.hide()
@@ -1391,8 +1393,10 @@ class CyclesPage(QWidget):
             self.network_toggle.hide()
             return
         pending = restrictions_mod.pending(saved.get("restrictions"), own)
+        # The lock says whether anything is held; the network has its own
+        # toggle beside it, so the words do not repeat either.
         icons.button(button, "lock" if effective["restricted"] else "unlock",
-                     restrictions_mod.short_summary(effective) + (" *" if pending else ""))
+                     "Restrictions" + (" *" if pending else ""))
         button.setEnabled(True)
         button.setToolTip("The defaults for the steps working in %s: %s.%s" % (
             written, restrictions_mod.summary(effective), "\nNot saved yet." if pending else ""))

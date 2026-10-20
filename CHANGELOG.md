@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- The cycles toolbar no longer says the network state twice: the network toggle
+  is a globe, struck through when off, and **Restrictions** beside it shows a
+  lock - closed when anything is restricted - with the details in its tooltip.
+- The restrictions window shows network or files switched off by a quick button
+  as Off / No access, like any other setting, without a note about how it got
+  there. Left as it is, what was configured under it is kept for the quick
+  button to bring back; choosing something else replaces it.
+
 ## [0.16.31] - 2026-10-20
 
 ### Fixed

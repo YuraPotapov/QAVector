@@ -548,9 +548,6 @@ QPushButton[variant="restrictions"] {{
 QPushButton[variant="restrictions"]:hover {{ background: {a100}; color: {a700}; border-color: {a300}; }}
 QPushButton[variant="restrictions"][restricted="true"] {{ border-color: {accent}; color: {text}; }}
 QPushButton[variant="restrictions"]:disabled {{ color: {n500}; border-color: {n300}; }}
-QLabel[role="restrictionnote"] {{
-    font-size: 12px; color: {warn_ink}; background: {warn_tint}; padding: 6px 8px;
-}}
 
 /* Set on Save while the controls no longer match the saved configuration they
    came from. Last of the button rules on purpose: an attribute selector and a
