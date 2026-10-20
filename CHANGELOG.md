@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.33] - 2026-10-20
+
 ### Changed
 - **Jira and Teams steps are held by a cycle's restrictions** like shell, git and
   agent steps: restricted, the same plugin runs as a program of its own inside
