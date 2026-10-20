@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.35] - 2026-10-21
+
 ### Added
 - **Isolated network for services** (docs/QAVector_Network_Isolation_and_Port_Publishing.md):
   Network On / **Isolated** / Off. An isolated service has ports of its own -
