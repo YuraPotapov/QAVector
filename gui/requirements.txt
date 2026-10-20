@@ -1,4 +1,7 @@
 # The GUI's only runtime dependency. Everything the launcher needs
 # (playwright, cryptography, pyyaml) belongs to the CORE environment, which the
 # GUI talks to as a subprocess - see README.md.
-PySide6>=6.6,<7
+# Below 6.12: PySide6 6.12.0 aborts at start-up ("Fatal Python error:
+# none_dealloc: deallocating None") while the main window is built. Lift the
+# cap once a release starts the app; a clean build takes the newest allowed.
+PySide6>=6.6,<6.12
