@@ -101,6 +101,25 @@ def stopping(cycle):
                for node in graph.get("nodes", []))
 
 
+def tone(cycle, live=False):
+    """The variant of the pill that shows :func:`header`, in the Cockpit's
+    colours: in flight, held up, failed, done, or simply stopped."""
+    raw = cycle.get("status")
+    steps = cycle.get("steps") or {}
+    waiting = any(one.get("status") == "pending" and (steps.get(one.get("step")) or {}).get("status")
+                  not in ("skipped", "cancelled") for one in (cycle.get("node_approvals") or {}).values())
+    if raw == "cancelled":
+        return "neutral"
+    if stopping(cycle) or cycle.get("paused") or cycle.get("pause_requested") or waiting \
+            or raw in ("paused", "interrupted"):
+        return "warn"
+    if live:
+        return "outline"
+    if raw in ("failed", "timeout", "error"):
+        return "bad"
+    return "accent" if raw == "success" else "neutral"
+
+
 def header(cycle, live=False, plugins=None):
     if cycle.get("status") == "cancelled":
         return "Run stopped"

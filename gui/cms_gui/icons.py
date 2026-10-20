@@ -654,6 +654,9 @@ def icon(name, color=None):
     built = QIcon()
     for size in SIZES:
         built.addPixmap(pixmap(name, size, color))
+        # Its own disabled look. The style's would be the same mark washed
+        # out, which on the dark theme is nearly as bright as the live one.
+        built.addPixmap(pixmap(name, size, theme.NEUTRAL[400]), QIcon.Disabled)
     _cache[key] = built
     return built
 

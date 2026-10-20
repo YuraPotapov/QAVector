@@ -539,6 +539,21 @@ QToolButton[variant="restriction"][state="off"]:hover {{ border-color: {warn}; }
 QToolButton[variant="restriction"][state="locked"] {{ color: {n500}; }}
 QToolButton[variant="restriction"][pending="true"] {{ border: 1px dashed {accent}; }}
 QToolButton[variant="restriction"]:disabled {{ color: {n400}; background: transparent; }}
+/* The cycle header's own controls - Properties, Restrictions, the network: one
+   size and no box, a mark each; the dashed edge is "not saved yet", as on the
+   toggles. After the variants above so the size is the same for all three. */
+QToolButton[head="true"] {{
+    min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px;
+    padding: 0; border: 1px solid transparent;
+}}
+QToolButton[head="true"][pending="true"] {{ border: 1px dashed {accent}; }}
+/* The run strip on the cycles page: one object of several parts, each dropping
+   the left edge its neighbour already draws, so [Auto][>][>>][stop][Run] reads
+   as one control - the stepper's rule. */
+QToolButton[seam="true"], QComboBox[seam="true"] {{ border-left: none; }}
+/* Its marks-only parts: no side padding, or the 13px of a labelled button
+   squeezes the mark into what is left of a narrow box. */
+QToolButton[strip="icon"] {{ padding: 0; }}
 /* The button beside a folder field: what the folder holds its programs to. */
 QPushButton[variant="restrictions"] {{
     border: 1px solid {divider}; color: {n800}; background: transparent;
@@ -589,11 +604,12 @@ QLineEdit[role="search"] {{
     padding: 0 4px; min-height: 0; font-size: 11px;
 }}
 QLineEdit[role="search"]:focus {{ border-color: {accent}; }}
+/* The arrow is a chevron drawn into a small SVG in this theme's ink (see
+   _chevron): the border-triangle trick of CSS comes out of Qt as a filled bar,
+   and a combo box with rules of its own never asks the style to draw one. */
 QComboBox::drop-down {{ border: none; width: 18px; }}
-QComboBox::down-arrow {{
-    image: none; border-left: 4px solid transparent; border-right: 4px solid transparent;
-    border-top: 5px solid {n600}; width: 0; height: 0; margin-right: 6px;
-}}
+QComboBox::down-arrow {{ {chevron} width: 10px; height: 6px; margin-right: 6px; }}
+QComboBox::down-arrow:disabled {{ {chevron_off} }}
 QComboBox QAbstractItemView {{
     background: {bg}; border: 1px solid {divider}; color: {text};
     selection-background-color: {select_bg}; selection-color: {select_ink};
@@ -885,7 +901,37 @@ def stylesheet():
         cell_v=CELL_INSET_V, cell_h=CELL_INSET_H,
         tb_bg=TITLEBAR_BG, tb_text=TITLEBAR_TEXT, tb_muted=TITLEBAR_MUTED,
         select_bg=SELECT_BG, select_ink=SELECT_INK,
+        chevron=_chevron(NEUTRAL[600]), chevron_off=_chevron(NEUTRAL[400]),
     )
+
+
+_CHEVRON = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6">'
+            '<path d="M1 1 L5 5 L9 1" fill="none" stroke="%s" stroke-width="1.6" '
+            'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def _chevron(color):
+    """``image: url(...)`` of a drop-down chevron in ``color``, or "".
+
+    Written once per colour into the user's own cache folder - not a shared
+    temporary one, where another account could have made the folder first.
+    Without a writable cache the list boxes simply have no arrow.
+    """
+    from PySide6.QtCore import QStandardPaths
+    root = QStandardPaths.writableLocation(QStandardPaths.GenericCacheLocation)
+    if not root:
+        return ""
+    folder = os.path.join(root, "qavector", "theme")
+    path = os.path.join(folder, "chevron-%s.svg" % color.lstrip("#").lower())
+    try:
+        if not os.path.isfile(path):
+            os.makedirs(folder, exist_ok=True)
+            with open(path + ".part", "w", encoding="ascii") as handle:
+                handle.write(_CHEVRON % color)
+            os.replace(path + ".part", path)
+    except OSError:
+        return ""
+    return 'image: url("%s");' % path.replace(os.sep, "/")
 
 
 # --- painted indicators ------------------------------------------------------

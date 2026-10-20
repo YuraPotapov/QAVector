@@ -4484,3 +4484,44 @@ def test_folded_phase_explains_root_failure_and_downstream_blocks(phased):
     assert "Baseline tests failed" in summary.toolTip()
     phased.canvas.clear_status()
     assert not summary.node["cause_summary"]
+
+
+# -- the header row: the cycle's own marks, and one run strip -----------------------
+def test_the_header_is_the_name_two_groups_and_one_run_strip(opened):
+    from PySide6.QtWidgets import QFrame
+    from cms_gui.pages import cycles as cycles_mod
+    strip = opened.run_button.parentWidget()
+    assert isinstance(strip, QFrame) and strip.property("role") == "runstrip"
+    parts = [strip.layout().itemAt(index).widget() for index in range(strip.layout().count())]
+    assert parts == [opened.execution_mode, opened.step_button, opened.from_button,
+                     opened.stop_button, opened.run_button]
+    assert {part.height() for part in parts} == {cycles_mod.STRIP_HEIGHT}
+    assert [part.property("seam") for part in parts] == [None, "true", "true", "true", "true"]
+    for mark in (opened.properties_button, opened.restrictions_button):
+        assert mark.toolButtonStyle() == Qt.ToolButtonIconOnly and mark.property("head") == "true"
+    assert opened.properties_button.text() == "Properties"            # still said, to a screen reader
+    assert opened.stop_button.toolButtonStyle() == Qt.ToolButtonIconOnly
+    assert not opened.stop_button.isEnabled()                         # nothing is running
+    assert opened.run_button.minimumWidth() == cycles_mod.RUN_BUTTON_WIDTH
+
+
+def test_the_run_on_screen_is_a_pill_toned_by_how_it_is_going():
+    from cms_gui import cycleactivity as activity
+    assert activity.tone({"status": "running"}, live=True) == "outline"
+    assert activity.tone({"status": "running", "pause_requested": True}, live=True) == "warn"
+    assert activity.tone({"status": "paused", "paused": True}) == "warn"
+    assert activity.tone({"status": "failed"}) == "bad"
+    assert activity.tone({"status": "success"}) == "accent"
+    assert activity.tone({"status": "cancelled"}) == "neutral"
+    waiting = {"status": "running", "steps": {"gate": {"status": "running"}},
+               "node_approvals": {"a": {"status": "pending", "step": "gate"}}}
+    assert activity.tone(waiting, live=True) == "warn"
+
+
+def test_every_list_box_has_a_drawn_chevron_not_a_border_trick():
+    from cms_gui import theme
+    sheet = theme.stylesheet()
+    assert "border-top: 5px solid" not in sheet
+    assert 'QComboBox::down-arrow { image: url("' in sheet
+    chevron = sheet.split('QComboBox::down-arrow { image: url("', 1)[1].split('")', 1)[0]
+    assert os.path.isfile(chevron) and "<svg" in open(chevron).read()

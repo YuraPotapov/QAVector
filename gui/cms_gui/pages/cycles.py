@@ -30,7 +30,7 @@ import copy
 import re
 import subprocess
 
-from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout,
                                QLabel, QMenu, QComboBox,
@@ -187,6 +187,9 @@ class CyclesPage(QWidget):
         self.run_button.setProperty("hasmenu", "true")
         self.run_button.setPopupMode(QToolButton.MenuButtonPopup)
         self.run_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        # As wide as "Resume" at least: Run, Resume and Pause take turns on it,
+        # and a button that changed width with them moved the whole row.
+        self.run_button.setMinimumWidth(RUN_BUTTON_WIDTH)
         # clicked(bool) is the button state, not the textual run mode.
         self.run_button.clicked.connect(self._primary_run)
         self.run_menu = QMenu(self.run_button)
@@ -211,18 +214,22 @@ class CyclesPage(QWidget):
         # label would have to name it or be vague. The tooltip says both what
         # it does and what it borrows, because "run one step" raises the
         # question of where the others' results come from.
-        self.step_button = icons.button(QPushButton(), "run-step")
+        self.step_button = _strip_icon(icons.button(QToolButton(), "run-step"))
         self.step_button.setToolTip(
             "Run this step only - a new run that takes every other step's\n"
             "results from the run on screen, or the last run if none is.")
         self.step_button.clicked.connect(lambda: self._run("only"))
-        self.from_button = icons.button(QPushButton(), "run-from")
+        self.from_button = _strip_icon(icons.button(QToolButton(), "run-from"))
         self.from_button.setToolTip(
             "Run from here - this step and everything after it, in a new run\n"
             "that takes the steps before it from the run on screen, or the\n"
             "last run if none is.")
         self.from_button.clicked.connect(lambda: self._run("from"))
-        self.stop_button = icons.button(QPushButton(), "stop", "Stop")
+        # A mark in the run strip, live only while a run goes: the main button
+        # beside it is Pause, Continue or Retry phase then, so Stop cannot take
+        # its place - and a button that came and went would move the row.
+        self.stop_button = _strip_icon(icons.button(QToolButton(), "stop", "Stop"))
+        self.stop_button.setToolTip("Stop the run.")
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.stop_button.setEnabled(False)
         self.execution_mode = QComboBox()
@@ -230,15 +237,14 @@ class CyclesPage(QWidget):
             self.execution_mode.addItem(mode.capitalize(), mode)
         self.execution_mode.setToolTip("Auto: important steps also run without implicit approval. Important asks before marked steps. Approve asks before each step. Explicit decision gates remain in every mode.")
         self.execution_mode.activated.connect(self._execution_mode_changed)
-        self.properties_button = QPushButton("Properties")
+        self.properties_button = _head_icon(icons.button(QToolButton(), "settings", "Properties"))
         self.properties_button.setToolTip(
-            "The cycle's name, project and variables.")
+            "Properties - the cycle's name, project and variables.")
         self.properties_button.clicked.connect(self.open_properties)
         # Its own window, never Properties: what the cycle's steps are held to
         # is a question of its own, and the button says the answer before it
         # is pressed.
-        self.restrictions_button = QPushButton("Restrictions")
-        icons.button(self.restrictions_button, "unlock", "Restrictions")
+        self.restrictions_button = _head_icon(icons.button(QToolButton(), "unlock", "Restrictions"))
         self.restrictions_button.clicked.connect(self.open_restrictions)
         # The whole cycle's network, one click either way - into the draft,
         # like any other change, so Undo takes it back.
@@ -248,6 +254,8 @@ class CyclesPage(QWidget):
         # Its text stays for the tooltip's reader and accessibility.
         self.network_toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.network_toggle.setAccessibleName("Cycle network")
+        self.network_toggle.setProperty("head", "true")
+        self.network_toggle.setIconSize(QSize(18, 18))
         self.network_toggle.clicked.connect(self._toggle_cycle_network)
         self.network_toggle.hide()
         self.arrange_button = icons.button(QPushButton(), "refresh", "Arrange")
@@ -286,7 +294,7 @@ class CyclesPage(QWidget):
             "Add a step - after the selected one, when one is selected.\n"
             "Right-click a step for what else can be done to it.")
         self.add_button.clicked.connect(self._add_step_from_bar)
-        for button in (self.properties_button, self.restrictions_button, self.arrange_button,
+        for button in (self.arrange_button,
                        self.fit_button, self.zoom_out_button,
                        self.zoom_in_button, self.fold_button, self.validity,
                        self.add_button):
@@ -333,14 +341,29 @@ class CyclesPage(QWidget):
 
         self.title = widgets.elided_line("Cycles")
         self.state = widgets.elided_line("", "mono")
-        self.active_header = widgets.elided_line("", "muted")
+        # Where the run on screen is, as a pill toned by how it is going - the
+        # Cockpit's own look - beside the name it belongs to.
+        self.active_header = widgets.Tag()
         self.active_header.hide()
 
+        # Two groups: what the cycle is set to, and running it. The run strip
+        # is one object - mode, this step, from here, stop, run - so its parts
+        # share edges and a height instead of standing apart.
+        strip = QFrame()
+        strip.setProperty("role", "runstrip")
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(0)
+        for index, part in enumerate((self.execution_mode, self.step_button, self.from_button,
+                                      self.stop_button, self.run_button)):
+            part.setFixedHeight(STRIP_HEIGHT)
+            if index:
+                part.setProperty("seam", "true")
+            strip_layout.addWidget(part)
         layout.addWidget(widgets.row(
-            self.title, None, self.state, self.active_header, self.properties_button, self.network_toggle,
-            self.restrictions_button,
-            self.step_button, self.from_button,
-            self.stop_button, self.execution_mode, self.run_button))
+            self.title, self.active_header, self.state, None,
+            self.properties_button, self.restrictions_button, self.network_toggle,
+            widgets.vline(STRIP_HEIGHT - 8), strip))
         # Said while nothing is open, on the empty canvas - not as lines over
         # it, which took room from a long cycle and moved the page when they
         # went away.
@@ -893,7 +916,9 @@ class CyclesPage(QWidget):
         self.active_header.setVisible(bool(cycle))
         self.state.setVisible(not cycle)
         summary = cycleactivity.header(cycle, live) if cycle else ""
-        self.active_header.setText(summary)
+        metrics = self.active_header.fontMetrics()
+        self.active_header.set(metrics.elidedText(summary, Qt.ElideRight, HEADER_PILL_WIDTH),
+                               cycleactivity.tone(cycle, live) if cycle else "neutral")
         self.active_header.setToolTip("\n".join(value for value in (
             summary, self.state.text(), "Mode: " + self.execution_mode.currentText() if cycle else "") if value))
         cockpit = self._context == RUN and self.run_view.current() == "Cockpit"
@@ -1392,6 +1417,7 @@ class CyclesPage(QWidget):
         effective = restrictions_mod.resolve([("cycle", own)])
         if not self.current_id() or not written:
             icons.button(button, "unlock", "Restrictions")
+            button.setToolButtonStyle(Qt.ToolButtonIconOnly)
             button.setEnabled(False)
             button.setToolTip("Set the cycle's project folder in Properties to restrict what its steps may do."
                               if self.current_id() else "")
@@ -1400,8 +1426,12 @@ class CyclesPage(QWidget):
         pending = restrictions_mod.pending(saved.get("restrictions"), own)
         # The lock says whether anything is held; the network has its own
         # toggle beside it, so the words do not repeat either.
-        icons.button(button, "lock" if effective["restricted"] else "unlock",
-                     "Restrictions" + (" *" if pending else ""))
+        icons.button(button, "lock" if effective["restricted"] else "unlock", "Restrictions")
+        button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        if button.property("pending") != ("true" if pending else "false"):
+            button.setProperty("pending", "true" if pending else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
         button.setEnabled(True)
         button.setToolTip("The defaults for the steps working in %s: %s.%s" % (
             written, restrictions_mod.summary(effective), "\nNot saved yet." if pending else ""))
@@ -3309,6 +3339,32 @@ class CyclesPage(QWidget):
             icons.button(self.validity, "check",
                          "No problems" if dirty else "Ready to run", theme.OK)
             self.validity.setStyleSheet("color: %s;" % theme.OK)
+
+
+#: The run strip's height, shared by every part of it and the divider before it.
+STRIP_HEIGHT = 32
+#: How wide the run's pill beside the title may grow before it elides.
+HEADER_PILL_WIDTH = 420
+#: The run button's least width: its "Resume", menu arrow included.
+RUN_BUTTON_WIDTH = 120
+
+
+def _strip_icon(button):
+    """A part of the run strip that is only its mark; the words are the tooltip."""
+    button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    button.setProperty("strip", "icon")
+    button.setIconSize(QSize(18, 18))
+    button.setFixedWidth(STRIP_HEIGHT + 4)
+    return button
+
+
+def _head_icon(button):
+    """One of the cycle's own controls in the header: a mark, one size, no box."""
+    button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    button.setIconSize(QSize(18, 18))
+    button.setProperty("variant", "icon")
+    button.setProperty("head", "true")
+    return button
 
 
 class _FloatingBar(QFrame):

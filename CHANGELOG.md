@@ -16,6 +16,22 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- **The cycle's header row is two groups.** Beside the name, the run on screen
+  is a pill toned by how it is going - in flight, held up, failed, done or
+  stopped - in the Cockpit's colours. On the right, the cycle's own controls are
+  marks of one size (Properties, Restrictions with its lock, the network globe),
+  and running it is one strip: mode, this step, from here, stop, run. Stop is a
+  mark in the strip, live only while a run goes; the run button keeps one width
+  as it turns Run, Resume and Pause, so the row no longer moves.
+
+### Fixed
+- Every drop-down list showed a grey bar where its arrow belongs: the stylesheet
+  drew the arrow with a CSS border trick Qt paints as a filled rectangle. It is a
+  chevron again, dimmed when the list is disabled.
+- Disabled icons on the dark theme were nearly as bright as live ones; they now
+  take the theme's faint ink.
+
 ## [0.16.33] - 2026-10-20
 
 ### Changed
