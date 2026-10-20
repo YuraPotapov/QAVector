@@ -133,6 +133,12 @@ class MemoryRemember(CyclePlugin):
         fields = self.setting(step.settings, "fields", {}) or {}
         counters = _names(self.setting(step.settings, "bump", []))
         try:
+            from cycle import admission
+            if (counters and context.cycle is not None and context.run is not None
+                    and admission.counter(context.cycle, step.id)):
+                held = memory.remember_once(key, fields, counters, admission.token(context.run, step),
+                    context.memory_path, verify=admission.verifier(context, step))
+                return registry.succeeded(fields=held, message="memory: reserved implementation attempt for %s" % key)
             held = memory.remember(key, fields, context.memory_path) if fields \
                 else memory.recall(key, context.memory_path)
             for name in counters:

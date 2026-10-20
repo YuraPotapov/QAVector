@@ -183,7 +183,9 @@ def execution_of(run, step_id):
     """
     rounds = sum(1 for one in (getattr(run, "revisions", None) or [])
                  if step_id in (one.get("steps") or []))
-    return 1 + rounds
+    retries = sum(1 for one in getattr(run, "control_history", [])
+                  if one.get("action") == "retry_phase" and step_id in one.get("steps", []))
+    return 1 + rounds + retries
 
 
 def kinds_of(plugin):

@@ -189,6 +189,36 @@ def bump(key, name, by=1, path=None):
         return now
 
 
+def _remember_once(store, key, fields, counters, reservation):
+    record = store.setdefault(str(key), {"created_at": time.time(), "fields": {}})
+    reservations = record.setdefault("reservations", {})
+    if reservation in reservations:
+        return dict(reservations[reservation]["fields"])
+    held = record.setdefault("fields", {})
+    for name, value in fields.items():
+        if value is None:
+            held.pop(name, None)
+        else:
+            held[name] = value
+    for name in counters:
+        try:
+            held[name] = int(held.get(name, 0)) + 1
+        except (TypeError, ValueError):
+            held[name] = 1
+    now = time.time()
+    record["updated_at"] = now
+    reservations[reservation] = {"fields": dict(held), "at": now}
+    return dict(held)
+
+
+def remember_once(key, fields, counters, reservation, path=None, verify=None):
+    """Atomically reserve a task attempt; replay after a crash is idempotent."""
+    with _change(path) as store:
+        if verify and reservation not in (store.get(str(key)) or {}).get("reservations", {}):
+            verify(store)
+        return _remember_once(store, str(key), fields, counters, reservation)
+
+
 # -- claims -------------------------------------------------------------------
 def claim(key, owner, seconds=CLAIM_SECONDS, path=None):
     """Take this key for ``owner``. Returns ``(ok, holder)``.
@@ -286,6 +316,12 @@ def _save(store, path):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
+        if os.name != "nt":
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     except OSError as exc:
         try:
             os.unlink(temp)

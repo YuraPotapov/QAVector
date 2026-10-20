@@ -1,0 +1,82 @@
+name: Execution Runtime portable contracts
+
+on:
+  push:
+    paths:
+      - 'execution_runtime/**'
+      - 'cycle/**'
+      - 'domain/cycle.py'
+      - 'tests/test_cycle_runtime.py'
+      - 'tests/test_runtime_git_worker.py'
+      - 'tests/test_runtime_agent_worker.py'
+      - 'tests/fixtures/runtime/**'
+      - 'tests/test_cycle_execution_schema.py'
+      - 'tests/test_execution_runtime_*.py'
+      - 'session_launcher.py'
+      - 'runtime_paths.py'
+      - 'pyproject.toml'
+      - 'licenses/**'
+      - 'packaging/check_licenses.py'
+      - 'tests/test_runtime_license_materials.py'
+      - '.github/workflows/execution-runtime.yml'
+  pull_request:
+    paths:
+      - 'execution_runtime/**'
+      - 'cycle/**'
+      - 'domain/cycle.py'
+      - 'tests/test_cycle_runtime.py'
+      - 'tests/test_runtime_git_worker.py'
+      - 'tests/test_runtime_agent_worker.py'
+      - 'tests/fixtures/runtime/**'
+      - 'tests/test_cycle_execution_schema.py'
+      - 'tests/test_execution_runtime_*.py'
+      - 'session_launcher.py'
+      - 'runtime_paths.py'
+      - 'pyproject.toml'
+      - 'licenses/**'
+      - 'packaging/check_licenses.py'
+      - 'tests/test_runtime_license_materials.py'
+      - '.github/workflows/execution-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install "pytest>=7,<10" "PyYAML>=6,<7"
+      - name: Require offline third-party license materials before packaging
+        run: python packaging/check_licenses.py --licenses=licenses
+      - run: python -m pip install --no-deps .
+      - name: Policy, profiles, backend and CLI contracts (no native isolation claims)
+        run: >-
+          python -m pytest
+          tests/test_execution_runtime_policy.py
+          tests/test_execution_runtime_registry.py
+          tests/test_execution_runtime_deployments.py
+          tests/test_execution_runtime_secrets.py
+          tests/test_execution_runtime_backends.py
+          tests/test_execution_runtime_linux.py
+          tests/test_execution_runtime_bundle.py
+          tests/test_execution_runtime_cli.py
+          tests/test_cycle_runtime.py
+          tests/test_runtime_git_worker.py
+          tests/test_runtime_agent_worker.py
+          tests/test_cycle_execution_schema.py
+          tests/test_runtime_license_materials.py -q
+      - name: Installed package import and read-only CLI smoke
+        run: python -I -m execution_runtime --runtime-list --runtime-profiles-dir=runtime-ci-empty

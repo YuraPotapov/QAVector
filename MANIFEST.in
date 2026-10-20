@@ -1,0 +1,5 @@
+recursive-include licenses *
+include packaging/build_bubblewrap.py
+include packaging/check_licenses.py
+include packaging/runtime-build-requirements.txt
+include examples/execution_runtime/prepare_claude_image.py

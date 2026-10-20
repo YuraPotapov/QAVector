@@ -32,6 +32,14 @@ class Settings:
                 self._qs.remove(key)
 
     @property
+    def cycle_inactivity_seconds(self):
+        return max(10, self._qs.value("cycles/inactivity_seconds", 60, int))
+
+    @cycle_inactivity_seconds.setter
+    def cycle_inactivity_seconds(self, value):
+        self._qs.setValue("cycles/inactivity_seconds", max(10, int(value)))
+
+    @property
     def config(self):
         """--config value; empty means the core's own default (users.json)."""
         return self._qs.value("core/config", "", str)

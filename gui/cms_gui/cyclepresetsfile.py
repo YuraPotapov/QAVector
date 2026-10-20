@@ -40,7 +40,7 @@ FILE_NAME = "cyclepresets.json"
 KEYS = ("name", "plugin", "step", "variables", "cycle")
 
 #: What a step carries that belongs to the cycle it is in, not to the step.
-_PLACE = ("id", "plugin", "needs", "group")
+_PLACE = ("id", "plugin", "needs", "group", "phase")
 
 #: A reference to a cycle variable, as ``cycle/variables.py`` reads one.
 _VARIABLE = re.compile(r"\$\{\s*vars\.([A-Za-z0-9_-]+)")

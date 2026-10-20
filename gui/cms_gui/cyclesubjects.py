@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QPushButton,
                                QSplitter, QTextBrowser, QVBoxLayout, QWidget)
 
-from . import findbar, icons, theme, widgets
+from . import cycleresult, findbar, icons, theme, widgets
 
 #: The id the "start something new" row carries, which no session can have:
 #: every session id has a colon in it.
@@ -148,7 +148,6 @@ SPEC = {
 
 #: How a finished run's status reads in a list, where "success" is jargon.
 STATUS_WORDS = {
-    "success": "passed",
     "failed": "stopped at %s",
     "timeout": "timed out at %s",
     "cancelled": "stopped at %s",
@@ -161,6 +160,7 @@ MODE_WORDS = {
     "fresh": "A new run.",
     "resume": "Resumed - attempt %d of this run.",
     "partial": "Part of the cycle, the rest taken from run %s.",
+    "action": "A fresh bounded action; results are not borrowed from earlier runs.",
 }
 
 #: The memory fields worth a line of their own in a status, and what they say.
@@ -185,6 +185,12 @@ def status_word(session):
     """Where one session is, in a few words: "waiting for approval"."""
     state = session.get("status") or ""
     reached = session.get("reached_label") or session.get("reached") or ""
+    if session.get("paused") or session.get("execution_status") == "paused":
+        return "Paused · " + (session.get("next_action") or "Resume to continue")
+    if session.get("pause_requested"):
+        return "Pausing · waiting for active operations"
+    if session.get("execution_status") == "waiting_for_node_approval":
+        return "waiting for node approval"
     if session.get("running"):
         if session.get("reached_plugin") == "approval.gate":
             return "waiting for approval"
@@ -194,6 +200,8 @@ def status_word(session):
             return "waiting for a choice"
         return "running - %s" % reached if reached else "running"
     remembered = ((session.get("memory") or {}).get("fields") or {}).get("state")
+    if state == "success":
+        return cycleresult.completion(session)[0]
     if remembered in REMEMBERED_STATES:
         return REMEMBERED_STATES[remembered]
     word = STATUS_WORDS.get(state, state or "unknown")
@@ -204,11 +212,15 @@ def status_word(session):
 
 def status_colour(session):
     """The ink a status is written in, read at paint time."""
+    if session.get("paused"):
+        return theme.NEUTRAL[500]
     if session.get("running"):
         return theme.ACCENT
     state = session.get("status")
     remembered = ((session.get("memory") or {}).get("fields") or {}).get("state")
-    if state == "success" or remembered in REMEMBERED_STATES:
+    if state == "success":
+        return theme.OK if cycleresult.completion(session)[1] == "ok" else theme.NEUTRAL[500]
+    if remembered in REMEMBERED_STATES:
         return theme.OK
     if state in ("failed", "timeout", "error"):
         return theme.BAD
@@ -217,15 +229,18 @@ def status_colour(session):
 
 def search_state(session):
     """How Search says where a session is: (word, tone, still going)."""
+    if session.get("paused") or session.get("execution_status") == "paused":
+        return "Paused", "neutral", bool(session.get("running"))
     if session.get("running"):
         waiting = status_word(session).startswith("waiting")
         return ("Waiting" if waiting else "Running"), "accent", True
     state = session.get("status") or ""
     remembered = ((session.get("memory") or {}).get("fields") or {}).get("state")
+    if state == "success":
+        label, tone = cycleresult.completion(session)
+        return label, "accent" if tone == "ok" else "neutral", False
     if remembered in REMEMBERED_STATES:
         return REMEMBERED_STATES[remembered].capitalize(), "accent", False
-    if state == "success":
-        return "Passed", "accent", False
     if state in ("failed", "timeout", "error"):
         return "Failed", "bad", False
     if state in ("cancelled", "interrupted"):
@@ -356,6 +371,32 @@ def details_html(session, live=None, graph_subject=None, labels=None):
 
     parts.append("<p><span style='color:%s'><b>%s</b></span></p>" % (
         status_colour(session), _escape(status_word(session))))
+    coverage = session.get("coverage") or {}
+    if coverage:
+        parts.append("<p>%s · %s/%s selected steps completed · %s total</p>" % (
+            _escape(session.get("scope") or ""), _escape(coverage.get("completed", 0)),
+            _escape(coverage.get("selected", 0)), _escape(coverage.get("total", 0))))
+    if session.get("current_phase"):
+        parts.append("<p>Phase: %s</p>" % _escape(session["current_phase"]))
+    execution_mode = (live or {}).get("execution_mode") or session.get("execution_mode")
+    if execution_mode:
+        parts.append("<p>Mode: %s</p>" % _escape(execution_mode.capitalize()))
+    brief = (live or {}).get("task_brief") or session.get("task_brief") or {}
+    if brief:
+        work, git = brief.get("workspace") or {}, brief.get("git") or {}
+        task = brief.get("task") or {}
+        rows = [("Task", "%s · %s" % (task.get("key", ""), task.get("summary", ""))),
+                ("Jira status", task.get("status", "")),
+                ("Workspace", work.get("path", "")), ("Workspace operation", work.get("operation", "not_recorded")),
+                ("Source checkout", work.get("source", "")),
+                ("Branch", git.get("branch", "")), ("Branch operation", git.get("branch_operation", "")),
+                ("HEAD", git.get("head", "")), ("Base ref", git.get("base_ref", "")),
+                ("Base SHA", git.get("base_commit", "")),
+                ("External effects", "None declared" if brief.get("external_effects") == [] else "Not recorded")]
+        if not brief.get("ready"):
+            rows.append(("Preparation blocked", ", ".join(git.get("conflicts") or []) or "Base not merged or workspace has local changes"))
+        parts.append("<h4>Task Brief</h4><table>%s</table>" % "".join(
+            "<tr><td>%s</td><td>%s</td></tr>" % (_escape(k), _escape(v)) for k, v in rows))
     if graph_subject is None:
         # Another cycle's session: say whose, since the canvas shows a
         # different one until the row is opened.

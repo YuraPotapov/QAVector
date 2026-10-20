@@ -1,0 +1,25 @@
+{
+  "provider": "linux-isolated",
+  "bindings": [{"name": "project", "source": "/path/to/project-a", "target": "/workspace"}],
+  "layers": [
+    {
+      "name": "platform",
+      "policy": {
+        "filesystem": [{"binding": "project", "access": "read_write"}],
+        "network": {"mode": "full"},
+        "resources": {"cpu_cores": 2, "memory": {"bytes": 2147483648, "accounting": "resident"}, "processes": 64},
+        "tools": ["git", "python"]
+      }
+    },
+    {"name": "project", "policy": {"network": {"mode": "none"}}},
+    {
+      "name": "environment",
+      "policy": {
+        "filesystem": [{"binding": "project", "access": "read_only"}],
+        "resources": {"cpu_cores": 1, "processes": 32},
+        "tools": ["git"]
+      }
+    },
+    {"name": "node", "policy": {"resources": {"memory": {"bytes": 1073741824, "accounting": "resident"}}}}
+  ]
+}

@@ -28,10 +28,10 @@ still being executed.
 import os
 import shutil
 
-from cycle import checkpoints, memory, run as records, variables
+from cycle import checkpoints, memory, outcomes, run as records, variables
 from cycle import workspace as workspace_mod
 from cycle.model import SUBJECT_EXPRESSIONS
-from domain.cycle import PENDING, RUNNING, SUCCESS
+from domain.cycle import PENDING, RUNNING, SUCCESS, WAITING
 
 #: How an index row reads when its run is not going and never said it ended:
 #: the process was killed, or the machine went down, mid-run.
@@ -137,15 +137,16 @@ def backfill(root=None, cycles_dir=None):
     # Read again just before writing, and only these fields changed: a run
     # going right now rewrites its own row, and that row must not be lost to
     # a copy of the index taken before it did.
-    rows = records.index(root)
-    for row in rows:
-        if row.get("id") in filled and "subject" not in row:
-            row.update(filled[row["id"]])
-    try:
-        records._atomic(records.index_path(root),
-                        {"schema": records.SCHEMA, "runs": rows})
-    except OSError:
-        return 0
+    with records._index_lock(root):
+        rows = records.index(root)
+        for row in rows:
+            if row.get("id") in filled and "subject" not in row:
+                row.update(filled[row["id"]])
+        try:
+            records._atomic(records.index_path(root),
+                            {"schema": records.SCHEMA, "runs": rows})
+        except OSError:
+            return 0
     return len(filled)
 
 
@@ -207,8 +208,9 @@ def page(root=None, cycle_id="", first="", limit=0, offset=0, memory_path=None,
         cycle = grouped[name][0].get("cycle") or ""
         if cycle and cycle not in last_runs:
             newest = max(grouped[name], key=lambda row: row.get("started_at") or 0)
-            last_runs[cycle] = {"when": updated(name),
-                                "status": _run_entry(newest, root)["state"] or ""}
+            entry = _run_entry(newest, root)
+            last_runs[cycle] = {"when": updated(name), "status": entry["state"] or "",
+                                **{key: entry[key] for key in outcomes.FIELDS if key in entry}}
     return {"sessions": [_session(name, grouped[name], root, remembered)
                          for name in chosen],
             "total": len(names),
@@ -250,6 +252,7 @@ def _session(name, rows, root, remembered):
                     "claim": dict(record.get("claim") or {})}
                    if record else {}),
         "runs": runs,
+        **{key: latest[key] for key in outcomes.FIELDS + outcomes.DETAIL_FIELDS + outcomes.POLICY_FIELDS if key in latest},
     }
 
 
@@ -257,11 +260,20 @@ def _run_entry(row, root):
     """One index row, with where it lives and what it is doing now."""
     entry = dict(row)
     where = workspace_mod.path_of(row.get("id", ""), root)
+    if any(key not in entry for key in outcomes.FIELDS):
+        saved = records.load(where)
+        if saved is not None:
+            entry.update(outcomes.refresh(saved))
     entry["run_dir"] = where
-    running = row.get("status") in (RUNNING, PENDING) and _held(where)
+    running = row.get("status") in (RUNNING, PENDING, WAITING) and _held(where)
     entry["running"] = running
     entry["state"] = (row.get("status") if running or row.get("status")
-                      not in (RUNNING, PENDING) else INTERRUPTED)
+                      not in (RUNNING, PENDING, WAITING) else INTERRUPTED)
+    if entry.get("paused"):
+        entry["state"] = "paused"
+    if entry["state"] == INTERRUPTED:
+        entry["execution_status"] = INTERRUPTED
+        entry["outcome"] = INTERRUPTED
     reached = row.get("reached") or ""
     entry["reached_label"], entry["reached_plugin"] = reached, ""
     if reached:
@@ -322,12 +334,13 @@ def delete(name, root=None, memory_path=None):
         shutil.rmtree(where, ignore_errors=True)
         removed.append(one["id"])
     gone = {one["id"] for one in session["runs"]}
-    rows = [row for row in records.index(root) if row.get("id") not in gone]
-    try:
-        records._atomic(records.index_path(root),
-                        {"schema": records.SCHEMA, "runs": rows})
-    except OSError as exc:
-        raise SessionError("Cannot rewrite the run index: %s" % exc)
+    with records._index_lock(root):
+        rows = [row for row in records.index(root) if row.get("id") not in gone]
+        try:
+            records._atomic(records.index_path(root),
+                            {"schema": records.SCHEMA, "runs": rows})
+        except OSError as exc:
+            raise SessionError("Cannot rewrite the run index: %s" % exc)
     key = (session.get("subject") or {}).get("memory") or ""
     forgotten = memory.forget(key, memory_path) if key else False
     return {"id": name, "runs": removed, "memory": key if forgotten else ""}

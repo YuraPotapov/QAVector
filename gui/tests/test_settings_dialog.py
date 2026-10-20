@@ -25,6 +25,14 @@ def test_where_the_cycle_secrets_go_is_remembered(dialog):
     assert settings.cycle_secrets_path == "/data/secrets.json"
 
 
+def test_cycle_inactivity_threshold_is_configurable(dialog):
+    view, settings = dialog
+    view.cycle_inactivity.setValue(134)
+    view.apply()
+    assert settings.cycle_inactivity_seconds == 134
+    settings.cycle_inactivity_seconds = 60
+
+
 def test_a_blank_secrets_field_says_where_they_would_go(dialog):
     """Blank is not an answer to "where are my credentials kept"."""
     dialog, _settings = dialog

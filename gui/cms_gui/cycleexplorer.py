@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QLineEdit,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                                QWidget)
 
-from . import icons, theme, widgets
+from . import cycleresult, icons, theme, widgets
 
 #: Roles on an explorer row. Qt's user role plus one, so the two things a row
 #: has to carry - what kind of row it is and which cycle it names - do not have
@@ -399,7 +399,9 @@ class Explorer(QWidget):
             parts.append("built in")
         last = self._last_runs.get(row.get("id", ""))
         if last:
-            parts.append("%s %s" % (_ago(last.get("when")), last.get("status") or ""))
+            result = ("Waiting for node approval" if last.get("execution_status") == "waiting_for_node_approval" else "Paused" if last.get("execution_status") == "paused" else cycleresult.completion(last)[0] if last.get("status") == "success"
+                      else last.get("status") or "")
+            parts.append("%s %s" % (_ago(last.get("when")), result))
             if not alert and last.get("status") in ("failed", "timeout",
                                                     "interrupted", "error"):
                 alert = "warn"

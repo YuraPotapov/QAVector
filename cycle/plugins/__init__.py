@@ -29,6 +29,7 @@ from cycle.plugins.report import ReportHtml, ReportJson
 from cycle.plugins.scenario import ScenarioRun
 from cycle.plugins.wait import Wait
 from cycle.plugins.teams import TeamsMessage
+from cycle.plugins.task_brief import TaskBrief
 from cycle.plugins.user_choice import UserChoice
 from cycle.plugins.user_input import UserInput
 from cycle.plugins.service import (ServiceRestart, ServiceStart, ServiceStop,
@@ -64,4 +65,5 @@ BUILTIN = (
     AgentMerge(),
     ReportJson(),
     ReportHtml(),
+    TaskBrief(),
 )

@@ -1,0 +1,363 @@
+id: claim_development
+name: Claim Prepare integration fixture
+variables:
+  claim_dir: ""
+  jira_email: test@example.invalid
+  jira_order: updated ASC
+  jira_projects: QA
+  jira_site: https://jira.example.invalid
+  jira_take: To Do, REOPEN
+  jira_token: {secret: true}
+  jira_user: currentUser()
+  max_runs_per_task: "3"
+  task_branch: ""
+  task_key: ""
+  work_root: ""
+subject:
+  kind: task
+  key: ${steps.todo.outputs.key}
+  title: ${steps.todo.outputs.title}
+  memory: claimdev/${steps.todo.outputs.key}
+  pin: task_key
+actions:
+  prepare_task:
+    description: "Read the chosen Jira task, fetch source refs and prepare its isolated task branch. The task's existing sandbox is recreated: files and uncommitted work inside it are replaced. Committed task-branch work from the source checkout or origin is reused; the source working tree is preserved. A production merge conflict stops preparation for review. The result includes a Task Brief with paths and exact SHAs. Baseline tests, agent calls and implementation attempts are outside this action. Declared external writes: none (no Jira transition or push)."
+    result: task_brief
+    steps: [queue, pick, todo, claim, spent, admit, workspace, branch, base_try, base_verdict, base_ready, facts, task_brief]
+    title: Prepare task
+
+steps:
+  - id: queue
+    plugin: jira.issues
+    label: Tasks to choose from
+    group: Take
+    with:
+      attachments: none
+      auth: basic
+      comments: false
+      description_limit: 3000
+      email: ${vars.jira_email}
+      flavour: cloud
+      issue: ${vars.task_key}
+      limit: 50
+      order: ${vars.jira_order}
+      project: ${vars.jira_projects}
+      role: assignee
+      site: ${vars.jira_site}
+      status: ${vars.jira_take}
+      subtasks: none
+      token: ${vars.jira_token}
+      user: ${vars.jira_user}
+      verify_tls: true
+    timeout: 120
+  - id: pick
+    plugin: user.choice
+    label: Choose the task
+    group: Take
+    needs: [queue]
+    with:
+      choose: ${vars.task_key}
+      columns: [key, summary, status, assignee]
+      item_detail: |-
+        {summary}
+
+        {description}
+      items: ${steps.queue.outputs.issues}
+      mode: single
+      question: Which task should this run take?
+      value: key
+      when_empty: skip
+    timeout: 3600
+  - id: todo
+    plugin: jira.issues
+    label: Read the chosen task
+    group: Take
+    needs: [pick]
+    with:
+      attachment_bytes: 25000000
+      attachments: images
+      auth: basic
+      comment_limit: 30
+      comments: true
+      description_limit: 20000
+      email: ${vars.jira_email}
+      flavour: cloud
+      issue: ${steps.pick.outputs.value}
+      limit: 1
+      order: ${vars.jira_order}
+      project: ${vars.jira_projects}
+      role: assignee
+      site: ${vars.jira_site}
+      status: ${vars.jira_take}
+      token: ${vars.jira_token}
+      user: ${vars.jira_user}
+      verify_tls: true
+    timeout: 120
+  - id: claim
+    plugin: memory.claim
+    label: Take it for this run
+    group: Take
+    needs: [todo]
+    with:
+      key: claimdev/${steps.todo.outputs.key}
+      seconds: 14400
+  - id: spent
+    plugin: memory.recall
+    label: How much of the budget is gone
+    group: Take
+    needs: [claim]
+    with:
+      default: "0"
+      field: attempts
+      key: claimdev/${steps.todo.outputs.key}
+  - id: admit
+    plugin: check.gate
+    label: Is this ours to do
+    group: Take
+    needs: [todo, spent]
+    with:
+      checks:
+        there is a task: ${steps.todo.outputs.count} > 0
+        within its budget: ${steps.spent.outputs.value} < ${vars.max_runs_per_task}
+    on_failure: continue
+  - id: workspace
+    plugin: command.shell
+    label: Copy claim/ and pick the task branch
+    group: Workspace
+    needs: [admit]
+    with:
+      command: |-
+        set -eu
+        KEY='${steps.todo.outputs.key}'
+        SRC='${vars.claim_dir}'
+        ROOT='${vars.work_root}'
+        JIRA='${run.workspace}/${steps.todo.outputs.report_path}'
+        WANTED='${vars.task_branch}'
+        case "$KEY" in [A-Z]*-[0-9]*) ;; *) echo "not a Jira key: $KEY" >&2; exit 1 ;; esac
+        # This deletes the folder it is given, so only ever one under .../sandbox/claim-dev.
+        case "$ROOT" in */sandbox/claim-dev) ;; *) echo "work_root must end in /sandbox/claim-dev, not: $ROOT" >&2; exit 1 ;; esac
+        WD="$ROOT/$KEY"
+        if [ -e "$WD" ]; then QAVECTOR_PREPARE_EXISTED=true; else QAVECTOR_PREPARE_EXISTED=false; fi
+        # Fetching moves only claim/'s remote-tracking refs; its working tree is not touched.
+        if git -C "$SRC" fetch --quiet origin; then
+          echo "claim/: fetched origin"
+        else
+          echo "WARNING: claim/ could not fetch origin - working from its last fetch (origin/production-ecs from $(git -C "$SRC" log -1 --format=%cr origin/production-ecs))"
+        fi
+        rm -rf "$WD"
+        mkdir -p "$ROOT"
+        git clone --quiet --shared --no-checkout "$SRC" "$WD"
+        cd "$WD"
+        python3 - "$QAVECTOR_PREPARE_EXISTED" <<'PREPARE_JSON'
+        import json, sys
+        with open('.git/qavector-prepare.json', 'w') as handle:
+            json.dump({'existed_before': sys.argv[1] == 'true'}, handle)
+        PREPARE_JSON
+        # agent.merge refuses a repository with a remote; nothing is pushed from here.
+        git remote remove origin
+        git fetch --quiet "$SRC" '+refs/remotes/origin/*:refs/remotes/origin/*'
+        # And claim/'s own branches, for a task branch that was never pushed.
+        git fetch --quiet "$SRC" '+refs/heads/*:refs/remotes/claim/*'
+        git config user.name "$(git -C "$SRC" config user.name)"
+        git config user.email "$(git -C "$SRC" config user.email)"
+        python3 - "$KEY" "$JIRA" "$WANTED" <<'PY'
+        import json, re, subprocess, sys
+        key, report, wanted = sys.argv[1], sys.argv[2], sys.argv[3].strip()
+        project, number = key.split("-")[0].lower(), key.split("-")[-1]
+        refs = subprocess.run(["git", "for-each-ref", "--format=%(refname:short)",
+                               "refs/remotes/origin/", "refs/remotes/claim/"],
+                              capture_output=True, text=True, check=True).stdout.split()
+        found = {}
+        for ref in refs:
+            where, name = ref.split("/", 1)
+            low = name.lower()
+            if name == "HEAD" or not low.startswith(project):
+                continue
+            if not re.search(r"(^|[^0-9])%s([^0-9]|$)" % number, low):
+                continue
+            # The ones that carry all of staging are not the task's branch.
+            if re.search(r"([-_](dev|stage|in-stage))[0-9]*$", low):
+                continue
+            found.setdefault(name, set()).add(where)
+        def ancestor(older, newer):
+            return subprocess.run(["git", "merge-base", "--is-ancestor", older, newer]).returncode == 0
+        def start(name, where):
+            # claim/'s own branch may hold commits never pushed, or be behind
+            # origin when nobody pulled: take whichever is ahead of the other.
+            local, remote = "claim/%s" % name, "origin/%s" % name
+            if where == {"claim", "origin"}:
+                if ancestor(remote, local):
+                    source = local
+                elif ancestor(local, remote):
+                    source = remote
+                else:
+                    sys.exit("%s in claim/ and on origin have gone different ways - "
+                             "settle that in claim/ first" % name)
+            else:
+                source = local if "claim" in where else remote
+            subprocess.run(["git", "switch", "--quiet", "-C", name, source], check=True)
+            print("existing task branch %s, from %s" % (name, source))
+            return name
+        if wanted:
+            if wanted not in found:
+                sys.exit("task_branch %s is not a branch of claim/ or origin" % wanted)
+            branch = start(wanted, found[wanted])
+        elif len(found) == 1:
+            name = next(iter(found))
+            branch = start(name, found[name])
+        elif len(found) > 1:
+            sys.exit("several branches could be %s's: %s - set the variable task_branch "
+                     "to the one to use" % (key, ", ".join(sorted(found))))
+        else:
+            letters = dict(zip(
+                "\u0430\u0431\u0432\u0433\u0491\u0434\u0435\u0454\u0436\u0437\u0438\u0456\u0457\u0439\u043a\u043b\u043c\u043d\u043e\u043f\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044c\u044e\u044f\u044d\u044b\u0451",
+                ["a", "b", "v", "h", "g", "d", "e", "ie", "zh", "z", "y", "i", "i", "i",
+                 "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "f", "kh", "ts",
+                 "ch", "sh", "shch", "", "iu", "ia", "e", "y", "e"]))
+            title = (json.load(open(report)).get("issues") or [{}])[0].get("summary") or ""
+            title = re.sub(r"^\s*%s[.:\s-]*" % re.escape(key), "", title, flags=re.I)
+            plain = "".join(letters.get(one, one) for one in title.lower())
+            words = [one for one in re.split(r"[^a-z0-9]+", plain) if one][:5]
+            branch = "-".join([key] + words)[:60].rstrip("-")
+            subprocess.run(["git", "switch", "--quiet", "-C", branch,
+                            "origin/production-ecs"], check=True)
+            print("new task branch %s, from origin/production-ecs" % branch)
+        open(".git/qavector-branch", "w").write(branch + "\n")
+        PY
+        echo "copy: $WD"
+        echo "production-ecs: $(git log -1 --format='%h %cd' --date=short origin/production-ecs)"
+        echo "development-ecs: $(git log -1 --format='%h %cd' --date=short origin/development-ecs)"
+    timeout: 600.0
+  - id: branch
+    plugin: command.shell
+    label: The task branch
+    group: Workspace
+    needs: [workspace]
+    with:
+      command: cat '${vars.work_root}/${steps.todo.outputs.key}/.git/qavector-branch'
+    timeout: 30.0
+  - id: base_try
+    plugin: command.shell
+    label: Bring production-ecs into the branch
+    group: Workspace
+    needs: [branch]
+    with:
+      command: |-
+        set -u
+        cd '${vars.work_root}/${steps.todo.outputs.key}'
+        if git merge-base --is-ancestor origin/production-ecs HEAD; then
+          echo "already contains origin/production-ecs"; echo up-to-date > .git/qavector-base
+        elif git merge --no-ff --no-edit origin/production-ecs; then
+          echo "merged origin/production-ecs without conflicts"; echo merged > .git/qavector-base
+        else
+          git diff --name-only --diff-filter=U | sed 's/^/conflict: /'
+          git merge --abort
+          echo conflict > .git/qavector-base
+        fi
+    timeout: 300.0
+  - id: base_verdict
+    plugin: command.shell
+    label: Did production-ecs conflict
+    group: Workspace
+    needs: [base_try]
+    with:
+      command: cat '${vars.work_root}/${steps.todo.outputs.key}/.git/qavector-base'
+    timeout: 30.0
+  - id: base_ready
+    plugin: command.shell
+    label: The branch is on today's production-ecs
+    group: Workspace
+    needs: [base_verdict, base_resolve]
+    if: ${steps.base_verdict.outputs.stdout_tail} != ''
+    with:
+      command: |-
+        set -eu
+        cd '${vars.work_root}/${steps.todo.outputs.key}'
+        if [ -e .git/MERGE_HEAD ]; then echo "a merge is still in progress" >&2; exit 1; fi
+        git merge-base --is-ancestor origin/production-ecs HEAD || { echo "origin/production-ecs is not in the branch - the conflicts were not resolved" >&2; exit 1; }
+        echo "branch $(git rev-parse --abbrev-ref HEAD) at $(git log -1 --format='%h %s')"
+    timeout: 60.0
+    on_failure: continue
+  - id: facts
+    plugin: command.shell
+    label: What the agents should know first
+    group: Workspace
+    needs: [base_ready]
+    with:
+      command: |-
+        set -eu
+        cd '${vars.work_root}/${steps.todo.outputs.key}'
+        python3 - '${run.workspace}/${steps.todo.outputs.report_path}' <<'PY'
+        import json, sys
+        issue = (json.load(open(sys.argv[1])).get("issues") or [{}])[0]
+        status = issue.get("status") or ""
+        print("Jira status: %s" % status)
+        if status.strip().lower() == "reopen":
+            print("REOPENED: this task was done before and sent back. The work now is what the "
+                  "comments since it was reopened ask for - read the latest comments first.")
+        PY
+        echo "Task branch: $(git rev-parse --abbrev-ref HEAD)"
+        AHEAD=$(git log --no-merges --oneline origin/production-ecs..HEAD | wc -l)
+        if [ "$AHEAD" -gt 0 ]; then
+          echo "Earlier work already on the branch ($AHEAD commit(s), not in production-ecs):"
+          git log --no-merges --format='  %h %an | %s' origin/production-ecs..HEAD | head -20
+        else
+          echo "The branch holds no work yet: it is production-ecs."
+        fi
+    timeout: 60.0
+  - id: task_brief
+    plugin: task.brief
+    label: Prepared task and Git snapshots
+    group: Workspace
+    needs: [facts, base_ready, base_verdict]
+    if: ${steps.base_verdict.outputs.stdout_tail} != ''
+    with:
+      base: origin/production-ecs
+      base_update: ${steps.base_verdict.outputs.stdout_tail}
+      directory: ${vars.work_root}/${steps.todo.outputs.key}
+      issues: ${steps.todo.outputs.issues}
+      source: ${vars.claim_dir}
+      task_report: ${steps.todo.outputs.html_path}
+    timeout: 120
+    on_failure: continue
+  - id: base_resolve
+    plugin: agent.merge
+    needs: [base_verdict]
+    if: "'false'"
+    with:
+      directory: ${vars.work_root}/${steps.todo.outputs.key}
+      model: sonnet
+      task: Resolve base conflicts
+  - id: budget
+    plugin: memory.remember
+    needs: [preflight, baseline]
+    with:
+      bump: attempts
+      key: claimdev/${steps.todo.outputs.key}
+  - id: baseline
+    plugin: command.shell
+    needs: [task_brief]
+    with:
+      command: echo baseline must not run during Prepare
+  - id: plan
+    plugin: agent.review
+    needs: [task_brief]
+    with:
+      framework: claude_cli
+      model: sonnet
+      repository: ${vars.claim_dir}
+      task: Plan the change
+  - id: preflight
+    plugin: check.gate
+    needs: [plan]
+    with:
+      checks:
+        approved: true == true
+  - id: implement
+    plugin: agent.implement
+    needs: [budget]
+    with:
+      checks: "true"
+      directory: ${vars.claim_dir}
+      model: sonnet
+      task: Implement the change

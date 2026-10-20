@@ -1225,7 +1225,7 @@ def _save_cycle(cycle_id, source, cycles_dir=None):
 def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                    jobs=None, control=False, reports_dir=None,
                    secrets_path=None, memory_path=None, only=None,
-                   start_from="", resume="", reuse_from="", subject=None):
+                   start_from="", resume="", reuse_from="", subject=None, action="", mode=None):
     """Run one cycle to completion. Returns the exit code.
 
     Handled before the Chrome launch loop, because a cycle opens no windows of
@@ -1243,6 +1243,7 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
     from cycle import loader as cycle_loader
     from cycle import run as run_mod
     from cycle import workspace as workspace_mod
+    from cycle.context import CancelToken
     from engine import services as engine_services
 
     try:
@@ -1266,6 +1267,14 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
         return 2
 
     chosen, refusal = _cycle_selection(cycle, only, start_from)
+    if action:
+        if only or start_from or resume or reuse_from:
+            refusal = "--cycle-action cannot be combined with selection, reuse or Resume."
+        else:
+            try:
+                model.action_selection(cycle, action)
+            except model.CycleError as exc:
+                refusal = str(exc)
     if resume and (only or start_from or variables or reuse_from):
         refusal = "Resume cannot be combined with partial selection or variable overrides."
     if resume and (workspace_mod.safe_id(resume) != resume or resume in (".", "..")):
@@ -1321,13 +1330,15 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
     if _events is not None and _events.enabled():
         observers.append(bus.EventObserver(run_id))
 
+    control_cancel = CancelToken()
     if control:
         # The identical two lines a --run-tests run uses: a reader on stdin for
         # the answers, and the service bridge turned on only when both halves of
         # the pipe are live. Asking a person rides the same pipe and is turned
         # on by the same condition - there is somewhere to ask only when there
         # is both an event out and a channel back.
-        threading.Thread(target=read_commands, args=({},), daemon=True).start()
+        threading.Thread(target=read_commands, args=({},), kwargs={
+            "on_closed": lambda: control_cancel.set("the control channel closed")}, daemon=True).start()
         engine_services.configure(_events is not None and _events.enabled())
         cycle_ask.configure(_events is not None and _events.enabled())
 
@@ -1337,7 +1348,7 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
             observer=bus.Tee(observers), flows_dir=flows_dir,
             cycles_dir=cycles_dir, run_id=run_id, secrets=values,
             memory_path=memory_path, only=chosen, reuse=reuse, resume=bool(resume),
-            subject=subject)
+            subject=subject, action=action, supervised=control, cancel=control_cancel, controlled=control, mode=mode)
     except checkpoints.CheckpointError as exc:
         log.error("%s", exc)
         _emit("cycle.run.end", cycle=cycle_id, status="error", message=str(exc), exit_code=2)
@@ -1627,6 +1638,8 @@ def _bad_option_message(arg, config_path):
                 "Repeat it for each variable a cycle takes.")
     if arg == "--cycle-jobs":
         return "--cycle-jobs needs a number: how many steps may run at once."
+    if arg == "--cycle-mode":
+        return "--cycle-mode needs auto, important or approve."
     if arg in ("--cycle-sessions-limit", "--cycle-sessions-offset"):
         return "%s needs a whole number, e.g. %s=50." % (arg, arg)
     if arg in ("--user", "--password", "--filter-users", "--url", "--config",
@@ -3011,7 +3024,7 @@ def install_local_extension(profile, src_dir, origin, key_file_name):
     return version_dir
 
 
-def read_commands(windows_by_session):
+def read_commands(windows_by_session, on_closed=None):
     """Take one JSON command per stdin line, for as long as stdin is open.
 
     The other half of ``--events``: facts go out on stdout, instructions come in
@@ -3083,6 +3096,25 @@ def read_commands(windows_by_session):
             if not asked:
                 log.warning("No cycle run called %r is going here.",
                             message.get("run_id"))
+        elif command in ("cycle.pause", "cycle.continue", "cycle.phase.run", "cycle.phase.retry"):
+            from cycle import executor as cycle_executor
+            action = {"cycle.pause": "pause", "cycle.continue": "continue", "cycle.phase.run": "run_phase", "cycle.phase.retry": "retry_phase"}[command]
+            refused = cycle_executor.control_run(message.get("run_id"), action, message.get("phase", ""))
+            if refused:
+                _emit("cycle.control.refused", run_id=message.get("run_id"), action=action, reason=refused)
+        elif command == "cycle.node.approval.answer":
+            from cycle import executor as cycle_executor
+            refused = cycle_executor.answer_node_approval(message)
+            if refused:
+                _emit("cycle.control.refused", run_id=message.get("run_id"), action="node_approval", reason=refused)
+        elif command == "cycle.mode.change":
+            from cycle import executor as cycle_executor
+            refused = cycle_executor.control_run(message.get("run_id"), "set_mode", mode=message.get("mode"))
+            if refused:
+                _emit("cycle.control.refused", run_id=message.get("run_id"), action="set_mode", reason=refused)
+        elif command == "cycle.supervision":
+            from cycle import executor as cycle_executor
+            cycle_executor.confirm_supervision(message.get("run_id"))
         elif command == "cycle.message":
             from cycle import executor as cycle_executor
             refused = cycle_executor.submit_interaction(message)
@@ -3093,6 +3125,11 @@ def read_commands(windows_by_session):
                       run_id=str(message.get("run_id") or ""), reason=refused)
         else:
             log.warning("Ignoring an unknown control command: %r", command)
+    # EOF means there can be no further GUI supervision or answers.
+    from cycle import executor as cycle_executor
+    cycle_executor.request_stop(reason="the control channel closed")
+    if on_closed is not None:
+        on_closed()
 
 
 def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
@@ -3461,6 +3498,36 @@ Editing scenarios (answer with JSON on stdout, then exit):
                             in file F ({"yaml": "..."}). Names of your own
                             override the ones that ship with the application.
 
+Execution Runtime - profile management and diagnostics as JSON; no workload launch:
+  --runtime-list           List saved execution environment profiles.
+  --runtime-bundle-info    Verify application-owned native runtime resources/version.
+  --runtime-show=NAME      Read a profile; --runtime-revision=HASH pins history.
+  --runtime-validate       Validate a profile from --from=FILE without saving.
+  --runtime-save=NAME      Save from --from=FILE; updates require
+                            --runtime-expected-revision=HASH.
+  --runtime-inspect        Resolve layered policy from --from=FILE.
+  --runtime-preflight      Check required guarantees from --from=FILE;
+                            unavailable enforcement returns exit code 1.
+  --runtime-profiles-dir=D Override the control-plane profile store.
+  --runtime-deployment-list
+                            List approved, content-pinned execution deployments.
+  --runtime-deployment-show=NAME
+                            Show one deployment and its revision.
+  --runtime-deployment-save=NAME --from=FILE
+                            Save trusted runtime provisioning with revision checks.
+  --runtime-deployment-draft --from=FILE
+                            Preview native defaults for a reviewed workload image.
+  --runtime-deployment-validate --from=FILE
+                            Validate a deployment and resolve its permission ceiling.
+  --runtime-deployment-check --from=FILE
+                      Check local Claude prerequisites without credentials or provider traffic.
+  --runtime-gateway-validate --from=FILE
+                            Validate a provider egress profile; no CLI launch or network probe.
+  --runtime-service=NAME --runtime-service-revision=HASH
+                            Start an attached isolated service using JSONL stdin
+                            requests/control and stdout events; no host fallback.
+                            Runtime commands run separately from other commands.
+
 Cycles - one graph of steps: start a service, run a scenario, run a command,
 write a report. The steps that do not depend on each other run at the same time.
   --cycle-list              Every cycle as JSON: its name, how many steps, and
@@ -3556,6 +3623,10 @@ Running a cycle:
                             what it needs when it gets there. Cannot be combined
                             with --run-tests or --recorder.
   --cycle-jobs=N            How many steps may run at once (default: 4).
+  --cycle-action=ID         Run a declared bounded action, such as prepare_task.
+  --cycle-mode=MODE         auto, important or approve. Defaults to the cycle's
+                            policy; Resume keeps the saved mode unless supplied.
+                            No borrowed results; Resume stays inside the action.
   --cycle-var=NAME=VALUE    Override one of the cycle's variables. Repeatable.
   --cycle-subject=KEY       What the run was started on - the key of the task (or
                             the tasks, joined by commas) somebody pressed Start
@@ -3581,6 +3652,9 @@ Running a cycle:
                             {"command": "cycle.message", ...}, a clarification
                             for a running step or for the rest of the run
                             (see docs/cycles.md, "Talking to a running cycle").
+                            Closing stdin stops the run: nothing could answer
+                            or supervise it any more. Leave --control out to
+                            run a cycle with stdin closed (</dev/null, CI).
 
   Example:
     --cycle-run=nightly --cycle-var=branch=main --events=- --cycle-jobs=4
@@ -3665,6 +3739,12 @@ def main():
     # and a starter users.json have to exist before anything reads them. A no-op in
     # a source checkout - see runtime_paths.ensure_user_data_root.
     runtime_paths.ensure_user_data_root()
+    if len(sys.argv) > 1 and sys.argv[1].split("=", 1)[0] in (
+            "--restrictions-check", "--restrictions-preview", "--restricted-exec"):
+        # Before any parsing: what follows --restricted-exec's "--" is the
+        # service's own command line, which is none of this parser's business.
+        from execution_runtime.restricted_cli import main as restricted_main
+        sys.exit(restricted_main(sys.argv[1:]))
     detach = False
     session_prefix = ""
     url = ""
@@ -3677,8 +3757,11 @@ def main():
     flow_command = None   # ("show"|"save"|"delete"|"import", id or path); JSON, then exit
     flow_source = None    # --from=FILE: the JSON document --flow-save writes
     cycle_command = None  # ("show"|"save"|"delete"|"import"|"list", id or path)
+    runtime_arguments = []  # standalone JSON runtime diagnostics; no workload launch
     cycle_run = None      # --cycle-run=ID: a run mode, not a JSON command
     cycle_only = []       # --cycle-only: run just these, reuse the rest
+    cycle_action = ""     # named, bounded action; no borrowing
+    cycle_mode = None     # None preserves the cycle default / saved run policy
     cycle_from = ""       # --cycle-from: run this one and everything after
     cycle_resume = ""     # --cycle-resume: exact saved execution, not the latest
     cycle_reuse = ""      # --cycle-reuse: exact source for a partial execution
@@ -3868,6 +3951,10 @@ def main():
             # extensions) for a front-end. Handled after the parse loop so
             # --config/--flows-dir can appear in any order.
             describe_json = True
+        elif arg.startswith("--runtime-"):
+            # Forward the exact runtime CLI grammar after the complete parse.
+            # Its parser rejects typos, duplicate commands and missing values.
+            runtime_arguments.append(arg)
         elif arg.startswith("--flow-show="):
             # The scenario editing commands. All four answer with JSON and exit,
             # like --describe, and all are handled after the parse loop so
@@ -3979,6 +4066,14 @@ def main():
         elif arg.startswith("--cycle-only="):
             cycle_only = [one.strip() for one
                           in arg.split("=", 1)[1].split(",") if one.strip()]
+        elif arg.startswith("--cycle-action="):
+            cycle_action = arg.split("=", 1)[1].strip()
+            if not cycle_action:
+                bad_option = "--cycle-action"
+        elif arg.startswith("--cycle-mode="):
+            cycle_mode = arg.split("=", 1)[1].strip()
+            if cycle_mode not in ("auto", "important", "approve"):
+                bad_option = "--cycle-mode"
         elif arg.startswith("--cycle-from="):
             cycle_from = arg.split("=", 1)[1].strip()
         elif arg.startswith("--cycle-resume="):
@@ -4097,6 +4192,20 @@ def main():
             bad_option = arg
         else:
             positional.append(arg)
+    if runtime_arguments:
+        from execution_runtime.cli import emit as runtime_emit, main as runtime_main
+        if (bad_option is not None or describe_json or init_config or flow_command
+                or cycle_command or cycle_run or plugin_action or secret_command
+                or memory_command or session_command or watch_command or run_tests
+                or recorder or server_log_show
+                or any(not arg.startswith(("--runtime-", "--from=")) for arg in sys.argv[1:])):
+            sys.exit(runtime_emit(2, {"ok": False, "problems": [{
+                "code": "conflicting_commands",
+                "message": "Runtime diagnostics cannot be combined with other commands or execution modes.",
+                "field": "", "layer": ""}]}))
+        if flow_source is not None:
+            runtime_arguments.append("--from=" + flow_source)
+        sys.exit(runtime_main(runtime_arguments))
     level = getattr(logging, log_level.upper(), None)
     if not isinstance(level, int):
         sys.exit("Invalid --log-level %r (use DEBUG, INFO, WARNING, ERROR)." % log_level)
@@ -4175,8 +4284,8 @@ def main():
                                 reports_dir=reports_dir,
                                 secrets_path=secrets_file,
                                 memory_path=memory_file,
-                                only=cycle_only, start_from=cycle_from,
-                                resume=cycle_resume, reuse_from=cycle_reuse,
+                                only=cycle_only, start_from=cycle_from, action=cycle_action,
+                                resume=cycle_resume, reuse_from=cycle_reuse, mode=cycle_mode,
                                 subject=({"key": cycle_subject,
                                           "title": cycle_subject_title,
                                           "pin": cycle_subject_pin}

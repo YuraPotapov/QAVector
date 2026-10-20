@@ -20,22 +20,25 @@ is in that directory is a stream it already understands.
 """
 
 import collections
+import copy
 import json
 import os
 
-from . import history as history_mod
+from . import history as history_mod, cycleresult
+from .runner import TIMING_FIELDS
 
 #: What the file is called inside a run's directory. The core's own
 #: ``cycle/workspace.py`` decides this; mirrored rather than imported, like
 #: every other path the GUI shares with the core.
 LOG_NAME = os.path.join("logs", "cycle.jsonl")
 
-#: How many events are read back at most. The model caps what it keeps anyway
+#: The event-tail budget. The model caps what it keeps anyway
 #: (``runner.CYCLE_STAGES`` and the log limits beside it), so reading more only
 #: costs the parse - and a run that emitted a hundred thousand events must not
 #: be something the window waits for on the way up. The first line is always
 #: kept whatever this is: it is ``cycle.run.start``, which carries the graph
-#: every other event is about.
+#: every other event is about. At most one extra run.mode is kept too: its
+#: retained results and rerun reasons are provenance, not replaceable output.
 MAX_EVENTS = 20000
 
 
@@ -71,19 +74,31 @@ def restore_cycle(history, state, cycle_id):
 def events_of(run_dir, limit=MAX_EVENTS):
     """The run's events, oldest first. Anything unreadable is simply not there.
 
-    The first line and the last ``limit`` of them, rather than the last
-    ``limit``: the first is the run starting, and without it there is no graph,
-    no list of steps and nothing for the rest to attach to.
+    Keep the first line, latest run mode and bounded tail. The mode's exact
+    retained results and rerun reasons are not duplicated in metadata.json.
     """
     try:
         with open(log_path(run_dir), encoding="utf-8", errors="replace") as fh:
             first = fh.readline()
             # Over the handle, so a long file is walked rather than held.
-            rest = collections.deque(fh, maxlen=max(limit - 1, 1))
+            rest = collections.deque(maxlen=max(limit - 1, 1))
+            mode = None
+            for position, line in enumerate(fh, 1):
+                rest.append((position, line))
+                # Avoid parsing every output event just to retain one semantic
+                # record. Confirm the kind so log text cannot impersonate it.
+                if '"cycle.run.mode"' in line:
+                    try:
+                        candidate = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(candidate, dict) and candidate.get("kind") == "cycle.run.mode":
+                        mode = (position, line)
     except OSError:
         return []
     found = []
-    for line in [first] + list(rest):
+    lines = dict([(0, first)] + ([mode] if mode is not None else []) + list(rest))
+    for _, line in sorted(lines.items()):
         line = line.strip()
         if not line:
             continue
@@ -119,6 +134,104 @@ def saved_interactions(run_dir, run_id):
         return None
 
 
+def _phase_current(receipt, steps):
+    for name, evidence in (receipt.get("evidence") or {}).items():
+        step = steps.get(name)
+        if step is None or any(step.get(key, 1 if key == "execution_generation" else "") != evidence[key]
+                               for key in ("status", "execution_generation", "definition_digest", "input_digest")
+                               if key in evidence):
+            return False
+    return True
+
+
+def _saved_policy(run_dir, run_id):
+    try:
+        with open(os.path.join(run_dir, ".execution", "execution-policy.json"), encoding="utf-8") as handle:
+            policy = json.load(handle)
+        if isinstance(policy, dict) and policy.get("schema") == 1 and policy.get("run_id") == run_id:
+            return {key: policy[key] for key in ("initial_execution_mode", "execution_mode", "execution_policy_version", "node_approvals", "policy_changes") if key in policy}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def _restore_receipts(run_dir, state):
+    """Restore durable results and semantics omitted from a bounded event tail."""
+    try:
+        with open(os.path.join(run_dir, "metadata.json"), encoding="utf-8") as handle:
+            record = json.load(handle)
+        if record.get("id") != state.cycle.get("run_id"):
+            return
+        record.update(_saved_policy(run_dir, record["id"]))
+        for key in ("active_elapsed_ms", "execution_segments", "selected_steps", "plugin_names",
+                    "subject", "revisions"):
+            if key in record:
+                state.cycle[key] = copy.deepcopy(record[key])
+        if "resume_count" in record:
+            count = record["resume_count"]
+            state.cycle["resume_count"] = count
+            if isinstance(count, int) and count > 0:
+                mode = state.cycle.get("mode") or {}
+                if mode.get("mode") != "resume" or mode.get("resume_count") != count:
+                    # A crash before the latest mode event must not attribute
+                    # a previous attempt's retained work/reasons to this one.
+                    state.cycle["mode"] = {"mode": "resume", "resume_count": count,
+                                           "source_run": record["id"], "kept": [], "rerun": []}
+        for phase in record.get("phase_definition") or []:
+            name = phase.get("id", "")
+            if not name or os.path.basename(name) != name:
+                continue
+            try:
+                with open(os.path.join(run_dir, ".execution", "phases", name + ".json"), encoding="utf-8") as handle:
+                    receipt = json.load(handle)
+                if receipt.get("phase") == name:
+                    saved = (record.get("phase_receipts") or {}).get(name) or {}
+                    generation, previous = receipt.get("generation", 0), saved.get("generation", 0)
+                    if generation >= previous:
+                        if generation == previous and saved.get("invalidated"):
+                            receipt["invalidated"] = True
+                        record.setdefault("phase_receipts", {})[name] = receipt
+            except (OSError, ValueError, AttributeError):
+                pass
+        for name, saved in (record.get("steps") or {}).items():
+            step = state.cycle.get("steps", {}).get(name)
+            if step is None or not isinstance(saved, dict):
+                continue
+            if os.path.basename(name) == name:
+                try:
+                    with open(os.path.join(run_dir, ".execution", "steps", name + ".json"), encoding="utf-8") as handle:
+                        receipt = json.load(handle)
+                    if isinstance(receipt, dict) and receipt.get("step_id") == name:
+                        saved = receipt
+                except (OSError, ValueError):
+                    pass
+            for key in TIMING_FIELDS + ("status", "plugin", "message", "outputs", "artifacts", "source_run", "runtime",
+                                        "started_at", "ended_at", "reason_code", "blocked_by", "duration_ms",
+                                        "definition_digest", "input_digest"):
+                if key in saved:
+                    step[key] = saved[key]
+            if "attempts" in saved:
+                step["attempt"] = saved["attempts"]
+        for receipt in (record.get("phase_receipts") or {}).values():
+            if not _phase_current(receipt, state.cycle["steps"]):
+                receipt["invalidated"] = True
+        if record.get("status") in ("success", "failed", "cancelled", "timeout", "interrupted"):
+            tally = record.get("tally") or {}
+            counts = {key: tally.get(status, sum(step.get("status") == status for step in state.cycle["steps"].values()))
+                      for key, status in (("passed", "success"), ("failed", "failed"), ("skipped", "skipped"))}
+            state.handle(dict(record, kind="cycle.run.end", run_id=record["id"], **counts))
+        else:
+            # A headless safe pause has already emitted run.end with status
+            # waiting. Its receipts can still be newer than that journal event;
+            # restoring them must not claim that the executor is live again.
+            for key in cycleresult.DETAIL_FIELDS:
+                if key in record:
+                    state.cycle[key] = record[key]
+            cycleresult.update(state.cycle, record if state.cycle_running else None)
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+
+
 def restore(run_dir, state, limit=MAX_EVENTS, events=None):
     """Replay ``run_dir`` into ``state``. True when there was a run to restore.
 
@@ -140,6 +253,9 @@ def restore(run_dir, state, limit=MAX_EVENTS, events=None):
         for event in events:
             state.handle(event)
         if state.cycle is not None:
+            # Receipts may be newer than a truncated diagnostic event stream.
+            _restore_receipts(run_dir, state)
+            state.cycle.update(_saved_policy(run_dir, state.cycle.get("run_id")))
             messages = saved_interactions(run_dir, state.cycle.get("run_id"))
             if messages is not None:
                 state.restore_interactions(messages)

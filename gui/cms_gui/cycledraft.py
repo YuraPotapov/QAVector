@@ -224,6 +224,9 @@ class Draft(object):
         made = dict(step or {})
         made["id"] = self.unique_id(made.get("id") or plugin.split(".")[-1])
         made["plugin"] = plugin
+        phases = self.document.get("phases") or []
+        if phases and "phase" not in made:
+            made["phase"] = (self.step(after) or {}).get("phase") or phases[0]["id"]
         if after and self.step(after) is not None and "needs" not in made:
             made["needs"] = [after]
             group = (self.step(after).get("group") or "").strip()

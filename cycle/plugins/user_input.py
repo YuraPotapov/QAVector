@@ -74,7 +74,7 @@ class UserInput(CyclePlugin):
         answer = ask_mod.ask(
             question, detail=str(self.setting(step.settings, "detail", "") or ""),
             options=[SEND, CANCEL], timeout_ms=timeout_ms, step=step.id,
-            cancel=context.cancel,
+            cancel=context.cancel, progress=getattr(context, "progress", None),
             text={"placeholder": str(self.setting(step.settings, "placeholder", "") or ""),
                   "default": str(self.setting(step.settings, "default", "") or ""),
                   "required": required})

@@ -37,6 +37,7 @@ and runs them, which is what the GUI has always been allowed to do.
 """
 
 import collections
+import copy
 import os
 import re
 import signal
@@ -47,6 +48,7 @@ from PySide6.QtCore import (QObject, QProcess, QProcessEnvironment, QTimer,
 
 from . import criteria as criteria_mod
 from . import runnertypes, store
+from . import restrictions, runtime_services
 from .runnertypes import (FAILED, MANAGED, RUNNING, STARTING, STOPPED, STOPPING,
                           WAITING)
 
@@ -422,6 +424,17 @@ class ServiceProcess(QObject):
         self._status = STOPPED
         self._detail = ""
         self._proc = None          # attached child
+        self._isolated = None
+        self.runtime_core = None
+        self.runtime_info = {}
+        self._runtime_configuration = None
+        self.launch_allowed = True
+        self.runtime_control_paths = []
+        #: The project's own restrictions (its folder's); the service's are in
+        #: runner.extra. What the running process was started with is kept
+        #: apart, so an edit while it runs reads as "restart to apply".
+        self.project_restrictions = {}
+        self.restricted_with = None
         self._action = None        # a managed start/stop, in flight
         self._probe = None         # a managed status query, in flight
         self._probe_program = ""   # what that query runs, for its error message
@@ -489,7 +502,7 @@ class ServiceProcess(QObject):
 
     def detained(self):
         """Running, and ours to lose when the window closes."""
-        return self.is_running() and not self.runner.detach and not self.is_managed()
+        return self.is_running() and (self._isolated is not None or not self.runner.detach and not self.is_managed())
 
     def console(self):
         return list(self._lines)
@@ -499,12 +512,18 @@ class ServiceProcess(QObject):
         # and looks at it, and an attached service has nothing else to poll for.
         return self.is_managed() or bool(self._pid) or bool(self._watched)
 
-    def update(self, runner, project_dir):
+    def update(self, runner, project_dir, project_restrictions=None):
         """Take the edited configuration. What is already up keeps its own."""
-        was = (self.runner.type, self.runner.settings, self.runner.detach)
+        was = (self.runner.type, self.runner.settings, self.runner.detach, self.runner.extra.get("execution"),
+               self.restriction_layers())
+        stale_before = self.stale
         criteria_was = [one.to_entry() for one in self.runner.criteria]
         self.runner = runner
         self.project_dir = project_dir
+        if project_restrictions is not None:
+            self.project_restrictions = dict(project_restrictions)
+        if self._isolated is not None and self._runtime_configuration is not None:
+            self.stale = self._runtime_configuration != self._runtime_settings()
         if criteria_was != [one.to_entry() for one in runner.criteria]:
             self._build_matchers()
             # Answer for what it has already printed rather than only for what it
@@ -513,8 +532,12 @@ class ServiceProcess(QObject):
                 if not matcher.source:
                     matcher.feed_all(self._lines)
             self.criteria_changed.emit()
-        if self.is_running() and was != (runner.type, runner.settings, runner.detach):
-            self.stale = True
+        if self.is_running() and was != (runner.type, runner.settings, runner.detach, runner.extra.get("execution"),
+                                         self.restriction_layers()):
+            if self._isolated is None or self._runtime_configuration is None:
+                self.stale = True
+            self.status_changed.emit(self._status)
+        elif self.stale != stale_before:
             self.status_changed.emit(self._status)
 
     # -- criteria -------------------------------------------------------------
@@ -560,6 +583,17 @@ class ServiceProcess(QObject):
         return [(matcher.name, matcher.color, matcher.lit(), matcher.outstanding())
                 for matcher in self._matchers]
 
+    # -- restrictions -----------------------------------------------------------
+    def restriction_layers(self):
+        """What holds this service: ``[("project", ...), ("service", ...)]``,
+        or None when it runs as it always has - no project folder, a kind of
+        service nothing can hold (a container), or nothing set."""
+        if not (self.project_dir or "").strip() or self.runner.type not in restrictions.SERVICE_TYPES:
+            return None
+        layers = [("project", self.project_restrictions or {}),
+                  ("service", self.runner.extra.get("restrictions") or {})]
+        return layers if restrictions.resolve(layers)["restricted"] else None
+
     # -- lifecycle ------------------------------------------------------------
     def start(self):
         # Not is_running(): a service that has been WAITING for its dependencies
@@ -570,6 +604,19 @@ class ServiceProcess(QObject):
         if kind is None:
             return self._fail("Unknown runner type %r - this build does not have it."
                               % self.runner.type)
+        execution = self.runner.extra.get("execution")
+        if "execution" in self.runner.extra:
+            problems = runtime_services.execution_problems(execution)
+            if problems:
+                return self._fail(problems[0])
+            if not self.launch_allowed:
+                return self._fail("Save the isolated service configuration before starting or restarting it.")
+            if kind.id not in ("python", "shell") or self.runner.detach:
+                return self._fail("Only attached Python/shell services support isolated execution; no host fallback was attempted.")
+            self.stale, self._detail, self._stopping = False, "", False
+            self._reset_criteria()
+            self._set_status(STARTING)
+            return self._start_isolated(execution, kind)
         try:
             cwd = runnertypes.resolve_dir(self.runner.settings, self.project_dir)
             argv = [str(part) for part in kind.command(self.runner.settings, cwd)]
@@ -579,7 +626,24 @@ class ServiceProcess(QObject):
             return self._fail("Nothing to run - check the configuration.")
         if cwd and not os.path.isdir(cwd):
             return self._fail("Working directory does not exist: %s" % cwd)
+        marker = argv[0]
+        layers = self.restriction_layers()
+        self.restricted_with = None
+        if layers is not None and kind.mode != MANAGED:
+            # Started through the core, which builds the sandbox and becomes the
+            # service; nothing here would run it unrestricted instead.
+            core = self.runtime_core
+            if core is None or not core.is_configured():
+                return self._fail("Restrictions are set for this service, but no QAVector core is configured "
+                                  "to enforce them, so it was not started.")
+            folder = os.path.abspath(os.path.expanduser(self.project_dir))
+            try:
+                argv = restrictions.exec_argv(core, restrictions.request(folder, layers, cwd), argv)
+            except ValueError as exc:
+                return self._fail(str(exc))
+            self.restricted_with = copy.deepcopy(layers)
         self.stale = False
+        self.runtime_info = {}
         self._detail = ""
         self._stopping = False
         self._reset_criteria()
@@ -587,9 +651,11 @@ class ServiceProcess(QObject):
         if kind.mode == MANAGED:
             self._run_action(argv, cwd, starting=True)
         elif self.runner.detach:
-            self._start_detached(argv, cwd)
+            self._start_detached(argv, cwd, marker)
         else:
-            self._start_attached(argv, cwd)
+            self._start_attached(argv, cwd, marker)
+        if self.restricted_with is not None:
+            self._emit_line("[QAVector] Restricted: %s" % restrictions.summary(restrictions.resolve(self.restricted_with)))
         return True
 
     def stop(self):
@@ -597,6 +663,10 @@ class ServiceProcess(QObject):
         # service that is still waiting is simply giving up on the wait.
         if self.cancel_waiting():
             return True
+        if self._isolated is not None:
+            self._stopping = True
+            self._set_status(STOPPING)
+            return self._isolated.stop()
         kind = self.kind()
         if kind is not None and kind.mode == MANAGED:
             if self._action is not None:
@@ -619,6 +689,9 @@ class ServiceProcess(QObject):
         return True
 
     def restart(self):
+        if "execution" in self.runner.extra and not self.launch_allowed:
+            self._detail = "Save the isolated service configuration before restarting it."
+            return False
         if not self.is_running():
             return self.start()
         self._restart = True
@@ -675,7 +748,70 @@ class ServiceProcess(QObject):
         self._proc.kill()
 
     # -- the three shapes -----------------------------------------------------
-    def _start_attached(self, argv, cwd):
+    def _start_isolated(self, execution, kind):
+        self.runtime_info["active"] = False
+        self._runtime_configuration = self._runtime_settings()
+        try:
+            grace = self.stop_grace_ms()
+            if grace is None or grace > 60000:
+                raise ValueError("Isolated services require a bounded stop timeout up to 60 seconds; unbounded shutdown is unavailable.")
+            argv = [str(part) for part in kind.command(self.runner.settings, "")]
+            packet = {"protocol_version": 1, "service": self.name, "runner_type": kind.id,
+                "project_directory": os.path.abspath(os.path.expanduser(self.project_dir)), "argv": argv,
+                "environment": dict(self.runner.settings.get("env") or {}),
+                "overrides": execution.get("overrides", {}), "stop_grace_seconds": grace / 1000}
+            packet["control_paths"] = list(self.runtime_control_paths)
+            cwd = str(self.runner.settings.get("dir") or "").strip()
+            if cwd:
+                packet["working_directory"] = cwd
+            worker = runtime_services.RuntimeServiceProcess(self.runtime_core, self)
+            worker.line.connect(self._emit_line)
+            worker.ready.connect(self._isolated_ready)
+            worker.ended.connect(self._isolated_finished)
+            self._isolated = worker
+            rotate(self.log_path)
+            self._open_log()
+            worker.start(execution, packet)
+            return True
+        except (ValueError, OSError) as exc:
+            if self._isolated is not None:
+                self._isolated.deleteLater()
+                self._isolated = None
+            self._close_log()
+            return self._fail(str(exc))
+
+    def _isolated_ready(self, metadata):
+        self.runtime_info = dict(metadata)
+        self.runtime_info["active"] = True
+        if not self._stopping:
+            self._set_status(RUNNING, "Isolated · " + metadata.get("provider", ""))
+
+    def _runtime_settings(self):
+        import copy
+        return copy.deepcopy((self.runner.type, self.runner.settings, self.runner.detach,
+                              self.runner.extra.get("execution"), self.project_dir))
+
+    def _isolated_finished(self, code, terminal):
+        worker, self._isolated = self._isolated, None
+        if worker is not None:
+            worker.deleteLater()
+        self._close_log()
+        confirmed = terminal.get("cleanup_confirmed") is True
+        ok = code == 0 and terminal.get("ok") is True and confirmed
+        self.runtime_info.update(terminal)
+        self.runtime_info["active"] = False
+        if ok:
+            self._set_status(STOPPED, "")
+        else:
+            self._set_status(FAILED, terminal.get("problem") or "The isolated service failed.")
+        self._stopping = False
+        if self._restart and confirmed:
+            self._restart = False
+            QTimer.singleShot(0, self.start)
+        elif not confirmed:
+            self._restart = False
+
+    def _start_attached(self, argv, cwd, marker=None):
         rotate(self.log_path)
         self._open_log()
         proc = QProcess(self)
@@ -691,10 +827,10 @@ class ServiceProcess(QObject):
         proc.setProcessEnvironment(_qt_environ(self.runner.settings))
         _own_session(proc)
         self._proc = proc
-        self._marker = argv[0]
+        self._marker = marker or argv[0]
         proc.start(argv[0], list(argv[1:]))
 
-    def _start_detached(self, argv, cwd):
+    def _start_detached(self, argv, cwd, marker=None):
         rotate(self.log_path)
         # Only this run's output belongs in the console; what the file already
         # holds is the previous one's and is still there to be opened.
@@ -722,7 +858,9 @@ class ServiceProcess(QObject):
             self._fail("Could not start %s: %s" % (argv[0], exc))
             return
         self._pid = int(child.pid)
-        self._marker = argv[0]
+        # The program's own name, not the core's: a restricted service becomes
+        # its sandbox, whose command line still carries it.
+        self._marker = marker or argv[0]
         if self._state is not None:
             # Where this run starts writing, taken from the tail that was just
             # moved to the end of the file: the window that adopts this pid reads
@@ -951,6 +1089,11 @@ class ServiceProcess(QObject):
         on the wire left Qt destroying a running QProcess and a signal arriving
         at a C++ object Python had already dropped.
         """
+        if self._isolated is not None and self._isolated.is_running():
+            self._isolated.stop()
+            if not self._isolated.wait(1000):
+                self._isolated.process.kill()
+                self._isolated.wait(1000)
         for proc in (self._probe, self._action):
             if proc is None:
                 continue
@@ -1056,6 +1199,8 @@ class ServiceProcess(QObject):
 
     def wait_for_stop(self, timeout_ms=SHUTDOWN_WAIT_MS):
         """Block until the attached child is gone. Only for the way out."""
+        if self._isolated is not None:
+            return self._isolated.wait(timeout_ms)
         if self._proc is None:
             return True
         return bool(self._proc.waitForFinished(timeout_ms))
@@ -1083,11 +1228,23 @@ class ServiceSupervisor(QObject):
         #: keys stopped only so they can be started again once they are down.
         self._restarting = set()
         self._state = state if state is not None else DetachedState()
+        self.runtime_core = None
+        self.runtime_control_paths = []
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self._tick)
 
     # -- the configuration ----------------------------------------------------
+    def set_runtime_core(self, core):
+        self.runtime_core = core
+        for service in self._services.values():
+            service.runtime_core = core
+
+    def set_runtime_control_paths(self, paths):
+        self.runtime_control_paths = [os.path.abspath(path) for path in paths if path]
+        for service in self._services.values():
+            service.runtime_control_paths = list(self.runtime_control_paths)
+
     def sync(self, projects):
         """Reconcile with the edited configuration, keeping what is up, up."""
         self._projects = list(projects)
@@ -1118,6 +1275,9 @@ class ServiceSupervisor(QObject):
             if service is None:
                 service = ServiceProcess(project.name, runner, project.dir,
                                          state=self._state, parent=self)
+                service.project_restrictions = dict(project.extra.get("restrictions") or {})
+                service.runtime_core = self.runtime_core
+                service.runtime_control_paths = list(self.runtime_control_paths)
                 service.status_changed.connect(
                     lambda status, k=key: self._service_changed(k, status))
                 service.output.connect(
@@ -1127,7 +1287,7 @@ class ServiceSupervisor(QObject):
                 self._services[key] = service
                 service.reattach()
             else:
-                service.update(runner, project.dir)
+                service.update(runner, project.dir, project.extra.get("restrictions") or {})
         # Keep the page's order, so the tables and this agree about what is where.
         self._services = collections.OrderedDict(
             (key, self._services[key]) for key in wanted if key in self._services)
@@ -1158,7 +1318,9 @@ class ServiceSupervisor(QObject):
             # Not straight away: this is running inside the stopped service's own
             # signal, and starting from there re-enters a state machine that is
             # still finishing the previous transition.
-            QTimer.singleShot(0, lambda k=key: self.start(k[0], k[1]))
+            service = self._services.get(key)
+            if service is None or service.runtime_info.get("cleanup_confirmed") is not False:
+                QTimer.singleShot(0, lambda k=key: self.start(k[0], k[1]))
         self._release(key, status)
         self.status_changed.emit(key[0], key[1], status)
 
@@ -1258,6 +1420,8 @@ class ServiceSupervisor(QObject):
         service = self._services.get(key)
         if service is None or service.is_running():
             return False
+        if "execution" in service.runner.extra and not service.launch_allowed:
+            return service.start()
         # A cycle is refused by servicesfile.validate, but a file edited by hand
         # reaches this before anyone presses Save - and recursing round a ring
         # would take the window with it.
@@ -1295,6 +1459,9 @@ class ServiceSupervisor(QObject):
         key = (project, name)
         service = self._services.get(key)
         if service is None:
+            return False
+        if "execution" in service.runner.extra and not service.launch_allowed:
+            service._detail = "Save the isolated service configuration before restarting it."
             return False
         if not service.is_running():
             return self.start(project, name)

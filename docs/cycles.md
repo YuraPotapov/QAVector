@@ -16,6 +16,10 @@ Cycles live in `cycles/` beside the rest of your data, and in the tree that
 ships with the application. Yours is searched first, so a cycle you write
 shadows a bundled one with the same id.
 
+A cycle can hold its steps to its project folder - network, files and limits,
+with each step able to set its own; steps that cannot be held to a folder are
+system steps. See [restrictions](restrictions.md).
+
 ---
 
 ## A minimal cycle
@@ -140,12 +144,10 @@ inside it - shows the diff and asks before dropping it. A file changed on disk
 after it was opened is not written over: the save is refused and Reload shows
 the other change.
 
-**Design and Run.** The switch over the canvas says which graph it is showing:
-**Design** is the file (or your unsaved changes), **Run** is the graph the run
-on screen was started with, with its statuses. They are the same picture until
-the file changes under a run - and then a run's colours are only shown in Run,
-because painting them on a graph that did not run would be a lie about both. A
-run starting switches to Run; an edit switches back.
+**Design and Run.** Design shows the file or unsaved changes. Starting a cycle
+switches to **Run → Cockpit**, the operational summary. **Run → Graph** shows
+the graph the run started with and its statuses. A file edited afterwards has
+its own Design graph; an edit switches back to Design.
 
 ### Phases
 
@@ -268,8 +270,8 @@ appears to the left of something it depends on.
 | `user.input` | Stops and asks a person to write something; later steps read it as `outputs.text`. |
 | `user.choice` | Stops and asks a person to pick from a list an earlier step made; later steps read `outputs.values`. |
 | `check.gate` | Several things that must all hold. Names the one that did not. |
-| `report.json` | Writes the whole run record as JSON. |
-| `report.html` | Writes a readable page describing the run. |
+| `report.json` | Writes a JSON snapshot; a separate final report follows the terminal verdict. |
+| `report.html` | Writes an HTML snapshot with a link to the final execution result. |
 
 What each takes and produces is published by `--describe` under `cycle_plugins`,
 which is where a step's window gets its fields — so this table can go out of
@@ -757,6 +759,131 @@ Right after `cycle.run.start` every run says how it began, as `cycle.run.mode`:
 
 A plan sent back from an approval is a `cycle.revision` event with its round,
 the feedback, and the steps it revisits. The Subjects pane shows all three.
+
+### What a run completed
+
+Technical `status: success` and exit code 0 still mean that the selected
+execution succeeded. They do not mean that a partial run completed the whole
+workflow. Schema 1 adds independent presentation fields to metadata, index
+rows, sessions and `cycle.run.start` / `cycle.run.end` events:
+
+```json
+{
+  "status": "success",
+  "execution_status": "completed",
+  "scope": "partial",
+  "coverage": {"completed": 1, "selected": 1, "total": 68},
+  "outcome": "partial_completed",
+  "current_phase": "Prepare"
+}
+```
+
+`scope` is `full`, `partial` or `resume`. `selected_steps` records the effective
+selection, including any gates that must run again. Coverage counts successful
+selected steps, excludes borrowed results in a partial run, and includes
+retained successful work on Resume. Intentional skips are not successful steps,
+so a completed full workflow can have fewer successful steps than its total.
+
+Resume preserves the original selection for named actions, Run step and Run from
+here. Changing `scope` to `resume` never expands the selected work. Legacy
+partial selections are inferred conservatively from borrowed and not-selected
+step receipts.
+
+Subjects and Search show neutral **Partial run completed** and **No work
+found**, rather than Passed. A full successful execution with no unresolved
+work reads **Workflow completed**. Unavailable outputs or unexplained skips
+read **Workflow incomplete**, even if the technical verdict is success. No
+selected work reads **No work performed**. An empty subject alone never proves
+that nothing was found: `no_work_found` requires successful empty `jira.issues`
+reads with no other executed work. Cycle-specific milestones come later.
+
+With explicit phases, `current_phase` identifies the execution frontier or the
+completed boundary at Pause. Legacy cycles use the reached step's descriptive
+`group`, which does not change scheduling. Skipped receipts and events
+carry `reason_code`: `not_selected`, `condition_false`, `disabled`, `blocked`,
+`rejected`, `unavailable` or `plugin_skipped`. `blocked_by` names a causal
+dependency when known. Legacy messages are interpreted conservatively; an
+unknown skip remains `plugin_skipped`.
+
+Old metadata and events remain readable without rewriting run directories.
+Sessions infer missing fields from saved steps and the run's graph; legacy
+JSONL replay uses its run mode and step evidence. When evidence is unavailable,
+the GUI uses neutral **Execution completed**. A new core's final outcome takes
+precedence over missing diagnostic step events.
+
+Baseline reports export only the fixed execution summary fields. Generated
+modern fixtures use container schema 2, preserving sanitized selection,
+phase/milestone and approval-state evidence; checked-in historical schema-1
+fixtures remain unchanged. Export verifies that reloading each sample produces
+the same execution summary. Task text, paths, settings, raw approval receipts
+and absolute identifiers/clocks are excluded.
+
+### Prepare task and bounded run actions
+
+A cycle can declare a named selection that runs fresh, without borrowing
+results from another run:
+
+```yaml
+actions:
+  prepare_task:
+    title: Prepare task
+    description: Recreates the task sandbox; committed source branch work is reused.
+    steps: [todo, claim, workspace, task_brief]
+    result: task_brief
+```
+
+The listed nodes must exist and supply their own inputs. A dependency outside
+the selection is allowed only at a conditional join that does not read that
+unselected node. Core rejects known agents, baseline/scenario plugins, external
+write plugins and memory counter writes in `prepare_task`. Shell commands
+remain declared operations: this does not enforce arbitrary shell effects.
+
+**Run ▾ → Prepare task** appears when the open cycle declares that action. Its
+confirmation explains sandbox recreation and reuse before work begins. From a
+terminal, use `--cycle-run=claim_development --cycle-action=prepare_task`.
+Selection/reuse/Resume flags cannot be combined with a new named action.
+
+The run stores `action_id`, its launch-time `action_definition`, and explicit
+`selected_steps`. The scheduler never submits nodes outside that selection,
+including on Resume. Changing the action's selection requires a new run.
+Successful Prepare has `scope: partial`, `outcome: task_prepared` and the neutral
+label **Task prepared · Prepare only**. An empty Jira queue is **No work found**.
+
+The `task.brief` plugin takes `issues` (exactly one task), `directory`, `source`
+and `base`, plus optional `base_update` and `task_report`. It reads the actual
+Git state and writes `task-brief.json` and `task-brief.html` in its step folder.
+Subjects shows the task, Jira status, sandbox/source paths, creation or
+recreation, branch reuse, HEAD and base SHA. A missing base merge, dirty
+workspace or unresolved conflict prevents `task_prepared`. A failed Prepare
+can still carry the blocked brief.
+
+External effects read **None declared**, rather than claiming verified receipts
+for arbitrary shell commands. The action excludes Jira transitions and pushes;
+the general effect ledger belongs to a later increment. Git fetch updates
+local remote-tracking refs, and preparing the sandbox can create local merge
+commits. The source checkout's working files are preserved.
+
+The Claim upgrade moves its existing `attempts` increment behind preflight and
+baseline, directly before implementation. It preserves the counter's value and
+the existing admission limit; a task already at its limit is still refused.
+Prepare never increments it. A new Prepare recreates the disposable sandbox,
+so the confirmation explicitly covers replacement of its uncommitted work.
+
+The working Claim cycle lives in user data, and so does its upgrade. Create a
+fresh draft against that user's current file with:
+
+```bash
+.venv/bin/python -m cycle.prepare_claim \
+  --source /path/to/cycles/claim_development.yaml \
+  --output /tmp/claim_development-prepare-task.yaml
+```
+
+After review, `--apply --expected-digest=HASH` writes back only if the source
+still matches the printed digest, preserving comments and file permissions.
+Use the updated core and GUI with this schema. Old runs still open, but the
+structurally changed graph cannot Resume executions of the old graph; start a
+new Prepare run instead. Unmodified cycles and their recovery behavior keep
+their existing semantics.
 
 ### Waiting for a time
 
@@ -1475,9 +1602,266 @@ timeout is part of what they do.
 Ctrl+C is a cancellation, not a crash: the run still gets its cleanup pass, its
 record and its verdict.
 
+## Execution phases and Pause
+
+Explicit phases are execution boundaries. `group:` remains a visual grouping
+for cycles without them; it grants no permission to start work. A phased cycle
+assigns every step to a declared phase, and dependencies can only point within
+the phase or to earlier phases:
+
+```yaml
+phases:
+  - id: prepare
+    title: Prepare task
+    purpose: Read the task and save its workspace evidence.
+    policy: stop_after
+    outcome: task_prepared
+    deliverables: [brief]
+  - id: implement
+    title: Implement
+    policy: manual
+steps:
+  - id: brief
+    plugin: task.brief
+    phase: prepare
+    # with: ... the normal task.brief settings
+  - id: implement
+    plugin: agent.implement
+    phase: implement
+    needs: [brief]
+    # with: ... the normal agent.implement settings
+```
+
+Phase policies are:
+
+| Policy | Scheduler behavior |
+|---|---|
+| `automatic` | Continue when the selected phase members settle successfully. |
+| `stop_after` | Pause before starting the next phase after a successful phase. |
+| `manual` | Wait for **Run phase** before starting this phase. |
+| `approval_required` | Require `approval: gate_id`, naming an existing `approval.gate` inside this phase. Every other member must depend on it; the core also blocks execution until that gate succeeds. |
+
+`approval_required` uses the gate's existing question and answer. Continue and
+Run phase do not provide an approval answer. Named actions remain bounded by
+their declared step selection; normal phase-boundary pauses are not added to
+**Prepare task**.
+
+**Pause** immediately bars new submissions, lets active steps reach their
+cooperative completion or plugin waiting point, then shows **Paused**. Pending
+steps stay pending. Plugin waiting and run Pause are different: plugin waiting
+normally consumes its timeout, while a paused run freezes active-time accounting
+and parked step deadlines. Active atomic operations can take time to drain.
+
+**Continue** proceeds in the same live executor and run identity, retaining
+successful results. **Run phase** runs the next phase and pauses before the
+following one; completed or future phases cannot be selected to skip a boundary.
+**Retry phase** is offered for a failed current phase. It retains successful
+work and retries its unfinished nodes with new execution generations and a
+recorded control transition. It refuses to invalidate successful downstream
+work, repeat an unresolved operation, or restart a failed step that still holds
+a managed resource. Retrying verification keeps its successful implementation
+and counter. Retrying a failed implementation rechecks its existing memory
+budget and charges its direct counter prerequisite again. Arbitrary counters
+elsewhere in a graph are not inferred to be implementation budgets.
+
+**Stop** cancels active operations, marks pending work cancelled and runs normal
+resource cleanup. It does not roll back completed effects. A live pause keeps
+managed resources; before continuation the scheduler renews held task claims
+and refuses further work if another run now owns a claim.
+
+The existing Run control becomes Pause while executing, then Continue,
+Run phase or Retry phase according to the core's available action. When both
+Continue and Run phase are available, Run phase is in its dropdown. Stop stays
+beside this control. The global activity strip opens the current run when
+clicked and does not duplicate its buttons. A paused live
+run keeps its process; **Resume** is for an execution whose process has ended.
+Without a live control channel, the CLI exports a safe pause, saves pending
+work and exits with code 0 (`status: waiting`, `execution_status: paused`). Use
+normal Resume to open that saved execution again. Resume verifies the original
+phase contract and restores process-local resources and approvals. Adding
+phases to an existing cycle therefore requires a new run for that new contract.
+
+An explicit **Run phase** or **Retry phase** records its phase bound before
+submission. The bound survives Resume, and a fully skipped/no-op phase still
+stops before the next phase. Skipped approval branches can settle as skipped;
+executing their write nodes still requires a successful gate.
+
+Each phase writes `.execution/phases/<id>.json` before the next phase can start.
+Receipts reference individual step receipts, input/definition fingerprints,
+execution generations and deliverable artifact hashes. `deliverables` names
+producer steps in that phase; raw outputs remain in those steps' receipts.
+Only a complete successful phase can claim its declared milestone. Updated
+receipts retain history; reset step evidence invalidates an older receipt.
+They survive process termination and a missing metadata update. `effects` is
+only a list of declared descriptions at this stage, not a verified change ledger.
+
+`python -m cycle.phase_claim --source FILE --output DRAFT` prepares six phases
+for the reviewed 69-step Claim cycle: Prepare, Plan, Implement, Integrate,
+Publish and Verify. The first five pause before the next phase. The migration
+preserves commands, dependencies, step IDs, existing approval gates and task
+counters. Applying uses `--apply --expected-digest HASH` from the reviewed
+source. Full Run keeps the configured production-conflict agent in Prepare;
+the separate 13-step **Prepare task** action still makes no agent calls.
+
+## Execution modes and node approvals
+
+The mode selector beside **Run** offers **Auto**, **Important** and **Approve**.
+The selected mode is enforced by the core scheduler before submitting a node,
+including when the cycle is launched through the CLI:
+
+```yaml
+execution:
+  default_mode: important
+steps:
+  - id: publish
+    plugin: git.push
+    important: true
+    importance_reason: Updates the development branch used by other developers.
+    # with: ... the normal git.push settings
+```
+
+| Mode | Additional approval before node execution |
+|---|---|
+| Auto | None, including for important nodes. |
+| Important | Every node with `important: true`. |
+| Approve | Every executable node. |
+
+An explicit `approval.gate` always asks its own question and gets no additional
+system prompt. Disabled nodes and branches skipped by their condition or
+dependencies get no approval request. Old cycles default to Auto. `important`
+must be a boolean; a missing `importance_reason` is a warning, not a validation
+failure. The node editor exposes both fields, and the graph marks important
+nodes with `!` as well as showing their reason in details and preflight.
+
+The Cockpit and global strip keep the effective mode visible. Auto explicitly
+explains that important nodes also run without implicit approval. Pending
+approval cards show the node, reason and a readable summary of the captured
+inputs. Jira searches show the site, project, filters, ordering and included
+content; a single pinned issue hides the inactive queue filters. Authentication,
+download limits, execution numbers, timeout, capabilities and the bounded JSON
+preview are in collapsed **Technical details**. Opening details does not answer
+the request. Details stay open across refreshes for that request and reset when
+the run or input fingerprint changes. Secret-bearing preview values remain
+redacted. Declared phase effects are labelled **Declared changes**; absent effect
+evidence reads **Effects not recorded** in the details until the change ledger
+is implemented.
+
+Approve and Cancel are native application buttons, separate from the HTML
+preview. Cancel declines this node approval and safely pauses; it does not stop
+the entire run. The action area stays inside Cockpit and scrolls for parallel
+requests without expanding the form.
+
+With keyboard focus in Cockpit, **Enter** (including the numeric keypad) presses
+Approve and **Esc** presses Cancel. A single request is the keyboard target;
+with parallel requests, Tab to that request's buttons first. Held keys do not
+repeat decisions, and the shortcuts do not act on other pages or input fields.
+
+Each card approves only its own node. Parallel branches can have separate cards
+and continue independently. Awaiting consent consumes no worker slot and leaves
+the node pending. Cancel records a declined decision and safely pauses the run with
+`approval_declined`; it does not report a technical failure or silently skip the
+node. Continue asks again. Stop uses the normal cancellation and cleanup path.
+
+The core binds consent to run ID, node ID, execution generation, submission
+attempt, resolved-input and definition fingerprints, mode and policy version.
+It writes the request before announcing it and the decision before submitting
+work. Changed inputs require a new decision. One grant covers the node's
+configured retry policy and unchanged plugin waiting polls; a poll with changed
+inputs needs new consent in a protected mode. Explicit Retry or failed Resume
+also needs a new grant. Successful retained nodes are not asked again.
+
+`initial_execution_mode` is part of the immutable launch manifest.
+`execution_mode` is the effective mode. Changing the YAML default cannot change
+a saved run's policy. During a live run, mode changes are allowed only after
+safe Pause and create a policy-change receipt; they invalidate pending and
+approved but unstarted requests. The selector does not implicitly Continue.
+Already-started unchanged waiting operations can finish their existing logical
+execution. The Cockpit lists mode changes and node decisions.
+
+The canonical `.execution/execution-policy.json` journal contains the mode,
+request/decision receipts and policy changes. Checkpoint loading and GUI replay
+read it independently of metadata, so a summary write lost at termination does
+not lose a decision. Resume may reuse an approved but unstarted node only in
+the same run with the same binding. An unanswered headless run exports a safe
+pause rather than starting work without consent.
+
+Use `--cycle-mode=auto|important|approve` to select a mode at launch. Omit it on
+Resume to keep the saved mode; an explicit changed mode creates a recorded
+resume policy change. The control pipe accepts `cycle.node.approval.answer`
+with `run_id`, `request_id`, `fingerprint` and boolean `approved`, and
+`cycle.mode.change` with `run_id` and `mode`. Answers are judged on the scheduler
+thread. Stale answers and mode changes before Pause are refused.
+
 ---
 
 ## Watching a run: Stages and artifacts
+
+**Run Cockpit** opens when a run starts. **Current step** is a prominent card
+pinned above the scrolling history, with the node's name, status, elapsed time,
+progress and last activity. It stays visible while reading earlier results;
+new activity does not force the history to scroll. Its progress bar appears
+only when the step reports a real current/total count. Pending approvals show
+the node awaiting a decision; after Cancel that node is labelled Paused.
+With parallel requests, focusing a request's buttons also selects its current
+card. Clicking the card opens the step's details. Also running shows the other
+active steps, their progress, last activity and remaining timeout. Next
+shows the dependency frontier; conditions are still evaluated by the core
+before a step starts. Completed lists results and their artifact counts.
+Needs attention follows each blocked step to its original failure. Folded
+graph phases show root failure and downstream blocker counts too.
+Skipped nodes are omitted from Cockpit cards; blocked counts still lead to the
+original failure. After Stop, Next no longer lists pending work: Cockpit shows
+Stopping while active work finishes, then Stopped. The core still settles every
+remaining node, and Graph and the journal retain their full statuses.
+This also covers a declined explicit approval gate with `on_failure: stop`,
+which ends as a failed run in the core even without pressing the toolbar's Stop.
+Cockpit preserves that final status and refusal reason. A recoverable phase
+failure or `on_failure: continue` keeps the remaining work visible.
+
+Run status shares the existing cycle-title row, using a muted label; it adds
+no row to the form. The mode stays in its selector. An empty result reads
+`No work found`, without a repeated completion message or a zero timer.
+Definition details and mode remain in the status tooltip.
+
+The cycle header reads `Baseline tests 08:41, Running · +2 parallel`. A waiting
+decision takes priority, then the active step selected by the user, then the
+oldest active step. Progress does not change that selection. Clicking a step opens its
+details. A strip below the main toolbar keeps the subject, phase, active step,
+elapsed time and last activity visible away from the current cycle. It is hidden
+while that cycle is already open, so it adds no duplicate row there. Click the strip to open
+the current run in Cockpit, or use the Cockpit tab on the Cycles page.
+Graph and the raw Output remain available.
+
+Timers use `MM:SS`, `H:MM:SS`, then `Dd HH:MM`. The core records
+`active_elapsed_ms`, `execution_generation` and bounded `execution_segments`
+in metadata and active step receipts every five seconds and at transitions.
+The GUI interpolates only within that five-second confirmation window; its
+one-second repaint writes no events or checkpoints. Replayed history is frozen
+at the last confirmed receipt. Legacy journals say **time unavailable** when
+they contain no supervised-time evidence.
+
+Plugin-owned waiting counts as execution time. Resume of an unchanged failed
+or interrupted node continues its accumulated time. A changed definition,
+refreshed successful gate or plan revision starts a new execution generation
+and retains the earlier segments. Large scheduler/clock gaps and missing GUI
+confirmations split segments; offline and suspend intervals are excluded, with
+at most a five-second confirmation uncertainty. CLI runs use scheduler liveness
+instead of GUI confirmations. Closing the control pipe cancels the run,
+including when it closes before the scheduler starts.
+
+`cycle.supervision` is diagnostic timing evidence in this increment. The
+scheduler lease and complete supervision policy are a later stage. Phase Pause
+and Auto/Important/Approve are available as described above.
+External changes read **Not recorded** until a change ledger exists. A Prepare
+Task Brief can say **None declared**, with that qualification.
+
+**Settings → Cycle inactivity threshold** controls when activity becomes
+**No output for 02:14 · timeout in 17:00**. Silence alone does not mark a step
+failed. Plugins can publish diagnostic progress with
+`context.progress(step.id, title=..., current=12, total=74, unit="modules")`.
+Omit current/total when unknown. Agent stages and output update activity;
+`scenario.run` tails complete child events for live scenario/step progress.
+Progress is never a success receipt.
 
 **Stages** is the run's account, one row per thing a step reported. It can
 live in a window of its own: the mark at the right end of the tab strip (it
@@ -1644,12 +2028,27 @@ The GUI and diagnostic observers never own accepted messages. See
     logs/cycle.jsonl     the event stream, replayable
     steps/<id>/          stdout.log, stderr.log, and whatever that step wrote
     artifacts/
-    reports/             run.json, run.html
+    reports/             node snapshots, for example run.json and run.html
+      final/run.json, run.html                 latest terminal result
+      final/<resume>-<phase-retry>/run.json, run.html
+    .execution/reports/  final report receipts with artifact hashes
 ```
 
-One directory, so it can be zipped and attached to a bug report. **Nothing in it
-is an absolute path**: the directory describes itself, which is what lets it be
-read on another machine.
+Artifact references are relative to this directory, so copying it preserves
+their links. Task Brief and plugin outputs may also record the actual local
+workspace/source paths and task content; a run archive is the execution record,
+not an anonymized export. Use the baseline audit for sanitized summaries.
+
+Report nodes capture the state when they execute, with `report_kind: snapshot`
+and a capture time. Their `path` output refers to that immutable node artifact;
+`final_path` points to the latest terminal result, including after Resume. After the run
+ends, a run that executed a report node publishes a separate final JSON/HTML
+pair with `report_kind: final`, the actual outcome, duration and settled steps.
+Each Resume/phase retry has its own immutable final directory and receipt;
+current reports link to this evidence, and earlier snapshots and their hashes
+are never rewritten. Headless safe Pause is not a terminal result.
+Final export failures are logged and recorded as diagnostics without changing
+the already saved execution verdict.
 
 `index.json` beside them lists the runs, newest first, each with its subject
 and the step it got to - which is what the sessions are grouped from.
@@ -1664,10 +2063,9 @@ plugins, nested cycles, loops in the graph, and a plan that changes itself
 during a run - see [the adaptive cycle design](cycle-adaptive-design.md) for
 where that is going.
 
-A wait lives **inside one run**: the process stays up for it, so it suits
-minutes and hours rather than days. Suspending a run to disk and resuming it in
-a later process is a different feature and is not here — though the record a run
-already writes at every step would be most of what it needs.
+A wait lives **inside one run**: the process stays up for it. Pause can export
+a safe checkpoint for later explicit Resume; it does not keep a background
+daemon running after the application closes.
 
 Stopping is cooperative (see *Timeouts, retries and stopping*): a step is asked
 to stop and every built-in plugin does, but nothing can kill a thread.

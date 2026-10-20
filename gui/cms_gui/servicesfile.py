@@ -26,6 +26,7 @@ import os
 from . import core
 from . import criteria as criteria_mod
 from . import runnertypes
+from .runtime_services_config import execution_problems
 # One clock for both files. The Services & Logs page shows rows from this file
 # and from logsources.json in the same block and sorts them the same way, so the
 # stamp they carry has to be written the same way too.
@@ -333,6 +334,10 @@ def validate(projects):
                 continue
             problems.extend("%s: %s" % (spot, message)
                             for message in kind.problems(runner.settings))
+            if "execution" in runner.extra:
+                problems.extend("%s: %s" % (spot, message) for message in execution_problems(runner.extra["execution"]))
+                if runner.type not in ("python", "shell") or runner.detach:
+                    problems.append("%s: isolated execution requires an attached Python/shell service." % spot)
 
         # A ring of services each waiting for the next can never start, and the
         # walk that orders them would recurse forever if it trusted the file.

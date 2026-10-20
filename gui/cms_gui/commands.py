@@ -131,7 +131,7 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # And running part of one: the two chevrons beside Run, which act
              # on the step selected on the canvas. Naming a step by hand on a
              # command line would mean knowing the graph without seeing it.
-             "--cycle-only", "--cycle-from", "--cycle-resume", "--cycle-reuse",
+             "--cycle-only", "--cycle-from", "--cycle-resume", "--cycle-reuse", "--cycle-action", "--cycle-mode",
              # What a run started from a listener's offer or the plan is about:
              # the page passes the offer it was started from, nobody types it.
              "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin",
@@ -172,6 +172,16 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              "--no-browser",
              # And RUN ▾ -> "Empty Sessions" this one.
              "--empty-sessions",
+             # Strict isolation from a reviewed file image is set up from the
+             # command line only; the Services page runs a service configured
+             # that way through --runtime-service. None is a launch option.
+             "--runtime-bundle-info", "--runtime-inspect", "--runtime-preflight",
+             "--runtime-list", "--runtime-show", "--runtime-save", "--runtime-validate",
+             "--runtime-profiles-dir", "--runtime-expected-revision", "--runtime-service",
+             "--runtime-deployment-list", "--runtime-deployment-show",
+             "--runtime-deployment-draft", "--runtime-deployment-save",
+             "--runtime-deployment-validate", "--runtime-deployment-check",
+             "--runtime-gateway-validate",
              "--help", "-h", "--version", "-V")
 
 # One-shot commands offered in the Tools menu: (what it is called, what a

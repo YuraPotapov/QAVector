@@ -42,13 +42,19 @@ dev = [
 qavector = "session_launcher:main"
 
 [tool.setuptools]
-py-modules = ["session_launcher"]
+py-modules = ["session_launcher", "runtime_paths", "system_load"]
 
 [tool.setuptools.packages.find]
-include = ["engine*", "adapters*", "domain*", "cycle*"]
+include = ["engine*", "adapters*", "domain*", "cycle*", "execution_runtime*"]
 
 [tool.setuptools.package-data]
 engine = ["hud.js", "recorder.js"]
+"execution_runtime.backends.linux" = ["bubblewrap.lock.json"]
+
+[tool.setuptools.data-files]
+"share/qavector/examples/execution_runtime" = ["examples/execution_runtime/prepare_claude_image.py"]
+"share/qavector/licenses" = ["licenses/components.json"]
+"share/qavector/licenses/bubblewrap" = ["licenses/bubblewrap/NOTICE.md", "licenses/bubblewrap/AUTHORS", "licenses/bubblewrap/COPYING"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

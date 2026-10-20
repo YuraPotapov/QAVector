@@ -21,6 +21,11 @@ import time
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
+from . import cycleresult
+
+TIMING_FIELDS = ("active_elapsed_ms", "execution_generation", "execution_segments",
+                 "last_activity_at", "progress", "timeout_remaining_ms")
+
 # "13:38:26  INFO    [dev-agent] message" - the launcher's console format, with
 # the session prefix the runner adds during parallel runs.
 LOG_LINE = re.compile(r"^(?P<ts>\d{2}:\d{2}:\d{2})\s+(?P<level>[A-Z]+)\s+"
@@ -248,6 +253,7 @@ class RunState(QObject):
     #: One step of a cycle changed. Carries the step id, so the page repaints
     #: one node instead of re-reading the whole model.
     cycle_step_changed = Signal(str)
+    cycle_timing_changed = Signal()
     #: The cycle run found out what it works on, or said how it began. The
     #: page's Subjects tab repaints on it; nothing else has to.
     cycle_subject_changed = Signal()
@@ -400,7 +406,13 @@ class RunState(QObject):
             "mode": {},
             # Every time a person sent the plan back, in order.
             "revisions": [],
+            "timing_version": event.get("timing_version", 0),
+            "control_version": event.get("control_version", 0),
+            "plugin_names": dict(event.get("plugin_names") or {}),
         }
+        if event.get("selected_steps") is not None:
+            self.cycle["selected_steps"] = list(event["selected_steps"])
+        cycleresult.update(self.cycle, event)
         self.cycle_graph_known.emit(graph)
 
     def _on_cycle_run_mode(self, event, _name):
@@ -413,6 +425,9 @@ class RunState(QObject):
             "kept": list(event.get("kept") or []),
             "rerun": [dict(one) for one in event.get("rerun") or []
                       if isinstance(one, dict)]}
+        self.cycle["scope"] = {"fresh": "full", "action": "partial"}.get(
+            event.get("mode"), event.get("mode")) or "full"
+        cycleresult.update(self.cycle)
         self.cycle_subject_changed.emit()
 
     def _on_cycle_subject(self, event, _name):
@@ -445,8 +460,12 @@ class RunState(QObject):
         if step is None:
             return
         step["status"] = "running"
+        step["reason_code"], step["blocked_by"] = "", ""
+        step["started_at"] = event.get("started_at") or event.get("ts") or 0
         step["attempt"] = event.get("attempt", 1)
         step["plugin"] = event.get("plugin") or step["plugin"]
+        self._timing_fields(step, event)
+        cycleresult.update(self.cycle)
         self.cycle_step_changed.emit(event.get("step", ""))
 
     def _on_cycle_step_end(self, event, _name):
@@ -458,6 +477,14 @@ class RunState(QObject):
         step["attempt"] = event.get("attempts", step["attempt"])
         step["message"] = event.get("message", "")
         step["outputs"] = dict(event.get("outputs") or {})
+        if event.get("runtime"):
+            step["runtime"] = dict(event["runtime"])
+        step["started_at"] = event.get("started_at") or step.get("started_at", 0)
+        step["ended_at"] = event.get("ended_at") or event.get("ts") or 0
+        for key in ("source_run", "reason_code", "blocked_by"):
+            step[key] = event.get(key, "")
+        self._timing_fields(step, event)
+        cycleresult.update(self.cycle)
         self.cycle_step_changed.emit(event.get("step", ""))
 
     def _on_cycle_step_retry(self, event, _name):
@@ -482,6 +509,8 @@ class RunState(QObject):
         step["message"] = event.get("message", "")
         step["resume_in_ms"] = event.get("resume_in_ms", 0)
         step["outputs"] = dict(event.get("outputs") or {})
+        self._timing_fields(step, event)
+        cycleresult.update(self.cycle)
         self.cycle_step_changed.emit(event.get("step", ""))
 
     def _on_cycle_step_skipped(self, event, _name):
@@ -490,6 +519,9 @@ class RunState(QObject):
             return
         step["status"] = event.get("status", "skipped")
         step["message"] = event.get("reason", "")
+        step["reason_code"] = event.get("reason_code", "")
+        step["blocked_by"] = event.get("blocked_by", "")
+        cycleresult.update(self.cycle)
         self.cycle_step_changed.emit(event.get("step", ""))
 
     def _on_cycle_step_log(self, event, _name):
@@ -499,6 +531,7 @@ class RunState(QObject):
             return
         stream = event.get("stream", "out")
         step_id = event.get("step", "")
+        step["last_activity_at"] = event.get("ts") or time.time()
         for line in event.get("lines") or []:
             step["log"].append((stream, line))
             self.cycle["log"].append((step_id, stream, line))
@@ -517,6 +550,10 @@ class RunState(QObject):
         if step is None:
             return
         step_id = event.get("step", "")
+        if event.get("phase") == "runtime" and isinstance((event.get("body") or {}).get("runtime"), dict):
+            step["runtime"] = dict(event["body"]["runtime"])
+        step["last_activity_at"] = event.get("ts") or time.time()
+        step.setdefault("progress", {})["title"] = event.get("title", "")
         stage = {"kind": event.get("phase", ""), "title": event.get("title", ""),
                  "detail": event.get("detail", ""),
                  "status": event.get("status", "done"),
@@ -530,6 +567,99 @@ class RunState(QObject):
         self.cycle["stages"].append((step_id, stage))
         del self.cycle["stages"][:-CYCLE_STAGES]
         self.cycle_step_changed.emit(step_id)
+
+    @staticmethod
+    def _timing_fields(record, event):
+        generation = event.get("execution_generation")
+        if generation is not None and generation > record.get("execution_generation", 1):
+            # These are the current execution's deliverables and detail view.
+            # The run-wide journal still keeps earlier executions' diagnostics.
+            for key in ("artifacts", "log", "stages"):
+                record[key] = []
+        # A worker may emit progress between the scheduler sampling it and
+        # publishing the timing receipt. Keep the newer diagnostic evidence.
+        stamp, previous = event.get("last_activity_at"), record.get("last_activity_at")
+        newer_activity = stamp is not None and previous is not None and previous > stamp
+        for key in TIMING_FIELDS:
+            if key in event and not (newer_activity and key in ("last_activity_at", "progress")):
+                record[key] = copy.deepcopy(event[key])
+        if event.get("active_elapsed_ms") is not None:
+            record["_timing_received"] = time.monotonic()
+            record["_timing_wall"] = time.time()
+            record["_timing_ttl_ms"] = event.get("ttl_ms", 5000)
+
+    def _on_cycle_run_timing(self, event, _name):
+        if not self._interaction_run(event):
+            return
+        for key in ("active_elapsed_ms", "execution_segments"):
+            if key in event:
+                self.cycle[key] = copy.deepcopy(event[key])
+        for name, timing in (event.get("steps") or {}).items():
+            step = self._cycle_step(name)
+            self._timing_fields(step, dict(timing, ttl_ms=event.get("ttl_ms", 5000)))
+        self.cycle_timing_changed.emit()
+
+    def _on_cycle_run_state(self, event, _name):
+        if not self._interaction_run(event):
+            return
+        was_paused = self.cycle.get("paused", False)
+        self.cycle["status"] = event.get("status", self.cycle.get("status"))
+        self.cycle.pop("control_error", None)
+        cycleresult.update(self.cycle, event)
+        resumed = was_paused and not self.cycle.get("paused", False)
+        received, wall = time.monotonic(), time.time()
+        for step in self.cycle.get("steps", {}).values():
+            step["_timing_paused"] = self.cycle.get("paused", False)
+            if resumed and step.get("active_elapsed_ms") is not None:
+                # Continue starts a new live interpolation interval. The last
+                # receipt's clocks include the pause and cannot be reused.
+                step["_timing_received"], step["_timing_wall"] = received, wall
+        self.cycle_subject_changed.emit()
+        self.cycle_timing_changed.emit()
+
+    def _on_cycle_phase(self, event, _name):
+        if not self._interaction_run(event):
+            return
+        cycleresult.update(self.cycle, event)
+        receipt = event.get("receipt") or {}
+        if receipt.get("phase"):
+            self.cycle.setdefault("phase_receipts", {})[receipt["phase"]] = copy.deepcopy(receipt)
+        self.cycle_subject_changed.emit()
+        self.cycle_timing_changed.emit()
+
+    def _on_cycle_control_refused(self, event, _name):
+        if self._interaction_run(event):
+            self.cycle["control_error"] = event.get("reason", "Control action was refused.")
+            self.cycle_timing_changed.emit()
+
+    def _on_cycle_node_approval(self, event, _name):
+        if not self._interaction_run(event):
+            return
+        receipt = event.get("receipt") or {}
+        if receipt.get("id"):
+            self.cycle.setdefault("node_approvals", {})[receipt["id"]] = copy.deepcopy(receipt)
+        cycleresult.update(self.cycle, event)
+        self.cycle_subject_changed.emit()
+        self.cycle_timing_changed.emit()
+
+    def _on_cycle_policy_changed(self, event, _name):
+        if not self._interaction_run(event):
+            return
+        cycleresult.update(self.cycle, event)
+        receipt = event.get("receipt") or {}
+        if receipt and "policy_changes" not in event:
+            self.cycle.setdefault("policy_changes", []).append(copy.deepcopy(receipt))
+        self.cycle_subject_changed.emit()
+        self.cycle_timing_changed.emit()
+
+    def _on_cycle_step_progress(self, event, _name):
+        step = self._cycle_step(event.get("step"))
+        if step is None or step.get("status") not in ("running", "waiting"):
+            return
+        step["last_activity_at"] = event.get("last_activity_at") or event.get("ts") or time.time()
+        step["progress"] = {key: event[key] for key in
+                            ("title", "current", "total", "unit", "heartbeat", "state") if key in event}
+        self.cycle_step_changed.emit(event.get("step", ""))
 
     def _interaction_run(self, event):
         return bool(self.cycle is not None and
@@ -641,6 +771,7 @@ class RunState(QObject):
         self.cycle["passed"] = event.get("passed", 0)
         self.cycle["failed"] = event.get("failed", 0)
         self.cycle["skipped"] = event.get("skipped", 0)
+        cycleresult.update(self.cycle, event)
         self.exit_code = event.get("exit_code", self.exit_code)
         self.flows_finished = True
         self.cycle_subject_changed.emit()
@@ -654,15 +785,24 @@ class RunState(QObject):
         that it is still going is withdrawn, and the steps that were mid-flight
         are marked stopped rather than left spinning forever.
         """
+        was_running = self.cycle_running
         self.cycle_running = False
         self._stop_interaction_input()
         if self.cycle is None:
             return
-        if self.cycle.get("status") == "running":
+        # QProcess.finished also follows a normal cycle.run.end. That event
+        # already supplied the authoritative outcome and coverage; recomputing
+        # a legacy fallback here would discard milestones such as Task prepared.
+        if not was_running or self.cycle.get("paused"):
+            self.changed.emit()
+            return
+        if self.cycle.get("status") in ("pending", "running", "waiting"):
             self.cycle["status"] = "interrupted"
         for step in (self.cycle.get("steps") or {}).values():
             if step.get("status") in ("running", "waiting"):
                 step["status"] = "cancelled"
+                step["interrupted"] = True
+        cycleresult.update(self.cycle)
         self.changed.emit()
 
     def _on_serverlog_lines(self, event, name):

@@ -27,6 +27,11 @@ valid. Each continuation increments `resume_count` and archives the previous
 record in `.execution/history/`. The index includes running executions so a
 crashed process does not disappear from history.
 
+Resume keeps the original selected nodes for every partial launch, not only
+named actions. A saved Run phase / Retry phase also retains its phase bound;
+completion or a no-op in that phase cannot authorize the next one. Expanding
+the work requires a separate explicit user action.
+
 ## Execution invariants
 
 1. An exclusive OS lock permits one executor per run, across processes.
@@ -98,6 +103,14 @@ does not erase successful paid work below an old approval. Unfinished consumers
 still wait for the fresh approval/resources, including through cached
 intermediates. A refusal blocks those consumers. Conditional finalizers may
 still write a report.
+
+The existing implementation task budget uses the same admission checks on
+Resume and Retry phase. Its `memory.remember` reservation checks current task
+memory and increments the counter under one lock. Replaying that reservation
+after a crash is idempotent. A complete successful provider response can be
+replayed without spending another task attempt; the first new provider call
+after such replay must pass admission again. This recognizes the existing
+direct counter prerequisite of `agent.implement`, not a generic plugin cost ledger.
 
 Resolved input digests protect retained results after refresh. If a new service
 handle or other refreshed output changes an input a completed node consumed,

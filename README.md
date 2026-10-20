@@ -222,6 +222,22 @@ The GUI's **Cycles** page draws the whole cycle - every step and every connectio
 - and the same drawing is the run view: the nodes take on their status as it
 goes. Writing one: **[docs/cycles.md](docs/cycles.md)**.
 
+### Restrictions
+
+A services project or a cycle can hold the programs it starts to its **project
+folder**: network on or off, the folder read-write, read-only or not at all, and
+limits on CPU, memory and processes. The project's settings are the defaults; a
+service or a step can set its own. Quick toggles on service rows, cycle steps and
+the cycles toolbar show what is set and switch access off - or back on - with one
+click. A folder without restrictions runs exactly as before. See
+**[docs/restrictions.md](docs/restrictions.md)**.
+
+Linux application builds ship their own pinned Bubblewrap and libcap; nothing
+falls back to a system installation or runs unrestricted when restrictions
+cannot be applied. Distribution: [ER-BB-001](docs/bundled-bubblewrap.md). A
+stricter isolation from a reviewed file image is available from the command
+line (`--runtime-*`); see [Execution Runtime](docs/QAVector_Execution_Runtime.md).
+
 ## Running the tests
 
 ```bash

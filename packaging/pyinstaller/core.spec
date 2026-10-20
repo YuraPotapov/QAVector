@@ -20,7 +20,11 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 
 sys.path.insert(0, SPECPATH)
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "packaging"))
 from tracked_files import tracked_datas  # noqa: E402
+from check_licenses import verify_licenses
+verify_licenses(os.path.join(ROOT, "licenses"))
 
 
 def playwright_driver_datas():
@@ -48,6 +52,7 @@ hiddenimports = (
     + collect_submodules("adapters")
     + collect_submodules("domain")
     + collect_submodules("cycle")
+    + collect_submodules("execution_runtime")
     + ["yaml", "playwright", "playwright.sync_api",
        "cryptography.hazmat.primitives.ciphers",
        "cryptography.hazmat.primitives.serialization",
@@ -61,11 +66,17 @@ hiddenimports = (
 datas = tracked_datas(ROOT, "flows") + tracked_datas(ROOT, "cycles") + [
     # Executed by the user's framework environment, not the frozen core.
     (os.path.join(ROOT, "cycle", "plugins", "agent_worker.py"), "cycle/plugins"),
+    (os.path.join(ROOT, "execution_runtime", "workers", "git_checkout_linux.py"), "execution_runtime/workers"),
+    (os.path.join(ROOT, "execution_runtime", "workers", "agent_review_linux.py"), "execution_runtime/workers"),
+    (os.path.join(ROOT, "execution_runtime", "workers", "claude_review_linux.py"), "execution_runtime/workers"),
     (os.path.join(ROOT, "extensions"), "extensions"),
     (os.path.join(ROOT, "engine", "hud.js"), "engine"),
     (os.path.join(ROOT, "engine", "recorder.js"), "engine"),
     (os.path.join(ROOT, "users.example.json"), "."),
     (os.path.join(ROOT, "build", "VERSION"), "."),
+    (os.path.join(ROOT, "licenses"), "licenses"),
+    (os.path.join(ROOT, "execution_runtime", "backends", "linux", "bubblewrap.lock.json"),
+     "execution_runtime/backends/linux"),
 ] + playwright_driver_datas()
 
 # The Windows executable's own icon. Without this PyInstaller embeds its

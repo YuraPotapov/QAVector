@@ -1,0 +1,17 @@
+{
+  "api_version": "qavector.io/v1",
+  "kind": "ExecutionEnvironment",
+  "metadata": {
+    "name": "project-reviewer",
+    "description": "Read-only project review with network disabled; portable policy request."
+  },
+  "spec": {
+    "provider": "auto",
+    "policy": {
+      "filesystem": [{"binding": "project", "access": "read_only"}],
+      "network": {"mode": "none"},
+      "resources": {"cpu_cores": 1, "processes": 32},
+      "tools": ["git"]
+    }
+  }
+}

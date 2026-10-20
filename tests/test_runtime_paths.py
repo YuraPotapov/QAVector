@@ -120,6 +120,7 @@ def test_frozen_splits_resources_from_user_data(frozen):
     assert rp.bundled_flows_dir() == os.path.join(str(bundle), "flows")
     assert rp.user_data_root() == os.path.join(str(home), rp.USER_DIR_NAME)
     assert rp.reports_dir().startswith(str(home))
+    assert rp.execution_runtime_root() == os.path.join(str(bundle), "runtime")
 
 
 def test_frozen_searches_the_users_flows_before_the_bundled_ones(frozen):

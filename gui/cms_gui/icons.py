@@ -72,6 +72,12 @@ def _run(painter, ink):
                                    QPointF(6.75, 19.5)]))
 
 
+def _pause(painter, ink):
+    _fill(painter, ink)
+    painter.drawRect(QRectF(6, 5, 4, 14))
+    painter.drawRect(QRectF(14, 5, 4, 14))
+
+
 def _run_step(painter, ink):
     """One chevron: run this step and nothing else.
 
@@ -475,8 +481,72 @@ def _redo(painter, ink):
     _turn(painter, ink, back=True)
 
 
+def _slash(painter):
+    """The line across a mark that means "cut off"."""
+    painter.drawLine(QPointF(4, 20), QPointF(20, 4))
+
+
+def _network(painter, ink):
+    """A globe: the network a program may reach."""
+    _stroke(painter, ink)
+    painter.drawEllipse(QRectF(3.5, 3.5, 17, 17))
+    painter.drawEllipse(QRectF(8.5, 3.5, 7, 17))
+    painter.drawLine(QPointF(3.5, 12), QPointF(20.5, 12))
+
+
+def _network_off(painter, ink):
+    _network(painter, ink)
+    _slash(painter)
+
+
+def _folder_off(painter, ink):
+    _artifacts(painter, ink)
+    _slash(painter)
+
+
+def _limits(painter, ink):
+    """A gauge: how much of the machine a program may take."""
+    _stroke(painter, ink)
+    path = QPainterPath()
+    path.moveTo(3.5, 17.5)
+    path.arcTo(QRectF(3.5, 5.5, 17, 17), 180, -180)
+    painter.drawPath(path)
+    painter.drawLine(QPointF(3.5, 17.5), QPointF(20.5, 17.5))
+    painter.drawLine(QPointF(12, 15), QPointF(16, 10))
+
+
+def _lock(painter, ink):
+    """A padlock: what a folder holds its programs to."""
+    _stroke(painter, ink)
+    painter.drawRect(QRectF(5.5, 10.5, 13, 9))
+    path = QPainterPath()
+    path.moveTo(8.5, 10.5)
+    path.lineTo(8.5, 8)
+    path.arcTo(QRectF(8.5, 4.5, 7, 7), 180, -180)
+    path.lineTo(15.5, 10.5)
+    painter.drawPath(path)
+
+
+def _unlock(painter, ink):
+    """An open padlock: nothing holds this folder's programs."""
+    _stroke(painter, ink)
+    painter.drawRect(QRectF(5.5, 10.5, 13, 9))
+    path = QPainterPath()
+    path.moveTo(8.5, 10.5)
+    path.lineTo(8.5, 8)
+    path.arcTo(QRectF(8.5, 4.5, 7, 7), 180, -150)
+    painter.drawPath(path)
+
+
 DRAWINGS = {
+    "network": _network,
+    "network-off": _network_off,
+    "folder-off": _folder_off,
+    "limits": _limits,
+    "lock": _lock,
+    "unlock": _unlock,
     "run": _run,
+    "pause": _pause,
     # A project in the Cycles explorer: a folder of cycles. The same drawing
     # as artifacts, named for what it marks there.
     "folder": _artifacts,

@@ -343,3 +343,37 @@ def test_pruning_updates_the_index(tmp_path):
 
 def test_pruning_with_nothing_to_prune_does_nothing(tmp_path):
     assert run_mod.prune(keep=10, root=str(tmp_path)) == []
+
+
+_HAMMER = """
+import os, sys
+sys.path.insert(0, %r)
+from cycle import run as run_mod
+from domain.cycle import CycleRun, StepRun
+root, rid = sys.argv[1], sys.argv[2]
+run = CycleRun(rid, "demo", steps={"a": StepRun("a", status="running")})
+run.workspace = os.path.join(root, rid)
+for i in range(300):
+    run.message = "step %%d" %% i
+    run_mod.remember(run, root)
+run.status = "success"
+run.message = "done"
+run_mod.remember(run, root)
+"""
+
+
+def test_two_processes_updating_the_index_keep_each_others_final_rows(tmp_path):
+    # A run in the GUI and one from a terminal both rewrite the whole index on
+    # every step; without the lock the later writer restored the other run's
+    # older row, so a finished run read as still going.
+    import subprocess
+    import sys
+    script = tmp_path / "hammer.py"
+    script.write_text(_HAMMER % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    root = str(tmp_path / "runs")
+    processes = [subprocess.Popen([sys.executable, str(script), root, name]) for name in ("A", "B")]
+    assert [one.wait(timeout=120) for one in processes] == [0, 0]
+    rows = {row["id"]: row for row in run_mod.index(root)}
+    assert rows["A"]["status"] == rows["B"]["status"] == "success"
+    assert rows["A"]["message"] == rows["B"]["message"] == "done"
+    assert workspace.existing_runs(root) == []

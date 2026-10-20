@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "name": "Bubblewrap",
+      "version": "0.13.1",
+      "license": "LGPL-2.1-or-later",
+      "scope": "Linux execution runtime. Linux distributions include the executable and corresponding source; other platforms include these notices for reference.",
+      "documents": ["bubblewrap/NOTICE.md", "bubblewrap/AUTHORS", "bubblewrap/COPYING"]
+    }
+  ]
+}

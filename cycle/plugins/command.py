@@ -24,7 +24,7 @@ import subprocess
 import threading
 import time
 
-from cycle import registry
+from cycle import registry, restrict
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
 from domain.cycle import Artifact
 
@@ -105,7 +105,7 @@ class ShellCommand(CyclePlugin):
         err_path = os.path.join(context.step_dir(step.id), "stderr.log")
 
         try:
-            process = subprocess.Popen(
+            process = restrict.popen(
                 command, cwd=workdir, env=environment, shell=shell,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 # Its own process group, so stopping the run reaches anything
@@ -178,8 +178,15 @@ class ShellCommand(CyclePlugin):
         return _split(text), False
 
     def _workdir(self, context, step):
-        """Where to run, with a relative path read against the workspace."""
+        """Where to run, with a relative path read against the workspace.
+
+        A step held to its project folder cannot see the run's workspace, so
+        there a blank or relative ``dir`` is read against the project folder.
+        """
         where = str(self.setting(step.settings, "dir") or "").strip()
+        held = restrict.current()
+        if held is not None:
+            return held.workdir(where)
         if not where:
             return context.workspace
         where = os.path.expanduser(where)

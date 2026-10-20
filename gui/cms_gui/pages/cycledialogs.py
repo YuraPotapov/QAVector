@@ -30,6 +30,7 @@ A value its widget cannot show at all is offered as an expression, or kept as
 written with a pointer to the YAML tab - never quietly reshaped.
 """
 
+import copy
 import os
 import re
 
@@ -143,7 +144,7 @@ class NodeDialog(_Editor):
 
     def __init__(self, step, plugin, parent=None, writable=True, live=None,
                  ask_plugin=None, trigger=None, groups=(), apply_label="",
-                 read_only_note=""):
+                 read_only_note="", phases=(), restrictions=None, core=None):
         super().__init__(step.get("label") or step.get("id", "Step"), parent,
                          writable)
         if apply_label:
@@ -154,8 +155,14 @@ class NodeDialog(_Editor):
             self.note.setText(read_only_note)
         self._step = dict(step)
         self._plugin = dict(plugin or {})
+        #: {"folder", "cycle"} when the cycle has a project folder - the step
+        #: then shows what it is held to - or None, and nothing changes.
+        self._restriction_context = restrictions
+        self._core = core
+        self._step_restrictions = dict(step.get("restrictions") or {})
         self._ask_plugin = ask_plugin
         self._groups = [one for one in groups if one]
+        self._phases = list(phases)
         self._widgets = {}
         #: What each field showed when the dialog opened, by key - so Save can
         #: tell a field somebody changed from one they only looked at.
@@ -178,6 +185,7 @@ class NodeDialog(_Editor):
 
         self._add_step_fields()
         self._add_plugin_fields()
+        self._add_restrictions()
         self._add_listening()
         self._add_actions()
         self._add_live(live)
@@ -194,6 +202,10 @@ class NodeDialog(_Editor):
         self._line("label", "Label", self._step.get("label", ""),
                    "What the node is called on the canvas. Blank uses the id.")
         self._group_field()
+        self._check("important", "Important", bool(self._step.get("important")),
+                    "Important mode asks for approval before this step starts.")
+        self._line("importance_reason", "Why important", self._step.get("importance_reason", ""),
+                   "Explain the cost, external change or decision that needs attention.")
         needs = self._step.get("needs") or []
         self._line("needs", "Depends on",
                    ", ".join(needs) if isinstance(needs, list) else _text(needs),
@@ -237,10 +249,19 @@ class NodeDialog(_Editor):
         widget.setEnabled(self._writable)
         self._widgets["group"] = widget
         self.body_layout.addWidget(widgets.field(
-            "Phase", widget,
+            "Visual group" if self._phases else "Phase", widget,
             "Which part of the cycle this belongs to. The canvas frames a "
             "phase's steps together and can fold them into one box. It does "
             "not change when the step runs."))
+        if self._phases:
+            execution = QComboBox()
+            for phase in self._phases:
+                execution.addItem(phase.get("title") or phase["id"], phase["id"])
+            execution.setCurrentIndex(execution.findData(self._step.get("phase")))
+            execution.setEnabled(self._writable)
+            self._widgets["phase"] = execution
+            self.body_layout.addWidget(widgets.field("Execution phase", execution,
+                "The scheduler completes earlier phases before this step may run. Phase policies are defined in YAML."))
 
     # -- whatever the plugin declares ----------------------------------------
     def _add_plugin_fields(self):
@@ -347,6 +368,55 @@ class NodeDialog(_Editor):
         if not enabled and not self._trigger:
             return None                 # never listened, still not: nothing to say
         return {"enabled": enabled, "every": int(every)}
+
+    def _add_restrictions(self):
+        """What the cycle's restrictions hold this step to, and a way to narrow it.
+
+        Only when the cycle has a project folder: without one its steps run as
+        they always have, and a section about restrictions would be noise.
+        """
+        self.system_box = None
+        self.restrict_button = None
+        if self._restriction_context is None:
+            return
+        from .. import restrictions as restrictions_mod
+        self.body_layout.addWidget(widgets.kicker("Restrictions"))
+        restrictable = self._step.get("plugin", "") in restrictions_mod.CYCLE_PLUGINS
+        self.system_box = QCheckBox("System step - runs without the cycle's restrictions")
+        self.system_box.setChecked(bool(self._step.get("system")) or not restrictable)
+        self.system_box.setEnabled(self._writable and restrictable)
+        self.restrict_button = restrictions_mod.FolderButton()
+        self.restrict_button.clicked.connect(self._edit_restrictions)
+        hint = ("This plugin works inside QAVector itself or drives a browser, so restrictions do not apply to it."
+                if not restrictable else
+                "Runs in the cycle's project folder, held to the cycle's restrictions; it can only narrow them.")
+        self.body_layout.addWidget(widgets.field("", widgets.row(self.system_box, None, self.restrict_button), hint))
+        self.system_box.toggled.connect(self._sync_restrictions)
+        self._sync_restrictions()
+
+    def _sync_restrictions(self, *_):
+        from .. import restrictions as restrictions_mod
+        if self.restrict_button is None:
+            return
+        system = self.system_box.isChecked()
+        effective = restrictions_mod.resolve([("cycle", self._restriction_context.get("cycle") or {}),
+                                              ("step", self._step_restrictions)])
+        self.restrict_button.set_state(
+            {} if system else effective, enabled=not system,
+            why="A system step runs without restrictions.",
+            pending=self._step_restrictions != dict(self._step.get("restrictions") or {}))
+
+    def _edit_restrictions(self):
+        from .. import restrictions as restrictions_mod
+        folder = self._restriction_context.get("folder") or ""
+        window = restrictions_mod.RestrictionsWindow(
+            self._step.get("label") or self._step.get("id", "step"), folder, "step", self._step_restrictions,
+            outer=[("cycle", self._restriction_context.get("cycle") or {})], outer_name="cycle", core=self._core,
+            probe={"folder": folder, "cwd": folder}, parent=self, writable=self._writable)
+        if window.exec() == QDialog.Accepted and window.saved is not None:
+            self._step_restrictions = window.saved
+            self._sync_restrictions()
+        window.deleteLater()
 
     def _add_actions(self):
         actions = self._plugin.get("actions") or []
@@ -578,6 +648,13 @@ class NodeDialog(_Editor):
         group = str(self._value("group") or "").strip()
         if group:
             step["group"] = group
+        if "phase" in self._widgets:
+            step["phase"] = self._value("phase") or ""
+        if self._value("important"):
+            step["important"] = True
+        reason = self._value("importance_reason").strip()
+        if reason:
+            step["importance_reason"] = reason
         needs = [one.strip() for one in self._value("needs").split(",")
                  if one.strip()]
         if needs:
@@ -625,6 +702,16 @@ class NodeDialog(_Editor):
         if settings:
             step["with"] = settings
         listening = self._listening(problems)
+        if self._restriction_context is not None:
+            if self.system_box is not None and self.system_box.isChecked() and self.system_box.isEnabled():
+                step["system"] = True
+                step.pop("restrictions", None)
+            else:
+                step.pop("system", None)
+                if self._step_restrictions:
+                    step["restrictions"] = copy.deepcopy(self._step_restrictions)
+                else:
+                    step.pop("restrictions", None)
 
         if problems:
             self._complain(problems)
@@ -887,7 +974,7 @@ class CycleDialog(_Editor):
     """A cycle's own properties: what it is called, whose it is, its variables."""
 
     def __init__(self, document, projects=(), parent=None, writable=True,
-                 stored_secrets=()):
+                 stored_secrets=(), core=None):
         super().__init__(document.get("name") or document.get("id", "Cycle"),
                          parent, writable)
         self._document = dict(document)
@@ -927,6 +1014,26 @@ class CycleDialog(_Editor):
         self.body_layout.addWidget(widgets.field("Description",
                                                  self.description))
         self.body_layout.addWidget(widgets.field("Project", self.project))
+        # The folder the cycle works on - the same name, and the same button
+        # beside it, as a services project's. Without one the cycle runs as it
+        # always has.
+        from .. import restrictions as restrictions_mod
+        self._core = core
+        self._restrictions = dict(document.get("restrictions") or {})
+        self.project_folder = QLineEdit(str(document.get("project_folder") or ""))
+        self.project_folder.setPlaceholderText("~/projects/app, or ${vars.project_dir}")
+        self.project_folder.setEnabled(self._writable)
+        browse = QPushButton("Browse…")
+        browse.setProperty("variant", "ghost")
+        browse.setEnabled(self._writable)
+        browse.clicked.connect(self._pick_project_folder)
+        self.restrict_button = restrictions_mod.FolderButton()
+        self.restrict_button.clicked.connect(self._edit_restrictions)
+        self.project_folder.textChanged.connect(self._sync_restrictions)
+        self.body_layout.addWidget(widgets.field(
+            "Project folder", widgets.row(self.project_folder, browse, self.restrict_button),
+            "The folder the steps work on: a path, or a path variable like ${vars.project_dir}. "
+            "Restrictions hold the steps to it - network, files and limits."))
         self.body_layout.addWidget(widgets.field(
             "Variables", self.variables,
             "A step reads one as ${vars.name}. A secret's value is not kept in "
@@ -934,6 +1041,43 @@ class CycleDialog(_Editor):
             "encrypted beside your own data (Settings -> Cycle secrets). A "
             "path is ordinary text that the row will help you find."))
         self.body_layout.addStretch(1)
+        self._sync_restrictions()
+
+    def _folder(self):
+        """The folder as written and, when it can be, resolved for a probe."""
+        written = self.project_folder.text().strip()
+        resolved = written
+        for row in self.variables.rows():
+            if not row["secret"]:
+                resolved = resolved.replace("${vars.%s}" % row["name"], str(self.variables.value_of(row)))
+        if "${" in resolved or not resolved:
+            return written, ""
+        return written, os.path.abspath(os.path.expanduser(resolved))
+
+    def _pick_project_folder(self):
+        path = widgets.pick_path(self, "Project folder", self._folder()[1] or "~", directory=True)
+        if path:
+            self.project_folder.setText(path)
+
+    def _sync_restrictions(self, *_):
+        from .. import restrictions as restrictions_mod
+        written, _resolved = self._folder()
+        self.restrict_button.set_state(
+            restrictions_mod.resolve([("cycle", self._restrictions)]), enabled=bool(written),
+            why="Set the project folder to restrict what the cycle's steps may do.",
+            pending=self._restrictions != dict(self._document.get("restrictions") or {}))
+
+    def _edit_restrictions(self):
+        from .. import restrictions as restrictions_mod
+        written, resolved = self._folder()
+        window = restrictions_mod.RestrictionsWindow(
+            self.name.text().strip() or self._document.get("id", "cycle"), resolved or written, "cycle",
+            self._restrictions, core=self._core, probe={"folder": resolved, "cwd": resolved} if resolved else None,
+            parent=self, writable=self._writable)
+        if window.exec() == QDialog.Accepted and window.saved is not None:
+            self._restrictions = window.saved
+            self._sync_restrictions()
+        window.deleteLater()
 
     def _save(self):
         variables, values = {}, {}
@@ -959,13 +1103,17 @@ class CycleDialog(_Editor):
                       "description": self.description.text().strip(),
                       "project": self.project.currentData() or "",
                       "variables": variables}
+        # Empty values are taken out of the file by the caller.
+        self.saved["project_folder"] = self.project_folder.text().strip()
+        self.saved["restrictions"] = copy.deepcopy(self._restrictions) if self.saved["project_folder"] else {}
         self.accept()
 
 
 # -- reading and writing the small formats ------------------------------------
 #: Every key of a step the dialog has a field for. Anything else a step carries
 #: is passed through untouched.
-_STEP_FIELDS = ("id", "plugin", "label", "group", "needs", "if", "with",
+_STEP_FIELDS = ("id", "plugin", "label", "group", "important", "importance_reason", "runtime",
+                "restrictions", "system", "needs", "if", "with",
                 "timeout", "retry", "on_failure", "disabled")
 
 #: Stands for "not in the step", which None cannot: None is a value.

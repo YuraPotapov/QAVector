@@ -92,6 +92,26 @@ def flags(child):
     return found
 
 
+def test_live_scenario_progress_waits_for_complete_lines_and_never_supplies_a_result(context, tmp_path):
+    from cycle.plugins.scenario import _Progress
+    from cycle.bus import EventObserver
+    path = tmp_path / "live.jsonl"
+    found = []
+    context.observer = EventObserver("r", sink=lambda kind, **values: found.append(dict(kind=kind, **values)))
+    reader = _Progress(str(path), context, "run")
+    path.write_bytes(b'{"kind":"flow.start","session":"agent","scenario":"Claim acceptance"}\n'
+                     b'{"kind":"step.end","session":"agent","index":7')
+    reader.poll()
+    assert len(found) == 1 and "Claim acceptance" in found[0]["title"]
+    reader.poll()
+    assert len(found) == 1  # polling silence is not output
+    with path.open("ab") as handle:
+        handle.write(b',"status":"fail"}\nmalformed\n[]\n')
+    reader.poll()
+    assert len(found) == 2 and "step 7 · fail" in found[-1]["title"]
+    assert all(one["kind"] == "cycle.step.progress" and "outputs" not in one for one in found)
+
+
 def passed(scenario="smoke_odoo", session="localhost-admin"):
     return [{"kind": "run.dir", "dir": "/tmp/reports/20260917-000000"},
             {"kind": "session.start", "session": session,

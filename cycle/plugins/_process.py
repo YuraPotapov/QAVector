@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 import runtime_paths
-from cycle import registry
+from cycle import registry, restrict
 from cycle.plugins.command import (FLUSH_SECONDS, STOP_GRACE, ShellCommand,
                                    _Pump, _signal_group, _size)
 from domain.cycle import Artifact
@@ -37,7 +37,7 @@ def run_process(context, step, argv, cwd, name, env=None, on_stdout=None):
     tail, errors = [], []
     with open(out_path, "wb") as out_file, open(err_path, "wb") as err_file:
         try:
-            process = subprocess.Popen(
+            process = restrict.popen(
                 argv, cwd=cwd, env=environment, shell=False,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, start_new_session=(os.name != "nt"))

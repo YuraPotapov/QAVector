@@ -61,6 +61,17 @@ def a_run(tmp_path, stream=None, name="run"):
     return str(where)
 
 
+def test_runtime_policy_restores_from_receipt_when_diagnostic_events_are_missing(qapp, tmp_path):
+    runtime = {"enforcement": "verified", "cleanup_confirmed": True, "policy_digest": "b" * 64,
+               "effective_policy": {"policy": {"network": {"mode": "none"}}}}
+    where = a_run(tmp_path)
+    with open(os.path.join(where, "metadata.json"), "w") as handle:
+        json.dump({"id": "r", "steps": {"a": {"status": "success", "runtime": runtime}}}, handle)
+    state = RunState()
+    assert cyclereplay.restore(where, state)
+    assert state.cycle["steps"]["a"]["runtime"] == runtime
+
+
 class FakeHistory:
     def __init__(self, entries):
         self._entries = entries
@@ -248,3 +259,69 @@ def test_events_read_elsewhere_are_fed_in_the_same_way(tmp_path, qapp):
     state = RunState()
     assert cyclereplay.restore(run, state, events=events)
     assert state.cycle is not None and state.cycle.get("cycle") == "demo"
+
+
+def test_bounded_replay_restores_task_revision_and_latest_resume_provenance(tmp_path, qapp):
+    from cms_gui import cyclesubjects
+
+    subject = {"kind": "jira", "key": "QA-42", "title": "Fix task", "step": "a"}
+    revisions = [{"number": 2, "gate": "review", "target": "b", "feedback": "Cover failure recovery",
+                  "who": "user", "steps": ["b"]}]
+    mode = {"kind": "cycle.run.mode", "run_id": "r", "mode": "resume", "resume_count": 2,
+            "source_run": "r", "kept": ["a"], "rerun": [{"step": "b", "reason": "failed last time"}]}
+    stream = events()[:1] + [
+        dict(mode, resume_count=1, kept=[], rerun=[{"step": "a", "reason": "was stopped last time"}]),
+        {"kind": "cycle.subject", "run_id": "r", "subject": {"key": "outdated"}},
+        {"kind": "cycle.revision", "run_id": "r", "number": 1, "feedback": "Older request"}, mode,
+    ] + [{"kind": "cycle.step.log", "run_id": "r", "step": "b", "lines": [str(index)]}
+         for index in range(10)] + events()[-1:]
+    where = a_run(tmp_path, stream)
+    with open(os.path.join(where, "metadata.json"), "w", encoding="utf-8") as handle:
+        json.dump({"id": "r", "status": "success", "subject": subject, "revisions": revisions,
+                   "resume_count": 2, "scope": "resume", "steps": {
+                       "a": {"status": "success"}, "b": {"status": "success"}}}, handle)
+    state = RunState()
+    assert cyclereplay.restore(where, state, limit=3)
+    assert state.cycle["subject"] == subject
+    assert state.cycle["revisions"] == revisions
+    assert state.cycle["mode"] == {key: mode[key] for key in
+                                     ("mode", "resume_count", "source_run", "kept", "rerun")}
+    assert state.cycle["scope"] == "resume"
+    assert state.cycle["steps"]["a"]["status"] == "success"
+    assert not state.cycle_running
+    details = cyclesubjects.details_html(state.cycle, live=state.cycle)
+    for evidence in ("QA-42", "Kept from before: a", "failed last time", "Cover failure recovery"):
+        assert evidence in details
+
+
+def test_latest_mode_is_kept_once_when_it_is_already_inside_the_tail(tmp_path):
+    mode = {"kind": "cycle.run.mode", "run_id": "r", "mode": "resume", "resume_count": 2}
+    stream = events()[:1] + [dict(mode, resume_count=1), mode] + events()[-1:]
+    restored = cyclereplay.events_of(a_run(tmp_path, stream), limit=3)
+    assert [one for one in restored if one["kind"] == "cycle.run.mode"] == [mode]
+
+
+@pytest.mark.parametrize("old_mode", [None, {"kind": "cycle.run.mode", "run_id": "r", "mode": "resume",
+                                           "resume_count": 1, "kept": ["a"],
+                                           "rerun": [{"step": "b", "reason": "old attempt"}]}])
+def test_metadata_resume_count_does_not_borrow_previous_attempt_provenance(tmp_path, qapp, old_mode):
+    stream = events()[:1] + ([old_mode] if old_mode else [])
+    where = a_run(tmp_path, stream)
+    with open(os.path.join(where, "metadata.json"), "w", encoding="utf-8") as handle:
+        json.dump({"id": "r", "status": "running", "resume_count": 2, "scope": "resume", "steps": {}}, handle)
+    state = RunState()
+    assert cyclereplay.restore(where, state)
+    assert state.cycle["mode"] == {"mode": "resume", "resume_count": 2, "source_run": "r", "kept": [], "rerun": []}
+    assert state.cycle["status"] == "interrupted"
+
+
+def test_empty_durable_subject_and_revisions_override_stale_events(tmp_path, qapp):
+    stream = events()[:1] + [{"kind": "cycle.subject", "run_id": "r", "subject": {"key": "stale"}},
+                            {"kind": "cycle.revision", "run_id": "r", "number": 1, "feedback": "stale"}]
+    where = a_run(tmp_path, stream)
+    with open(os.path.join(where, "metadata.json"), "w", encoding="utf-8") as handle:
+        json.dump({"id": "r", "status": "running", "subject": {}, "revisions": [], "steps": {}}, handle)
+    state = RunState()
+    assert cyclereplay.restore(where, state)
+    assert state.cycle["subject"] == {}
+    assert state.cycle["revisions"] == []

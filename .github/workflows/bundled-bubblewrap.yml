@@ -1,0 +1,72 @@
+name: Bundled Bubblewrap source build
+
+on:
+  push:
+    paths:
+      - 'execution_runtime/**'
+      - 'packaging/build_bubblewrap.py'
+      - 'packaging/check_licenses.py'
+      - 'licenses/**'
+      - 'packaging/runtime-build-requirements.txt'
+      - 'tests/test_execution_runtime_*.py'
+      - 'tests/runtime_git_image.py'
+      - 'tests/fixtures/runtime/**'
+      - 'cycle/runtime*.py'
+      - '.github/workflows/bundled-bubblewrap.yml'
+  pull_request:
+    paths:
+      - 'execution_runtime/**'
+      - 'packaging/build_bubblewrap.py'
+      - 'packaging/check_licenses.py'
+      - 'licenses/**'
+      - 'packaging/runtime-build-requirements.txt'
+      - 'tests/test_execution_runtime_*.py'
+      - 'tests/runtime_git_image.py'
+      - 'tests/fixtures/runtime/**'
+      - 'cycle/runtime*.py'
+      - '.github/workflows/bundled-bubblewrap.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x86-64-glibc-235:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install build-only dependencies (target never installs bubblewrap)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential pkg-config libcap-dev binutils busybox-static
+          python -m pip install -r packaging/runtime-build-requirements.txt "pytest>=7,<10"
+      - name: Build pinned upstream source twice
+        run: |
+          python packaging/build_bubblewrap.py --output=build/runtime-first
+          python packaging/build_bubblewrap.py --output=build/runtime-second
+          diff -r build/runtime-first build/runtime-second
+      - name: Require real offline boundary, scratch quota and host crash cleanup
+        run: |
+          sudo apt-get remove -y bubblewrap
+          if command -v bwrap; then exit 1; fi
+          python -m pytest tests/test_execution_runtime_linux.py tests/test_execution_runtime_bundle.py tests/test_execution_runtime_deployments.py tests/test_execution_runtime_secrets.py --linux-runtime-integration --linux-runtime-scratch-integration --linux-runtime-bundle-dir=build/runtime-first -q
+      - name: Archive runtime with executable permissions and reproducible timestamps
+        run: |
+          python packaging/check_licenses.py --runtime=build/runtime-first
+          runtime_epoch="$(python -c 'import json; print(json.load(open("execution_runtime/backends/linux/bubblewrap.lock.json"))["source_date_epoch"])')"
+          tar --sort=name --mtime="@$runtime_epoch" --owner=0 --group=0 --numeric-owner -cf - -C build/runtime-first . | gzip -n > build/qavector-runtime-linux-x86_64-glibc235.tar.gz
+          sha256sum build/qavector-runtime-linux-x86_64-glibc235.tar.gz > build/runtime-SHA256SUMS
+      - name: Publish runtime, source, licenses, versions, checksums and inventory
+        uses: actions/upload-artifact@v6
+        with:
+          name: qavector-runtime-linux-x86_64-glibc235
+          path: |
+            build/qavector-runtime-linux-x86_64-glibc235.tar.gz
+            build/runtime-SHA256SUMS
+          if-no-files-found: error

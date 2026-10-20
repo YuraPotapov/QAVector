@@ -64,6 +64,9 @@ BACKOFF = (FIXED, EXPONENTIAL)
 #: it, and adding the field afterwards means every old run answers "unknown".
 MANUAL = "manual"
 
+#: Core policies governing implicit approval immediately before node submit.
+EXECUTION_MODES = ("auto", "important", "approve")
+
 
 @dataclass
 class CycleStep:
@@ -97,6 +100,14 @@ class CycleStep:
     #: frames a group's steps together and can fold them into one box. It
     #: changes nothing about when or whether the step runs.
     group: str = ""
+    phase: str = ""                    # explicit execution boundary; group stays visual
+    important: bool = False
+    importance_reason: str = ""
+    runtime: dict = field(default_factory=dict)  # node restrictions; inherits execution.runtime
+    #: Narrows the cycle's ``restrictions`` for this step only - see cycle/restrict.py.
+    restrictions: dict = field(default_factory=dict)
+    #: Runs without the cycle's restrictions, and the canvas says so.
+    system: bool = False
 
     @property
     def title(self):
@@ -169,6 +180,18 @@ class Trigger:
 
 
 @dataclass
+class CyclePhase:
+    id: str
+    title: str = ""
+    purpose: str = ""
+    policy: str = "automatic"
+    approval: str = ""
+    outcome: str = ""
+    deliverables: tuple = ()           # step ids whose artifacts form the receipt
+    effects: tuple = ()               # declarations, not verified effects
+
+
+@dataclass
 class Cycle:
     """A parsed cycle: its id, its steps, and its metadata.
 
@@ -204,8 +227,17 @@ class Cycle:
     subject: Subject = None
     #: What may offer to start the cycle without somebody pressing Run.
     triggers: tuple = ()                            # tuple[Trigger]
+    # Named, bounded selections. They run fresh and never borrow other nodes.
+    actions: dict = field(default_factory=dict)
+    phases: list = field(default_factory=list)
     steps: list = field(default_factory=list)       # list[CycleStep]
     source: str = None                              # file path it was read from
+    execution: dict = field(default_factory=dict)  # explicit launch defaults only
+    #: The folder the cycle works on - a path, or ``${vars.<path variable>}``.
+    #: Restrictions are set on it; without one the cycle runs as it always has.
+    project_folder: str = ""
+    #: Network, files and limits for the steps that run on the project folder.
+    restrictions: dict = field(default_factory=dict)
 
     def step(self, step_id):
         """The step with this id, or None. Never raises - callers are checking."""
@@ -259,6 +291,24 @@ class StepRun:
     input_digest: str = ""
     definition_digest: str = ""
     source_run: str = ""
+    # Presentation evidence; these fields do not change scheduling or inputs.
+    reason_code: str = ""
+    blocked_by: str = ""
+    group: str = ""
+    phase: str = ""
+
+    # None identifies legacy records with no supervised execution receipts.
+    active_elapsed_ms: float = None
+    execution_generation: int = 1
+    execution_segments: list = field(default_factory=list)
+
+    last_activity_at: float = None
+    progress: dict = field(default_factory=dict)
+    timeout_remaining_ms: float = None
+    # Written before a local task-budget mutation. Legacy in-flight writes
+    # without this idempotence evidence retain their uncertain-outcome policy.
+    admission_reservation: str = ""
+    runtime: dict = field(default_factory=dict)  # core-owned immutable policy / lifecycle evidence
 
     @property
     def ok(self):
@@ -299,6 +349,38 @@ class CycleRun:
     #: pin, step}`` once the cycle's ``subject`` resolved, empty until then and
     #: for a cycle that declares none. ``step`` is the one that settled it.
     subject: dict = field(default_factory=dict)
+    # Orthogonal to the schema-1 technical status. None means a legacy record
+    # whose selection must be inferred, rather than an explicitly empty one.
+    scope: str = ""
+    selected_steps: list = None
+    execution_status: str = ""
+    coverage: dict = field(default_factory=dict)
+    outcome: str = ""
+    current_phase: str = ""
+    action_id: str = ""
+    action_definition: dict = field(default_factory=dict)
+    task_brief: dict = field(default_factory=dict)
+    plugin_names: dict = field(default_factory=dict)
+    active_elapsed_ms: float = None
+    execution_segments: list = field(default_factory=list)
+    phase_definition: list = field(default_factory=list)
+    phase_receipts: dict = field(default_factory=dict)
+    last_completed_phase: str = ""
+    pause_reason: str = ""
+    pause_requested: bool = False
+    paused: bool = False
+    next_action: str = ""
+    control_history: list = field(default_factory=list)
+    phase_actions: dict = field(default_factory=dict)
+    phase_retry_count: int = 0
+    # A live Run/Retry phase is bounded even when the process must Resume.
+    # Cleared only when its boundary is durably reached or a person continues.
+    execution_bound: dict = field(default_factory=dict)
+    initial_execution_mode: str = ""  # immutable launch snapshot; blank on legacy runs
+    execution_mode: str = ""
+    execution_policy_version: int = 1
+    node_approvals: dict = field(default_factory=dict)
+    policy_changes: list = field(default_factory=list)
 
     @property
     def ok(self):
@@ -306,7 +388,7 @@ class CycleRun:
 
     @property
     def exit_code(self):
-        return 0 if self.ok else 1
+        return 0 if self.ok or (self.status == WAITING and self.paused) else 1
 
     def tally(self):
         """How many steps ended each way, as ``{status: count}``.

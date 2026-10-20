@@ -39,12 +39,13 @@ _SAFE_ID = re.compile(r"[^A-Za-z0-9_-]+")
 
 #: The order keys are written in. Not alphabetical - this is the order somebody
 #: reads a cycle in: what it is, then what it takes, then what it does.
-_CYCLE_KEY_ORDER = ("id", "name", "description", "project", "version",
-                    "variables", "subject", "triggers", "steps")
+_CYCLE_KEY_ORDER = ("id", "name", "description", "project", "project_folder", "version",
+                    "variables", "subject", "triggers", "actions", "execution", "restrictions", "phases", "steps")
 _TRIGGER_KEY_ORDER = ("id", "watch", "every", "pin", "enabled")
 #: The order a subject reads in: what kind of thing, which one, then the rest.
 _SUBJECT_KEY_ORDER = ("kind", "key", "title", "memory", "pin")
-_STEP_KEY_ORDER = ("id", "plugin", "label", "group", "needs", "if", "with",
+_STEP_KEY_ORDER = ("id", "plugin", "label", "group", "phase", "important", "importance_reason", "runtime",
+                   "system", "restrictions", "needs", "if", "with",
                    "timeout", "retry", "on_failure", "disabled")
 
 
@@ -103,6 +104,9 @@ def describe_cycle(cycle_id, cycles_dir=None, registry=None):
     # both, and they are two different shapes of the same file.
     payload["document"] = model.to_document(parsed)
     payload["problems"] = model.problems(parsed, registry=registry, raw=raw)
+    guidance = model.warnings(parsed)
+    if guidance:
+        payload["warnings"] = guidance
     return payload
 
 

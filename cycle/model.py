@@ -22,9 +22,10 @@ nodes whether a file was opened or a run was started. There is no second
 nowhere else for one to come from.
 """
 
+import copy
 import re
 
-from domain.cycle import (BACKOFF, EXPONENTIAL, FIXED, Cycle, CycleStep,
+from domain.cycle import (BACKOFF, EXECUTION_MODES, EXPONENTIAL, FIXED, Cycle, CycleStep,
                           ON_FAILURE, STOP, Subject, Trigger, WATCH_EVERY,
                           WATCH_EVERY_MIN)
 
@@ -36,13 +37,15 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 #: Keys a step may carry. Anything else is a typo worth reporting - a silently
 #: ignored ``timout:`` is a step that quietly never times out.
 STEP_KEYS = frozenset((
-    "id", "plugin", "label", "group", "needs", "with", "if", "timeout", "retry",
-    "on_failure", "disabled",
+    "id", "plugin", "label", "group", "phase", "needs", "with", "if", "timeout", "retry",
+    "on_failure", "disabled", "important", "importance_reason", "runtime",
+    "restrictions", "system",
 ))
 
 #: Keys a cycle may carry.
 CYCLE_KEYS = frozenset(("id", "name", "description", "project", "version",
-                        "variables", "subject", "triggers", "steps"))
+                        "variables", "subject", "triggers", "actions", "phases", "execution", "steps",
+                        "project_folder", "restrictions"))
 
 #: Keys of the ``subject:`` mapping - see :class:`~domain.cycle.Subject`.
 SUBJECT_KEYS = frozenset(("kind", "key", "title", "memory", "pin"))
@@ -93,10 +96,19 @@ def parse_cycle(raw, cycle_id, source=None):
     variables, secrets, paths = _parse_variables(raw.get("variables") or {})
 
     steps = [_parse_step(entry, index) for index, entry in enumerate(steps_raw)]
+    actions = raw.get("actions", {})
+    if not isinstance(actions, dict) or any(not isinstance(value, dict) for value in actions.values()):
+        raise CycleError("actions must be a mapping of action ids to definitions")
 
+    from cycle import phases
     return Cycle(id=declared or cycle_id,
+                 phases=phases.parse(raw.get("phases")),
                  subject=_parse_subject(raw.get("subject")),
                  triggers=_parse_triggers(raw.get("triggers")),
+                 actions=copy.deepcopy(actions),
+                 execution=_parse_execution(raw.get("execution", {})),
+                 project_folder=_text_or_raise(raw.get("project_folder"), "project_folder"),
+                 restrictions=_mapping_or_raise(raw.get("restrictions"), "restrictions"),
                  name=str(raw.get("name") or "").strip(),
                  description=str(raw.get("description") or "").strip(),
                  project=str(raw.get("project") or "").strip(),
@@ -106,6 +118,30 @@ def parse_cycle(raw, cycle_id, source=None):
                  paths=paths,
                  steps=steps,
                  source=source)
+
+
+def _text_or_raise(value, name):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CycleError("%s must be text" % name)
+    return value.strip()
+
+
+def _mapping_or_raise(value, name):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise CycleError("%s must be a mapping, not %s" % (name, type(value).__name__))
+    return copy.deepcopy(value)
+
+
+def _parse_execution(raw):
+    if not isinstance(raw, dict):
+        raise CycleError("execution must be a mapping, not %s" % type(raw).__name__)
+    if "default_mode" in raw and not isinstance(raw["default_mode"], str):
+        raise CycleError("execution.default_mode must be text")
+    return copy.deepcopy(raw)
 
 
 def _parse_variables(raw):
@@ -194,6 +230,18 @@ def _parse_step(entry, index):
         raise CycleError("%s: retry must be a mapping, not %s"
                          % (step_id, type(retry).__name__))
 
+    important = entry.get("important", False)
+    if type(important) is not bool:
+        raise CycleError("%s: important must be a boolean" % step_id)
+    reason = entry.get("importance_reason", "")
+    if not isinstance(reason, str):
+        raise CycleError("%s: importance_reason must be text" % step_id)
+    if "runtime" in entry and not isinstance(entry["runtime"], dict):
+        raise CycleError("%s: runtime must be a mapping" % step_id)
+    system = entry.get("system", False)
+    if type(system) is not bool:
+        raise CycleError("%s: system must be true or false" % step_id)
+
     return CycleStep(
         id=step_id,
         plugin=str(entry.get("plugin") or "").strip(),
@@ -211,6 +259,12 @@ def _parse_step(entry, index):
         disabled=bool(entry.get("disabled")),
         source_index=index,
         group=str(entry.get("group") or "").strip(),
+        phase=str(entry.get("phase") or "").strip(),
+        important=important,
+        importance_reason=reason.strip(),
+        runtime=copy.deepcopy(entry.get("runtime", {})),
+        restrictions=_mapping_or_raise(entry.get("restrictions"), "%s: restrictions" % step_id),
+        system=system,
     )
 
 
@@ -264,6 +318,10 @@ def problems(cycle, registry=None, raw=None):
     found = []
     found.extend(_key_problems(raw))
     found.extend(_subject_problems(cycle))
+    found.extend(_execution_problems(cycle))
+    found.extend(action_problems(cycle))
+    from cycle import phases
+    found.extend(phases.problems(cycle))
     found.extend(_trigger_problems(
         cycle, raw.get("triggers") if isinstance(raw, dict) else None, registry))
     found.extend(_step_problems(cycle, registry))
@@ -278,6 +336,91 @@ def problems(cycle, registry=None, raw=None):
             except ValueError as exc:
                 found.append("%s: %s" % (step.id, exc))
     return found
+
+
+def _execution_problems(cycle):
+    if not isinstance(cycle.execution, dict):
+        return ["execution must be a mapping"]
+    found = ["execution: unknown key %r" % key
+             for key in sorted(set(cycle.execution) - {"default_mode", "runtime"}, key=str)]
+    mode = cycle.execution.get("default_mode", "auto")
+    if mode not in EXECUTION_MODES:
+        found.append("execution.default_mode is %r; it has to be %s."
+                     % (mode, " or ".join(EXECUTION_MODES)))
+    from .runtime import problems as runtime_problems
+    found.extend(runtime_problems(cycle))
+    from .restrict import problems as restriction_problems
+    found.extend(restriction_problems(cycle))
+    return found
+
+
+def warnings(cycle):
+    """Author guidance that does not prevent saving or running a valid cycle."""
+    return ["%s: important step has no importance_reason; explain why it needs attention."
+            % step.id for step in cycle.steps
+            if step.important is True and isinstance(step.importance_reason, str)
+            and not step.importance_reason.strip()]
+
+
+def action_problems(cycle):
+    """Named selections cannot acquire missing inputs or launch extra nodes.
+
+    Prepare's shell steps remain declared operations; this is not shell effect
+    enforcement. Known paid and external-write plugins cannot be selected.
+    """
+    from cycle import variables
+    found = []
+    known = {step.id for step in cycle.steps}
+    prepare_plugins = {"jira.issues", "user.choice", "memory.claim", "memory.recall",
+                       "check.gate", "command.shell", "task.brief"}
+    for name, action in cycle.actions.items():
+        where = "actions.%s" % name
+        if not isinstance(name, str) or not ID_PATTERN.fullmatch(name):
+            found.append("%s: invalid action id" % where)
+        extra = set(action) - {"title", "description", "steps", "result"}
+        if extra:
+            found.append("%s: unknown keys %s" % (where, ", ".join(sorted(extra))))
+        steps = action.get("steps")
+        if not isinstance(steps, list) or not steps or any(not isinstance(s, str) for s in steps):
+            found.append("%s: steps must be a non-empty list of step ids" % where)
+            continue
+        selected = set(steps)
+        if len(selected) != len(steps):
+            found.append("%s: steps are repeated" % where)
+        if selected - known:
+            found.append("%s: unknown steps %s" % (where, ", ".join(sorted(selected - known))))
+        for field in ("title", "description", "result"):
+            if field in action and not isinstance(action[field], str):
+                found.append("%s: %s must be text" % (where, field))
+        result = action.get("result")
+        if result and (not isinstance(result, str) or result not in selected):
+            found.append("%s: result must be a selected step" % where)
+        if name == "prepare_task" and (not isinstance(result, str) or not cycle.step(result)
+                                       or cycle.step(result).plugin != "task.brief"):
+            found.append("%s: result must name a task.brief step" % where)
+        for step in cycle.steps:
+            if step.id not in selected:
+                continue
+            if name == "prepare_task" and step.plugin not in prepare_plugins:
+                found.append("%s: %s (%s) is not a preparation operation" % (where, step.id, step.plugin))
+            outside = set(step.needs) - selected
+            if outside and not step.condition:
+                found.append("%s: %s requires unselected dependencies %s" % (where, step.id, ", ".join(sorted(outside))))
+            for ref in variables.references([step.settings, step.condition]):
+                parts = ref.split(".")
+                if parts[0] == "steps" and len(parts) > 1 and parts[1] not in selected:
+                    found.append("%s: %s reads unselected step %s" % (where, step.id, parts[1]))
+    return found
+
+
+def action_selection(cycle, name):
+    if name not in cycle.actions:
+        raise CycleError("No action %r in %s." % (name, cycle.id))
+    problems_ = action_problems(cycle)
+    if problems_:
+        raise CycleError("; ".join(problems_))
+    selected = set(cycle.actions[name]["steps"])
+    return [step.id for step in cycle.steps if step.id in selected]
 
 
 def _parse_triggers(raw):
@@ -452,6 +595,11 @@ def _step_problems(cycle, registry):
             found.append("%s: two steps share this id, so nothing could tell "
                          "them apart." % step.id)
         seen.add(step.id)
+
+        if type(step.important) is not bool:
+            found.append("%s: important must be a boolean." % step.id)
+        if not isinstance(step.importance_reason, str):
+            found.append("%s: importance_reason must be text." % step.id)
 
         if not step.plugin:
             found.append("%s: no plugin." % step.id)
@@ -722,6 +870,17 @@ def to_document(cycle):
                                if getattr(cycle.subject, name)}
     if cycle.triggers:
         document["triggers"] = [_trigger_document(one) for one in cycle.triggers]
+    if cycle.actions:
+        document["actions"] = copy.deepcopy(cycle.actions)
+    if cycle.execution:
+        document["execution"] = copy.deepcopy(cycle.execution)
+    if cycle.project_folder:
+        document["project_folder"] = cycle.project_folder
+    if cycle.restrictions:
+        document["restrictions"] = copy.deepcopy(cycle.restrictions)
+    if cycle.phases:
+        from cycle import phases
+        document["phases"] = [phases.document(phase) for phase in cycle.phases]
     document["steps"] = [_step_document(step) for step in
                          sorted(cycle.steps, key=lambda one: one.source_index)]
     return document
@@ -744,6 +903,18 @@ def _step_document(step):
         entry["label"] = step.label
     if step.group:
         entry["group"] = step.group
+    if step.phase:
+        entry["phase"] = step.phase
+    if step.important:
+        entry["important"] = True
+    if step.importance_reason:
+        entry["importance_reason"] = step.importance_reason
+    if step.runtime:
+        entry["runtime"] = copy.deepcopy(step.runtime)
+    if step.restrictions:
+        entry["restrictions"] = copy.deepcopy(step.restrictions)
+    if step.system:
+        entry["system"] = True
     if step.needs:
         entry["needs"] = list(step.needs)
     if step.condition:
@@ -768,6 +939,11 @@ def _step_document(step):
     return entry
 
 
+def _restrictable():
+    from .restrict import RESTRICTABLE
+    return RESTRICTABLE
+
+
 def to_graph(cycle):
     """The wire payload: what the canvas draws and what the events carry.
 
@@ -781,6 +957,8 @@ def to_graph(cycle):
     They are a grid position, not pixels - how wide a node is and how far apart
     they sit is a question for whoever is drawing.
     """
+    from cycle import phases
+    titles = {phase.id: phase.title or phase.id for phase in cycle.phases}
     depth = layers(cycle)
     rows, seen = {}, {}
     for step in sorted(cycle.steps, key=lambda s: s.source_index):
@@ -794,6 +972,11 @@ def to_graph(cycle):
         "description": cycle.description,
         "project": cycle.project,
         "version": cycle.version,
+        "actions": copy.deepcopy(cycle.actions),
+        **({"execution": copy.deepcopy(cycle.execution)} if cycle.execution else {}),
+        **({"project_folder": cycle.project_folder} if cycle.project_folder else {}),
+        **({"restrictions": copy.deepcopy(cycle.restrictions)} if cycle.restrictions else {}),
+        **({"phases": [phases.document(phase) for phase in cycle.phases]} if cycle.phases else {}),
         "variables": dict(cycle.variables),
         "secrets": list(cycle.secrets),
         "paths": list(cycle.paths),
@@ -814,13 +997,21 @@ def to_graph(cycle):
                    "layer": depth.get(step.id, 0),
                    "row": rows[step.id],
                    "disabled": step.disabled,
+                   **({"runtime_enabled": True} if "runtime" in cycle.execution else {}),
                    "condition": step.condition,
                    "timeout": step.timeout,
                    "retry": step.retry_attempts,
                    "backoff": step.retry_backoff,
                    "on_failure": step.on_failure,
                    # A phase for the reader; the canvas frames and folds by it.
-                   "group": step.group}
+                   "group": titles.get(step.phase) or step.group,
+                   **({"phase": step.phase} if step.phase else {}),
+                   **({"important": True} if step.important else {}),
+                   **({"runtime": copy.deepcopy(step.runtime)} if step.runtime else {}),
+                   **({"restrictions": copy.deepcopy(step.restrictions)} if step.restrictions else {}),
+                   **({"system": True} if step.system else {}),
+                   **({"restrictable": True} if step.plugin in _restrictable() else {}),
+                   **({"importance_reason": step.importance_reason} if step.importance_reason else {})}
                   for step in sorted(cycle.steps, key=lambda s: s.source_index)],
         "edges": [{"from": need, "to": step.id, "kind": "dependency"}
                   for step in sorted(cycle.steps, key=lambda s: s.source_index)

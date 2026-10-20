@@ -1,0 +1,2 @@
+# Preserve the exact upstream license bytes used by the portable release gate.
+licenses/bubblewrap/COPYING -text

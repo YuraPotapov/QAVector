@@ -350,6 +350,10 @@ class Core:
         if self.config:
             return self.config if os.path.isabs(self.config) else os.path.join(
                 self.root, self.config)
+        # The source CLI also honors CMS_HOME. Keep GUI reads/reloads on that
+        # same explicit profile while preserving the checkout as the cwd.
+        if os.environ.get("CMS_HOME", "").strip():
+            return os.path.join(user_data_root(self.script), "users.json")
         return os.path.join(self.root, "users.json") if self.root else ""
 
     def is_configured(self):

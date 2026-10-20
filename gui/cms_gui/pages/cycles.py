@@ -11,10 +11,8 @@ selected on the right. Opening a cycle shows **all of it** - that is the point
 of drawing it rather than listing it, and a list of steps would hide precisely
 the thing a cycle has that a scenario does not, which is shape.
 
-**The same canvas is the run view.** Starting a cycle does not open another
-page: the nodes already on screen take on their live status. There is no second
-picture of a run to keep in step with this one, because there is no second
-picture.
+Starting a cycle opens Run Cockpit on this page. Its operational summary and
+the Run Graph share one RunState; Design remains the editable graph.
 
 Nothing here parses YAML, and nothing here knows what a plugin does. The page
 asks the core over --cycle-list / --cycle-show, draws the graph the core hands
@@ -28,20 +26,24 @@ plain which task a run is about, and going back to one is a click. See
 """
 
 import os
+import copy
+import re
 import subprocess
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout,
-                               QLabel, QMenu,
+                               QLabel, QMenu, QComboBox,
                                QPlainTextEdit, QPushButton, QStackedWidget,
-                               QTabWidget, QTextBrowser, QToolButton,
+                               QTabWidget, QTextBrowser, QToolButton, QToolTip,
                                QVBoxLayout, QWidget, QWidgetAction)
 
 from .. import (core as core_mod, cyclelayoutfile as clf,
                 cyclepresetsfile as presets_file, cycleprojectsfile as cpf,
                 icons, theme, widgets)
-from .. import background, findbar, search, stageswindow
+from .. import background, cycleactivity, cycleresult, findbar, search, stageswindow
+from .. import restrictions as restrictions_mod
+from ..cyclecockpit import Cockpit
 from ..cycledraft import Draft
 from ..cyclesubjects import KEEP
 # The explorer lives in its own module; its roles are re-exported here, where
@@ -135,6 +137,8 @@ class CyclesPage(QWidget):
     #: The plan as just read: what the scheduler starts on time.
     planned_loaded = Signal(list)
     stop_requested = Signal()
+    control_requested = Signal(str, str)
+    approval_answered = Signal(str, str, bool)
     interaction_requested = Signal(dict)
     saved = Signal()
     #: The page put the rows a write answered with into its own list - every
@@ -167,6 +171,8 @@ class CyclesPage(QWidget):
         #: The cycle the loaded sessions were asked to put first.
         self._sessions_first = ""
         self._stages_window = None       # stageswindow.StagesWindow, while detached
+        self._cockpit_run = ""
+        self._execution_mode_source = None
         self._build()
         self.load_projects()
 
@@ -182,8 +188,7 @@ class CyclesPage(QWidget):
         self.run_button.setPopupMode(QToolButton.MenuButtonPopup)
         self.run_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         # clicked(bool) is the button state, not the textual run mode.
-        self.run_button.clicked.connect(
-            lambda: self._run("resume" if self._resume_available() else ""))
+        self.run_button.clicked.connect(self._primary_run)
         self.run_menu = QMenu(self.run_button)
         self.run_menu.setToolTipsVisible(True)
         # Named for what it does. "Hard Run" said it was forceful without
@@ -193,6 +198,14 @@ class CyclesPage(QWidget):
             "A new run from the first step, taking nothing from earlier runs.\n"
             "Paid services will be called again; previous runs remain saved.")
         self.hard_run_action.triggered.connect(lambda: self._run("hard"))
+        self.prepare_action = self.run_menu.addAction("Prepare task")
+        self.prepare_action.setToolTip("Prepare the chosen task and its workspace without baseline tests or agent calls.")
+        self.prepare_action.triggered.connect(lambda: self._run("action:prepare_task"))
+        self.prepare_action.setVisible(False)
+        self.phase_action = self.run_menu.addAction("Run phase")
+        self.phase_action.setToolTip("Run the next phase and pause before the following one.")
+        self.phase_action.triggered.connect(self._phase_control)
+        self.phase_action.setVisible(False)
         self.run_button.setMenu(self.run_menu)
         # No text on these two: they act on whichever step is selected, and a
         # label would have to name it or be vague. The tooltip says both what
@@ -212,10 +225,29 @@ class CyclesPage(QWidget):
         self.stop_button = icons.button(QPushButton(), "stop", "Stop")
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.stop_button.setEnabled(False)
+        self.execution_mode = QComboBox()
+        for mode in ("auto", "important", "approve"):
+            self.execution_mode.addItem(mode.capitalize(), mode)
+        self.execution_mode.setToolTip("Auto: important steps also run without implicit approval. Important asks before marked steps. Approve asks before each step. Explicit decision gates remain in every mode.")
+        self.execution_mode.activated.connect(self._execution_mode_changed)
         self.properties_button = QPushButton("Properties")
         self.properties_button.setToolTip(
             "The cycle's name, project and variables.")
         self.properties_button.clicked.connect(self.open_properties)
+        # Its own window, never Properties: what the cycle's steps are held to
+        # is a question of its own, and the button says the answer before it
+        # is pressed.
+        self.restrictions_button = QPushButton("Restrictions")
+        icons.button(self.restrictions_button, "unlock", "Restrictions")
+        self.restrictions_button.clicked.connect(self.open_restrictions)
+        # The whole cycle's network, one click either way - into the draft,
+        # like any other change, so Undo takes it back.
+        self.network_toggle = QToolButton()
+        self.network_toggle.setProperty("variant", "restriction")
+        self.network_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.network_toggle.setAccessibleName("Cycle network")
+        self.network_toggle.clicked.connect(self._toggle_cycle_network)
+        self.network_toggle.hide()
         self.arrange_button = icons.button(QPushButton(), "refresh", "Arrange")
         self.arrange_button.setToolTip(
             "Put every step back where the layout says it belongs.\n"
@@ -252,7 +284,7 @@ class CyclesPage(QWidget):
             "Add a step - after the selected one, when one is selected.\n"
             "Right-click a step for what else can be done to it.")
         self.add_button.clicked.connect(self._add_step_from_bar)
-        for button in (self.properties_button, self.arrange_button,
+        for button in (self.properties_button, self.restrictions_button, self.arrange_button,
                        self.fit_button, self.zoom_out_button,
                        self.zoom_in_button, self.fold_button, self.validity,
                        self.add_button):
@@ -299,11 +331,14 @@ class CyclesPage(QWidget):
 
         self.title = widgets.elided_line("Cycles")
         self.state = widgets.elided_line("", "mono")
+        self.active_header = widgets.elided_line("", "muted")
+        self.active_header.hide()
 
         layout.addWidget(widgets.row(
-            self.title, None, self.state, self.properties_button,
+            self.title, None, self.state, self.active_header, self.properties_button, self.network_toggle,
+            self.restrictions_button,
             self.step_button, self.from_button,
-            self.stop_button, self.run_button))
+            self.stop_button, self.execution_mode, self.run_button))
         # Said while nothing is open, on the empty canvas - not as lines over
         # it, which took room from a long cycle and moved the page when they
         # went away.
@@ -326,6 +361,7 @@ class CyclesPage(QWidget):
         self.canvas.node_selected.connect(self._node_selected)
         self.canvas.node_opened.connect(self.open_step)
         self.canvas.node_menu.connect(self._node_menu)
+        self.canvas.restriction_clicked.connect(self._restriction_clicked)
         self.canvas.canvas_menu.connect(self._canvas_menu)
         self.canvas.edge_menu.connect(self._edge_menu)
         self.canvas.link_made.connect(self._link_made)
@@ -389,14 +425,23 @@ class CyclesPage(QWidget):
         # The view's own controls sit on the view, not in the page's header:
         # they act on what is drawn, and the header is for the cycle itself
         # and for running it - which is also what lets its name be read.
+        self.run_view = widgets.Segmented(["Cockpit", "Graph"], "Cockpit")
+        self.run_view.changed.connect(self._run_view_changed)
+        self.run_view.hide()
+        self.cockpit = Cockpit(self)
+        self.cockpit.node_selected.connect(self._cockpit_selected)
+        self.cockpit.approval_answered.connect(self.approval_answered.emit)
+        self.run_surface = QStackedWidget()
+        self.run_surface.addWidget(self.canvas)
+        self.run_surface.addWidget(self.cockpit)
         self.view_bar = widgets.row(
-            self.context_switch, self.validity, None, self.add_button,
+            self.context_switch, self.run_view, self.validity, None, self.add_button,
             self.fold_button, self.arrange_button,
             self.zoom_out_button, self.zoom_in_button, self.fit_button,
             spacing=2)
         across = widgets.FoldingSplitter(Qt.Horizontal)
         across.addWidget(self.explorer)
-        across.addWidget(_framed(self.canvas, self.view_bar))
+        across.addWidget(_framed(self.run_surface, self.view_bar))
         across.addWidget(self.subjects)
         across.setStretchFactor(1, 1)
         across.setSizes([EXPLORER_WIDTH, 900, SUBJECTS_WIDTH])
@@ -432,6 +477,9 @@ class CyclesPage(QWidget):
         # The page held still, and the canvas veiled with what is happening,
         # while a change is checked or a cycle written - see _waiting.
         self.busy = widgets.Busy(self, area=self.canvas)
+        self._cockpit_timer = QTimer(self)
+        self._cockpit_timer.timeout.connect(self._refresh_cockpit)
+        self._cockpit_timer.start(1000)
 
         self._update_buttons()
 
@@ -478,6 +526,7 @@ class CyclesPage(QWidget):
         # Coalesced: changed fires on every event of every run, including ones
         # that have nothing to do with a cycle.
         run_state.changed.connect(self._schedule_buttons)
+        run_state.cycle_timing_changed.connect(self._refresh_cockpit)
 
     def set_projects_path(self, path):
         """Where the projects file lives. Set from Settings, through the window."""
@@ -714,6 +763,7 @@ class CyclesPage(QWidget):
             if self._selected and self.canvas.node(self._selected) is None:
                 self._selected = ""
         self.canvas.set_problems(self._problems_now())
+        self._push_restrictions()
         # The canvas is drawn from the file, which knows nothing about a run.
         # Whatever the model knows about this cycle is painted back on, so a
         # run still going - or one that finished while somebody was elsewhere -
@@ -782,18 +832,158 @@ class CyclesPage(QWidget):
         for step_id, step in (state.get("steps") or {}).items():
             self.canvas.set_status(step_id, step.get("status"),
                                    step.get("duration_ms"), step.get("attempt"))
+        self.canvas.set_run_evidence(state.get("steps") or {})
 
     def _context_changed(self, name):
         self._context = name
         self._redraw()
         self._describe_state(self._open or {})
         self._update_buttons()
+        self._refresh_cockpit()
+        if self.run_surface.currentWidget() is self.cockpit:
+            self.cockpit.setFocus(Qt.OtherFocusReason)
 
     def _set_context(self, name):
         """Switch without being asked - a run started, an edit was made."""
         if name != self._context:
             self.context_switch.set_current(name, notify=False)
             self._context = name
+        self._refresh_cockpit()
+
+    def _run_view_changed(self, name):
+        self.run_surface.setCurrentWidget(self.cockpit if self._context == RUN and name == "Cockpit" else self.canvas)
+        self._refresh_cockpit()
+        if self.run_surface.currentWidget() is self.cockpit:
+            self.cockpit.setFocus(Qt.OtherFocusReason)
+
+    def show_cockpit(self):
+        state = (self.run_state.cycle or {}) if self.run_state else {}
+        if not state:
+            return
+        if self.current_id() != state.get("cycle"):
+            self.open(state["cycle"], then=self.show_cockpit)
+            return
+        self._set_context(RUN)
+        self.run_view.set_current("Cockpit", notify=False)
+        self.run_surface.setCurrentWidget(self.cockpit)
+        self._refresh_cockpit()
+        self.cockpit.setFocus(Qt.OtherFocusReason)
+
+    def _cockpit_selected(self, step_id):
+        self.canvas.select(step_id)
+        self._node_selected(step_id)
+        self.open_step(step_id)
+
+    def _refresh_cockpit(self):
+        if not hasattr(self, "run_surface"):
+            return
+        cycle = self._live_cycle() or {}
+        # A run launched from History/watch can arrive before any cycle file
+        # was opened here. Its graph is already on the canvas at that point.
+        state = (self.run_state.cycle or {}) if self.run_state else {}
+        if (not cycle and self._context == RUN and state.get("graph")
+                and state["graph"].get("id") == (self.canvas.graph() or {}).get("id")):
+            cycle = state
+        live = bool(self.run_state and self.run_state.cycle_running)
+        self._sync_execution_mode(cycle, live)
+        self._sync_run_control()
+        self.run_view.setVisible(self._context == RUN and bool(cycle))
+        self.active_header.setVisible(bool(cycle))
+        self.state.setVisible(not cycle)
+        summary = cycleactivity.header(cycle, live) if cycle else ""
+        self.active_header.setText(summary)
+        self.active_header.setToolTip("\n".join(value for value in (
+            summary, self.state.text(), "Mode: " + self.execution_mode.currentText() if cycle else "") if value))
+        cockpit = self._context == RUN and self.run_view.current() == "Cockpit"
+        self.run_surface.setCurrentWidget(self.cockpit if cockpit else self.canvas)
+        for button in (self.fold_button, self.arrange_button, self.zoom_out_button,
+                       self.zoom_in_button, self.fit_button):
+            button.setVisible(not cockpit and (button is not self.fold_button or bool(self.canvas.phases())))
+        if cockpit:
+            self.cockpit.refresh(cycle, live, threshold=self.settings.cycle_inactivity_seconds)
+        values = [cycleactivity.elapsed(cycle["steps"][name], live) or 0 for name in cycleactivity.active(cycle)]
+        self._cockpit_timer.setInterval(60000 if values and min(values) >= 86400000 else 1000)
+
+    def _phase_control(self):
+        state = (self.run_state.cycle or {}) if self.run_state else {}
+        offers = state.get("phase_actions") or {}
+        action, phase = ("retry_phase", offers.get("retry")) if offers.get("retry") else ("run_phase", offers.get("run"))
+        if phase:
+            self.control_requested.emit(action, phase)
+
+    def _primary_run(self):
+        if self.run_state and self.run_state.cycle_running:
+            action, phase, _label = self._live_run_action()
+            if action:
+                self.control_requested.emit(action, phase)
+            return
+        self._run("resume" if self._resume_available() else "")
+
+    def _live_run_action(self):
+        cycle = self._live_cycle() or {}
+        if not cycle.get("control_version"):
+            return "", "", "Run"
+        offers = cycle.get("phase_actions") or {}
+        if cycle.get("paused"):
+            if offers.get("retry"):
+                return "retry_phase", offers["retry"], "Retry phase"
+            if offers.get("continue"):
+                return "continue", "", "Continue"
+            if offers.get("run"):
+                return "run_phase", offers["run"], "Run phase"
+            return "", "", "Paused"
+        return ("pause", "", "Pause") if offers.get("pause") else ("", "", "Pausing…" if cycle.get("pause_requested") else "Starting…")
+
+    def _sync_run_control(self):
+        running = bool(self.run_state and self.run_state.cycle_running)
+        cycle = self._live_cycle() or {}
+        action, _phase, label = self._live_run_action() if running else ("", "", "")
+        self.hard_run_action.setVisible(not running)
+        preparation = (((self._open or {}).get("cycle") or {}).get("actions") or {}).get("prepare_task")
+        self.prepare_action.setVisible(bool(preparation) and not running)
+        one_phase = running and action == "continue" and bool((cycle.get("phase_actions") or {}).get("run"))
+        self.phase_action.setVisible(one_phase)
+        menu = not running or one_phase
+        target_menu = self.run_menu if menu else None
+        if self.run_button.menu() is not target_menu:
+            self.run_button.setMenu(target_menu)
+        self.run_button.setPopupMode(QToolButton.MenuButtonPopup if menu else QToolButton.DelayedPopup)
+        hasmenu = "true" if menu else "false"
+        if self.run_button.property("hasmenu") != hasmenu:
+            self.run_button.setProperty("hasmenu", hasmenu)
+            self.run_button.style().unpolish(self.run_button)
+            self.run_button.style().polish(self.run_button)
+        self.run_button.setIcon(icons.icon("pause" if action == "pause" or label == "Pausing…" else "run"))
+        if running:
+            self.run_button.setText(label)
+            self.run_button.setEnabled(bool(action))
+            self.run_button.setToolTip({"pause": "Let active operations finish safely and keep pending work for continuation.",
+                                       "continue": "Continue this live run without starting a new execution.",
+                                       "retry_phase": "Retry unfinished work in this phase and keep successful results.",
+                                       "run_phase": "Run the next phase and pause before the following one."}.get(action, label))
+
+    def _sync_execution_mode(self, cycle, live):
+        graph = (self._open or {}).get("cycle") or {}
+        mode = cycle.get("execution_mode") or (graph.get("execution") or {}).get("default_mode") or "auto"
+        source = (cycle.get("run_id") or self.current_id(), mode, live)
+        # Keep an offline selection until another run or saved policy arrives.
+        if source != self._execution_mode_source or live:
+            self.execution_mode.setCurrentIndex(max(0, self.execution_mode.findData(mode)))
+            self._execution_mode_source = source
+        self.execution_mode.setEnabled(not live or bool(cycle.get("paused") and cycle.get("execution_policy_version")))
+
+    def _execution_mode_changed(self, _index):
+        cycle = self._live_cycle() or {}
+        if self.run_state and self.run_state.cycle_running and cycle.get("paused") and cycle.get("execution_policy_version"):
+            self.control_requested.emit("set_mode", self.execution_mode.currentData())
+
+    def requested_execution_mode(self):
+        return self.execution_mode.currentData() or "auto"
+
+    def default_execution_mode(self):
+        """What a new run of the open cycle gets when no mode is asked for."""
+        graph = (self._open or {}).get("cycle") or {}
+        return (graph.get("execution") or {}).get("default_mode") or "auto"
 
     # -- editing: changes collect in a draft until Save ----------------------------
     def _can_edit_graph(self):
@@ -1078,6 +1268,8 @@ class CyclesPage(QWidget):
         menu = QMenu(self)
         menu.addAction("Open..." if editable else "Show...",
                        lambda: self.open_step(step_id))
+        if step is not None and self._folder_of(document)[0]:
+            self._restrictions_menu(menu, step_id, step, document, editable)
         if editable and step is not None:
             menu.addSeparator()
             self._plugins_menu(menu.addMenu("Add a step after it"), after=step_id)
@@ -1134,6 +1326,219 @@ class CyclesPage(QWidget):
         for action in (only, after):
             action.setEnabled(not running and not (self._draft and self._draft.dirty))
         menu.exec(where)
+
+    # -- restrictions --------------------------------------------------------------
+    def _folder_of(self, document):
+        """The cycle's project folder as written, and resolved ("" when it cannot be)."""
+        written = str((document or {}).get("project_folder") or "").strip()
+        if not written:
+            return "", ""
+        variables = (document or {}).get("variables") or {}
+
+        def value(match):
+            one = variables.get(match.group(1))
+            if isinstance(one, dict):
+                return "" if one.get("secret") else str(one.get("value") or "")
+            return "" if one is None else str(one)
+        resolved = re.sub(r"\$\{\s*vars\.([A-Za-z0-9_-]+)\s*\}", value, written)
+        if "${" in resolved or not resolved.strip():
+            return written, ""
+        return written, os.path.abspath(os.path.expanduser(resolved))
+
+    def _restriction_states(self, document, saved):
+        """step id -> what its indicators show, for a cycle with a project folder."""
+        if not self._folder_of(document)[0]:
+            return {}
+        editable = self._can_edit_graph() and self._context == DESIGN
+        outer = [("cycle", document.get("restrictions") or {})]
+        before = {one.get("id"): one for one in (saved or {}).get("steps") or []}
+        states = {}
+        for step in document.get("steps") or []:
+            if not isinstance(step, dict) or not step.get("id"):
+                continue
+            if step.get("system") or step.get("plugin", "") not in restrictions_mod.CYCLE_PLUGINS:
+                states[step["id"]] = {"system": True}
+                continue
+            own = step.get("restrictions") or {}
+            effective = restrictions_mod.resolve(outer + [("step", own)])
+            states[step["id"]] = {
+                "network": restrictions_mod.switch_state(outer, own, "step", "network")[:2],
+                "files": restrictions_mod.switch_state(outer, own, "step", "files")[:2],
+                "limits": restrictions_mod.limits_words(effective["limits"], short=True),
+                "summary": restrictions_mod.summary(effective),
+                "pending": set(restrictions_mod.pending((before.get(step["id"]) or {}).get("restrictions"), own)),
+                "editable": editable}
+        return states
+
+    def _push_restrictions(self):
+        document = self._document_now()
+        saved = (self._open or {}).get("document") or {}
+        self.canvas.set_restrictions(self._restriction_states(document, saved) if document else {})
+        self._sync_restrictions_button()
+
+    def _sync_restrictions_button(self):
+        document = self._document_now() or {}
+        saved = (self._open or {}).get("document") or {}
+        written, _resolved = self._folder_of(document)
+        button = self.restrictions_button
+        own = document.get("restrictions") or {}
+        effective = restrictions_mod.resolve([("cycle", own)])
+        if not self.current_id() or not written:
+            icons.button(button, "unlock", "Restrictions")
+            button.setEnabled(False)
+            button.setToolTip("Set the cycle's project folder in Properties to restrict what its steps may do."
+                              if self.current_id() else "")
+            self.network_toggle.hide()
+            return
+        pending = restrictions_mod.pending(saved.get("restrictions"), own)
+        icons.button(button, "lock" if effective["restricted"] else "unlock",
+                     restrictions_mod.short_summary(effective) + (" *" if pending else ""))
+        button.setEnabled(True)
+        button.setToolTip("The defaults for the steps working in %s: %s.%s" % (
+            written, restrictions_mod.summary(effective), "\nNot saved yet." if pending else ""))
+        shown, state, why = restrictions_mod.switch_state([], own, "cycle", "network")
+        icons.button(self.network_toggle, "network-off" if shown == "Off" else "network", shown)
+        self.network_toggle.setProperty("state", {"off": "off", "on": "on"}.get(state, "locked"))
+        self.network_toggle.setProperty("pending", "true" if "network" in pending else "false")
+        editable = self._can_edit_graph() and self._context == DESIGN
+        self.network_toggle.setEnabled(editable)
+        self.network_toggle.setToolTip("Network for the whole cycle: %s\n%s" % (shown.lower(), why)
+                                       if editable else "Network for the whole cycle: %s" % shown.lower())
+        self.network_toggle.style().unpolish(self.network_toggle)
+        self.network_toggle.style().polish(self.network_toggle)
+        self.network_toggle.show()
+
+    def _toggle_cycle_network(self):
+        if self._context != DESIGN or not self._can_edit_graph():
+            return
+        document = self._document_now()
+        changed = restrictions_mod.click([], document.get("restrictions"), "cycle", "network")
+        if changed is None:
+            self.open_restrictions()
+            return
+        draft = self._ensure_draft()
+        updated = copy.deepcopy(draft.document)
+        if changed:
+            updated["restrictions"] = changed
+        else:
+            updated.pop("restrictions", None)
+        draft.change(updated)
+        self._draft_changed()
+        self._push_restrictions()
+
+    def _steps_for_window(self, document):
+        rows = []
+        outer = [("cycle", document.get("restrictions") or {})]
+        for step in document.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            label = step.get("label") or step.get("id", "")
+            if step.get("system") or step.get("plugin", "") not in restrictions_mod.CYCLE_PLUGINS:
+                rows.append((label, "System step - runs without restrictions"))
+            elif step.get("restrictions"):
+                rows.append((label, "Its own: " + restrictions_mod.summary(
+                    restrictions_mod.resolve(outer + [("step", step["restrictions"])]))))
+            else:
+                rows.append((label, "Same as the cycle"))
+        return rows
+
+    def open_restrictions(self):
+        """The cycle's own restrictions window - not Properties."""
+        document = (self._open or {}).get("document")
+        if not document:
+            return
+        written, resolved = self._folder_of(document)
+        if not written:
+            return
+        if self._draft is not None and self._draft.dirty and not self._leave_draft():
+            # Written to the file at once, like Properties, so the canvas's
+            # unsaved changes are settled first.
+            return
+        cycle_id = self.current_id()
+        document = (self._open or {}).get("document") or document
+        window = restrictions_mod.RestrictionsWindow(
+            document.get("name") or cycle_id, resolved or written, "cycle", document.get("restrictions") or {},
+            core=self.core, probe={"folder": resolved, "cwd": resolved} if resolved else None, parent=self,
+            writable=bool((self._open or {}).get("writable")), steps=self._steps_for_window(document))
+        try:
+            if window.exec() != QDialog.Accepted or window.saved is None:
+                return
+            changed = dict(document)
+            if window.saved:
+                changed["restrictions"] = window.saved
+            else:
+                changed.pop("restrictions", None)
+            if changed != document and self._write_cycle(cycle_id, changed):
+                self.open(cycle_id)
+        finally:
+            window.deleteLater()
+
+    def _restrictions_menu(self, menu, step_id, step, document, editable):
+        outer = [("cycle", document.get("restrictions") or {})]
+        if step.get("system") or step.get("plugin", "") not in restrictions_mod.CYCLE_PLUGINS:
+            menu.addAction("System step - runs without restrictions").setEnabled(False)
+            return
+        own = step.get("restrictions") or {}
+        for kind, words in (("network", "Network"), ("files", "File access")):
+            shown, state, why = restrictions_mod.switch_state(outer, own, "step", kind)
+            action = menu.addAction("%s: %s - %s" % (words, shown, "turn off" if state == "on" else "turn on"),
+                                    lambda k=kind: self._toggle_step_restriction(step_id, k))
+            action.setEnabled(editable and state != "locked")
+            action.setToolTip(why)
+        menu.setToolTipsVisible(True)
+        menu.addAction("Restrictions…", lambda: self.open_step(step_id))
+
+    def _restriction_clicked(self, step_id, kind, where):
+        document = self._document_now()
+        step = self._step_of(step_id)
+        if step is None:
+            return
+        editable = self._can_edit_graph() and self._context == DESIGN
+        outer = [("cycle", document.get("restrictions") or {})]
+        own = step.get("restrictions") or {}
+        if not editable:
+            QToolTip.showText(where, "Restrictions are read-only here. Switch to Design to change them.")
+            return
+        if kind == "limits":
+            restrictions_mod.limits_menu(
+                self, outer, own, "step", {},
+                apply=lambda raw: self._set_step_restrictions(step_id, raw),
+                open_window=lambda: self.open_step(step_id), where=where)
+            return
+        _shown, state, why = restrictions_mod.switch_state(outer, own, "step", kind)
+        if state == "locked":
+            QToolTip.showText(where, why)
+            return
+        self._toggle_step_restriction(step_id, kind)
+
+    def _toggle_step_restriction(self, step_id, kind):
+        step = self._step_of(step_id)
+        if step is None:
+            return
+        document = self._document_now()
+        changed = restrictions_mod.click([("cycle", document.get("restrictions") or {})],
+                                         step.get("restrictions"), "step", kind)
+        if changed is None:
+            self.open_step(step_id)
+            return
+        self._set_step_restrictions(step_id, changed)
+
+    def _set_step_restrictions(self, step_id, raw):
+        """Into the draft, like any other change to a step: Undo takes it back."""
+        if self._context != DESIGN or not self._can_edit_graph():
+            return
+        step = copy.deepcopy(self._step_of(step_id))
+        if step is None:
+            return
+        raw = restrictions_mod.clean(raw)
+        if raw:
+            step["restrictions"] = raw
+        else:
+            step.pop("restrictions", None)
+        draft = self._ensure_draft()
+        draft.replace_step(step_id, step)
+        self._draft_changed()
+        self._push_restrictions()
 
     def _artifacts_menu(self, menu, step_id):
         """Every file ``step_id`` wrote in the run on screen, and its folder."""
@@ -1376,11 +1781,15 @@ class CyclesPage(QWidget):
                 step.get("plugin", ""), key, settings),
             trigger=self._trigger_of(step_id),
             groups=Draft("", document).phases(),
+            restrictions=self._step_restrictions_context(document),
+            core=self.core,
+            **({"phases": document["phases"]} if document.get("phases") else {}),
             apply_label="Add" if adding else "Apply",
             read_only_note=("This is the step as the run on screen has it. "
                             "Switch to Design to change it."
                             if self._context == RUN else ""))
-        if dialog.exec() != QDialog.Accepted or dialog.saved is None:
+        accepted = dialog.exec()
+        if accepted != QDialog.Accepted or dialog.saved is None:
             return False
         draft = self._ensure_draft()
         probe = Draft("", draft.document)
@@ -1404,6 +1813,14 @@ class CyclesPage(QWidget):
                 return one
         return None
 
+    def _step_restrictions_context(self, document):
+        """What a step's window needs to show its restrictions, or None when
+        the cycle has no project folder and its steps run as they always have."""
+        written, resolved = self._folder_of(document)
+        if not written:
+            return None
+        return {"folder": resolved or written, "cycle": document.get("restrictions") or {}}
+
     def open_properties(self):
         """The cycle's own name, project and variables."""
         document = (self._open or {}).get("document")
@@ -1416,7 +1833,7 @@ class CyclesPage(QWidget):
         cycle_id = self.current_id()
         dialog = CycleDialog(document, cpf.names(self._projects), self,
                              bool((self._open or {}).get("writable")),
-                             stored_secrets=self._stored_secrets(cycle_id))
+                             stored_secrets=self._stored_secrets(cycle_id), core=self.core)
         if dialog.exec() != QDialog.Accepted or dialog.saved is None:
             return
         changed = dict(document)
@@ -2272,13 +2689,21 @@ class CyclesPage(QWidget):
         development cycle spends six agent calls and moves a Jira issue, and
         neither of those is undone by pressing Stop.
         """
+        if how.startswith("action:"):
+            action = ((self._open or {}).get("cycle") or {}).get("actions", {}).get(how.split(":", 1)[1])
+            if not action:
+                return False
+            return widgets.confirm(self, action.get("title") or "Prepare task",
+                "Prepare the task in a new run?",
+                (action.get("description") or "Runs only the declared preparation steps; earlier results are not borrowed.") + self._mode_preflight(),
+                agree=action.get("title") or "Prepare task")
         if how == "resume":
             state = self.run_state.cycle if self.run_state else {}
             return widgets.confirm(
                 self, "Resume run", "Continue %s?" % (state or {}).get("run_id", ""),
                 "Successful results are kept. Failed steps may call paid services "
                 "again. Changed completed steps or uncertain outcomes stop the "
-                "resume before more work starts.", agree="Resume")
+                "resume before more work starts." + self._mode_preflight(), agree="Resume")
         if how == "only":
             return True
         if how == "from":
@@ -2288,20 +2713,35 @@ class CyclesPage(QWidget):
                 "Run %s and the %d step(s) that wait on it?"
                 % (self._selected, len(after) - 1),
                 "Earlier results come from the displayed run, or the last run "
-                "of this cycle if none is displayed.\n\n" + CONSEQUENCE, agree="Run from here")
+                "of this cycle if none is displayed.\n\n" + CONSEQUENCE + self._mode_preflight(), agree="Run from here")
         if how == "hard":
             return widgets.confirm(
                 self, START_OVER, "Start %s over from the beginning?"
                 % (_name_of(self._open) or self.current_id()),
                 "All steps will be evaluated again in a new run. Paid services "
-                "will be called again. Previous runs remain saved.\n\n" + CONSEQUENCE,
+                "will be called again. Previous runs remain saved.\n\n" + CONSEQUENCE + self._mode_preflight(),
                 agree=START_OVER)
         return widgets.confirm(
             self, "Run",
             "Run all %d step(s) of %s?"
             % (len(self.canvas.node_ids()),
                _name_of(self._open) or self.current_id()),
-            CONSEQUENCE, agree="Run")
+            CONSEQUENCE + self._mode_preflight(), agree="Run")
+
+    def _mode_preflight(self):
+        graph = (self._open or {}).get("cycle") or self.canvas.graph() or {}
+        important = [node for node in graph.get("nodes", []) if node.get("important")]
+        detail = "\n\nMode: " + self.execution_mode.currentText()
+        if self.execution_mode.currentData() == "auto":
+            detail += "\nImportant steps also run without implicit approval. Explicit decision gates remain."
+        if important:
+            detail += "\nImportant steps:\n" + "\n".join(
+                "• %s — %s" % (node.get("label") or node["id"], node.get("importance_reason") or "Marked important")
+                for node in important)
+        warnings = (self._open or {}).get("warnings") or []
+        if warnings:
+            detail += "\nWarnings:\n" + "\n".join("• " + str(one) for one in warnings)
+        return detail
 
     # -- running one ----------------------------------------------------------
     def _run(self, how=""):
@@ -2348,9 +2788,10 @@ class CyclesPage(QWidget):
             self.canvas.clear_status()
             self.output.clear_log()
             self.output.show_log()
-        target = (state["run_id"] if how == "resume" else self._selected
+        target = (how.split(":", 1)[1] if how.startswith("action:") else
+                  state["run_id"] if how == "resume" else self._selected
                   if how in ("only", "from") else "")
-        self.run_requested.emit(cycle_id, "" if how == "hard" else how, target)
+        self.run_requested.emit(cycle_id, "action" if how.startswith("action:") else "" if how == "hard" else how, target)
 
     def _graph_known(self, graph):
         """A run started. Draw what it is running, if that is not already drawn.
@@ -2369,6 +2810,10 @@ class CyclesPage(QWidget):
         # canvas away from somebody working on the file.
         if self.run_state and self.run_state.cycle_running:
             self._set_context(RUN)
+            run_id = (self.run_state.cycle or {}).get("run_id", "")
+            if run_id != self._cockpit_run:
+                self._cockpit_run = run_id
+                self.run_view.set_current("Cockpit", notify=False)
         if _same_shape(graph, self.canvas.graph()):
             self.canvas.clear_status()
         else:
@@ -2382,6 +2827,7 @@ class CyclesPage(QWidget):
         self._apply_run_state()
         self._paint_log()
         self._update_buttons()
+        self._refresh_cockpit()
 
     # -- where the nodes sit, and where somebody was looking -------------------
     def _drawn_id(self):
@@ -2500,6 +2946,7 @@ class CyclesPage(QWidget):
         if not self._statuses_hidden():
             self.canvas.set_status(step_id, step.get("status"),
                                    step.get("duration_ms"), step.get("attempt"))
+            self.canvas.set_run_evidence(state.get("steps") or {})
         if self._open and self.canvas.phases():
             # Which phase the run is in is part of the line under the title.
             self._describe_state(self._open)
@@ -2525,6 +2972,7 @@ class CyclesPage(QWidget):
     def _flush_paint(self):
         self._paint_pending = False
         self._paint_log()
+        self._refresh_cockpit()
 
     def _schedule_buttons(self):
         if not self._buttons_pending:
@@ -2545,6 +2993,9 @@ class CyclesPage(QWidget):
         guessed which node was talking.
         """
         self._selected = step_id
+        cycle = (self.run_state.cycle or {}) if self.run_state else {}
+        if cycle:
+            cycle["_activity_selected"] = step_id
         self._paint_log()
         self._update_buttons()
 
@@ -2749,7 +3200,7 @@ class CyclesPage(QWidget):
                     and state.get("cycle") == self.current_id()
                     and state.get("run_id")
                     and state.get("status") in
-                    ("failed", "cancelled", "interrupted", "timeout", "error"))
+                    ("failed", "cancelled", "interrupted", "timeout", "error", "waiting", "paused"))
 
     def _update_buttons(self):
         # The cycle's own flag, not the scenario run's: with the two conflated,
@@ -2759,6 +3210,9 @@ class CyclesPage(QWidget):
         has_cycle = bool(self.current_id())
         self.run_button.setEnabled(has_cycle and not running)
         self.hard_run_action.setEnabled(has_cycle and not running)
+        preparation = (((self._open or {}).get("cycle") or {}).get("actions") or {}).get("prepare_task")
+        self.prepare_action.setVisible(bool(preparation))
+        self.prepare_action.setEnabled(has_cycle and not running)
         resume = self._resume_available()
         self.run_button.setText("Resume" if resume else "Run")
         # Said on the button, not in a line under the header: a line that came
@@ -2780,9 +3234,11 @@ class CyclesPage(QWidget):
         for button in (self.step_button, self.from_button):
             button.setEnabled(bool(picked) and has_cycle and not running)
         self.stop_button.setEnabled(running)
+        self._sync_run_control()
         self.subjects.set_busy(running)
         drawn = bool(self.canvas.node_ids())
         self.properties_button.setEnabled(bool(self.current_id()))
+        self._sync_restrictions_button()
         for button in (self.fit_button, self.zoom_in_button,
                        self.zoom_out_button):
             button.setEnabled(drawn)
@@ -2802,6 +3258,7 @@ class CyclesPage(QWidget):
             RUN, bool(live.get("graph")),
             "No run of this cycle is on screen. Pick one in Subjects, or run it.")
         self.context_switch.setVisible(bool(self._open))
+        self._refresh_cockpit()
         self.undo_button.setEnabled(bool(self._draft and self._draft.can_undo()))
         self.redo_button.setEnabled(bool(self._draft and self._draft.can_redo()))
         self.save_draft_button.setEnabled(
@@ -2811,8 +3268,8 @@ class CyclesPage(QWidget):
             # run buttons say so by being unavailable until it is saved.
             for button in (self.step_button, self.from_button):
                 button.setEnabled(False)
+        # _refresh_cockpit owns visibility for all graph controls.
         folded = bool(self.canvas.folded())
-        self.fold_button.setVisible(bool(self.canvas.phases()))
         icons.button(self.fold_button, "unfold" if folded else "fold",
                      "Open phases" if folded else "Fold phases")
         self._show_validity()
@@ -2828,6 +3285,8 @@ class CyclesPage(QWidget):
         problems = self._problems_now()
         dirty = bool(self._draft is not None and self._draft.dirty)
         self.validity.setVisible(True)
+        warnings = (self._open or {}).get("warnings") or []
+        self.validity.setToolTip("\n".join(str(one) for one in warnings) or "Show the Problems tab.")
         if problems:
             icons.button(self.validity, "warn", "%d problem%s" % (
                 len(problems), "" if len(problems) == 1 else "s"), theme.BAD)
@@ -2926,7 +3385,8 @@ def _last_runs(sessions):
         cycle_id = session.get("cycle") or ""
         when = session.get("updated_at") or 0
         if cycle_id and when >= (found.get(cycle_id) or {}).get("when", 0):
-            found[cycle_id] = {"when": when, "status": session.get("status") or ""}
+            found[cycle_id] = {"when": when, "status": session.get("status") or "",
+                               **{key: session[key] for key in cycleresult.FIELDS if key in session}}
     return found
 
 
@@ -3030,6 +3490,7 @@ def _same_shape(one, other):
         # The phase too: it decides which frame a node is drawn in.
         return ([(node.get("id"), node.get("layer"), node.get("row"),
                   node.get("plugin"), node.get("label"), node.get("group") or "")
+                  + (node.get("important", False), node.get("importance_reason", ""))
                  for node in graph.get("nodes") or []],
                 [(edge.get("from"), edge.get("to"), edge.get("kind"))
                  for edge in graph.get("edges") or []])

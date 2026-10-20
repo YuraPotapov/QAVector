@@ -26,9 +26,11 @@ finished, which is honest and is exactly the case somebody is investigating.
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 
 from cycle import workspace as workspace_mod
+from cycle import outcomes
 from cycle.bus import NullObserver
 from domain.cycle import (CANCELLED, FAILED, PENDING, RUNNING, SKIPPED,
                           TIMEOUT, WAITING, Artifact, CycleRun, StepRun)
@@ -68,6 +70,7 @@ def to_document(run):
     which is the one thing every reader already knows; :func:`load` fills it
     back in.
     """
+    outcomes.refresh(run)
     document = asdict(run)
     document.pop("workspace", None)
     document["schema"] = SCHEMA
@@ -107,6 +110,7 @@ def load(workspace):
     run = from_document(document)
     if run is not None:
         run.workspace = os.path.abspath(workspace)
+        outcomes.refresh(run, graph_of(workspace))
     return run
 
 
@@ -132,6 +136,7 @@ def from_document(document):
         steps[step_id] = step
     run = CycleRun(**_only(document, CycleRun, skip=("steps",)))
     run.steps = steps
+    outcomes.refresh(run)
     return run
 
 
@@ -164,6 +169,11 @@ class Persister(NullObserver):
     def step_end(self, step_run):
         if self._run is not None:
             save(self._run)
+            remember(self._run, self._root)
+
+    def step_start(self, step_run, attempt=1):
+        if self._run is not None:
+            remember(self._run, self._root)
 
     def step_skipped(self, step_run, reason):
         if self._run is not None:
@@ -191,6 +201,20 @@ class Persister(NullObserver):
         self._run = run
         save(run)
         remember(run, self._root)
+
+    def run_state(self, run, action):
+        self._run = run
+        save(run)
+        remember(run, self._root)
+
+    def phase(self, run, receipt):
+        self.run_state(run, "phase")
+
+    def node_approval(self, run, receipt):
+        self.run_state(run, "node_approval")
+
+    def policy_changed(self, run, receipt):
+        self.run_state(run, "policy_changed")
 
 
 def _write_graph(workspace, graph):
@@ -224,6 +248,7 @@ def summary(run):
     work out and none of them needs told - and an absolute path in a file that
     lives in the checkout is a home directory waiting to be committed.
     """
+    presentation = outcomes.refresh(run)
     tally = run.tally()
     return {"id": run.id, "cycle": run.cycle_id, "name": run.cycle_name,
             "status": run.status, "trigger": run.trigger,
@@ -232,7 +257,8 @@ def summary(run):
             "steps": len(run.steps), "passed": tally.get("success", 0),
             "failed": tally.get("failed", 0), "skipped": tally.get("skipped", 0),
             "message": run.message, "resume_count": run.resume_count,
-            "subject": dict(run.subject or {}), "reached": reached(run)}
+            "subject": dict(run.subject or {}), "reached": reached(run),
+            **presentation}
 
 
 def reached(run):
@@ -281,14 +307,74 @@ def latest_of(cycle_id, root=None):
     return None
 
 
-def remember(run, root=None):
-    """Put ``run`` at the top of the index, replacing any earlier row for it."""
-    rows = [row for row in index(root) if row.get("id") != run.id]
-    rows.insert(0, summary(run))
+#: How long a writer waits for another process to finish its own index
+#: update. The index is best effort, so after this it writes anyway.
+INDEX_LOCK_WAIT = 2.0
+
+
+@contextmanager
+def _index_lock(root=None):
+    """Serialise index updates between processes - a run in the GUI and one
+    started from a terminal or a schedule each rewrite the whole file, and
+    without this the later writer puts back the other run's older row (a
+    finished run then reads as still going).
+
+    A kernel lock, so one held by a process that died is released with it.
+    Never raises: if the lock cannot be had in time, the update goes ahead
+    unlocked, as every update did before.
+    """
+    handle = None
+    locked = False
     try:
-        _atomic(index_path(root), {"schema": SCHEMA, "runs": rows})
+        path = index_path(root) + ".lock"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handle = open(path, "a+b")
+        deadline = time.monotonic() + INDEX_LOCK_WAIT
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
     except OSError:
         pass
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                if locked:
+                    if os.name == "nt":
+                        import msvcrt
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            handle.close()
+
+
+def remember(run, root=None):
+    """Put ``run`` at the top of the index, replacing any earlier row for it."""
+    row = summary(run)
+    with _index_lock(root):
+        rows = [one for one in index(root) if one.get("id") != run.id]
+        rows.insert(0, row)
+        try:
+            _atomic(index_path(root), {"schema": SCHEMA, "runs": rows})
+        except OSError:
+            pass
     return rows
 
 
@@ -316,10 +402,11 @@ def rebuild_index(root=None):
         if run is not None:
             rows.append(summary(run))
     rows.sort(key=lambda row: row.get("started_at") or 0, reverse=True)
-    try:
-        _atomic(index_path(root), {"schema": SCHEMA, "runs": rows})
-    except OSError:
-        pass
+    with _index_lock(root):
+        try:
+            _atomic(index_path(root), {"schema": SCHEMA, "runs": rows})
+        except OSError:
+            pass
     return rows
 
 

@@ -1,0 +1,142 @@
+name: Execution Runtime clean release acceptance
+
+# Manual, disposable hosted runner. Never execute privileged PR or production
+# self-hosted jobs. This stores a candidate; it does not publish a release.
+on:
+  workflow_dispatch:
+    inputs:
+      previous_run_id:
+        description: Actions run in this repository containing the previous DEB artifact
+        required: true
+        type: string
+      previous_artifact_name:
+        description: CI artifact containing one genuine previous amd64 DEB
+        required: true
+        default: qavector-verified-linux-deb
+        type: string
+      previous_deb_sha256:
+        description: Independently reviewed checksum of that previous DEB
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: runtime-release-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  clean-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+      - name: Public build dependencies on disposable runner only
+        run: |
+          sudo apt-get --error-on=any update -q
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libcap-dev libseccomp-dev binutils busybox-static \
+            libgl1 libegl1 libglib2.0-0 libdbus-1-3 libfontconfig1 libfreetype6 \
+            libx11-6 libx11-xcb1 libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-render0 libxcb-shape0 \
+            libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 \
+            libxkbcommon0 libxkbcommon-x11-0 libsm6 libice6 libnss3 \
+            libasound2 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1
+          python -m venv build/venv
+          build/venv/bin/python -m pip install -r packaging/runtime-build-requirements.txt \
+            -r requirements-dev.txt -r gui/requirements.txt 'pyinstaller>=6.6,<7' pyinstaller-hooks-contrib
+          mkdir -p build/acceptance
+          build/venv/bin/python -m pip list --format=json > build/acceptance/python-packages.json
+      - name: Require harness, package and attribution guards
+        run: >-
+          build/venv/bin/python -m pytest tests/test_runtime_acceptance_harness.py
+          tests/test_runtime_deb_package.py tests/test_runtime_license_materials.py
+          tests/test_runtime_clean_release.py -q --junitxml=build/acceptance/guards.xml
+      - name: Require offline Help About third-party license viewer
+        run: >-
+          build/venv/bin/python -m pytest gui/tests/test_thirdparty.py -q
+          --junitxml=build/acceptance/gui-licenses.xml
+      - name: Download previous DEB from a repository CI artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_RUN_ID: ${{ inputs.previous_run_id }}
+          PREVIOUS_ARTIFACT_NAME: ${{ inputs.previous_artifact_name }}
+        run: |
+          [[ "$PREVIOUS_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test -n "$PREVIOUS_ARTIFACT_NAME"
+          gh run download --repo="$GITHUB_REPOSITORY" --name="$PREVIOUS_ARTIFACT_NAME" \
+            --dir=build/previous-artifact -- "$PREVIOUS_RUN_ID"
+      - name: Require reviewed earlier artifact checksum
+        env:
+          PREVIOUS_DEB_SHA256: ${{ inputs.previous_deb_sha256 }}
+        run: |
+          previous_deb=$(build/venv/bin/python packaging/acceptance/ci_release.py build/previous-artifact "$PREVIOUS_DEB_SHA256")
+          cp "$previous_deb" build/previous.deb
+      - name: Build pinned bundled runtime and fresh GUI/core preview
+        run: |
+          PATH="$PWD/build/venv/bin:$PATH" build/venv/bin/python packaging/build_bubblewrap.py --output build/clean-runtime
+          build/venv/bin/python packaging/build_runtime_preview.py --runtime-distribution build/clean-runtime --output build/clean-preview
+          (cd gui && ../build/venv/bin/python -m cms_gui.icon ../build/icons)
+          build/venv/bin/python packaging/package_runtime_preview.py --preview build/clean-preview --icons build/icons --output build/release-candidate
+      - name: Require real native CPU, charged-memory and task pressure
+        run: |
+          docker pull python:3.10-slim
+          build/venv/bin/python packaging/accept_runtime_cpu.py --image python:3.10-slim \
+            --bundle build/clean-runtime --output build/acceptance/resources
+      - name: Require bundled boundary, scratch, cleanup and frozen worker acceptance
+        run: >-
+          build/venv/bin/python -m pytest tests/test_execution_runtime_linux.py
+          tests/test_execution_runtime_bundle.py tests/test_execution_runtime_deployments.py
+          tests/test_execution_runtime_secrets.py -q --linux-runtime-integration
+          --linux-runtime-scratch-integration --linux-runtime-bundle-dir=build/clean-runtime
+          --runtime-frozen-core=build/clean-preview/core/qavector-core
+          --junitxml=build/acceptance/native-frozen.xml
+      - name: Require GUI permissions and service Cycle flows with the frozen core
+        run: |
+          # Qt has process-global state; each widget-heavy module gets a fresh QApplication.
+          for module in test_execution_environments test_runtime_services test_runtime_permissions test_cycle_runtime test_cycle_execution_modes test_core; do
+            build/venv/bin/python -m pytest "gui/tests/$module.py" -q \
+              --gui-runtime-frozen-core="$PWD/build/clean-preview/core/qavector-core" \
+              --junitxml="build/acceptance/gui-$module.xml"
+          done
+      - name: Require clean Ubuntu and Debian package lifecycle with offline execution
+        run: |
+          candidate_deb=$(build/venv/bin/python -c 'import json; from pathlib import Path; p=Path("build/release-candidate"); print(p / json.loads((p / "PACKAGE-INFO.json").read_text())["archive"])')
+          test -n "$candidate_deb"
+          for target in ubuntu:22.04 debian:12-slim; do
+            target_name=${target//:/-}
+            docker pull "$target"
+            build/venv/bin/python packaging/prepare_repository_dependencies.py --image "$target" \
+              --candidate "$candidate_deb" --previous build/previous.deb \
+              --output "build/acceptance/dependencies-$target_name" --allow-repository-downloads
+            build/venv/bin/python packaging/accept_runtime_install.py --image "$target" \
+              --candidate "$candidate_deb" --previous build/previous.deb \
+              --dependencies "build/acceptance/dependencies-$target_name" --output "build/acceptance/install-$target_name"
+          done
+      - name: Store diagnostics even when a strict acceptance gate fails
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: runtime-clean-acceptance-evidence
+          path: |
+            build/acceptance/**
+            !build/acceptance/**/*.deb
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Store verified candidate only after every gate succeeds
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: qavector-verified-linux-deb
+          path: build/release-candidate/*
+          if-no-files-found: error
+          retention-days: 14

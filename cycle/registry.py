@@ -261,6 +261,7 @@ class PluginResult:
     resume_at: float = None
     #: An explicit human request to revisit a read-only plan before approval.
     revision: dict = dataclass_field(default_factory=dict)
+    runtime: dict = dataclass_field(default_factory=dict)
 
     @property
     def ok(self):

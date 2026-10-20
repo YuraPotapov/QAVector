@@ -1,0 +1,32 @@
+name: Runtime service GUI and offline licenses
+
+on:
+  push:
+    paths: ['licenses/**', 'execution_runtime/**', 'cycle/**', 'domain/cycle.py', 'gui/cms_gui/**', 'gui/tests/test_cycle*.py', 'gui/tests/test_runtime_services.py', 'gui/tests/test_runtime_permissions.py', 'gui/tests/test_services*.py', 'gui/tests/test_servicebridge.py', 'gui/tests/test_thirdparty.py', 'gui/tests/test_settings_dialog.py', '.github/workflows/runtime-license-gui.yml']
+  pull_request:
+    paths: ['licenses/**', 'execution_runtime/**', 'cycle/**', 'domain/cycle.py', 'gui/cms_gui/**', 'gui/tests/test_cycle*.py', 'gui/tests/test_runtime_services.py', 'gui/tests/test_runtime_permissions.py', 'gui/tests/test_services*.py', 'gui/tests/test_servicebridge.py', 'gui/tests/test_thirdparty.py', 'gui/tests/test_settings_dialog.py', '.github/workflows/runtime-license-gui.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-viewer:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - run: python -m pip install -r gui/requirements.txt 'pytest>=7,<10'
+      - run: python packaging/check_licenses.py --licenses=licenses
+      - run: |
+          # Keep independent Qt modules in independent QApplication processes.
+          for module in test_thirdparty test_settings_dialog test_runtime_services test_runtime_permissions test_services test_servicesfile test_cycle_runtime test_cycledialogs test_cyclereplay test_cycle_execution_modes test_services_page test_servicebridge; do
+            python -m pytest "gui/tests/$module.py" -q
+          done
+        env:
+          QT_QPA_PLATFORM: offscreen

@@ -112,6 +112,23 @@ def test_a_checkout_spawns_in_the_checkout_and_makes_no_data_directory(tmp_path,
     assert not (tmp_path / "data").exists()
 
 
+def test_checkout_default_config_matches_explicit_private_data_root(tmp_path, monkeypatch):
+    private = tmp_path / "private profile"
+    checkout = tmp_path / "checkout"
+    monkeypatch.setenv("CMS_HOME", "  " + str(private) + "  ")
+    core = core_mod.Core(str(checkout / "session_launcher.py"), sys.executable)
+    assert core.root == str(checkout)
+    assert core.config_path == str(private / "users.json")
+    assert not private.exists()  # Resolving the display path performs no writes.
+
+
+def test_explicit_config_keeps_precedence_over_private_data_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMS_HOME", str(tmp_path / "private"))
+    checkout = tmp_path / "checkout"
+    core = core_mod.Core(str(checkout / "session_launcher.py"), sys.executable, config="custom.json")
+    assert core.config_path == str(checkout / "custom.json")
+
+
 def test_the_folder_chosen_at_install_time_is_where_the_core_runs(tmp_path, monkeypatch):
     """The GUI must reach the same answer as runtime_paths, or the two disagree
     about where users.json is and the front-end edits a file the core ignores."""

@@ -40,7 +40,7 @@ import re
 import subprocess
 import tempfile
 
-from cycle import registry
+from cycle import registry, restrict
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
 
 #: The trailer that makes a commit findable again after a crash. Git keeps
@@ -329,7 +329,7 @@ def _run(where, arguments, extra=None):
     environment.update({"GIT_TERMINAL_PROMPT": "0"})
     environment.update(extra or {})
     try:
-        done = subprocess.run(["git"] + list(arguments), cwd=where,
+        done = restrict.run(["git"] + list(arguments), cwd=where,
                               env=environment, capture_output=True, text=True,
                               timeout=TIMEOUT)
     except subprocess.TimeoutExpired:

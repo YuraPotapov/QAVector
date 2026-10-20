@@ -17,7 +17,7 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
-                               QLineEdit, QPushButton, QScrollArea, QVBoxLayout,
+                               QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
                                QWidget)
 
 from .. import core as core_mod
@@ -140,6 +140,13 @@ class SettingsDialog(QDialog):
             "the core's default, which in a source checkout is the checkout "
             "itself - so editing a cycle there changes a file that ships with "
             "the application. Passed to every command as --cycles-dir."))
+
+        self.cycle_inactivity = QSpinBox()
+        self.cycle_inactivity.setRange(10, 86400)
+        self.cycle_inactivity.setSuffix(" s")
+        self.cycle_inactivity.setValue(settings.cycle_inactivity_seconds)
+        column.addWidget(widgets.field("Cycle inactivity threshold", self.cycle_inactivity,
+                                      "Show 'No output for' after this interval. Silence does not mark a step as failed."))
 
         # The GUI's own, and the launcher has never heard of it - so where this
         # one goes really is nobody else's business.
@@ -385,6 +392,7 @@ class SettingsDialog(QDialog):
                              cycles_dir=self.cycles.text().strip())
 
     def apply(self):
+        self.settings.cycle_inactivity_seconds = self.cycle_inactivity.value()
         self.settings.config = self.config.text().strip()
         self.settings.services_path = self.services.text().strip()
         self.settings.cycle_projects_path = self.cycle_projects.text().strip()

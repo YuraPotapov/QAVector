@@ -26,7 +26,7 @@ KEEP_VENV=0
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
-for tool in python3 dpkg-deb fakeroot; do
+for tool in python3 dpkg-deb fakeroot cc pkg-config readelf; do
   command -v "$tool" >/dev/null || die "$tool is not installed"
 done
 
@@ -62,6 +62,16 @@ fi
 mkdir -p "$BUILD"
 printf '%s\n' "$VERSION" > "$BUILD/VERSION"
 
+# ER-BB-001: compile the reviewed upstream source; no target-system bwrap dependency.
+say "Building the bundled Linux runtime"
+"$VENV/bin/python" -m pip install -q -r "$ROOT/packaging/runtime-build-requirements.txt"
+NATIVE_STAGE="$(mktemp -d "$BUILD/native-runtime.XXXXXX")"
+NATIVE_ARGS=(--output="$NATIVE_STAGE/runtime")
+if [ -n "${QAVECTOR_BWRAP_SOURCE_ARCHIVE:-}" ]; then
+  NATIVE_ARGS+=(--archive="$QAVECTOR_BWRAP_SOURCE_ARCHIVE")
+fi
+PATH="$VENV/bin:$PATH" "$VENV/bin/python" "$ROOT/packaging/build_bubblewrap.py" "${NATIVE_ARGS[@]}"
+
 # -- 3. freeze ----------------------------------------------------------------
 rm -rf "$BUILD/dist" "$BUILD/pyi"
 for spec in core gui; do
@@ -75,6 +85,13 @@ CORE_BIN="$BUILD/dist/core/qavector-core"
 GUI_BIN="$BUILD/dist/gui/qavector-gui"
 [ -x "$CORE_BIN" ] || die "the core bundle was not produced"
 [ -x "$GUI_BIN" ] || die "the GUI bundle was not produced"
+
+# Copy after PyInstaller so it cannot rewrite the ELF/RUNPATH/checksum manifests.
+cp -a "$NATIVE_STAGE/runtime" "$BUILD/dist/core/_internal/runtime"
+"$VENV/bin/python" "$ROOT/packaging/build_bubblewrap.py" --verify="$BUILD/dist/core/_internal/runtime"
+cp -a "$NATIVE_STAGE/runtime/licenses/." "$BUILD/dist/gui/_internal/licenses/"
+"$VENV/bin/python" "$ROOT/packaging/check_licenses.py" \
+    --runtime="$BUILD/dist/core/_internal/runtime" --licenses="$BUILD/dist/gui/_internal/licenses"
 
 # PyInstaller copies datas without their permission bits, and playwright's driver
 # is an executable it has to be able to run. Without this, connect_over_cdp fails
@@ -90,6 +107,7 @@ chmod +x "$NODE"
 say "Checking the frozen core"
 CMS_HOME="$BUILD/smoke" "$CORE_BIN" --version
 CMS_HOME="$BUILD/smoke" "$CORE_BIN" --describe > "$BUILD/describe.json"
+CMS_HOME="$BUILD/smoke" "$CORE_BIN" --runtime-bundle-info > "$BUILD/runtime-bundle.json"
 python3 "$ROOT/packaging/check_frozen.py" "$BUILD/describe.json" "$VERSION"
 
 # -- 5. icons -----------------------------------------------------------------
@@ -135,6 +153,9 @@ sed -e "s|@VERSION@|$VERSION|" \
     "$ROOT/packaging/linux/control.in" > "$STAGE/DEBIAN/control"
 
 # -- 7. build -----------------------------------------------------------------
+# Verify the actual staged materials immediately before creating the distributable.
+"$VENV/bin/python" "$ROOT/packaging/check_licenses.py" \
+    --runtime="$STAGE$APP_DIR/core/_internal/runtime" --licenses="$STAGE$APP_DIR/gui/_internal/licenses"
 say "Building the .deb"
 mkdir -p "$OUT"
 DEB="$OUT/${PACKAGE}_${VERSION}_${ARCH}.deb"

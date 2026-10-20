@@ -56,11 +56,12 @@ class AgentReview(CyclePlugin):
         permissions=("process.spawn", "filesystem.read", "filesystem.write", "network"),
         inputs=(
             field("framework", "Framework", "choice", default="claude_cli",
-                  options=("claude_cli", "crewai", "autogen"),
+                  options=("claude_cli", "crewai", "autogen", "runtime"),
                   hint="claude_cli runs the Claude Code CLI and needs no API "
                        "key - it uses the browser sign-in that CLI already "
                        "has. The other two need a key and a Python "
-                       "environment with the framework installed."),
+                       "environment with the framework installed. runtime uses "
+                       "the approved isolated deployment's JSON review provider."),
             field("claude", "Claude Code binary", "file",
                   hint="Only for claude_cli. Blank finds `claude` on PATH."),
             field("python", "Agent Python", "file",
@@ -166,6 +167,9 @@ class AgentReview(CyclePlugin):
         """Answer the two actions above. Never raises - the report IS the answer."""
         settings = settings or {}
         framework = str(settings.get("framework") or "claude_cli")
+        if framework == "runtime":
+            return {"ok": False, "summary": "The approved runtime deployment owns provider setup.",
+                    "detail": "Host sign-in/status commands are unavailable for runtime reviews."}
         binary = str(settings.get("claude") or "")
 
         if framework != "claude_cli":
@@ -258,6 +262,8 @@ class AgentReview(CyclePlugin):
         return found
 
     def execute(self, context, step):
+        if self.setting(step.settings, "framework") == "runtime":
+            return registry.failed("The runtime review framework requires isolated Cycle execution and an approved provider.")
         problems = self.problems(step.settings)
         if problems:
             return registry.failed("; ".join(problems))

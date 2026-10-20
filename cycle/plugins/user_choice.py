@@ -192,7 +192,7 @@ class UserChoice(CyclePlugin):
         answer = ask_mod.ask(
             question, detail=str(self.setting(settings, "detail", "") or ""),
             options=[CHOOSE, CANCEL], timeout_ms=timeout_ms, step=step.id,
-            cancel=context.cancel,
+            cancel=context.cancel, progress=getattr(context, "progress", None),
             choice=table.question(mode, detail_template, set(checked)))
 
         who = answer.get("who", "")

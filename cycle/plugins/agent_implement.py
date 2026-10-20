@@ -38,7 +38,7 @@ import re
 import subprocess
 import tempfile
 
-from cycle import registry
+from cycle import registry, restrict
 from cycle.plugins import agent_cli, agent_run
 from cycle.plugins.agent import AgentReview, read_files
 from cycle.plugins.agent_worker import extract_json, validate_review
@@ -743,7 +743,7 @@ def _first_line(failure):
 def _git(where, arguments, environment):
     """One git query. ``None`` when git refused or is not there."""
     try:
-        done = subprocess.run(["git"] + arguments, cwd=where, env=environment,
+        done = restrict.run(["git"] + arguments, cwd=where, env=environment,
                               capture_output=True, text=True,
                               timeout=GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):

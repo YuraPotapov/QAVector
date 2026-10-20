@@ -16,6 +16,7 @@ rather than pretending to have stopped it.
 
 import os
 import threading
+import time
 
 
 class CancelToken(object):
@@ -134,6 +135,7 @@ class RunContext(object):
         #: ``RunInteractions``, set by the executor. Plugins reach it only
         #: through :meth:`inbox`, never directly.
         self.interactions = None
+        self.activity = None
         self._held = []                       # [(step_id, plugin, handle)]
         self._lock = threading.Lock()
 
@@ -219,6 +221,8 @@ class RunContext(object):
         rows = [lines] if isinstance(lines, str) else list(lines)
         if not rows:
             return
+        if self.activity is not None:
+            self.activity.note(step_id)
         try:
             self.observer.step_log(step_id, stream, rows)
         except Exception:                     # observers are diagnostics
@@ -234,10 +238,24 @@ class RunContext(object):
         """
         if self.observer is None or not one:
             return
+        if self.activity is not None:
+            self.activity.note(step_id, {"title": one.get("title", "")})
         try:
             self.observer.step_stage(step_id, one)
         except Exception:                     # observers are diagnostics
             pass
+
+    def progress(self, step_id, title="", current=None, total=None, unit="", heartbeat=False, state=""):
+        """Diagnostic progress, never a success/result receipt."""
+        value = {"title": str(title), "current": current, "total": total,
+                 "unit": str(unit), "heartbeat": bool(heartbeat), "state": str(state)}
+        if self.activity is not None:
+            self.activity.note(step_id, value)
+        if self.observer is not None:
+            try:
+                self.observer.step_progress(step_id, dict(value, last_activity_at=time.time()))
+            except Exception:
+                pass
 
     # -- holding something open ----------------------------------------------
     def hold(self, step_id, plugin, handle):

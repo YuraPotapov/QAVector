@@ -31,6 +31,7 @@ import shutil
 import subprocess
 
 import runtime_paths
+from cycle import restrict
 
 #: What the binary is called. Overridable per step, because somebody may have it
 #: installed somewhere PATH does not reach - a nodenv shim, a per-project copy.
@@ -80,7 +81,7 @@ def auth_status(binary=None, timeout=STATUS_TIMEOUT):
     found["installed"], found["binary"] = True, path
 
     try:
-        finished = subprocess.run(
+        finished = restrict.run(
             [path, "auth", "status", "--json"],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
             env=runtime_paths.clean_subprocess_env(),

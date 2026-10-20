@@ -141,6 +141,9 @@ STATUS_LOOK = {
 }
 
 #: What a status is called on a node. Short: the node is 208px wide.
+#: Room on a node's plugin line for Network, Files and Limits (or SYSTEM).
+RESTRICTION_WIDTH = 76
+
 STATUS_WORD = {
     "success": "passed", "failed": "failed", "timeout": "timed out",
     "running": "running", "waiting": "waiting", "skipped": "skipped",
@@ -594,6 +597,11 @@ class CycleNodeItem(QGraphicsObject):
         self._status = "pending"
         self._duration_ms = None
         self._attempts = 0
+        #: What the cycle's restrictions hold this step to, as the page worked
+        #: it out: {"network": (shown, state), "files": (shown, state),
+        #: "limits": text, "system": bool, "pending": set}. None draws nothing -
+        #: a cycle without a project folder looks exactly as it always did.
+        self.restriction = None
         #: What the core says is wrong with this step, as its own lines.
         self._problems = []
         self.edges = []              # every edge with this node at either end
@@ -850,6 +858,8 @@ class CycleNodeItem(QGraphicsObject):
         self._paint_status_bar(painter, body, path)
         self._paint_text(painter, spec, text, disabled)
         self._paint_badges(painter, spec)
+        if self.restriction is not None and not self.is_phase:
+            self._paint_restriction(painter)
         if self.ports_shown():
             self._paint_ports(painter, spec)
 
@@ -889,7 +899,7 @@ class CycleNodeItem(QGraphicsObject):
         painter.setPen(QPen(QColor(ink("NEUTRAL500" if disabled else "TEXT"))))
         painter.drawText(QRectF(left, spec["pad_y"], width, text["title"] + 4),
                          Qt.AlignLeft | Qt.AlignVCenter,
-                         _elide(painter, self.node.get("label") or self.step_id,
+                         _elide(painter, ("! " if self.node.get("important") else "") + (self.node.get("label") or self.step_id),
                                 width))
 
         plugin = QFont(theme.FONT_MONO[0])
@@ -905,12 +915,13 @@ class CycleNodeItem(QGraphicsObject):
         painter.setPen(QPen(QColor(ink("NEUTRAL700"))))
         members = self.node.get("members") or []
         second = (self.node.get("plugin") or "" if not self.is_phase
+                  else self.node.get("cause_summary") if self.node.get("cause_summary")
                   else "phase - %d step%s" % (len(members),
                                               "" if len(members) == 1 else "s"))
         painter.drawText(
             QRectF(left, spec["pad_y"] + text["title"] + 6, width,
                    text["plugin"] + 4),
-            Qt.AlignLeft | Qt.AlignVCenter, _elide(painter, second, width))
+            Qt.AlignLeft | Qt.AlignVCenter, _elide(painter, second, width - (RESTRICTION_WIDTH if self.restriction is not None and not self.is_phase else 0)))
 
         painter.setFont(QFont(theme.FONT_BODY[0], -1))
         meta = QFont(theme.FONT_BODY[0])
@@ -965,9 +976,23 @@ class CycleNodeItem(QGraphicsObject):
                     "Double-click to open it back out."]
             if self._status != "pending":
                 rows.append("status: %s" % self._status)
+            if self.node.get("cause_summary"):
+                rows.extend([self.node["cause_summary"], self.node.get("cause_detail", "")])
             return "\n".join(rows + self._problems)
         rows = ["%s  (%s)" % (self.node.get("label") or self.step_id,
                               self.node.get("plugin") or "")]
+        if self.restriction is not None:
+            if self.restriction.get("system"):
+                rows.append("System step: runs without the cycle's restrictions.")
+            else:
+                rows.append("Restrictions: " + self.restriction.get("summary", ""))
+                rows.append("Network and Files on the node switch that access off, or back on to what was set; "
+                            "Limits opens the numbers." if self.restriction.get("editable") else
+                            "Restrictions are read-only here.")
+                if self.restriction.get("pending"):
+                    rows.append("Not saved yet: Save applies it to the next run.")
+        if self.node.get("important"):
+            rows.append("Important: " + (self.node.get("importance_reason") or "Approval required in Important mode"))
         if self.node.get("group"):
             rows.append("phase: %s" % self.node["group"])
         if self.node.get("needs"):
@@ -987,6 +1012,63 @@ class CycleNodeItem(QGraphicsObject):
         if self._ports:
             rows.append("Drag a dot on its edge to another step to link them.")
         return "\n".join(rows + self._problems)
+
+    def restriction_rect(self, kind):
+        """Where one indicator sits: right of the plugin line, in a fixed order."""
+        spec, text = self._spec["node"], self._spec["text"]
+        left = spec["w"] - spec["pad_x"] - RESTRICTION_WIDTH
+        offsets = {"network": (0, 20), "files": (22, 32), "limits": (56, 20), "system": (0, RESTRICTION_WIDTH)}
+        start, width = offsets[kind]
+        return QRectF(left + start, spec["pad_y"] + text["title"] + 5, width, 20)
+
+    def restriction_at(self, point):
+        if self.restriction is None or self.is_phase or self.restriction.get("system"):
+            return ""
+        return next((kind for kind in ("network", "files", "limits")
+                     if self.restriction_rect(kind).contains(point)), "")
+
+    def _paint_restriction(self, painter):
+        """Network, Files and Limits as they are now; a tag on a system step.
+
+        State is a mark and a word, never a colour alone: a slashed globe for
+        no network, the folder's access in letters, the gauge drawn in the
+        accent only when there is a limit to read. A change not saved yet is
+        underlined, on that indicator only.
+        """
+        state = self.restriction
+        font = QFont(theme.FONT_BODY[0])
+        font.setPixelSize(10)
+        font.setBold(True)
+        painter.setFont(font)
+        if state.get("system"):
+            rect = self.restriction_rect("system")
+            painter.setPen(QPen(QColor(ink("NEUTRAL500")), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect.adjusted(0.5, 2.5, -0.5, -2.5))
+            painter.setPen(QPen(QColor(ink("NEUTRAL600"))))
+            painter.drawText(rect, Qt.AlignCenter, "SYSTEM")
+            return
+        pending = state.get("pending") or set()
+        shown, mode = state["network"]
+        rect = self.restriction_rect("network")
+        colour = ink("WARN" if mode == "off" else "NEUTRAL500" if mode == "locked" else "NEUTRAL700")
+        icons.paint(painter, "network-off" if shown == "Off" else "network", rect.adjusted(2, 2, -2, -2), colour)
+        shown, mode = state["files"]
+        rect = self.restriction_rect("files")
+        colour = ink("WARN" if mode == "off" else "NEUTRAL500" if mode == "locked" else "NEUTRAL700")
+        icons.paint(painter, "folder-off" if shown == "Off" else "folder", QRectF(rect.left() + 1, rect.top() + 3, 14, 14), colour)
+        painter.setPen(QPen(QColor(colour)))
+        painter.drawText(QRectF(rect.left() + 16, rect.top(), rect.width() - 16, rect.height()),
+                         Qt.AlignLeft | Qt.AlignVCenter, shown if shown != "All" else "")
+        rect = self.restriction_rect("limits")
+        icons.paint(painter, "limits", rect.adjusted(2, 2, -2, -2),
+                    ink("ACCENT" if state.get("limits") else "NEUTRAL500"))
+        if pending:
+            painter.setPen(QPen(QColor(ink("ACCENT")), 1, Qt.DashLine))
+            for kind in pending:
+                if kind in ("network", "files", "limits"):
+                    rect = self.restriction_rect(kind)
+                    painter.drawLine(QPointF(rect.left() + 1, rect.bottom()), QPointF(rect.right() - 1, rect.bottom()))
 
 
 class CycleEdgeItem(QGraphicsPathItem):
@@ -1633,6 +1715,9 @@ class CycleCanvas(QGraphicsView):
     #: Right-click on a step: (step id, where on screen). The page decides
     #: what can be done to it - the canvas draws, it does not edit.
     node_menu = Signal(str, QPoint)
+    #: A click on a step's Network, Files or Limits indicator: (step id,
+    #: "network" | "files" | "limits", where on screen).
+    restriction_clicked = Signal(str, str, QPoint)
     #: Right-click on empty ground: where on screen.
     canvas_menu = Signal(QPoint)
     #: Right-click on a link: (the step waited for, the step waiting, where).
@@ -1664,6 +1749,9 @@ class CycleCanvas(QGraphicsView):
         #: the items, because folding rebuilds the items and a run's colours
         #: must survive somebody tidying the view.
         self._statuses = {}
+        self._run_evidence = {}
+        #: step id -> its restriction indicators (see set_restrictions).
+        self._restrictions = {}
         #: step id -> what the core says is wrong with it.
         self._problems = {}
         #: The phases and which one each step is in - read once per graph,
@@ -1745,6 +1833,7 @@ class CycleCanvas(QGraphicsView):
         self._folded = set(folded or ())
         self._places = dict(places or {})
         self._statuses, self._problems = {}, {}
+        self._run_evidence = {}
         # Building a scene scrolls: items appearing move the scene rect under
         # the view. Held as a placement from end to end so none of that reads
         # as somebody choosing to look somewhere.
@@ -1802,6 +1891,7 @@ class CycleCanvas(QGraphicsView):
 
         for node in nodes:
             item = CycleNodeItem(node, self._spec)
+            item.restriction = self._restrictions.get(node.get("id"))
             x, y = positions.get(node["id"],
                                  computed.get(node["id"], (0.0, 0.0)))
             item.setPos(x, y)
@@ -1981,6 +2071,42 @@ class CycleCanvas(QGraphicsView):
                       for one in self._phases.get(name, [])]
             frame.set_state(phase_status(states),
                             any(one in ("running", "waiting") for one in states))
+            summary, detail = self._phase_causes(name)
+            frame._say()
+            if summary:
+                frame.setToolTip(frame.toolTip() + "\n" + summary + "\n" + detail)
+
+    def set_run_evidence(self, steps):
+        """Causal evidence accompanies statuses, without changing graph data."""
+        self._run_evidence = steps
+        for name in self._folded:
+            self._repaint_phase(name)
+        self._repaint_frames()
+
+    def set_restrictions(self, states):
+        """step id -> what the restrictions hold it to (see CycleNodeItem.restriction).
+
+        Kept here as well as on the items, because folding rebuilds the items
+        and the indicators must survive somebody tidying the view.
+        """
+        self._restrictions = dict(states or {})
+        for step_id, item in self._nodes.items():
+            item.restriction = self._restrictions.get(step_id)
+            item.setToolTip(item._tooltip())
+            item.update()
+
+    def _phase_causes(self, name):
+        from .cycleactivity import causes
+        steps = getattr(self, "_run_evidence", {})
+        members = self._phases.get(name, [])
+        problems = [one for one in members if steps.get(one, {}).get("status") in ("failed", "timeout")
+                    or steps.get(one, {}).get("blocked_by")]
+        roots = {causes({"steps": steps}, one)[-1][0] for one in problems if causes({"steps": steps}, one)}
+        if not roots:
+            return "", ""
+        summary = "%d root failure(s) · %d blocked" % (len(roots), sum(bool(steps[one].get("blocked_by")) for one in problems))
+        labels = {node["id"]: node.get("label") or node["id"] for node in (self._graph or {}).get("nodes", [])}
+        return summary, "\n".join(labels.get(root, root) + ": " + steps[root].get("message", "") for root in sorted(roots))
 
     # -- problems ---------------------------------------------------------------
     def set_problems(self, problems):
@@ -2018,11 +2144,15 @@ class CycleCanvas(QGraphicsView):
         item = self._nodes.get(GROUP_PREFIX + name)
         if item is None:
             return
+        summary, detail = self._phase_causes(name)
+        item.node["cause_summary"] = summary
+        item.node["cause_detail"] = detail
         members = self._phases.get(name) or []
         item.set_status(phase_status([(self._statuses.get(one) or ("",))[0]
                                       for one in members]),
                         sum((self._statuses.get(one) or (None, 0, 0))[1] or 0
                             for one in members) or None)
+        item.setToolTip(item._tooltip())
 
     def update_graph(self, graph):
         """Take a fresh payload of the graph that is already drawn.
@@ -2285,8 +2415,11 @@ class CycleCanvas(QGraphicsView):
 
     def clear_status(self):
         self._statuses = {}
+        self._run_evidence = {}
         for item in self._nodes.values():
             item.clear_status()
+        for name in self._folded:
+            self._repaint_phase(name)
         self._repaint_frames()
 
     # -- looking at it --------------------------------------------------------
@@ -2719,6 +2852,14 @@ class CycleCanvas(QGraphicsView):
         being edited starts one, and the step itself stays where it is.
         """
         item = self.itemAt(event.position().toPoint())
+        if event.button() == Qt.LeftButton and isinstance(item, CycleNodeItem):
+            kind = item.restriction_at(item.mapFromScene(self.mapToScene(event.position().toPoint())))
+            if kind:
+                self.scene().clearSelection()
+                item.setSelected(True)
+                self.restriction_clicked.emit(item.step_id, kind, event.globalPosition().toPoint())
+                event.accept()
+                return
         if (event.button() == Qt.LeftButton and self._linking is not None
                 and isinstance(item, CycleEdgeItem)):
             end = item.end_at(self.mapToScene(event.position().toPoint()))

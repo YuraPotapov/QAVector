@@ -1,0 +1,25 @@
+{
+  "provider": "windows-isolated",
+  "bindings": [{"name": "project", "source": "C:/Projects/project-a", "target": "C:/Runtime/Workspace"}],
+  "layers": [
+    {
+      "name": "platform",
+      "policy": {
+        "filesystem": [{"binding": "project", "access": "read_write"}],
+        "network": {"mode": "full"},
+        "resources": {"cpu_cores": 2, "memory": {"bytes": 2147483648, "accounting": "committed"}, "processes": 64},
+        "tools": ["git", "python"]
+      }
+    },
+    {"name": "project", "policy": {"network": {"mode": "none"}}},
+    {
+      "name": "environment",
+      "policy": {
+        "filesystem": [{"binding": "project", "access": "read_only"}],
+        "resources": {"cpu_cores": 1, "processes": 32},
+        "tools": ["git"]
+      }
+    },
+    {"name": "node", "policy": {"resources": {"memory": {"bytes": 1073741824, "accounting": "committed"}}}}
+  ]
+}

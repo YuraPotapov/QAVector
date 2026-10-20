@@ -169,7 +169,8 @@ class ApprovalGate(CyclePlugin):
         answer = ask_mod.ask(
             question, detail=str(self.setting(step.settings, "detail", "") or ""),
             options=options, timeout_ms=timeout_ms,
-            step=step.id, cancel=context.cancel, revision=revision, auto=auto)
+            step=step.id, cancel=context.cancel, revision=revision, auto=auto,
+            progress=getattr(context, "progress", None))
 
         if answer.get("revision_requested"):
             if not revision.get("enabled"):

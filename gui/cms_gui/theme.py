@@ -523,6 +523,35 @@ QToolButton[hasmenu="true"] {{ padding-right: 24px; }}
 QToolButton[menuglyph="true"] {{ padding: 5px 9px; }}
 QToolButton[menuglyph="true"]::menu-indicator {{ image: none; width: 0; height: 0; }}
 
+/* Restrictions (restrictions.py). A quick toggle says its state in words and a
+   mark, never by colour alone: "Off" with a slashed glyph when access is cut, a
+   dashed edge while the change is not saved yet, and muted ink when an outer
+   level decided and this one cannot undo it. The tint only repeats what the
+   words already say. */
+QToolButton[variant="restriction"] {{
+    border: 1px solid transparent; color: {n700}; background: transparent;
+    font-family: {body}; font-size: 12px; font-weight: 500; letter-spacing: 0px;
+    padding: 1px 6px; min-height: 18px;
+}}
+QToolButton[variant="restriction"]:hover {{ background: {a100}; color: {a700}; }}
+QToolButton[variant="restriction"][state="off"] {{ color: {warn_ink}; background: {warn_tint}; }}
+QToolButton[variant="restriction"][state="off"]:hover {{ border-color: {warn}; }}
+QToolButton[variant="restriction"][state="locked"] {{ color: {n500}; }}
+QToolButton[variant="restriction"][pending="true"] {{ border: 1px dashed {accent}; }}
+QToolButton[variant="restriction"]:disabled {{ color: {n400}; background: transparent; }}
+/* The button beside a folder field: what the folder holds its programs to. */
+QPushButton[variant="restrictions"] {{
+    border: 1px solid {divider}; color: {n800}; background: transparent;
+    font-family: {body}; font-size: 12px; font-weight: 500; padding: 3px 9px;
+    text-align: left;
+}}
+QPushButton[variant="restrictions"]:hover {{ background: {a100}; color: {a700}; border-color: {a300}; }}
+QPushButton[variant="restrictions"][restricted="true"] {{ border-color: {accent}; color: {text}; }}
+QPushButton[variant="restrictions"]:disabled {{ color: {n500}; border-color: {n300}; }}
+QLabel[role="restrictionnote"] {{
+    font-size: 12px; color: {warn_ink}; background: {warn_tint}; padding: 6px 8px;
+}}
+
 /* Set on Save while the controls no longer match the saved configuration they
    came from. Last of the button rules on purpose: an attribute selector and a
    pseudo-class carry the same weight in Qt, so the later one is the one that

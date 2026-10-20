@@ -55,6 +55,11 @@ def app_root():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def execution_runtime_root():
+    """Application-owned native runtime resources, never the writable user store."""
+    return os.path.join(app_root(), "runtime")
+
+
 def install_config_path():
     """The installer's cms.ini, or "" when there is none to read.
 

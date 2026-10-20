@@ -10,9 +10,13 @@ artifact previews. Unused 3D and multimedia modules are excluded below.
 """
 
 import os
+import sys
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 GUI = os.path.join(ROOT, "gui")
+sys.path.insert(0, os.path.join(ROOT, "packaging"))
+from check_licenses import verify_licenses
+verify_licenses(os.path.join(ROOT, "licenses"))
 
 # Verified against every `from PySide6.X import` in gui/cms_gui: the front-end
 # needs WebEngineCore and WebEngineWidgets for HTML previews and QuickWidgets
@@ -44,7 +48,8 @@ excludes = [
 # is "cms_gui/assets" so it lands beside the package, where app._splash_file
 # looks for it (dirname(__file__) + "/assets") in the bundle exactly as it does
 # in a checkout.
-datas = [(os.path.join(GUI, "cms_gui", "assets"), os.path.join("cms_gui", "assets"))]
+datas = [(os.path.join(GUI, "cms_gui", "assets"), os.path.join("cms_gui", "assets")),
+         (os.path.join(ROOT, "licenses"), "licenses")]
 
 # The Windows executable's own icon. Without this PyInstaller embeds its
 # default, which is the Python logo - and that is what Windows then shows in the

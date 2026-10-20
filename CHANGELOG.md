@@ -16,6 +16,190 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Restrictions on a project folder** for Services and Cycle steps: network on
+  or off, the folder read-write, read-only or not at all (plus listed folders),
+  and CPU/memory/process limits. A services project or a cycle sets the
+  defaults; a service or a step can set its own. Programs keep their own paths
+  and the host's tools inside a sandbox that hides the rest of the home folder
+  and QAVector's own data; limits go through the session's service manager.
+  A restrictions button sits beside every project folder and service working
+  directory; quick Network/Files/Limits toggles on service rows, the project
+  header, cycle steps and the cycles toolbar show what is set and switch access
+  off or back on with one click (`switched_off` keeps what was configured).
+  Steps that cannot be held to a folder are marked as system steps. Folders
+  without restrictions run exactly as before; anything that cannot be enforced
+  refuses to start. Core commands: `--restrictions-check`,
+  `--restrictions-preview`, `--restricted-exec`. See docs/restrictions.md.
+- Scoped credentials for isolated runtime reviews: approved alias-to-Cycle-secret
+  references, exact node grants, no host environment fallback and ephemeral native
+  read-only files through a portable backend API. Provider protocol v2 carries
+  file locations; credential-free v1 remains supported. Native logs redact
+  literal and standard JSON-escaped echoes.
+  Git/shell nodes explicitly revoke inherited credentials. Network remains offline;
+  authorized provider egress is the next increment.
+- Isolated `agent.review` with explicit `framework: runtime`, a pinned JSON
+  provider and core-owned wrapper. Read-only mounts and bounded scratch are
+  mandatory; evidence is read inside the boundary. Validated reports, durable
+  call/clarification receipts and uncertain-call retry/Resume refusal share the
+  native lifecycle.
+  Native acceptance covers Git → deterministic local review fixture → unittest;
+  real remote providers and scoped credentials/egress remain separate work.
+- Isolated local `git.checkout` Cycle worker with a versioned core-owned artifact,
+  explicitly pinned Git/Python image, independent object copies, branch/commit
+  selection and exclusive atomic publication. Separate bounded staging cleanup
+  runs after native reap on success, Stop and timeout; uncertain cleanup blocks
+  retry/Resume.
+  Remote transports, shallow clones, submodules and native Windows Git execution
+  remain unavailable in this increment.
+- First isolated Cycle worker for `command.shell`: cycle environment and narrowing
+  node policies, portable native paths and deployment-owned shell selection,
+  policy-bound approvals/Resume/reuse, explicit environment, native stop/timeout
+  and cleanup, audited runtime receipts and redacted log artifacts, configured from
+  the command line. Unsupported plugins fail before host hooks can execute.
+- Strict image-based isolation for attached Python/shell Services, configured
+  from the command line (`execution` in services.json, approved deployment
+  revisions); the GUI starts such a service through the core and keeps its
+  configuration as it is. Running services retain their policy until restart;
+  uncertain cleanup blocks automatic restart. Native acceptance covers frozen core, GUI, RO writes, redacted logs,
+  stop/restart and supervisor crash recovery.
+- Scoped Linux secrets use sealed anonymous files and read-only mounts; explicit
+  environment values also use a sealed argument FD, keeping values out of the
+  launcher command line. Streaming logs mask both across read boundaries. Service
+  launches require durable policy/lifecycle/rejection audit and exclusive ownership.
+- ER-LIC-001: verified LGPL-2.1-or-later for the complete Bubblewrap executable,
+  original authorship and full license, corresponding source with standalone
+  rebuild scripts, libcap attribution, offline Help → About → Third-Party
+  Licenses, and mandatory source/frozen/installer license gates.
+- ER-BB-001 bundled Linux runtime: reviewed Bubblewrap source pin, deterministic
+  source build, private libcap/RUNPATH, source/license/CycloneDX inventory and
+  integrity/version checks from application resources. Bundled is the Linux
+  default; system isolation is an explicit provider. DEB/frozen staging and
+  clean native CI no longer require a target-system bubblewrap installation.
+- Portable Execution Runtime foundation: immutable deny-by-default policies,
+  narrowing resolution, explicit resource accounting, versioned environment
+  profiles and JSON `--runtime-*` diagnostics. Linux and Windows share a lazy
+  backend contract and portable contract CI.
+- First native Linux Runtime increment: explicitly approved hash-verified images,
+  pinned RO/RW mounts, offline namespace/seccomp boundary and supervised lifecycle
+  through the portable `ExecutionRuntime` API. Bounded redacted logs and policy
+  artifacts accompany each instance. CPU/charged-memory/task controls require
+  explicit cgroup delegation; unsupported guarantees refuse launch. Native
+  acceptance tests and a manual resource acceptance workflow are included.
+- Linux Runtime scratch capacity is enforced by a probed private tmpfs and shared
+  across descendants. The common API adds shutdown/recover; private leases and
+  pidfd/process identity checks protect crash cleanup, retaining incomplete evidence.
+  Operators can explicitly provision a content-pinned launcher without replacing
+  system packages. Native tests cover aggregate scratch overflow and host SIGKILL.
+- Successful cycle report nodes retain labelled snapshots and expose a separate
+  final JSON/HTML result after the terminal verdict. Final reports have their own
+  hashed receipts per continuation and preserve older reports across Resume.
+- Core execution modes **Auto / Important / Approve**, with per-node,
+  fingerprint-bound durable approvals before submission. Decline safely pauses;
+  mode changes require Pause and keep a policy journal. The GUI adds a mode
+  selector, approval cards, important-node markers/reasons and restored policy
+  history; `--cycle-mode` exposes the same policy through the CLI.
+- Cycles can declare execution phases with automatic, stop-after, explicit
+  approval and manual policies. Durable phase receipts link step evidence and
+  artifact hashes. Pause drains active steps without cancelling pending work;
+  the existing Run control becomes Pause / Continue / Run phase / Retry phase.
+  The global status strip opens the current run without duplicate action
+  buttons. Offline Resume remains a separate action.
+- `python -m cycle.phase_claim` prepares the reviewed six-phase Claim migration,
+  preserving existing commands, approvals and counters. Full Run pauses after
+  Prepare and Plan before implementation; Prepare task stays a bounded action.
+- Cycle runs open **Run → Cockpit** with Now, Also running, Next, Completed,
+  causal blockers and an honest external-change summary. The cycle header and
+  a global activity strip show the stable primary step, adaptive timer,
+  waiting/decision state and last activity; Graph and raw Output stay available.
+- Supervised elapsed-time segments survive replay and Resume. GUI confirmation
+  gaps and OS suspend do not become offline execution time. Periodic core
+  receipts are separate from UI ticks. Scenario child events provide live
+  diagnostic progress; Settings controls the inactivity threshold.
+- Cycles can declare bounded run actions. **Run ▾ → Prepare task** reads the
+  chosen Claim task and prepares its sandbox, then leaves a Task Brief with
+  workspace recreation evidence, branch and base/HEAD SHAs. It makes no agent
+  calls or baseline test runs. A base conflict leaves a blocked brief for
+  review. Resume stays within the action's original selection.
+- `python -m cycle.prepare_claim` creates a reviewable, comment-preserving
+  upgrade for the user's Claim cycle; applying requires its reviewed source
+  digest. `task.brief` writes JSON and HTML artifacts and a session summary.
+- Cycle runs record execution status, full/partial/resume scope, successful
+  selected-step coverage, outcome and descriptive phase in metadata, the run
+  index, session projections and events. Skipped steps carry reason codes and
+  the dependency that blocked them; old records are inferred when read.
+- `python -m cycle.baseline --runs-dir PATH` audits run history without changing
+  it, with optional anonymized reports and representative compatibility fixtures.
+
+### Changed
+- The image-based environment GUI (Execution environments page, environment
+  selection in Edit service and Cycle properties, five-tab permission editors)
+  is replaced by restrictions on a project folder; image-based deployments are
+  managed with the `--runtime-*` commands only.
+- The cycles toolbar's Properties and Restrictions open separate windows;
+  Properties no longer holds the execution environment.
+- A run that stops at a pause exits with code 0, and a successful run in which a
+  selected step was skipped for a reason other than its `if:` or being disabled
+  reads "Workflow incomplete" instead of "Passed". Both are deliberate.
+
+### Fixed
+- Two runs at once no longer put back each other's older row in the run index
+  (a finished run read as still going); index updates are serialised between
+  processes.
+- A periodic timing receipt that cannot be written (a file held for a moment by
+  an indexer or a virus scanner) no longer fails the run; it is written again
+  on the next tick.
+- Run from the Cycles page sends `--cycle-mode` only when the chosen mode differs
+  from the cycle's default, so a GUI paired with an older core can still run.
+- `system_load` is listed in the package's modules (installed builds imported it
+  without shipping it).
+- Resume preserves partial selections and explicit phase bounds, including
+  skipped/no-op phases and process interruption. Skipped phase approval gates
+  propagate skips without cancelling valid no-op branches.
+  Resumed partial work keeps a neutral partial outcome instead of claiming that
+  the whole workflow completed.
+- New implementation attempts use the task's admission budget on both Resume
+  and Retry phase; cached complete service responses do not spend it again.
+- Anonymized baseline exports use a fixed allow-list. Modern fixture schema 2
+  preserves execution semantics without task content, paths or approval inputs;
+  exported fixtures verify their own round trip.
+- Full runs expose the prepared Task Brief at the Prepare boundary. GUI process
+  completion preserves terminal milestones, and bounded replay restores task
+  identity, revisions and Resume provenance from durable records. Interrupted
+  waiting runs are distinguished from intentional safe Pause checkpoints.
+- Cockpit hides skipped nodes and the advancing Next queue during Stop, showing
+  **Stopping** until shutdown finishes, including a declined explicit gate with
+  `on_failure: stop`. Phase recovery and `on_failure: continue` keep their pending
+  work visible. The core still settles every node and records the original final
+  status; Graph and the journal retain their evidence.
+- The current cycle node stays visible in a prominent **Current step** card
+  above Cockpit history, with status, elapsed time and reported progress.
+  Reading earlier results does not hide the current node or force scrolling.
+- Cockpit keeps the visible text in place when Stop or Cancel removes approval
+  cards and buttons. Declining a node approval renders the paused state without
+  treating its status message as a list of active steps.
+- **Open phases / Fold phases** stays hidden in Cockpit while run events and
+  timer updates arrive; graph controls remain available in Graph and Design.
+- Cockpit approval cards show readable action summaries instead of raw JSON.
+  Jira previews focus on search scope and content; connection settings and
+  bounded redacted input JSON are available in collapsed **Technical details**.
+- Cockpit approvals use native **Approve / Cancel** buttons in the application
+  style instead of HTML action links, retaining each request's fingerprint.
+  **Enter / Esc** answer the current request while Cockpit has keyboard focus;
+  parallel requests use the focused row and held keys do not repeat decisions.
+- Cycle run status shares the title row without adding form height. Empty runs
+  read **No work found** without a repeated mode or zero completion timer; the
+  global activity strip hides while the current cycle is already open.
+- Claim's implementation attempt is charged directly before `agent.implement`,
+  after preflight and baseline. Preparing a task, a failed plan and a declined
+  preflight do not spend implementation attempts. Existing counters are kept.
+- A successful partial cycle run reads **Partial run completed · 1/68 steps**
+  in Subjects, Search and the explorer, with a neutral status. Full workflows
+  read **Workflow completed**; a proven empty Jira query reads **No work found**.
+  Borrowed results do not inflate partial-run coverage. Replay keeps the same
+  outcome as live events, and technical schema-1 status and exit codes stay
+  compatible.
+
 ## [0.16.29] - 2026-10-16
 
 ### Added

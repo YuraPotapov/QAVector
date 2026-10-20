@@ -60,7 +60,7 @@ from cycle import ask, checkpoints, conditions, model, registry as default_regis
 from cycle import interactions as interactions_mod
 from cycle.bus import NullObserver
 from cycle.context import CancelToken, Cancelled, RunContext
-from cycle import revisions, sessions
+from cycle import outcomes, revisions, sessions, timing, phases, execution_policy, admission, restrict
 from domain.cycle import (CANCELLED, CONTINUE, FAILED, MANUAL, PENDING, RUNNING,
                           SKIPPED, SUCCESS, TERMINAL, TIMEOUT, WAITING, CycleRun,
                           StepRun)
@@ -133,21 +133,48 @@ def submit_interaction(raw):
     return scheduler.inbox.put(request)
 
 
+def confirm_supervision(run_id):
+    """Record GUI liveness for elapsed-time accounting, without scheduling work."""
+    with _live_lock:
+        scheduler = _schedulers.get(run_id)
+    if scheduler is not None and scheduler.confirmations is not None:
+        scheduler.confirmations.confirm()
+
+
+def control_run(run_id, command, phase="", mode=""):
+    if not isinstance(run_id, str):
+        return "Control needs a run id."
+    with _live_lock:
+        scheduler = _schedulers.get(run_id)
+    return scheduler.control.submit(command, mode if command == "set_mode" else phase) if scheduler else "No such active run."
+
+
+def answer_node_approval(raw):
+    request, problem = execution_policy.parse_answer(raw)
+    if problem:
+        return problem
+    with _live_lock:
+        scheduler = _schedulers.get(request["run_id"])
+    return scheduler.approval_inbox.put(request) if scheduler else "No such active run."
+
+
 def run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
               jobs=None, registry=None, flows_dir=None, cycles_dir=None,
               trigger=MANUAL, run_id=None, environment=None, secrets=None,
-              memory_path="", only=None, reuse=None, resume=False, subject=None):
+              memory_path="", only=None, reuse=None, resume=False, subject=None, action="",
+              supervised=False, controlled=False, mode=None):
     with checkpoints.lock(workspace):
         return _run_cycle(cycle, workspace, variables_, observer, cancel, jobs,
                           registry, flows_dir, cycles_dir, trigger, run_id,
                           environment, secrets, memory_path, only, reuse, resume,
-                          subject)
+                          subject, action, supervised, controlled, mode)
 
 
 def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                jobs=None, registry=None, flows_dir=None, cycles_dir=None,
                trigger=MANUAL, run_id=None, environment=None, secrets=None,
-               memory_path="", only=None, reuse=None, resume=False, subject=None):
+               memory_path="", only=None, reuse=None, resume=False, subject=None, action="",
+               supervised=False, controlled=False, mode=None):
     """Run every step of ``cycle`` that should run. Returns a :class:`CycleRun`.
 
     Never raises for anything the run did - a step that fails, a plugin that
@@ -172,8 +199,24 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
     observer = observer or NullObserver()
     cancel = cancel or CancelToken()
     jobs = max(1, int(jobs or DEFAULT_JOBS))
+    if mode is not None and mode not in execution_policy.MODES:
+        raise checkpoints.CheckpointError("Execution mode must be auto, important or approve.")
+    phase_problems = phases.problems(cycle)
+    if phase_problems:
+        raise checkpoints.CheckpointError("; ".join(phase_problems))
 
     store = checkpoints.Store(workspace)
+    from .runtime import CycleRuntime
+    runtime_plan = CycleRuntime(cycle, registry, workspace)
+    store.runtime_bindings = runtime_plan.bindings
+    action_steps = None
+    if action:
+        if only or reuse or resume:
+            raise checkpoints.CheckpointError("A named action cannot be combined with selection, reuse or Resume.")
+        try:
+            action_steps = model.action_selection(cycle, action)
+        except model.CycleError as exc:
+            raise checkpoints.CheckpointError(str(exc)) from exc
     if resume:
         if only or reuse or variables_:
             raise checkpoints.CheckpointError("Resume cannot be combined with selection or variable overrides.")
@@ -187,7 +230,8 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                    cycle_id=cycle.id, cycle_name=cycle.title, trigger=trigger,
                    status=RUNNING, started_at=time.time(), workspace=workspace,
                    variables=dict(variables_ or {}),
-                   steps={step.id: StepRun(step.id, plugin=step.plugin)
+                   scope="partial" if only or action else "full",
+                   steps={step.id: StepRun(step.id, plugin=step.plugin, group=step.group, phase=step.phase)
                           for step in cycle.steps})
         if subject and subject.get("key") and getattr(cycle, "subject", None) is None:
             run.subject = {"kind": str(subject.get("kind") or "task"),
@@ -195,7 +239,26 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                            "title": str(subject.get("title") or ""),
                            "memory": "", "pin": str(subject.get("pin") or ""),
                            "step": ""}
-        borrowed = _borrow(run, cycle, only, reuse, registry)
+        if action:
+            run.action_id = action
+            run.action_definition = copy.deepcopy(cycle.actions[action])
+            for name, step_run in run.steps.items():
+                if name not in action_steps:
+                    step_run.status = SKIPPED
+                    step_run.reason_code = "not_selected"
+                    step_run.message = "not part of this run"
+                    step_run.ended_at = time.time()
+            borrowed = [s for s in run.steps.values() if s.status == SKIPPED]
+        else:
+            borrowed = _borrow(run, cycle, only, reuse, registry, runtime_plan.bindings)
+        run.selected_steps = [name for name, step_run in run.steps.items()
+                              if step_run.status == PENDING]
+
+    policy_change = execution_policy.initialize(store, run, cycle, mode, resume)
+    run.phase_definition = [phases.document(phase) for phase in cycle.phases]
+    run.plugin_names = {step.plugin: registry.get(step.plugin).metadata.name
+                        for step in cycle.steps if registry.get(step.plugin) is not None}
+    outcomes.refresh(run, model.to_graph(cycle))
 
     # What a person said to this run before it went down, if it did. Read
     # before anything starts, like the rest of the record: a history that
@@ -222,6 +285,7 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
     # changed halfway through a run would make its steps disagree.
     context.secrets = dict(secrets or {})
     context.checkpoints = store
+    context.runtime_plan = runtime_plan
     context.restored = {one.step_id for one in borrowed} if resume else set()
     if resume:
         context.earlier = dict(store.earlier)
@@ -235,12 +299,14 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
         # a queue read twice need not give the same task. Until it has, this
         # run is not about what the last attempt was about.
         run.subject = {}
-    scheduler = _Scheduler(cycle, run, context, observer, registry, jobs)
+    scheduler = _Scheduler(cycle, run, context, observer, registry, jobs, supervised, controlled)
     with _live_lock:
         _schedulers[run.id] = scheduler
     checkpoint_failed = False
     try:
         observer.run_start(run, model.to_graph(cycle), jobs)
+        if policy_change:
+            observer.policy_changed(run, policy_change)
         for step_run in borrowed:
             # Announced, so the canvas and the record show them as what they
             # are: already answered, and by which run. A borrowed step that
@@ -273,14 +339,21 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                 cancel.set(str(exc))
                 run.message = str(exc)
         _cleanup(context, cycle, observer)
+        scheduler.clock.close()
+        observer.run_timing(scheduler.clock.snapshot())
         with _live_lock:
             _live.pop(run.id, None)
             _schedulers.pop(run.id, None)
-        run.ended_at = time.time()
+        run.ended_at = None if scheduler.export_paused else time.time()
         run.duration_ms = prior_duration + (time.monotonic() - started) * 1000.0
-        run.status = _verdict(run)
+        run.status = WAITING if scheduler.export_paused else _verdict(run)
+        if not scheduler.export_paused:
+            run.paused, run.pause_requested = False, False
         if checkpoint_failed or run.message.startswith("Cannot save execution state"):
             run.status = FAILED
+            run.paused, run.pause_requested = False, False
+            run.phase_actions = {}
+            run.ended_at = time.time()
         if not run.message and run.status != SUCCESS:
             run.message = scheduler.why()
         # An execution receipt is mandatory; observers remain best effort.
@@ -288,6 +361,12 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
             store.save(run)
         except checkpoints.CheckpointError as exc:
             run.status, run.message = FAILED, str(exc)
+            run.paused, run.pause_requested = False, False
+            run.phase_actions = {}
+            run.ended_at = time.time()
+        else:
+            from cycle import final_report
+            final_report.publish(context)
         observer.run_end(run)
     return run
 
@@ -308,6 +387,11 @@ def _mode(cycle, run, store, resume, borrowed, only, reuse):
                 "source_run": run.id, "kept": kept,
                 "rerun": [{"step": name, "reason": store.reasons.get(name, "")}
                           for name in in_order if name in store.reasons]}
+    if run.action_id:
+        return {"mode": "action", "action_id": run.action_id, "resume_count": 0,
+                "source_run": "", "kept": [],
+                "rerun": [{"step": name, "reason": "part of %s" % run.action_id}
+                          for name in run.selected_steps]}
     if only:
         lent = {one.step_id for one in borrowed if one.source_run}
         left = {one.step_id for one in borrowed} - lent
@@ -358,7 +442,7 @@ def _must_run(cycle, registry):
     return model.downstream(cycle, fresh) if fresh else set()
 
 
-def _borrow(run, cycle, only, reuse, registry=None):
+def _borrow(run, cycle, only, reuse, registry=None, runtime_bindings=None):
     """Fill in the steps this run is not going to do. Returns what was filled.
 
     A step taken from an earlier run keeps that run's outputs and is marked
@@ -382,7 +466,7 @@ def _borrow(run, cycle, only, reuse, registry=None):
     wanted = {one for one in only if run.steps.get(one) is not None}
     earlier = (reuse.steps if reuse is not None else {}) or {}
     fresh = _must_run(cycle, registry)
-    current_definitions = checkpoints.signatures(cycle, run.variables, registry)
+    current_definitions = checkpoints.signatures(cycle, run.variables, registry, runtime_bindings)
     # What the selection actually reads. Anything else is borrowed only so the
     # record shows the last known state of the whole cycle.
     feeding = model.upstream(cycle, wanted)
@@ -416,11 +500,13 @@ def _borrow(run, cycle, only, reuse, registry=None):
             # the selection needs can land here; `missing_for` refuses the run
             # before it starts if it would.
             step_run.status = SKIPPED
+            step_run.reason_code = "not_selected"
             step_run.message = "not part of this run"
             step_run.ended_at = time.time()
             filled.append(step_run)
             continue
-        if was.definition_digest and was.definition_digest != current_definitions[step.id]:
+        if ((was.definition_digest and was.definition_digest != current_definitions[step.id]) or
+                (runtime_bindings and step.id in runtime_bindings and not was.definition_digest)):
             if step.id in feeding:
                 raise checkpoints.CheckpointError(
                     "Saved settings for %s changed. Select that node explicitly to rerun "
@@ -429,6 +515,7 @@ def _borrow(run, cycle, only, reuse, registry=None):
             # settings is simply not shown as this run's - rather than refusing
             # to run a step that never looks at it.
             step_run.status = SKIPPED
+            step_run.reason_code = "not_selected"
             step_run.message = ("not part of this run; its last result was made "
                                 "with settings that have since changed")
             step_run.ended_at = time.time()
@@ -442,6 +529,7 @@ def _borrow(run, cycle, only, reuse, registry=None):
         step_run.outputs = dict(was.outputs or {})
         step_run.artifacts = list(was.artifacts or [])
         step_run.metrics = dict(was.metrics or {})
+        step_run.runtime = copy.deepcopy(was.runtime)
         step_run.attempts = was.attempts
         step_run.started_at = was.started_at
         step_run.ended_at = was.ended_at
@@ -559,16 +647,24 @@ class _Scheduler(object):
     on a queue; they never write to the run record.
     """
 
-    def __init__(self, cycle, run, context, observer, registry, jobs):
+    def __init__(self, cycle, run, context, observer, registry, jobs, supervised=False, controlled=False):
         self.cycle = cycle
         self.run = run
         self.context = context
         self.observer = observer
         self.registry = registry
         self.jobs = jobs
+        self.controlled, self.export_paused = controlled, False
+        self.paused_at = None
+        self.confirmations = timing.Confirmations() if supervised else None
+        self.clock = timing.Clock(run, self.confirmations)
+        self.activity = context.activity = timing.Activity()
+        self.last_receipt = time.monotonic()
 
         self.steps = {step.id: step for step in cycle.steps}
         self.done = queue.Queue()
+        self.control = phases.Control(lambda: self.done.put(_WAKE))
+        self.phases = phases.Phases(self)
         self.inflight = {}                    # step id -> (token, deadline)
         #: Steps that asked to be come back to: step id -> monotonic seconds.
         #: Not in flight and not finished - the third thing a step can be.
@@ -578,6 +674,7 @@ class _Scheduler(object):
         #: whole timeout back each time, or `timeout:` would stop bounding it.
         self.deadlines = {}                   # step id -> monotonic, or None
         self.begun = {}                       # step id -> monotonic
+        self.execution_inputs = {}           # settings and definition used by a started turn
         self.waited = {}                      # step id -> how many times
         self.groups = {}                      # concurrency group -> semaphore
         #: Steps past their deadline whose person has been asked whether to
@@ -594,6 +691,9 @@ class _Scheduler(object):
         self.interactions = context.interactions or interactions_mod.RunInteractions(
             os.path.join(context.workspace, ".execution"), run.id, observer)
         self.inbox = _Requests(lambda: self.done.put(_WAKE))
+        self.approval_inbox = _Requests(lambda: self.done.put(_WAKE))
+        self.approvals = execution_policy.Approvals(self)
+        self.context.admission = admission.Guard(context)
 
         # Three levels of token, and the middle one is the point. The run's own
         # token means "somebody stopped this run" and nothing else touches it,
@@ -608,21 +708,44 @@ class _Scheduler(object):
         pool = ThreadPoolExecutor(max_workers=self.jobs,
                                   thread_name_prefix="cycle")
         try:
-            self._submit(pool)
-            # `or self.waiting`: a run whose only remaining work is a step that
-            # asked to be come back to still has work. Without this the loop
-            # would fall out the moment nothing was in flight and the waiting
-            # step would be cancelled by _resolve_remaining, which is the exact
-            # opposite of what it asked for.
-            while self.inflight or self.waiting:
-                finished = self._take()
+            self._state("start")
+            while True:
+                self._apply_controls()
+                self._apply_approval_answers()
                 self._apply_requests()
-                if finished is None:
+                if self.stopping.is_set():
+                    self.run.paused, self.run.pause_requested = False, False
+                    self.control.requested = False
+                else:
+                    self.phases.before_submit()
+                    if self.control.requested and not self.run.pause_requested:
+                        self.pause_at("user_request", "Continue run")
+                    if self.run.pause_requested and not self.inflight and not self.run.paused:
+                        if any(step.status not in TERMINAL or step.status in (FAILED, TIMEOUT) for step in self.run.steps.values()):
+                            self._enter_pause()
+                        else:
+                            self.run.pause_requested = self.control.requested = False
+                if self.run.paused:
+                    if not self.controlled:
+                        self.export_paused = True
+                        break
+                else:
+                    self._submit(pool)
+                if not self.inflight and not self.waiting and not self.run.paused:
+                    if self.run.pause_requested:
+                        continue
+                    if self.approvals.pending() and not self.stopping.is_set():
+                        if not self.controlled:
+                            self.pause_at("approval_required", "Review node approval in a connected application")
+                            continue
+                    else:
+                        self.phases.refresh()
+                        break
+                finished = self._take()
+                if finished is not None:
+                    self._record(*finished)
+                if not self.run.paused:
                     self._enforce_deadlines()
-                    self._submit(pool)        # anything whose wait is over
-                    continue
-                self._record(*finished)
-                self._submit(pool)
         except KeyboardInterrupt:
             # Ctrl+C is a cancellation, not a crash. Caught here so the run
             # still gets its cleanup pass, its record and its verdict - the
@@ -635,6 +758,10 @@ class _Scheduler(object):
             self.stopping.set(str(exc))
             raise
         finally:
+            with self.control.lock:
+                self.control.closed = True
+            for request in self.approval_inbox.close():
+                self.observer.control_refused(self.run, "node_approval", "The run ended before this answer was processed.")
             # Not pool.shutdown(wait=True): a plugin that ignores its token
             # would hang the run for as long as it likes. Ask, wait a while,
             # then report what is still going rather than never returning.
@@ -652,7 +779,180 @@ class _Scheduler(object):
             finally:
                 pool.shutdown(wait=False)
                 self._drain()
-        self._resolve_remaining()
+        if not self.export_paused:
+            self._resolve_remaining()
+            self.phases.refresh()
+
+    def _state(self, action):
+        frontier = self.phases.frontier()
+        failed = frontier and any(self.run.steps[name].status in (FAILED, TIMEOUT) for name in self.phases.members(frontier))
+        self.run.phase_actions = {
+            "pause": not self.run.pause_requested,
+            "continue": self.run.paused and not failed and (not frontier or frontier.policy != "manual"),
+            "run": frontier.id if self.run.paused and frontier and not failed else "",
+            "retry": frontier.id if self.run.paused and failed else ""}
+        self.context.checkpoints.save(self.run)
+        self.observer.run_state(self.run, action)
+
+    def pause_at(self, reason, next_action):
+        if self.run.pause_requested:
+            return
+        self._timing()
+        with self.control.lock:
+            self.control.requested = True
+            self.run.pause_requested = True
+            self.run.pause_reason, self.run.next_action = reason, next_action
+        self.run.control_history.append({"action": "pause", "reason": reason, "at": time.time()})
+        self._state("pausing")
+
+    def _enter_pause(self):
+        self._timing()
+        self.phases.refresh()
+        self.run.paused, self.run.status = True, WAITING
+        self.paused_at = time.monotonic()
+        self.clock.tick()
+        self._timing(force=True)
+        self._state("paused")
+
+    def _continue(self, action):
+        self.clock.tick()
+        delay = time.monotonic() - self.paused_at
+        for mapping in (self.deadlines, self.waiting, self.begun):
+            for name, value in list(mapping.items()):
+                if value is not None:
+                    mapping[name] = value + delay
+        with self.control.lock:
+            self.run.paused, self.run.pause_requested = False, False
+            self.run.status = RUNNING
+            self.run.pause_reason, self.run.next_action = "", ""
+            self.run.control_history.append(dict({"action": action, "at": time.time()},
+                **({"phase": self.phases.run_one} if self.phases.run_one else {})))
+            self._state(action)
+            self.control.requested = False
+        self.clock.tick()
+
+    def _apply_controls(self):
+        for action, phase_id in self.control.drain():
+            if action == "pause":
+                if not self.run.pause_requested:
+                    self.pause_at("user_request", "Continue run")
+                continue
+            problem = "Wait until the run reaches Paused." if not self.run.paused else ""
+            if action == "set_mode":
+                if not problem:
+                    if phase_id not in execution_policy.MODES:
+                        problem = "Execution mode must be auto, important or approve."
+                    else:
+                        receipt = execution_policy.change_mode(self.context.checkpoints, self.run, phase_id, "paused_change")
+                        if receipt:
+                            self.observer.policy_changed(self.run, receipt)
+                        self._state("policy_changed")
+                if problem:
+                    self.observer.control_refused(self.run, action, problem)
+                continue
+            if not problem:
+                problem = self._renew_claims()
+            if not problem and action == "retry_phase":
+                problem = self._retry_phase(phase_id)
+            elif not problem and self.cycle.phases:
+                frontier = self.phases.frontier()
+                if frontier and any(self.run.steps[name].status in (FAILED, TIMEOUT) for name in self.phases.members(frontier)):
+                    problem = "The failed phase needs Retry phase."
+                else:
+                    problem = self.phases.continue_phase(phase_id, one=action == "run_phase")
+            elif not problem and action == "run_phase":
+                problem = "This cycle declares no execution phases."
+            if problem:
+                self.observer.control_refused(self.run, action, problem)
+                continue
+            self._continue(action)
+
+    def _apply_approval_answers(self):
+        for request in self.approval_inbox.drain():
+            problem = "The run is stopping." if self.stopping.is_set() else self.approvals.answer(request)
+            if problem:
+                self.observer.control_refused(self.run, "node_approval", problem)
+
+    def _renew_claims(self):
+        from cycle import memory
+        for name, plugin, handle in self.context.held():
+            if plugin.metadata.id != "memory.claim":
+                continue
+            key, owner = handle
+            try:
+                settings = revisions.settings(self.steps[name], self.run, self._scope(), self.cycle)
+                ok, holder = memory.claim(key, owner, plugin.setting(settings, "seconds", memory.CLAIM_SECONDS), self.context.memory_path)
+            except (memory.MemoryError_, variables.ResolveError, ValueError) as exc:
+                return "Cannot renew the task claim: %s. No further steps were started." % exc
+            if not ok:
+                return "Task claim is now held by %s. No further steps were started." % holder
+        return ""
+
+    def _retry_phase(self, phase_id):
+        frontier = self.phases.frontier()
+        if not frontier or frontier.id != phase_id:
+            return "Retry must name the failed current phase."
+        members = set(self.phases.members(frontier))
+        roots = {name for name in members if self.run.steps[name].status in (FAILED, TIMEOUT, CANCELLED)}
+        if not roots:
+            return "There is no failed work to retry in this phase."
+        descendants = model.downstream(self.cycle, roots)
+        if any(self.run.steps[name].status == SUCCESS for name in descendants - roots):
+            return "Retry would invalidate successful downstream work. Review it before starting a new run."
+        changed = (descendants | members) & self.phases.selected
+        changed = {name for name in changed if self.run.steps[name].status != SUCCESS}
+        # Recheck and charge the existing task budget before another paid
+        # implementation attempt. Successful paid work is never invalidated.
+        budget = admission.refresh_nodes(self.cycle, self.run, changed, self.context.workspace)
+        if budget - self.phases.selected:
+            return "The implementation budget is outside this execution selection; start a bounded run including its admission steps."
+        changed.update(budget)
+        if any(name in changed for name, _plugin, _handle in self.context.held()):
+            return "A failed step still holds a managed resource. Stop the run and review that resource before retrying."
+        from pathlib import Path
+        for name in changed:
+            for receipt in Path(self.context.workspace, "steps", name, "operations").glob("*/receipt.json"):
+                if checkpoints._read(str(receipt)).get("state") != "complete":
+                    return "Uncertain operation in %s: reconcile it before retrying." % name
+        # A retry is a new plugin execution, with a matched cleanup/prepare
+        # lifecycle. Successful nodes and their resources remain untouched.
+        for name in changed:
+            plugin = self.prepared.get(name)
+            if plugin is not None:
+                try:
+                    settings = revisions.settings(self.steps[name], self.run, self._scope(), self.cycle)
+                    plugin.cleanup(self.context, _Step(self.steps[name], settings))
+                except Exception as exc:
+                    return "Cannot clean up %s before retry: %s" % (name, exc)
+                self.prepared.pop(name, None)
+        updated = copy.deepcopy(self.run)
+        updated.phase_retry_count += 1
+        updated.execution_bound = {"phase": phase_id, "action": "retry_phase"}
+        updated.control_history.append({"action": "retry_phase", "phase": phase_id, "steps": sorted(changed), "at": time.time()})
+        for name in changed:
+            old, step = updated.steps[name], self.steps[name]
+            self.context.earlier[name] = (self.run.id, copy.deepcopy(old))
+            updated.steps[name] = StepRun(name, plugin=step.plugin, group=step.group, phase=step.phase,
+                attempts=old.attempts, execution_generation=old.execution_generation + 1,
+                execution_segments=copy.deepcopy(old.execution_segments))
+        self.context.checkpoints.publish(updated, changed)
+        self.run.steps, self.run.phase_retry_count, self.run.control_history = updated.steps, updated.phase_retry_count, updated.control_history
+        self.run.execution_bound = updated.execution_bound
+        self.context.checkpoints.finish_transition()
+        for name in changed:
+            for mapping in (self.begun, self.deadlines, self.waited, self.waiting, self.extended):
+                mapping.pop(name, None)
+            self.context.restored.discard(name)
+            self.observer.step_end(self.run.steps[name])
+        self.context.restored.update(name for name, step in self.run.steps.items() if step.status == SUCCESS)
+        self.context.checkpoints.refreshed.update(changed)
+        self.context.admission = admission.Guard(self.context)
+        self.approvals.invalidate(changed, "phase retry starts a new execution")
+        phases_from_retry = {phase.id for phase in self.cycle.phases[self.cycle.phases.index(frontier):]}
+        self.phases.consumed.difference_update(phases_from_retry)
+        self.interactions.reoffer(changed)
+        self.phases.run_one = phase_id
+        return ""
 
     def close_messages(self):
         """Stop taking messages, and say so about everything still waiting.
@@ -713,6 +1013,7 @@ class _Scheduler(object):
 
     def _take(self):
         """One finished step, or None when it is time to check deadlines."""
+        self._timing()
         timeout = self._until_next_deadline()
         try:
             finished = self.done.get(timeout=timeout)
@@ -722,6 +1023,33 @@ class _Scheduler(object):
         # result.
         return None if finished is _WAKE else finished
 
+    def _timing(self, force=False):
+        self.clock.tick()
+        for name, update in self.activity.drain().items():
+            step = self.run.steps.get(name)
+            if step is not None:
+                step.last_activity_at = update["last_activity_at"]
+                if "progress" in update:
+                    step.progress = update["progress"]
+        for name, deadline in self.deadlines.items():
+            if self.run.paused or self.run.steps[name].status not in (RUNNING, WAITING):
+                continue
+            self.run.steps[name].timeout_remaining_ms = (
+                max(0, (deadline - time.monotonic()) * 1000) if deadline else None)
+        if force or time.monotonic() - self.last_receipt >= timing.RECEIPT_INTERVAL:
+            try:
+                self.context.checkpoints.timing(self.run)
+            except checkpoints.CheckpointError as exc:
+                if force:
+                    raise
+                # A periodic receipt only refreshes clocks; the next state change
+                # writes them again. A file held for a moment by an indexer or a
+                # virus scanner must not end a run that is otherwise fine.
+                log.warning("Timing receipt not saved, trying again in %ss: %s",
+                            timing.RECEIPT_INTERVAL, exc)
+            self.observer.run_timing(self.clock.snapshot())
+            self.last_receipt = time.monotonic()
+
     def _until_next_deadline(self):
         """How long the loop may sit on the queue before it has to look around.
 
@@ -729,6 +1057,8 @@ class _Scheduler(object):
         and a step whose wait is nearly over. Missing the second would leave a
         step that asked for one second sitting until the next idle tick.
         """
+        if self.run.paused:
+            return IDLE_TICK
         soonest = [deadline for _token, deadline in self.inflight.values()
                    if deadline is not None]
         soonest.extend(self.waiting.values())
@@ -787,7 +1117,7 @@ class _Scheduler(object):
 
         def asking():
             slot["answer"] = ask.ask(text, options=OVERDUE_OPTIONS,
-                                     step=step_id, cancel=question)
+                                     step=step_id, cancel=question, progress=self.context.progress)
 
         self.overdue[step_id] = (question, slot)
         self.inflight[step_id] = (token, None)
@@ -872,19 +1202,38 @@ class _Scheduler(object):
     # -- what may start -------------------------------------------------------
     def _submit(self, pool):
         """Start everything that can start now, and resolve everything that cannot."""
+        if self.control.requested and not self.stopping.is_set():
+            return
         self._wake()
         while True:
             started = False
             for step in self.cycle.steps:
                 if self.run.steps[step.id].status != PENDING:
                     continue
+                if not self.stopping.is_set():
+                    self.phases.before_submit()
+                    if self.control.requested:
+                        return
                 if step.id in self.inflight:
                     continue
                 verdict = self._readiness(step)
                 if verdict is _WAIT:
                     continue
                 if verdict is _GO:
-                    self._start(pool, step)
+                    with self.control.lock:
+                        if self.control.requested and not self.stopping.is_set():
+                            return
+                        try:
+                            settings = revisions.settings(step, self.run, self._scope(), self.cycle)
+                        except variables.ResolveError as exc:
+                            self._resolve(step, FAILED, str(exc))
+                            started = True
+                            continue
+                        if not self.approvals.allow(step, settings):
+                            continue
+                        if len(self.inflight) >= self.jobs:
+                            continue
+                        self._start(pool, step, settings)
                     started = True
                 else:
                     self._resolve(step, verdict[0], verdict[1])
@@ -913,8 +1262,12 @@ class _Scheduler(object):
 
     def _readiness(self, step):
         """``_GO``, ``_WAIT``, or ``(status, reason)`` for a step that will not run."""
+        if self.run.action_id and step.id not in self.run.selected_steps:
+            return SKIPPED, "not part of this run"
         if self.stopping.is_set():
             return CANCELLED, self.stopping.reason or "the run was stopped"
+        if self.control.requested or not self.phases.permits(step, execution=False):
+            return _WAIT
         if step.disabled:
             return SKIPPED, "disabled"
 
@@ -954,6 +1307,13 @@ class _Scheduler(object):
             except Exception as exc:          # noqa: BLE001 - a bad reference
                 return FAILED, "if: %s" % exc
 
+        if not self.phases.permits(step):
+            phase = next(phase for phase in self.cycle.phases if phase.id == step.phase)
+            gate = self.run.steps[phase.approval]
+            if gate.status in (SKIPPED, CANCELLED):
+                return SKIPPED, "%s %s" % (phase.approval, gate.status)
+            return _WAIT
+
         for name in ancestors & self.context.restored:
             previous = self.run.steps[name]
             if previous.status != SUCCESS or not previous.input_digest:
@@ -987,18 +1347,22 @@ class _Scheduler(object):
             self.observer.subject(self.run)
 
     def _scope(self):
-        return variables.scope(self.run, self.cycle, self.run.steps,
+        scope = variables.scope(self.run, self.cycle, self.run.steps,
                                env=self.context.environment,
                                secrets=getattr(self.context, "secrets", {}))
+        return self.context.runtime_plan.scope(scope)
 
     # -- running one ----------------------------------------------------------
-    def _start(self, pool, step):
+    def _start(self, pool, step, settings):
+        self._timing()
         plugin = self.registry.get(step.plugin)
+        self.execution_inputs[step.id] = (checkpoints.digest(settings), self.context.checkpoints.definitions[step.id])
         step_run = self.run.steps[step.id]
         first = step.id not in self.begun
         step_run.status = RUNNING
         if first:
             step_run.started_at = time.time()
+            self.clock.start(step_run)
 
         token = self.stopping.child()
         if first:
@@ -1009,26 +1373,30 @@ class _Scheduler(object):
             self.begun[step.id] = time.monotonic()
             self.deadlines[step.id] = ((time.monotonic() + step.timeout)
                                        if step.timeout else None)
+            step_run.timeout_remaining_ms = step.timeout * 1000 if step.timeout else None
         self.inflight[step.id] = (token, self.deadlines[step.id])
-
-        try:
-            settings = revisions.settings(step, self.run, self._scope(), self.cycle)
-        except variables.ResolveError as exc:
-            self.inflight.pop(step.id, None)
-            self._resolve(step, FAILED, str(exc))
-            return
 
         step_run.input_digest = checkpoints.digest(settings)
         step_run.definition_digest = self.context.checkpoints.definitions[step.id]
+        if step.plugin == "memory.remember" and admission.counter(self.cycle, step.id):
+            step_run.admission_reservation = admission.token(self.run, step)
         self.context.checkpoints.step(self.run, step_run)
         self.observer.step_start(step_run, attempt=step_run.attempts + 1)
         # Before the worker exists, so the first point it takes already knows
         # which execution it belongs to.
         self.interactions.begin(step.id, interactions_mod.execution_of(self.run, step.id),
                                 plugin)
-        pool.submit(self._work, step, plugin, settings, token)
+        # What the cycle's restrictions hold this step to, worked out here
+        # where the run's variables are safe to read. A folder that cannot be
+        # resolved fails the step; it never runs it unrestricted instead.
+        restriction, refused = None, None
+        try:
+            restriction = restrict.for_step(self.cycle, step, self._scope(), self.context.step_dir(step.id))
+        except Exception as exc:              # noqa: BLE001 - reported as the step's failure
+            refused = exc
+        pool.submit(self._work, step, plugin, settings, token, restriction, refused)
 
-    def _work(self, step, plugin, settings, token):
+    def _work(self, step, plugin, settings, token, restriction=None, refused=None):
         """One step, on a worker thread. Puts its result on the queue, always.
 
         Nothing here touches the run record: the scheduler owns that, and a
@@ -1042,12 +1410,19 @@ class _Scheduler(object):
         # reaches it. Without this a step's timeout would set a token nothing
         # was watching, and only stopping the whole run would ever be noticed.
         context = self.context.for_step(token)
+        # _StepView forwards assignments to shared context; deadlines are local.
+        context.__dict__["runtime_deadline"] = self.deadlines[step.id]
+        held = restrict.enter(restriction)
         try:
+            if refused is not None:
+                raise refused
+            plugin = self.context.runtime_plan.workers.get(step.id, plugin)
             if semaphore is not None:
                 # Held for the whole of execute: the point of a group is that
                 # two members are never both inside their plugin at once.
                 semaphore.acquire()
             resolved = _Step(step, settings)
+            context.progress(step.id, title=step.label or plugin.metadata.name or step.id)
             if step.id not in self.prepared:
                 # Once per step, not once per turn. `cleanup` is called exactly
                 # once for every step that reached `prepare`, so a step that
@@ -1095,6 +1470,7 @@ class _Scheduler(object):
         except Exception as exc:              # noqa: BLE001 - prepare, or the pool
             result, error = None, exc
         finally:
+            restrict.leave(held)
             if semaphore is not None:
                 semaphore.release()
             self.done.put((step, result, error, attempts,
@@ -1108,6 +1484,7 @@ class _Scheduler(object):
 
     # -- writing down what happened -------------------------------------------
     def _record(self, step, result, error, attempts, duration_ms, token):
+        self._timing()
         self.inflight.pop(step.id, None)
         asked = self.overdue.pop(step.id, None)
         if asked is not None:
@@ -1154,6 +1531,7 @@ class _Scheduler(object):
             return self._park(step, result)
 
         step_run.ended_at = time.time()
+        self.clock.finish(step_run)
         step_run.duration_ms = duration_ms
 
         if result is not None:
@@ -1162,11 +1540,15 @@ class _Scheduler(object):
             step_run.outputs = dict(result.outputs or {})
             step_run.metrics = dict(result.metrics or {})
             step_run.artifacts = list(result.artifacts or [])
+            if result.runtime:
+                step_run.runtime = copy.deepcopy(result.runtime)
             for artifact in step_run.artifacts:
                 self.observer.artifact(step.id, artifact)
         elif error is not None:
             step_run.status = FAILED
             step_run.message = "%s: %s" % (type(error).__name__, error)
+            if getattr(error, "runtime", None):
+                step_run.runtime = copy.deepcopy(error.runtime)
         else:
             step_run.status = CANCELLED
             step_run.message = token.reason or "stopped before it ran"
@@ -1209,7 +1591,10 @@ class _Scheduler(object):
             # `stopping`, not the run's own token: the run did not get
             # cancelled, a step failed under `on_failure: stop`. The verdict
             # reads FAILED from the step, which is the truer account.
-            self.stopping.set("%s %s" % (step.id, step_run.status))
+            if self.cycle.phases and not self.run.action_id:
+                self.pause_at("phase_failed", "Retry phase: " + step.phase)
+            else:
+                self.stopping.set("%s %s" % (step.id, step_run.status))
 
     def _park(self, step, result):
         """Set a step aside until the time it asked for. Not a verdict.
@@ -1222,6 +1607,8 @@ class _Scheduler(object):
         step_run = self.run.steps[step.id]
         step_run.status = WAITING
         step_run.message = result.message
+        step_run.progress = {"title": result.message, "state": "waiting"}
+        step_run.last_activity_at = time.time()
         step_run.outputs = dict(result.outputs or {})
         step_run.metrics = dict(result.metrics or {})
         if result.artifacts:
@@ -1246,9 +1633,14 @@ class _Scheduler(object):
 
     def _resolve(self, step, status, reason):
         """Give a step that never ran its verdict, and say why."""
+        self._timing()
         step_run = self.run.steps[step.id]
+        self.clock.finish(step_run, reason)
         step_run.status = status
         step_run.message = reason
+        if status == SKIPPED:
+            step_run.reason_code, step_run.blocked_by = outcomes.skip_reason(
+                step_run, self.run.steps)
         step_run.ended_at = time.time()
         self.context.checkpoints.step(self.run, step_run)
         self.interactions.finish(step.id, status, started=step.id in self.begun,
@@ -1260,7 +1652,10 @@ class _Scheduler(object):
         # waiting never goes through _record, so this is the only place that
         # would stop the run on its account.
         if status in (FAILED, TIMEOUT) and step.on_failure != CONTINUE:
-            self.stopping.set("%s %s" % (step.id, status))
+            if self.cycle.phases and not self.run.action_id:
+                self.pause_at("phase_failed", "Retry phase: " + step.phase)
+            else:
+                self.stopping.set("%s %s" % (step.id, status))
 
 
 class _Step(object):

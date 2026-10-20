@@ -29,6 +29,7 @@ import threading
 import time
 
 from cycle import workspace as workspace_mod
+from cycle import outcomes, timing
 from engine import events
 
 
@@ -64,6 +65,27 @@ class NullObserver(object):
 
     def step_stage(self, step_id, stage):
         """One stage of a step's inner work - what an agent is doing now."""
+
+    def step_progress(self, step_id, progress):
+        """Structured diagnostic progress; not a result receipt."""
+
+    def run_timing(self, snapshot):
+        """A durable, bounded execution-time snapshot."""
+
+    def run_state(self, run, action):
+        """Core-owned Pause/Continue state and available phase actions."""
+
+    def phase(self, run, receipt):
+        """A phase result was durably recorded."""
+
+    def control_refused(self, run, action, reason):
+        """A control action did not pass validation."""
+
+    def node_approval(self, run, receipt):
+        """A node approval request or decision was durably recorded."""
+
+    def policy_changed(self, run, receipt):
+        """A safe execution-mode change was durably recorded."""
 
     def artifact(self, step_id, artifact):
         """A file a step produced."""
@@ -127,18 +149,30 @@ class EventObserver(NullObserver):
         # opened or a run was started. There is no second model to drift.
         self._emit("cycle.run.start", cycle=run.cycle_id, name=run.cycle_name,
                    workspace=run.workspace, trigger=run.trigger, jobs=jobs,
-                   variables=dict(run.variables or {}), graph=graph)
+                   variables=dict(run.variables or {}), graph=graph,
+                   timing_version=1,
+                   control_version=1,
+                   plugin_names=dict(run.plugin_names),
+                   **({"selected_steps": list(run.selected_steps)}
+                      if run.selected_steps is not None else {}),
+                   **outcomes.refresh(run, graph))
 
     def step_start(self, step_run, attempt=1):
         self._emit("cycle.step.start", step=step_run.step_id,
-                   plugin=step_run.plugin, attempt=attempt)
+                   plugin=step_run.plugin, attempt=attempt,
+                   started_at=step_run.started_at, **timing.step_snapshot(step_run))
 
     def step_end(self, step_run):
         self._emit("cycle.step.end", step=step_run.step_id,
                    plugin=step_run.plugin, status=step_run.status,
                    duration_ms=round(step_run.duration_ms, 1),
                    attempts=step_run.attempts, message=step_run.message,
-                   outputs=dict(step_run.outputs or {}))
+                   outputs=dict(step_run.outputs or {}),
+                   started_at=step_run.started_at, ended_at=step_run.ended_at,
+                   source_run=step_run.source_run,
+                   **({"runtime": dict(step_run.runtime)} if step_run.runtime else {}),
+                   reason_code=step_run.reason_code, blocked_by=step_run.blocked_by,
+                   **timing.step_snapshot(step_run))
 
     def step_retry(self, step_run, attempt, delay, message=""):
         self._emit("cycle.step.retry", step=step_run.step_id, attempt=attempt,
@@ -149,17 +183,39 @@ class EventObserver(NullObserver):
                    plugin=step_run.plugin, status=step_run.status,
                    resume_in_ms=int(seconds * 1000),
                    message=step_run.message,
-                   outputs=dict(step_run.outputs or {}))
+                   outputs=dict(step_run.outputs or {}), **timing.step_snapshot(step_run))
 
     def step_skipped(self, step_run, reason):
         self._emit("cycle.step.skipped", step=step_run.step_id,
-                   status=step_run.status, reason=reason)
+                   status=step_run.status, reason=reason,
+                   reason_code=step_run.reason_code, blocked_by=step_run.blocked_by)
 
     def step_log(self, step_id, stream, lines):
         # Batched by the producer: one event per line would serialise every
         # other step behind this one on the stream's single lock.
         self._emit("cycle.step.log", step=step_id, stream=stream,
                    lines=list(lines))
+
+    def step_progress(self, step_id, progress):
+        self._emit("cycle.step.progress", step=step_id, **progress)
+
+    def run_timing(self, snapshot):
+        self._emit("cycle.run.timing", **snapshot)
+
+    def run_state(self, run, action):
+        self._emit("cycle.run.state", status=run.status, action=action, **outcomes.refresh(run))
+
+    def phase(self, run, receipt):
+        self._emit("cycle.phase", receipt=dict(receipt), **outcomes.refresh(run))
+
+    def control_refused(self, run, action, reason):
+        self._emit("cycle.control.refused", action=action, reason=reason)
+
+    def node_approval(self, run, receipt):
+        self._emit("cycle.node.approval", receipt=dict(receipt), **outcomes.refresh(run))
+
+    def policy_changed(self, run, receipt):
+        self._emit("cycle.policy.changed", receipt=dict(receipt), **outcomes.refresh(run))
 
     def step_stage(self, step_id, stage):
         # "phase", not "kind": every event on this stream already has a "kind"
@@ -177,6 +233,7 @@ class EventObserver(NullObserver):
 
     def run_mode(self, run, mode):
         self._emit("cycle.run.mode", mode=mode.get("mode", ""),
+                   **({"action_id": run.action_id} if run.action_id else {}),
                    resume_count=mode.get("resume_count", 0),
                    source_run=mode.get("source_run", ""),
                    kept=list(mode.get("kept") or []),
@@ -215,7 +272,7 @@ class EventObserver(NullObserver):
                    passed=tally.get("success", 0), failed=tally.get("failed", 0),
                    skipped=tally.get("skipped", 0),
                    cancelled=tally.get("cancelled", 0),
-                   timed_out=tally.get("timeout", 0))
+                   timed_out=tally.get("timeout", 0), **outcomes.refresh(run))
 
 
 class JsonlObserver(EventObserver):
@@ -320,6 +377,27 @@ class Tee(NullObserver):
 
     def step_stage(self, step_id, stage):
         self._fan("step_stage", step_id, stage)
+
+    def step_progress(self, step_id, progress):
+        self._fan("step_progress", step_id, progress)
+
+    def run_timing(self, snapshot):
+        self._fan("run_timing", snapshot)
+
+    def run_state(self, run, action):
+        self._fan("run_state", run, action)
+
+    def phase(self, run, receipt):
+        self._fan("phase", run, receipt)
+
+    def control_refused(self, run, action, reason):
+        self._fan("control_refused", run, action, reason)
+
+    def node_approval(self, run, receipt):
+        self._fan("node_approval", run, receipt)
+
+    def policy_changed(self, run, receipt):
+        self._fan("policy_changed", run, receipt)
 
     def artifact(self, step_id, artifact):
         self._fan("artifact", step_id, artifact)

@@ -46,6 +46,7 @@ Start, Stop and Restart to those, and the buttons say so.
 """
 
 import json
+import copy
 import os
 
 from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, QUrl, Signal
@@ -60,6 +61,7 @@ from .. import icons
 from .. import logsourcesfile as lsf
 from .. import criteria as criteria_mod
 from .. import runnertypes
+from .. import restrictions as restrictions_mod
 from .. import search
 from .. import services as svc
 from .. import servicesfile as sf
@@ -280,10 +282,10 @@ def _fit_list(view, rows, min_rows=1, max_rows=6):
     view.setFixedHeight(shown * row + extra + 2 * view.frameWidth() + 2)
 
 
-def _status_width(table):
+def _status_width(table, edited=True):
     """Room for the longest thing the status column will ever say, plus its dot."""
     metrics = table.fontMetrics()
-    widest = max(metrics.horizontalAdvance("%s (edited)" % text)
+    widest = max(metrics.horizontalAdvance(("%s (edited)" if edited else "%s") % text)
                  for text in STATUS_TEXT.values())
     return widest + 44
 
@@ -414,7 +416,7 @@ class EnvEditor(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.itemChanged.connect(lambda _item: self.changed.emit())
-        widgets.empty_note(self.table,
+        self.empty_note = widgets.empty_note(self.table,
                            "Nothing added - the service inherits this "
                            "application's own environment.")
         column.addWidget(self.table)
@@ -464,10 +466,14 @@ class EnvEditor(QWidget):
 class ProjectDialog(RowDialog):
     """Create or edit one project: what it is called and where it lives."""
 
-    def __init__(self, row=None, taken=(), parent=None):
+    def __init__(self, row=None, taken=(), parent=None, core=None):
         super().__init__("Project" if row else "New project", parent)
         self._row = (row or sf.ProjectRow()).copy()
         self._taken = {name for name in taken if name != self._row.name}
+        self._core = core
+        #: What this project's folder holds its services to; each service can
+        #: only narrow it.
+        self._restrictions = dict(self._row.extra.get("restrictions") or {})
 
         self.name = QLineEdit(self._row.name)
         self.name.setPlaceholderText("Storefront, Billing…")
@@ -480,21 +486,39 @@ class ProjectDialog(RowDialog):
         self.dir.setPlaceholderText("~/PycharmProjects/MyProject")
         self.dir.textChanged.connect(self._changed)
         browse = _ghost("Browse…", self._pick_dir)
+        self.restrict_button = restrictions_mod.FolderButton()
+        self.restrict_button.clicked.connect(self._edit_restrictions)
         self.column.addWidget(widgets.field(
-            "Directory", widgets.row(self.dir, browse),
+            "Project folder", widgets.row(self.dir, browse, self.restrict_button),
             "Where the project lives. Every service starts here unless it names a "
-            "directory of its own. It does not have to exist yet."))
+            "directory of its own. It does not have to exist yet. Restrictions hold "
+            "the project's services to it: network, files and limits."))
 
         self.finish_layout()
         self._changed()
 
     def _pick_dir(self):
-        path = widgets.pick_path(self, "Project directory",
+        path = widgets.pick_path(self, "Project folder",
                                  self.dir.text().strip() or "~", directory=True)
         if path:
             self.dir.setText(path)
 
+    def _edit_restrictions(self):
+        folder = os.path.abspath(os.path.expanduser(self.dir.text().strip()))
+        window = restrictions_mod.RestrictionsWindow(
+            self.name.text().strip() or "New project", folder, "project", self._restrictions,
+            core=self._core, probe={"folder": folder, "cwd": folder}, parent=self)
+        if window.exec() == QDialog.Accepted and window.saved is not None:
+            self._restrictions = window.saved
+            self._changed()
+        window.deleteLater()
+
     def _changed(self, *_args):
+        has_folder = bool(self.dir.text().strip())
+        self.restrict_button.set_state(
+            restrictions_mod.resolve([("project", self._restrictions)]), enabled=has_folder,
+            why="Set the project folder to restrict what its services may do.",
+            pending=self._restrictions != dict(self._row.extra.get("restrictions") or {}))
         self.show_problems(self._problems())
 
     def _problems(self):
@@ -507,14 +531,20 @@ class ProjectDialog(RowDialog):
         directory = row.dir.strip()
         if directory and os.path.isfile(os.path.expanduser(directory)):
             problems.append("%s is a file, not a directory." % directory)
+        problems.extend(restrictions_mod.problems(self._restrictions, "project"))
         return problems
 
     def value(self):
+        extra = dict(self._row.extra)
+        if self._restrictions:
+            extra["restrictions"] = copy.deepcopy(self._restrictions)
+        else:
+            extra.pop("restrictions", None)
         return sf.ProjectRow(name=self.name.text().strip(),
                              dir=self.dir.text().strip(),
                              expanded=self._row.expanded,
                              runners=[r.copy() for r in self._row.runners],
-                             extra=dict(self._row.extra),
+                             extra=extra,
                              added=self._row.added)
 
 
@@ -528,7 +558,8 @@ class RunnerDialog(RowDialog):
     """
 
     def __init__(self, runner_type, row=None, taken=(), siblings=(),
-                 project_dir="", parent=None):
+                 project_dir="", parent=None, core=None, project_restrictions=None,
+                 project_name=""):
         super().__init__(runner_type.label if row else "New %s"
                          % runner_type.label.lower(), parent)
         self._type = runner_type
@@ -538,6 +569,12 @@ class RunnerDialog(RowDialog):
                                          settings=runner_type.default_settings())).copy()
         self._taken = {name for name in taken if name != self._row.name}
         self._editors = {}
+        self._core = core
+        self._project_name = project_name
+        self._project_restrictions = dict(project_restrictions or {})
+        #: This service's own restrictions: they can only narrow the project's.
+        self._restrictions = dict(self._row.extra.get("restrictions") or {})
+        self.restrict_button = None
 
         self.name = QLineEdit(self._row.name)
         self.name.setPlaceholderText("App Server, PostgreSQL DB…")
@@ -595,8 +632,54 @@ class RunnerDialog(RowDialog):
                 "Off: closing the application asks first, then stops it. On: it "
                 "keeps running on its own and is picked up again next time.")
 
+        execution = self._row.extra.get("execution")
+        if isinstance(execution, dict):
+            # Configured with the command line (--runtime-deployment-*); kept
+            # exactly as it is, and not something this form edits.
+            strict = QLabel("Strict isolation from the command line: environment %r. It is kept as configured; "
+                            "edit it with the runtime commands." % execution.get("deployment", ""))
+            strict.setProperty("role", "hint")
+            strict.setWordWrap(True)
+            self.column.addWidget(strict)
+        self._ready = True
         self.finish_layout()
+        self._sync_restrictions()
         self._changed()
+
+    # -- restrictions --------------------------------------------------------------
+    def _restrictable(self):
+        return (self._type.id in restrictions_mod.SERVICE_TYPES and bool((self._project_dir or "").strip())
+                and "execution" not in self._row.extra)
+
+    def _sync_restrictions(self):
+        if self.restrict_button is None:
+            return
+        layers = [("project", self._project_restrictions), ("service", self._restrictions)]
+        if self._type.id not in restrictions_mod.SERVICE_TYPES:
+            why = "A container is started by its daemon, which cannot be held to a folder."
+        elif not (self._project_dir or "").strip():
+            why = "Set the project's folder (Edit project) to restrict its services."
+        else:
+            why = "Strict isolation is configured from the command line."
+        self.restrict_button.set_state(restrictions_mod.resolve(layers), enabled=self._restrictable(), why=why,
+                                       pending=self._restrictions != dict(self._row.extra.get("restrictions") or {}))
+
+    def _edit_restrictions(self):
+        folder = os.path.abspath(os.path.expanduser(self._project_dir))
+        try:
+            cwd = runnertypes.resolve_dir(self.value().settings, self._project_dir)
+            command = [str(part) for part in self._type.command(self.value().settings, cwd)]
+        except ValueError:
+            cwd, command = folder, []
+        window = restrictions_mod.RestrictionsWindow(
+            self.name.text().strip() or "New service", folder, "service", self._restrictions,
+            outer=[("project", self._project_restrictions)], outer_name="project", core=self._core,
+            probe={"folder": folder, "cwd": cwd, "command": command}, parent=self)
+        if window.exec() == QDialog.Accepted and window.saved is not None:
+            self._restrictions = window.saved
+            self._sync_restrictions()
+            self._changed()
+        window.deleteLater()
 
     def _build(self, spec):
         """One field of the generated form, by kind."""
@@ -621,6 +704,11 @@ class RunnerDialog(RowDialog):
             edit.setPlaceholderText(found or runnertypes.DEFAULT_PYTHON)
         if spec.kind in ("file", "dir"):
             browse = _ghost("Browse…", lambda s=spec: self._pick(s))
+            if spec.key == "dir" and self._type.id in restrictions_mod.SERVICE_TYPES:
+                # Beside the folder it runs in: what this service may reach from it.
+                self.restrict_button = restrictions_mod.FolderButton()
+                self.restrict_button.clicked.connect(self._edit_restrictions)
+                return widgets.field(spec.label, widgets.row(edit, browse, self.restrict_button), spec.hint)
             return widgets.field(spec.label, widgets.row(edit, browse), spec.hint)
         return widgets.field(spec.label, edit, spec.hint)
 
@@ -637,6 +725,8 @@ class RunnerDialog(RowDialog):
             edit.setText(path)
 
     def _changed(self, *_args):
+        if not getattr(self, "_ready", False):
+            return
         self.show_problems(self._problems())
 
     def _problems(self):
@@ -648,6 +738,7 @@ class RunnerDialog(RowDialog):
             problems.append("There is already a service called %r in this project."
                             % row.name)
         problems.extend(self._type.problems(row.settings))
+        problems.extend(restrictions_mod.problems(self._restrictions, "service"))
         seen = set()
         for index, one in enumerate(row.criteria, start=1):
             where = "Criterion %d (%s)" % (index, one.name or "unnamed")
@@ -676,11 +767,16 @@ class RunnerDialog(RowDialog):
             # so clearing a field still saves as a blank.
             if filled or spec.key in settings:
                 settings[spec.key] = filled
+        extra = copy.deepcopy(self._row.extra)
+        if self._restrictions:
+            extra["restrictions"] = copy.deepcopy(self._restrictions)
+        else:
+            extra.pop("restrictions", None)
         return sf.RunnerRow(name=self.name.text().strip(), type=self._type.id,
                             detach=self.detach.isChecked(), settings=settings,
                             depends=list(self.depends.checked()),
                             criteria=self.criteria.rows(),
-                            extra=dict(self._row.extra),
+                            extra=extra,
                             added=self._row.added)
 
 
@@ -1105,9 +1201,19 @@ class ProjectBlock(QWidget):
             (_ghost("Restart All", lambda: self.page.restart_project(
                 self.name, self.selected_runners(), confirm=True), ""), "Restart"),
         ]
+        self.project_toggles = None
+        if (self.project.dir or "").strip():
+            # The project's own level: switching network off here holds every
+            # service in it, and a service can only narrow what this allows.
+            self.project_toggles = restrictions_mod.QuickToggles()
+            self.project_toggles.toggle.connect(lambda kind: self.page.toggle_restriction(self.name, None, kind))
+            self.project_toggles.limits_requested.connect(lambda anchor: self.page.restriction_limits(self.name, None, anchor))
+            self.project_toggles.open_window.connect(lambda: self.page.edit_restrictions(self.name, None))
+            self._model_toggles(self.project_toggles)
+            self.disclosure.add_to_header(self.project_toggles)
         for widget in [button for button, _verb in self._service_buttons] + [
                 _ghost("Edit", lambda: self.page.edit_project(self.name),
-                       "Rename this project, or point it at another directory."),
+                       "Rename this project, point it at another folder, or restrict what its services may do."),
                 _ghost("Delete", lambda: self.page.delete_project(self.name)),
                 add]:
             self.disclosure.add_to_header(widget)
@@ -1242,15 +1348,60 @@ class ProjectBlock(QWidget):
         restart = _icon_button("refresh",
                                lambda: self.page.restart_runner(self.name, name),
                                "Restart")
-        strip = _actions(
-            toggle, restart,
+        quick = self._quick_toggles(row)
+        strip = _actions(toggle, restart, *([quick] if quick is not None else []),
             _cell_button("Console", lambda: self.page.open_console(self.name, row),
                          "What this service is printing."),
             _cell_button("Edit", lambda: self.page.edit_runner(self.name, row)),
             _cell_button("Copy", lambda: self.page.copy_runner(self.name, row)),
             _cell_button("Delete", lambda: self.page.delete_runner(self.name, row)))
         strip.toggle = toggle
+        strip.restrictions = quick
         return strip
+
+    def _quick_toggles(self, row):
+        """Network / Files / Limits for one service, or None where nothing can be
+        restricted: a project with no folder keeps the row it always had.
+
+        Inside a project that has one, a row that cannot be restricted (a
+        container, strict isolation from the command line) keeps the same
+        width empty, so the buttons after it stay in one column.
+        """
+        if self.project is None or not (self.project.dir or "").strip():
+            return None
+        quick = restrictions_mod.QuickToggles()
+        restrictable = row.type in restrictions_mod.SERVICE_TYPES and "execution" not in row.extra
+        if not restrictable:
+            policy = quick.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            quick.setSizePolicy(policy)
+            quick.hide()
+            return quick
+        quick.toggle.connect(lambda kind, n=row.name: self.page.toggle_restriction(self.name, n, kind))
+        quick.limits_requested.connect(lambda anchor, n=row.name: self.page.restriction_limits(self.name, n, anchor))
+        quick.open_window.connect(lambda n=row.name: self.page.edit_restrictions(self.name, n))
+        self._model_toggles(quick, row)
+        return quick
+
+    def _model_toggles(self, quick, row=None):
+        outer = [] if row is None else [("project", self.project.extra.get("restrictions") or {})]
+        own = (self.project.extra.get("restrictions") if row is None else row.extra.get("restrictions")) or {}
+        level = "project" if row is None else "service"
+        quick.set_model(outer, own, level, pending=self.page.pending_restrictions(self.name, None if row is None else row.name),
+                        limit_note=self.page.limit_note())
+
+    def refresh_restrictions(self, runner_name=None):
+        """Repaint the toggles after a save or a change, without a rebuild."""
+        if runner_name is None and getattr(self, "project_toggles", None) is not None:
+            self._model_toggles(self.project_toggles)
+        if self.runners is None:
+            return
+        for index, row in enumerate(self._runner_rows):
+            if runner_name is None or row.name == runner_name:
+                strip = self.runners.cellWidget(index, self.R_ACTIONS)
+                quick = getattr(strip, "restrictions", None)
+                if quick is not None and quick.isVisible():
+                    self._model_toggles(quick, row)
 
     def set_status(self, runner_name, status, detail="", stale=False):
         """Repaint one row's status without rebuilding the table.
@@ -1394,6 +1545,8 @@ class ServicesPage(QWidget):
         self._services_error = ""
         self._envs = []
         self._core = None
+        #: What this computer can enforce, asked of the core once it is known.
+        self._restriction_capabilities = None
         self._viewers = []          # open log windows, kept from being collected
         self._consoles = []         # ditto, for service consoles
         self._developer = False
@@ -1529,8 +1682,11 @@ class ServicesPage(QWidget):
 
     # -- wiring ---------------------------------------------------------------
     def set_core(self, core):
-        """The core runner, for opening a log. Without one the button says so."""
+        """The core runner, for opening a log and for starting a restricted
+        service through. Without one the button says so."""
         self._core = core
+        self._restriction_capabilities = None
+        self.supervisor.set_runtime_core(core)
 
     def set_environments(self, envs):
         """The env values from --describe, so a log is bound by picking not typing."""
@@ -1630,6 +1786,7 @@ class ServicesPage(QWidget):
         self._mark_clean()
         self._show_ok("Saved %s (previous kept as .bak)." % " and ".join(written))
         self.saved.emit()
+        return True
 
     def _confirm_overwrite(self, path, known, read):
         """Never write over a change somebody else made while this was open."""
@@ -1707,6 +1864,7 @@ class ServicesPage(QWidget):
             self._column.insertWidget(at, block)
 
         self.supervisor.sync(self._projects)
+        self.supervisor.set_runtime_control_paths([self._services_path, self._log_path])
         self._refresh_statuses()
         self._update_dirty()
 
@@ -1738,6 +1896,19 @@ class ServicesPage(QWidget):
     def _update_dirty(self):
         self._dirty = (self._baseline is not None
                        and self._comparable() != self._baseline)
+        saved = {}
+        if self._baseline is not None:
+            for project in json.loads(self._baseline)["projects"]:
+                for runner in project["runners"]:
+                    saved[(project["name"], runner["name"])] = (project["dir"], runner)
+        for project in self._projects:
+            for runner in project.runners:
+                service = self.supervisor.service(project.name, runner.name)
+                if service is not None:
+                    service.launch_allowed = saved.get((project.name, runner.name)) == (project.dir, runner.to_entry())
+        for block in self._blocks.values():
+            if block.project is not None:
+                block.refresh_restrictions()
         self.save_button.setProperty("dirty", "true" if self._dirty else "false")
         # A stylesheet rule keyed on a property is only re-read on re-polish.
         self.save_button.style().unpolish(self.save_button)
@@ -1864,7 +2035,7 @@ class ServicesPage(QWidget):
         return None
 
     def add_project(self):
-        dialog = ProjectDialog(taken=self.project_names(), parent=self)
+        dialog = ProjectDialog(taken=self.project_names(), parent=self, core=self._core)
         if dialog.exec() == QDialog.Accepted:
             # Appended, and shown at the top: the file keeps the order things
             # were written in, the page shows the order they arrived in.
@@ -1876,7 +2047,7 @@ class ServicesPage(QWidget):
         project = self._project(name)
         if project is None:
             return
-        dialog = ProjectDialog(project, taken=self.project_names(), parent=self)
+        dialog = ProjectDialog(project, taken=self.project_names(), parent=self, core=self._core)
         if dialog.exec() != QDialog.Accepted:
             return
         updated = dialog.value()
@@ -1984,7 +2155,9 @@ class ServicesPage(QWidget):
         dialog = RunnerDialog(runner_type,
                               taken=[r.name for r in project.runners],
                               siblings=[r.name for r in project.runners],
-                              project_dir=project.dir, parent=self)
+                              project_dir=project.dir, parent=self, core=self._core,
+                              project_restrictions=project.extra.get("restrictions"),
+                              project_name=project_name)
         if dialog.exec() == QDialog.Accepted:
             project.runners.append(_stamped(dialog.value()))
             self._rebuild()
@@ -2001,7 +2174,9 @@ class ServicesPage(QWidget):
             return
         dialog = RunnerDialog(kind, row, taken=[r.name for r in project.runners],
                               siblings=[r.name for r in project.runners],
-                              project_dir=project.dir, parent=self)
+                              project_dir=project.dir, parent=self, core=self._core,
+                              project_restrictions=project.extra.get("restrictions"),
+                              project_name=project_name)
         if dialog.exec() != QDialog.Accepted:
             return
         updated = dialog.value()
@@ -2060,8 +2235,142 @@ class ServicesPage(QWidget):
             self._show_ok("Starting %s…" % runner_name)
             self.supervisor.start(project_name, runner_name)
 
+    # -- restrictions ----------------------------------------------------------------
+    def _restrictions_of(self, project_name, runner_name):
+        """``(project, row, outer, own, level)`` for one level, or None."""
+        project = self._project(project_name)
+        if project is None:
+            return None
+        if runner_name is None:
+            return project, None, [], dict(project.extra.get("restrictions") or {}), "project"
+        row = project.runner(runner_name)
+        if row is None:
+            return None
+        return (project, row, [("project", dict(project.extra.get("restrictions") or {}))],
+                dict(row.extra.get("restrictions") or {}), "service")
+
+    def _set_restrictions(self, project_name, runner_name, raw, said=""):
+        """Put one level's restrictions in the page draft; Save writes them."""
+        found = self._restrictions_of(project_name, runner_name)
+        if found is None:
+            return
+        project, row, _outer, _own, _level = found
+        raw = restrictions_mod.clean(raw)
+        if row is None:
+            updated = project.copy() if hasattr(project, "copy") else project
+            if raw:
+                updated.extra["restrictions"] = raw
+            else:
+                updated.extra.pop("restrictions", None)
+            self._projects[self._projects.index(project)] = updated
+        else:
+            updated = row.copy()
+            if raw:
+                updated.extra["restrictions"] = raw
+            else:
+                updated.extra.pop("restrictions", None)
+            project.runners[project.runners.index(row)] = updated
+        self._rebuild()
+        self._validate()
+        if said:
+            self._show_ok(said)
+
+    def toggle_restriction(self, project_name, runner_name, kind):
+        """One click on Network or Files: off, or back to what was configured."""
+        found = self._restrictions_of(project_name, runner_name)
+        if found is None:
+            return
+        _project, _row, outer, own, level = found
+        changed = restrictions_mod.click(outer, own, level, kind)
+        if changed is None:
+            self.edit_restrictions(project_name, runner_name)
+            return
+        now = restrictions_mod.resolve(outer + [(level, changed)])
+        what = {"network": "Network", "files": "File access"}[kind]
+        state = "off" if now[kind] in ("off", "none") else "on"
+        who = project_name if runner_name is None else "%s / %s" % (project_name, runner_name)
+        running = any(service.is_running() for service in
+                      (self.supervisor.service(project_name, one.name) for one in self._project(project_name).runners
+                       if runner_name is None or one.name == runner_name) if service is not None)
+        self._set_restrictions(project_name, runner_name, changed,
+                               "%s turned %s for %s: %s. Save%s to apply." % (
+                                   what, state, who, restrictions_mod.summary(now),
+                                   ", then restart" if running else ""))
+
+    def edit_restrictions(self, project_name, runner_name):
+        found = self._restrictions_of(project_name, runner_name)
+        if found is None:
+            return
+        project, row, outer, own, level = found
+        folder = os.path.abspath(os.path.expanduser(project.dir))
+        probe = {"folder": folder, "cwd": folder}
+        if row is not None and row.runner_type is not None:
+            try:
+                cwd = runnertypes.resolve_dir(row.settings, project.dir)
+                probe = {"folder": folder, "cwd": cwd,
+                         "command": [str(part) for part in row.runner_type.command(row.settings, cwd)]}
+            except ValueError:
+                pass
+        window = restrictions_mod.RestrictionsWindow(
+            project_name if row is None else row.name, folder, level, own, outer=outer,
+            outer_name="project", core=self._core, probe=probe, parent=self)
+        if window.exec() == QDialog.Accepted and window.saved is not None and window.saved != own:
+            self._set_restrictions(project_name, runner_name, window.saved,
+                                   "Restrictions changed. Save to apply them.")
+        window.deleteLater()
+
+    def restriction_limits(self, project_name, runner_name, anchor):
+        found = self._restrictions_of(project_name, runner_name)
+        if found is None:
+            return
+        _project, _row, outer, own, level = found
+        available = (self._restriction_capabilities or {}).get("limits") or {}
+        restrictions_mod.limits_menu(
+            anchor, outer, own, level, available,
+            apply=lambda raw: self._set_restrictions(project_name, runner_name, raw,
+                                                     "Limits changed. Save to apply them."),
+            open_window=lambda: self.edit_restrictions(project_name, runner_name))
+        self._load_restriction_capabilities()
+
+    def pending_restrictions(self, project_name, runner_name):
+        """Which toggles differ from the saved file - drawn with a dashed edge."""
+        if self._baseline is None:
+            return ()
+        saved_project = next((one for one in json.loads(self._baseline)["projects"]
+                              if one.get("name") == project_name), None)
+        if saved_project is None:
+            return ("network", "files", "limits")
+        if runner_name is None:
+            saved = saved_project.get("restrictions") or {}
+            found = self._restrictions_of(project_name, None)
+        else:
+            saved_row = next((one for one in saved_project.get("runners", []) if one.get("name") == runner_name), {})
+            saved = saved_row.get("restrictions") or {}
+            found = self._restrictions_of(project_name, runner_name)
+        current = found[3] if found else {}
+        return restrictions_mod.pending(saved, current)
+
+    def limit_note(self):
+        """Why a limit cannot be set on this computer, once known."""
+        limits = (self._restriction_capabilities or {}).get("limits") or {}
+        return " ".join(sorted({one.get("reason", "") for one in limits.values() if not one.get("available", True)}))
+
+    def _load_restriction_capabilities(self):
+        if self._core is None or self._restriction_capabilities is not None:
+            return
+        core = self._core
+
+        def done(result, error):
+            if not error and result:
+                self._restriction_capabilities = result
+        from .. import background
+        background.run(lambda: restrictions_mod.capabilities(core), done, owner=self)
+
     def restart_runner(self, project_name, runner_name):
-        self.supervisor.restart(project_name, runner_name)
+        started = self.supervisor.restart(project_name, runner_name)
+        service = self.supervisor.service(project_name, runner_name)
+        if not started and service is not None and "execution" in service.runner.extra and not service.launch_allowed:
+            self._show_problem("Save the isolated service configuration before restarting it.")
 
     def open_console(self, project_name, row):
         service = self.supervisor.service(project_name, row.name)

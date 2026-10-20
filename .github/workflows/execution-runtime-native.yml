@@ -1,0 +1,46 @@
+name: Execution Runtime native Linux acceptance
+
+# Operator-triggered on a prepared runner, never privileged PR execution.
+on:
+  workflow_dispatch:
+    inputs:
+      cgroup_parent:
+        description: Existing delegated cgroup v2 parent for this runner user
+        required: true
+        type: string
+      bundle_directory:
+        description: Built QAVector runtime resources with pinned binary/libraries/manifests
+        required: true
+        type: string
+      frozen_core:
+        description: Optional freshly packaged core executable for Services, Cycle workers and crash acceptance
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native-linux:
+    runs-on: [self-hosted, linux, qavector-runtime]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install "pytest>=7,<10"
+      - name: Require namespace, seccomp, scratch and CPU/memory/task pressure acceptance
+        env:
+          QAVECTOR_TEST_CGROUP_PARENT: ${{ inputs.cgroup_parent }}
+          QAVECTOR_TEST_BUNDLE_DIRECTORY: ${{ inputs.bundle_directory }}
+          QAVECTOR_TEST_FROZEN_CORE: ${{ inputs.frozen_core }}
+        run: >-
+          python -m pytest tests/test_execution_runtime_linux.py -q
+          --linux-runtime-integration --linux-runtime-resource-integration
+          --linux-runtime-scratch-integration --linux-runtime-bundle-dir="$QAVECTOR_TEST_BUNDLE_DIRECTORY"
+          --linux-runtime-cgroup-parent="$QAVECTOR_TEST_CGROUP_PARENT"
+          --runtime-frozen-core="$QAVECTOR_TEST_FROZEN_CORE"
+          --junitxml=runtime-native.xml

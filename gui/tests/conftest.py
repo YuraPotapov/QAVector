@@ -19,6 +19,13 @@ if os.environ["QT_QPA_PLATFORM"] == "offscreen":
 # locations are redirected before Qt resolves them, which it does lazily on first
 # use, so this must happen at import time rather than in a fixture.
 _SANDBOX = tempfile.mkdtemp(prefix="cms-gui-tests-")
+
+
+def pytest_addoption(parser):
+    parser.addoption("--gui-runtime-frozen-core", default=None,
+                     help="Built core for real GUI/core/native execution runtime acceptance.")
+
+
 os.environ["XDG_CONFIG_HOME"] = os.path.join(_SANDBOX, "config")
 os.environ["XDG_DATA_HOME"] = os.path.join(_SANDBOX, "data")
 
@@ -31,6 +38,10 @@ os.environ["XDG_DATA_HOME"] = os.path.join(_SANDBOX, "data")
 os.environ["HOME"] = os.path.join(_SANDBOX, "home")
 os.environ["USERPROFILE"] = os.environ["HOME"]      # the same thing on Windows
 os.makedirs(os.environ["HOME"], exist_ok=True)
+# Source core defaults to its checkout, independently of HOME. Redirect its
+# store too before any core subprocess starts; inventory must use test data.
+os.environ["CMS_HOME"] = os.path.join(_SANDBOX, "control")
+os.makedirs(os.environ["CMS_HOME"], exist_ok=True)
 
 
 def _dispose(widget):

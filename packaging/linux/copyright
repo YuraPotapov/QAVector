@@ -15,3 +15,29 @@ License: various
  Node.js driver (Apache-2.0 and MIT), cryptography (Apache-2.0 or BSD-3-Clause),
  PyYAML (MIT). Their full licence texts are installed alongside the modules they
  belong to, under /opt/qavector.
+
+Files: opt/qavector/core/_internal/runtime/bin/bwrap
+ opt/qavector/core/_internal/runtime/sources/bubblewrap-*.tar.xz
+Copyright: Alexander Larsson, Rick Sladkey, Dan Howell, Giuseppe Scrivano,
+ and the other Bubblewrap contributors
+License: LGPL-2.1-or-later
+ The complete upstream license, notices, corresponding source archive and
+ build configuration are shipped under runtime/licenses and runtime/sources.
+
+Files: opt/qavector/core/_internal/runtime/lib/libcap.so.2
+Copyright: Andrew G. Morgan and the libcap contributors
+License: BSD-3-Clause
+ The complete libcap copyright and license notices are shipped as
+ runtime/licenses/libcap-copyright. Third-party components retain their own
+ licenses; QAVector's proprietary terms do not override those licenses.
+
+Files: opt/qavector/core/_internal/runtime/sources/build_bubblewrap.py
+ opt/qavector/core/_internal/runtime/sources/check_licenses.py
+ opt/qavector/core/_internal/runtime/sources/bubblewrap.lock.json
+ opt/qavector/core/_internal/runtime/sources/runtime-build-requirements.txt
+Copyright: 2026 Yurii Potapov
+License: LGPL-2.1-or-later
+ The corresponding build scripts and configuration may be copied, modified and
+ redistributed under this license. The complete license is shipped in
+ runtime/licenses/bubblewrap/COPYING; this exception does not relicense the
+ independent QAVector application.

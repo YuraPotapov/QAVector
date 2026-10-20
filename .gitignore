@@ -27,6 +27,9 @@ doc_labels.json
 # checkouts, and the container names beside them - copy services.example.json
 services.json
 
+# Control-plane execution profiles contain local paths and permission grants.
+execution-environments
+
 # Run artifacts: screenshots and full-page DOM dumps of whatever the flows visited,
 # so they carry the app's data. Regenerated on every --run-tests run.
 reports/
@@ -57,6 +60,8 @@ cyclememory.json
 # Build artifacts (setuptools drops these in the source tree; an *.egg-info left
 # behind also makes importlib.metadata report a version from an uninstalled tree)
 build/
+/runtime/
+/execution-deployments/
 dist/
 *.egg-info/
 

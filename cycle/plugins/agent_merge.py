@@ -30,7 +30,7 @@ push attempted - instead of taking the agent's own account.
 import os
 import subprocess
 
-from cycle import registry
+from cycle import registry, restrict
 from cycle.plugins import agent_cli, agent_run, agent_stream
 from cycle.plugins.agent import AgentReview, read_files
 from cycle.plugins.agent_edit import AgentEdit
@@ -199,7 +199,7 @@ class AgentMerge(CyclePlugin):
 
 def _git(where, *args):
     try:
-        done = subprocess.run(["git", "-C", where] + list(args),
+        done = restrict.run(["git", "-C", where] + list(args),
                               capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None

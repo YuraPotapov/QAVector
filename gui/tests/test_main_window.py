@@ -40,6 +40,50 @@ def _visible(window, key):
     return not window._nav_buttons[key].isHidden()
 
 
+def test_cycle_strip_survives_page_navigation_and_sends_supervision(window, monkeypatch):
+    sent = []
+    monkeypatch.setattr(window.process, "is_running", lambda: True)
+    monkeypatch.setattr(window.process, "send_command", lambda **message: sent.append(message) or True)
+    window.run_state.handle({"kind": "cycle.run.start", "cycle": "demo", "run_id": "strip", "timing_version": 1,
+                             "graph": {"nodes": [{"id": "baseline", "label": "Baseline tests"}]}})
+    window.run_state.handle({"kind": "cycle.step.start", "step": "baseline", "active_elapsed_ms": 0})
+    window.show_page("launch")
+    assert window.cycle_strip.isVisible()
+    assert "Baseline tests" in window.cycle_strip.summary.text()
+    monkeypatch.setattr(window.cycles, "current_id", lambda: "demo")
+    window.show_page("cycles")
+    assert window.cycle_strip.isHidden()
+    window.show_page("launch")
+    assert window.cycle_strip.isVisible()
+    window._confirm_cycle_supervision()
+    assert sent[-1] == {"command": "cycle.supervision", "run_id": "strip"}
+    window.run_state.handle({"kind": "cycle.run.end", "status": "success"})
+    assert not window.cycle_strip.isVisible()
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+
+
+def test_old_core_does_not_receive_new_supervision_commands(window, monkeypatch):
+    sent = []
+    monkeypatch.setattr(window.process, "is_running", lambda: True)
+    monkeypatch.setattr(window.process, "send_command", lambda **message: sent.append(message))
+    window.run_state.handle({"kind": "cycle.run.start", "cycle": "demo", "run_id": "old"})
+    window._confirm_cycle_supervision()
+    assert not sent
+    window.run_state.cycle_interrupted()
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+
+
+@pytest.mark.parametrize("action,command,phase", [("pause", "cycle.pause", ""), ("continue", "cycle.continue", ""),
+                                                ("run_phase", "cycle.phase.run", "plan"), ("retry_phase", "cycle.phase.retry", "plan")])
+def test_cycle_controls_stay_on_the_existing_process(window, monkeypatch, action, command, phase):
+    sent = []
+    monkeypatch.setattr(window.process, "send_command", lambda **message: sent.append(message) or True)
+    window.run_state.handle({"kind": "cycle.run.start", "run_id": "r", "control_version": 1})
+    window._control_cycle(action, phase)
+    assert sent == [dict(command=command, run_id="r", **({"phase": phase} if phase else {}))]
+    window.run_state.cycle_interrupted()
+
+
 def test_cycle_resume_passes_the_exact_displayed_run_id(window, monkeypatch):
     sent = []
     monkeypatch.setattr(window.process, "is_running", lambda: False)
@@ -49,6 +93,41 @@ def test_cycle_resume_passes_the_exact_displayed_run_id(window, monkeypatch):
     window.start_cycle_run("demo", "resume", "20260923-184505-demo")
     assert "--cycle-resume=20260923-184505-demo" in sent[0]
     assert not any(arg.startswith("--cycle-from=") for arg in sent[0])
+
+
+@pytest.mark.parametrize("step_events", [True, False])
+def test_prepared_outcome_survives_process_finished_and_replay(window, tmp_path, step_events):
+    import json
+
+    from cms_gui import cycleactivity, cyclereplay, cycleresult
+    from cms_gui.runner import RunState
+
+    brief = {"ready": True, "workspace": {"path": "/sandbox/QA-1"},
+             "git": {"head": "abc123", "base_commit": "def456"}}
+    projection = {"execution_status": "completed", "scope": "partial", "outcome": "task_prepared",
+                  "coverage": {"completed": 1, "selected": 1, "total": 2}, "current_phase": "prepare",
+                  "action_id": "prepare_task", "task_brief": brief}
+    events = [{"kind": "cycle.run.start", "run_id": "prepared", "cycle": "demo",
+               "graph": {"id": "demo", "nodes": [{"id": "brief", "plugin": "task.brief"},
+                                                      {"id": "build", "plugin": "command.shell"}]}}]
+    if step_events:
+        events.extend([{"kind": "cycle.step.end", "step": "brief", "status": "success"},
+                       {"kind": "cycle.step.skipped", "step": "build", "reason_code": "not_selected"}])
+    events.append({"kind": "cycle.run.end", "run_id": "prepared", "status": "success", **projection})
+    for event in events:
+        window.run_state.handle(event)
+    window._on_finished(0)
+    assert not window.run_state.cycle_running
+    assert {key: window.run_state.cycle[key] for key in projection} == projection
+    assert cycleactivity.header(window.run_state.cycle).startswith("Task prepared · Prepare only")
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "cycle.jsonl").write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+    replayed = RunState()
+    assert cyclereplay.restore(str(tmp_path), replayed)
+    for key in cycleresult.FIELDS + ("action_id", "task_brief"):
+        assert replayed.cycle[key] == window.run_state.cycle[key]
 
 
 @pytest.mark.parametrize("mode", ["only", "from"])
@@ -62,6 +141,18 @@ def test_cycle_partial_run_pins_the_displayed_source(window, monkeypatch, mode):
     window.start_cycle_run("demo", mode, "implement")
     assert "--cycle-%s=implement" % mode in sent[0]
     assert "--cycle-reuse=saved-demo" in sent[0]
+
+
+def test_prepare_action_passes_its_identity_without_borrowing_a_displayed_run(window, monkeypatch):
+    sent = []
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+    monkeypatch.setattr(window.process, "start", lambda argv, **kw: sent.append(argv))
+    monkeypatch.setattr(window.core, "is_configured", lambda: True)
+    monkeypatch.setattr(window.core, "argv", lambda *args: list(args))
+    window.run_state.cycle = {"cycle": "demo", "run_id": "old"}
+    window.start_cycle_run("demo", "action", "prepare_task")
+    assert "--cycle-action=prepare_task" in sent[0]
+    assert not any(arg.startswith(("--cycle-reuse=", "--cycle-from=", "--cycle-only=")) for arg in sent[0])
 
 
 def _menu_labels(window, title):

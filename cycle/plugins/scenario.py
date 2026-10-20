@@ -148,7 +148,9 @@ class ScenarioRun(CyclePlugin):
                     start_new_session=(os.name != "nt"))
             except OSError as exc:
                 return registry.failed("cannot run the launcher: %s" % exc)
-            code = self._wait(process, context)
+            progress = _Progress(events_path, context, step.id)
+            code = self._wait(process, context, progress)
+            progress.poll()
 
         summary = _read_events(events_path)
         artifacts = [
@@ -209,13 +211,15 @@ class ScenarioRun(CyclePlugin):
                         else _split(str(extra)))
         return argv
 
-    def _wait(self, process, context):
+    def _wait(self, process, context, progress=None):
         """Wait for the launcher, signalling it if the run is cancelled."""
         while True:
             try:
                 return process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
                 pass
+            if progress is not None:
+                progress.poll()
             if context.cancel.is_set():
                 return self._stop(process)
 
@@ -237,13 +241,52 @@ class ScenarioRun(CyclePlugin):
             return -1
 
 
+class _Progress:
+    """Tail bounded complete JSONL lines; report evidence, never an idle tick."""
+    def __init__(self, path, context, step):
+        self.path, self.context, self.step = path, context, step
+        self.offset = 0
+        self.buffer = b""
+        self.scenarios = {}
+
+    def poll(self):
+        try:
+            with open(self.path, "rb") as handle:
+                handle.seek(self.offset)
+                data = handle.read(65536)
+                self.offset = handle.tell()
+        except OSError:
+            return
+        if not data:
+            return
+        lines = (self.buffer + data).split(b"\n")
+        self.buffer = lines.pop()[-65536:]
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            session = str(event.get("session") or "scenario")
+            kind = event.get("kind")
+            if kind == "flow.start":
+                self.scenarios[session] = str(event.get("scenario") or event.get("id") or session)
+            if kind not in ("flow.start", "flow.end", "step.start", "step.end", "step.retry"):
+                continue
+            title = self.scenarios.get(session, session)
+            if kind.startswith("step."):
+                title += " · step %s · %s" % (event.get("index", "?"), event.get("status") or kind.split(".")[1])
+            else:
+                title += " · " + str(event.get("status") or "starting")
+            self.context.progress(self.step, title=title, heartbeat=True)
+
+
 def _read_events(path):
     """What the child's event stream says happened.
 
-    Read from the file afterwards rather than followed live, because this step
-    reports a result rather than narrating one - the GUI is already watching the
-    cycle's own stream, and the child's is kept as an artifact for anybody who
-    wants the detail.
+    Results are read from the whole journal after the child exits. The bounded
+    live progress reader is diagnostic and cannot supply a success receipt.
     """
     summary = {"passed": 0, "failed": 0, "run_dir": "", "scenarios": []}
     try:

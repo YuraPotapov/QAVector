@@ -98,6 +98,14 @@ $GuiBin  = Join-Path $Build "dist\gui\qavector-gui.exe"
 if (-not (Test-Path $CoreBin)) { Die "the core bundle was not produced" }
 if (-not (Test-Path $GuiBin))  { Die "the GUI bundle was not produced" }
 
+# All platforms ship the offline notices; Windows does not ship the Linux ELF.
+foreach ($Bundle in @("core", "gui")) {
+    $LicenseDir = Join-Path $Build "dist\$Bundle\_internal\licenses"
+    & $Py (Join-Path $PSScriptRoot "check_licenses.py") `
+        "--licenses=$LicenseDir"
+    if ($LASTEXITCODE -ne 0) { Die "mandatory third-party license materials are missing" }
+}
+
 # The .deb build chmod +x's playwright's node driver here. Windows has no
 # execute bit, so the equivalent is only to check it arrived: without it,
 # connect_over_cdp fails the first time a flow runs, long after the build.

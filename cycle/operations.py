@@ -41,7 +41,7 @@ class Operation:
         self.directory = context.step_dir(step.id, "operations",
                                           checkpoints.digest([name, request]))
         self.path = os.path.join(self.directory, "receipt.json")
-        self.epoch = getattr(context.run, "resume_count", 0)
+        self.epoch = getattr(context.run, "resume_count", 0) + getattr(context.run, "phase_retry_count", 0)
         self.record = checkpoints._read(self.path) if os.path.exists(self.path) else None
         self.store = checkpoints.Store(context.workspace)
 
@@ -64,6 +64,10 @@ class Operation:
                 "The service call in %s has an uncertain outcome. Inspect %s "
                 "before explicitly retrying; no new request was sent."
                 % (self.step.id, self.directory))
+        admission = getattr(self.context, "admission", None)
+        if admission is not None:
+            self.context.cancel.raise_if_set()
+            admission.before_call(self.step, self)
         if self.record:
             self.store.write(os.path.join(self.directory, "history",
                                            "%04d.json" % self.record.get("epoch", 0)),

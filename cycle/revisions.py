@@ -118,7 +118,10 @@ def apply(cycle, run, gate, request, store, inflight):
         "previous_plan": copy.deepcopy(run.steps[target].outputs)}
     for name in names:
         updated.steps[name] = StepRun(name, plugin=cycle.step(name).plugin,
-                                      attempts=run.steps[name].attempts)
+                                      attempts=run.steps[name].attempts,
+                                      group=cycle.step(name).group, phase=cycle.step(name).phase)
+        updated.steps[name].execution_generation = run.steps[name].execution_generation + 1
+        updated.steps[name].execution_segments = copy.deepcopy(run.steps[name].execution_segments)
     store.publish(updated, names)
     run.steps, run.revisions, run.revision_inputs = (
         updated.steps, updated.revisions, updated.revision_inputs)

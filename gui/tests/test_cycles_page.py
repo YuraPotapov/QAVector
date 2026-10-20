@@ -695,6 +695,8 @@ def test_a_run_started_elsewhere_draws_itself(page):
 
     state.handle({"kind": "cycle.run.start", "run_id": "r", "graph": DIAMOND})
     assert sorted(page.canvas.node_ids()) == ["a", "b", "c", "d"]
+    assert page.run_surface.currentWidget() is page.cockpit
+    assert "NEXT" in page.cockpit.browser.toPlainText()
 
 
 def test_a_step_s_output_is_shown_when_it_is_the_selected_one(opened):
@@ -807,7 +809,7 @@ def test_hard_run_menu_explicitly_starts_fresh_even_with_a_failed_run(opened):
     opened.run_requested.connect(lambda *args: requests.append(args))
     assert opened.run_button.popupMode() == QToolButton.MenuButtonPopup
     assert opened.run_button.property("hasmenu") == "true"
-    assert [action.text() for action in opened.run_button.menu().actions()] == [
+    assert [action.text() for action in opened.run_button.menu().actions() if action.isVisible()] == [
         "Start over (new run)"]
     opened.hard_run_action.trigger()
     assert requests == [("demo", "", "")]
@@ -4382,7 +4384,8 @@ def test_search_lists_cycles_their_runs_and_the_plan_with_their_states(opened):
     opened.set_listener(_Listening([("nightly", "watch")]))
     opened.subjects.set_sessions([
         {"id": "demo:QA-1", "cycle": "demo", "subject": {"key": "QA-1", "title": "Export"},
-         "status": "success", "runs": []},
+         "status": "success", "scope": "partial", "outcome": "partial_completed",
+         "coverage": {"completed": 1, "selected": 1, "total": 68}, "runs": []},
         {"id": "demo:QA-2", "cycle": "demo", "subject": {"key": "QA-2"},
          "running": True, "status": "running", "runs": []}])
     opened.subjects.set_planned([{"id": "p1", "cycle": "nightly", "key": "QA-3",
@@ -4391,7 +4394,8 @@ def test_search_lists_cycles_their_runs_and_the_plan_with_their_states(opened):
     assert hits["Nightly"].status == "Listening" and hits["Nightly"].live
     assert hits["Nightly"].detail == "Shop · nightly"
     assert hits["Demo cycle"].status == "" and not hits["Demo cycle"].live
-    assert (hits["QA-1  Export"].status, hits["QA-1  Export"].tone) == ("Passed", "accent")
+    assert (hits["QA-1  Export"].status, hits["QA-1  Export"].tone) == (
+        "Partial run completed · 1/68 steps", "neutral")
     assert hits["QA-2"].status == "Running" and hits["QA-2"].live
     assert hits["QA-3  Refund"].status == "Scheduled" and hits["QA-3  Refund"].live
 
@@ -4416,3 +4420,67 @@ def test_a_found_cycle_opens_and_a_found_run_is_picked_as_a_click_would(opened, 
     assert [one["id"] for one in picked] == ["demo:QA-1"]
     assert opened.subjects.picked()["id"] == "demo:QA-1"
     assert not opened.show_found(("session", "demo:QA-9"))
+
+
+def test_prepare_task_is_an_explicit_bounded_run_action_with_recreation_preview(opened, monkeypatch):
+    import copy
+    opened._open = copy.deepcopy(opened._open)
+    description = "Recreates the selected task sandbox; committed source branches are reused."
+    opened._open["cycle"]["actions"] = {"prepare_task": {
+        "title": "Prepare task", "description": description, "steps": ["a", "b"], "result": "b"}}
+    opened._update_buttons()
+    assert opened.prepare_action.isVisible() and opened.prepare_action.isEnabled()
+    questions, requests = [], []
+    monkeypatch.setattr("cms_gui.pages.cycles.widgets.confirm", lambda *a, **kw: (questions.append(a), True)[1])
+    opened.run_requested.connect(lambda *args: requests.append(args))
+    opened.prepare_action.trigger()
+    assert requests == [("demo", "action", "prepare_task")]
+    assert any(description in str(arg) for arg in questions[0])
+
+
+def test_prepare_task_is_hidden_for_cycles_without_the_action(opened):
+    assert not opened.prepare_action.isVisible()
+
+
+def test_prepare_task_is_hidden_while_a_run_is_active(opened):
+    import copy
+    opened._open = copy.deepcopy(opened._open)
+    opened._open["cycle"]["actions"] = {"prepare_task": {"steps": ["a"]}}
+    state = RunState()
+    state.cycle_running = True
+    opened.set_run_state(state)
+    opened._update_buttons()
+    assert not opened.prepare_action.isVisible() and not opened.prepare_action.isEnabled()
+
+
+def test_run_opens_cockpit_and_keeps_graph_available(opened):
+    state = RunState()
+    opened.set_run_state(state)
+    state.handle({"kind": "cycle.run.start", "cycle": "demo", "run_id": "cockpit", "graph": DIAMOND})
+    state.handle({"kind": "cycle.step.start", "step": "a", "started_at": 1000, "active_elapsed_ms": 8000})
+    settled()
+    assert opened.run_surface.currentWidget() is opened.cockpit
+    assert "A 00:08, Running" in opened.active_header.text()
+    assert opened.cockpit.current.title.text() == "A"
+    assert opened.cockpit.current.state.text() == "Running"
+    opened.run_view.set_current("Graph")
+    assert opened.run_surface.currentWidget() is opened.canvas
+    assert opened.canvas.status_of("a") == "running"
+    opened.context_switch.set_current("Design")
+    assert opened.run_surface.currentWidget() is opened.canvas
+    opened.show_cockpit()
+    assert opened.run_surface.currentWidget() is opened.cockpit
+
+
+def test_folded_phase_explains_root_failure_and_downstream_blocks(phased):
+    state = RunState()
+    phased.set_run_state(state)
+    state.handle({"kind": "cycle.run.start", "cycle": "demo", "graph": _phased()})
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "failed", "message": "Baseline tests failed"})
+    state.handle({"kind": "cycle.step.end", "step": "b", "status": "skipped", "reason_code": "blocked", "blocked_by": "a"})
+    phased.canvas.set_folded(["Take"])
+    summary = phased.canvas.node("group:Take")
+    assert summary.node["cause_summary"] == "1 root failure(s) · 1 blocked"
+    assert "Baseline tests failed" in summary.toolTip()
+    phased.canvas.clear_status()
+    assert not summary.node["cause_summary"]

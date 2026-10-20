@@ -27,6 +27,7 @@ from . import (background, commands, core as core_mod, cycleinteractions, cycler
                logsourcesfile as lsf, search, stageswindow, theme, titlebar,
                widgets)
 from .askbridge import AskBridge
+from .cyclecockpit import ActiveStrip
 from .cyclewatch import Listener
 from .cycleschedule import PlanScheduler
 from .loader import LoaderThread
@@ -34,6 +35,7 @@ from . import version as gui_version
 from .runner import LauncherProcess, RunState
 from .servicebridge import ServiceBridge
 from .settings import Settings
+from .thirdparty import AboutDialog
 from .pages.artifacts import ArtifactsPage
 from .pages.command import CommandPage
 from .pages.credentials import CredentialsPage
@@ -512,6 +514,13 @@ class MainWindow(QMainWindow):
             self.refresh_button, None, self.describe_label, widgets.vline(),
             self.developer_button, settings_button))
         column.addWidget(bar)
+        self.cycle_strip = ActiveStrip(self.run_state, self.settings, self,
+                                       navigation_needed=self._cycle_navigation_needed)
+        self.cycle_strip.opened.connect(self._show_cycle_cockpit)
+        column.addWidget(self.cycle_strip)
+        self._supervision_timer = QTimer(self)
+        self._supervision_timer.timeout.connect(self._confirm_cycle_supervision)
+        self._supervision_timer.start(1000)
 
         # --- body: rail + pages ---------------------------------------------
         body = QWidget()
@@ -659,8 +668,10 @@ class MainWindow(QMainWindow):
         # What a write answered with, already in the page's own list: only
         # what else reads the cycles needs telling, not a whole --describe.
         self.cycles.cycles_changed.connect(self._cycles_changed)
-        self.cycles.run_requested.connect(self.start_cycle_run)
+        self.cycles.run_requested.connect(self._start_page_cycle_run)
         self.cycles.stop_requested.connect(self.stop_run)
+        self.cycles.control_requested.connect(self._control_cycle)
+        self.cycles.approval_answered.connect(self._answer_cycle_node_approval)
         self.environments.directories_changed.connect(self._directories_changed)
         self.run_state.run_dir_known.connect(self.artifacts.set_run_dir)
         # Recorded the moment the run says where it is writing, not only when
@@ -716,6 +727,7 @@ class MainWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
         self._page_key = key
+        self.cycle_strip.refresh()
         self.settings.page = key
         # RUN follows whichever of the two launching pages you were last in, so
         # the toolbar button and Ctrl+Return never act on a page you left behind.
@@ -994,6 +1006,7 @@ class MainWindow(QMainWindow):
         # Scenarios reads and writes files through the core too, not just runs it.
         self.scenarios.set_core(self.core)
         self.cycles.set_core(self.core)
+        self.services.set_core(self.core)
         
         def _splash_msg(text):
             """Progress, for the splash only.
@@ -1683,7 +1696,17 @@ class MainWindow(QMainWindow):
                                    "id": request.get("id"),
                                    "reason": "The launcher is no longer accepting input."})
 
-    def start_cycle_run(self, cycle_id, how="", step="", variables=None, subject=None):
+    def _start_page_cycle_run(self, cycle_id, how="", step=""):
+        mode = self.cycles.requested_execution_mode()
+        # Only a choice the core would not make by itself is sent. Without the
+        # flag a new run takes the cycle's own default, and a core older than
+        # execution modes refuses the flag outright - so the ordinary Run keeps
+        # working against it. A resume always says which mode it wants.
+        if how != "resume" and mode == self.cycles.default_execution_mode():
+            mode = None
+        self.start_cycle_run(cycle_id, how, step, execution_mode=mode)
+
+    def start_cycle_run(self, cycle_id, how="", step="", variables=None, subject=None, execution_mode=None):
         """Run one cycle. Modelled on start_run, and deliberately separate.
 
         A scenario run is assembled from a page's form; a cycle run is one id
@@ -1691,9 +1714,8 @@ class MainWindow(QMainWindow):
         would mean a page-shaped branch inside start_run for something that
         shares only its guards.
 
-        It stays on the Cycles page rather than switching to Run: the canvas
-        already on screen *is* the run view, and sending somebody to a second
-        picture of it would be the one thing this feature is meant not to do.
+        It stays on the Cycles page, where Run Cockpit opens from the start
+        event. The Run Graph and raw output remain available there.
 
         ``how`` and ``step`` run part of it: "only" for that step by itself,
         "from" for it and everything that waits on it. Whichever steps are left
@@ -1711,6 +1733,8 @@ class MainWindow(QMainWindow):
         args = (["--cycle-run=" + cycle_id, "--events=-", "--control=-"]
                 + self.core.secrets_flag() + self.core.memory_flag()
                 + ["--cycle-var=%s=%s" % one for one in sorted((variables or {}).items())])
+        if execution_mode in ("auto", "important", "approve"):
+            args.append("--cycle-mode=" + execution_mode)
         if subject and subject.get("key") and not how:
             # Started from an offer or the plan: the run is about what was
             # offered, so its row keeps the name the plan gave it.
@@ -1721,6 +1745,8 @@ class MainWindow(QMainWindow):
                 args.append("--cycle-subject-pin=" + subject["pin"])
         if how == "resume" and step:
             args.append("--cycle-resume=" + step)
+        elif how == "action" and step:
+            args.append("--cycle-action=" + step)
         elif how and step:
             args.append("--cycle-%s=%s" % ("only" if how == "only" else "from",
                                            step))
@@ -1744,7 +1770,7 @@ class MainWindow(QMainWindow):
             "summary": cycle_id,
             "argv": argv,
             "display_command": self.core.display_argv(*args),
-            "config": {"cycle": cycle_id},
+            "config": {"cycle": cycle_id, **({"action": step} if how == "action" else {})},
         })
         self.run.run_started("cycle %s · events on stdout" % cycle_id)
         self.show_page("cycles")
@@ -1764,8 +1790,48 @@ class MainWindow(QMainWindow):
             return
             
         self._stopping = True
+        if self.run_state.cycle_running and self.run_state.cycle:
+            self.run_state.cycle["_stopping"] = True
+            self.run_state.changed.emit()
         self.status_right.setText("stopping — the launcher closes its windows first")
         self.process.stop()
+
+    def _show_cycle_cockpit(self):
+        self.show_page("cycles")
+        self.cycles.show_cockpit()
+
+    def _cycle_navigation_needed(self):
+        cycle = self.run_state.cycle or {}
+        return not (getattr(self, "_page_key", "") == "cycles" and self.cycles.current_id() == cycle.get("cycle"))
+
+    def _confirm_cycle_supervision(self):
+        cycle = self.run_state.cycle or {}
+        if self.run_state.cycle_running and cycle.get("timing_version") and self.process.is_running():
+            self.process.send_command(command="cycle.supervision", run_id=cycle.get("run_id"))
+
+    def _control_cycle(self, action, phase=""):
+        cycle = self.run_state.cycle or {}
+        if action == "set_mode":
+            if (self.run_state.cycle_running and cycle.get("paused") and cycle.get("execution_policy_version")
+                    and phase in ("auto", "important", "approve")):
+                if not self.process.send_command(command="cycle.mode.change", run_id=cycle.get("run_id"), mode=phase):
+                    self.status_right.setText("The launcher is no longer accepting control commands.")
+            return
+        commands = {"pause": "cycle.pause", "continue": "cycle.continue", "run_phase": "cycle.phase.run", "retry_phase": "cycle.phase.retry"}
+        if not self.run_state.cycle_running or not cycle.get("control_version") or action not in commands:
+            return
+        if not self.process.send_command(command=commands[action], run_id=cycle.get("run_id"), **({"phase": phase} if phase else {})):
+            self.status_right.setText("The launcher is no longer accepting control commands.")
+
+    def _answer_cycle_node_approval(self, request_id, fingerprint, approved):
+        cycle = self.run_state.cycle or {}
+        receipt = (cycle.get("node_approvals") or {}).get(request_id) or {}
+        if (not self.run_state.cycle_running or not cycle.get("execution_policy_version")
+                or receipt.get("status") != "pending" or receipt.get("fingerprint") != fingerprint):
+            return
+        if not self.process.send_command(command="cycle.node.approval.answer", run_id=cycle.get("run_id"),
+                                         request_id=request_id, fingerprint=fingerprint, approved=bool(approved)):
+            self.status_right.setText("The launcher is no longer accepting approval answers.")
 
     def _on_started(self, argv):
         self._set_running(True)
@@ -1775,6 +1841,10 @@ class MainWindow(QMainWindow):
     def _on_event(self, event):
         self.run_state.handle(event)
         kind = event.get("kind")
+        if kind == "cycle.control.refused":
+            self.status_right.setText(event.get("reason", "Control action refused."))
+        if kind == "cycle.run.start":
+            self._confirm_cycle_supervision()
         if kind == "service.request":
             # A scenario is blocked on the answer to this, so it goes first and
             # nothing else here is interested in it.
@@ -2008,7 +2078,7 @@ class MainWindow(QMainWindow):
         One application with one version: how it is split into processes inside
         is its own business, and not what someone opening About is asking.
         """
-        widgets.note(self, "About QAVector", "QAVector", self.about_text())
+        AboutDialog(self, description=self.about_text()).exec()
 
     def about_text(self):
         return ("QAVector - Explore. Build. Verify.\n\n"

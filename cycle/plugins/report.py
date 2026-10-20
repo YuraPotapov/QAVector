@@ -6,10 +6,9 @@ a cycle that wants no report simply has no report node, and one that wants two
 has two. The run's own ``metadata.json`` is written either way, so nothing is
 lost by leaving them out.
 
-Both read the same thing - the run record as it stands when the report step
-runs - so a report node placed last describes everything before it. A report
-node in the middle describes what has happened so far, which is occasionally
-what somebody wants and is never a lie about the rest.
+Both make explicitly labelled snapshots of the run when the report step runs.
+After the terminal verdict the executor publishes separate final reports with
+their own receipt, without rewriting the snapshot artifacts or their hashes.
 
 The HTML is written by hand, the way ``engine/flowfile.render`` writes YAML by
 hand. A templating dependency for one page would be paid for by every install
@@ -19,6 +18,7 @@ and every frozen build, and the page is a table.
 import html
 import json
 import os
+import time
 
 from cycle import registry
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
@@ -51,11 +51,14 @@ class _Report(CyclePlugin):
         return path
 
     def _result(self, context, step, path, kind):
+        from cycle.final_report import current_path
+
         size = os.path.getsize(path) if os.path.exists(path) else 0
         artifact = Artifact(kind, context.relative(path), step.id,
                             name=os.path.basename(path), bytes=size)
         return registry.PluginResult(
-            SUCCESS, outputs={"path": context.relative(path)},
+            SUCCESS, outputs={"path": context.relative(path),
+                              "final_path": current_path(kind)},
             artifacts=[artifact],
             message="wrote %s" % os.path.basename(path))
 
@@ -74,7 +77,8 @@ class ReportJson(_Report):
                   hint="Where to write it. A relative path goes in the run's "
                        "reports directory."),
         ),
-        outputs=(output("path", "string", "Where the report was written."),),
+        outputs=(output("path", "string", "Where the snapshot was written."),
+                 output("final_path", "string", "Final result, available after the run ends.")),
     )
 
     def execute(self, context, step):
@@ -82,9 +86,9 @@ class ReportJson(_Report):
 
         path = self._target(context, step, "run.json")
         document = run_mod.to_document(context.run)
-        # The step writing the report is itself still running, and saying so
-        # would be true but useless in a finished report. It is named instead.
         document["generated_by"] = step.id
+        document["report_kind"] = "snapshot"
+        document["snapshot_at"] = time.time()
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(document, handle, indent=2, ensure_ascii=False,
                       default=str)
@@ -108,23 +112,45 @@ class ReportHtml(_Report):
             field("title", "Title", "text",
                   hint="The heading. Blank uses the cycle's name."),
         ),
-        outputs=(output("path", "string", "Where the report was written."),),
+        outputs=(output("path", "string", "Where the snapshot was written."),
+                 output("final_path", "string", "Final result, available after the run ends.")),
     )
 
     def execute(self, context, step):
         path = self._target(context, step, "run.html")
         title = (str(self.setting(step.settings, "title") or "").strip()
                  or context.run.cycle_name or context.run.cycle_id)
+        from cycle.final_report import current_path
+
+        final = os.path.relpath(os.path.join(context.workspace, current_path("html")),
+                                os.path.dirname(path) or ".")
+        prefix = os.path.relpath(context.workspace, os.path.dirname(path) or ".")
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write(_page(context.run, title, step.id))
+            handle.write(_page(context.run, title, step.id, artifact_prefix=prefix,
+                                report_kind="snapshot", final_path=final))
         return self._result(context, step, path, "html")
 
 
 # -- the page -----------------------------------------------------------------
-def _page(run, title, generated_by):
+def _page(run, title, generated_by, artifact_prefix="..", report_kind="snapshot", final_path="", immutable_path=""):
     """The whole document. One string, no assets, nothing to fetch."""
     tally = run.tally()
     colour, word = LOOK.get(run.status, LOOK["pending"])
+    if run.status == SUCCESS:
+        labels = {"workflow_completed": "Workflow completed", "partial_completed": "Partial run completed",
+                  "task_prepared": "Task prepared", "no_work_found": "No work found",
+                  "no_work_performed": "No work performed", "workflow_incomplete": "Workflow incomplete"}
+        word = labels.get(run.outcome, "Execution completed")
+        if run.outcome != "workflow_completed":
+            colour = "#57606a"
+    if report_kind == "snapshot":
+        description = "Snapshot captured " + html.escape(_when(time.time())) + "; execution may still be in progress."
+        if final_path:
+            description += ' <a href="%s">Final result (available after the run ends)</a>.' % html.escape(final_path.replace(os.sep, "/"), quote=True)
+    else:
+        description = "Final execution result"
+        if immutable_path:
+            description += ' · <a href="%s">Immutable result for this execution</a>' % html.escape(immutable_path.replace(os.sep, "/"), quote=True)
     return _TEMPLATE % {
         "title": html.escape(title),
         "status_colour": colour,
@@ -138,12 +164,15 @@ def _page(run, title, generated_by):
         "passed": tally.get(SUCCESS, 0),
         "failed": tally.get(FAILED, 0) + tally.get(TIMEOUT, 0),
         "skipped": tally.get(SKIPPED, 0),
-        "rows": _rows(run),
+        "rows": _rows(run, artifact_prefix),
         "generated_by": html.escape(generated_by),
+        "report_description": description,
+        "report_source": ("Written by the %s step." % html.escape(generated_by)
+                          if report_kind == "snapshot" else "Published by the cycle executor."),
     }
 
 
-def _rows(run):
+def _rows(run, artifact_prefix=".."):
     """One table row per step, in the order the steps were written."""
     out = []
     for step_id, step in run.steps.items():
@@ -155,14 +184,14 @@ def _rows(run):
             % (html.escape(step_id), html.escape(step.plugin or ""), colour,
                html.escape(word), _duration(step.duration_ms),
                step.attempts or "", html.escape(step.message or "")))
-        details = _details(step)
+        details = _details(step, artifact_prefix)
         if details:
             out.append('<tr class="details"><td></td><td colspan="5">%s</td></tr>'
                        % details)
     return "\n".join(out)
 
 
-def _details(step):
+def _details(step, artifact_prefix=".."):
     """Outputs and artifacts, when a step had any worth showing."""
     parts = []
     if step.outputs:
@@ -172,8 +201,9 @@ def _details(step):
             for key, value in sorted(step.outputs.items())))
     if step.artifacts:
         parts.append("<ul>%s</ul>" % "".join(
-            '<li><a href="../%s">%s</a> <span class="dim">%s</span></li>'
-            % (html.escape(artifact.path),
+            '<li><a href="%s">%s</a> <span class="dim">%s</span></li>'
+            % (html.escape((artifact.path if os.path.isabs(artifact.path) else
+                            artifact_prefix.rstrip("/") + "/" + artifact.path).replace(os.sep, "/")),
                html.escape(artifact.name or os.path.basename(artifact.path)),
                _bytes(artifact.bytes))
             for artifact in step.artifacts))
@@ -215,7 +245,6 @@ def _duration(milliseconds):
 def _when(epoch):
     if not epoch:
         return ""
-    import time
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
 
 
@@ -266,6 +295,7 @@ _TEMPLATE = """<!doctype html>
 </style>
 <h1>%(title)s</h1>
 <div class="sub">run %(run_id)s</div>
+<p class="sub">%(report_description)s</p>
 
 <div class="facts">
   <div class="fact"><b>Result</b>
@@ -285,6 +315,6 @@ _TEMPLATE = """<!doctype html>
 %(rows)s
 </table>
 
-<footer>%(message)s<br>Written by the %(generated_by)s step.</footer>
+<footer>%(message)s<br>%(report_source)s</footer>
 </html>
 """

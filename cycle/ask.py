@@ -96,7 +96,7 @@ def abandon_all():
 
 
 def ask(question, detail="", options=(), timeout_ms=None, step="",
-        cancel=None, revision=None, auto="", text=None, choice=None):
+        cancel=None, revision=None, auto="", text=None, choice=None, progress=None):
     """Put a question to whoever is watching. Blocks until answered or not.
 
     Returns ``{answered, answer, who, message}``. ``answered`` is the only
@@ -147,7 +147,14 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
                 options=choices, timeout_ms=timeout_ms, revision=dict(revision or {}),
                 auto=str(auto or ""), **extra)
 
-    answered = _wait(slot[0], timeout_ms / 1000.0, cancel)
+    if progress is not None:
+        progress(step, title=str(question or ""), state=(
+            "waiting_for_input" if text is not None or choice is not None else "waiting_for_approval"))
+    try:
+        answered = _wait(slot[0], timeout_ms / 1000.0, cancel)
+    finally:
+        if progress is not None:
+            progress(step, state="running")
     with _lock:
         _pending.pop(request_id, None)
         answer = slot[1]
