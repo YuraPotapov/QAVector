@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.30] - 2026-10-20
+
 ### Added
 - **Restrictions on a project folder** for Services and Cycle steps: network on
   or off, the folder read-write, read-only or not at all (plus listed folders),
