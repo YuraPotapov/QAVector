@@ -8,6 +8,29 @@ strict command-line isolation both start programs through Bubblewrap. QAVector
 ships its own build of it; nobody installs the `bubblewrap` package, Docker or
 a compiler to use them.
 
+## pasta and pesto (network isolation)
+
+The same runtime ships **pasta** and **pesto** from the passt project
+(https://passt.top/passt/), which give an isolated service its network: they
+publish its ports on this computer, reach this computer's services or the
+internet when allowed, and change publications while it runs
+([restrictions.md](restrictions.md#an-isolated-network)).
+
+- Source pin: [passt.lock.json](../execution_runtime/backends/linux/passt.lock.json),
+  passt `2026_10_02.cba3570`, commit `cba357068dc586e7540971eb40bb56c5e62c4de1`,
+  source SHA-256 `aa75616cc43925f0bd6c05bcfbbaecd77397c03d7bd23591b34ef535be5dfcdc`.
+- License: **GPL-2.0-or-later** (two files also BSD-3-Clause). pasta and pesto are
+  separate programs QAVector starts as processes; QAVector's own terms do not
+  apply to them or restrict anyone's rights under the GPL. The verbatim license
+  texts and a notice are in `runtime/licenses/passt/`, shown offline in
+  **Help → About → Third-Party Licenses**; the unmodified source archive and the
+  build scripts are in `runtime/sources/`; `packaging/linux/copyright` names
+  them.
+- Built from that source with upstream's Makefile (`passt`, its x86_64 AVX2
+  variant, and `pesto`; no patches), checked for the glibc baseline and needing
+  only libc. The license gate (`check_licenses.py`) requires the passt notice,
+  both license texts and the source archive as it does Bubblewrap's.
+
 ## Which binary runs
 
 The resolver takes `runtime/` from `runtime_paths.app_root()` only - in a frozen
@@ -52,7 +75,8 @@ python3 packaging/build_bubblewrap.py --output=build/runtime
 python3 packaging/build_bubblewrap.py --verify=build/runtime
 ```
 
-`--archive=FILE` uses an offline source copy (its SHA-256 is still checked). The
+`--archive=FILE` and `--passt-archive=FILE` use offline source copies (their
+SHA-256 is still checked). The
 output must be a new staging directory. The builder never uses an installed
 bwrap and installs nothing on the host.
 

@@ -1052,7 +1052,8 @@ class CycleNodeItem(QGraphicsObject):
         shown, mode = state["network"]
         rect = self.restriction_rect("network")
         colour = ink("WARN" if mode == "off" else "NEUTRAL500" if mode == "locked" else "NEUTRAL700")
-        icons.paint(painter, "network-off" if shown == "Off" else "network", rect.adjusted(2, 2, -2, -2), colour)
+        icons.paint(painter, {"Off": "network-off", "Isolated": "network-isolated"}.get(shown, "network"),
+                    rect.adjusted(2, 2, -2, -2), colour)
         shown, mode = state["files"]
         rect = self.restriction_rect("files")
         colour = ink("WARN" if mode == "off" else "NEUTRAL500" if mode == "locked" else "NEUTRAL700")

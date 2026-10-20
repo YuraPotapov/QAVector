@@ -2,7 +2,11 @@
 # Copyright (C) 2026 Yurii Potapov
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # License text: licenses/bubblewrap/COPYING (../licenses/bubblewrap/COPYING in the source bundle).
-"""ER-LIC-001 release gate, also shipped with the corresponding native source."""
+"""ER-LIC-001 release gate, also shipped with the corresponding native source.
+
+Bubblewrap (LGPL-2.1-or-later) with its libcap, and passt's pasta and pesto
+(GPL-2.0-or-later): each verbatim license, notice and unmodified source.
+"""
 
 import argparse
 import hashlib
@@ -11,12 +15,37 @@ from pathlib import Path, PurePosixPath
 import tarfile
 
 
-def source_lock():
+def source_lock(name="bubblewrap.lock.json"):
     here = Path(__file__).resolve().parent
-    path = here.parent / "execution_runtime/backends/linux/bubblewrap.lock.json"
+    path = here.parent / "execution_runtime/backends/linux" / name
     if not path.is_file():
-        path = here / "bubblewrap.lock.json"
+        path = here / name
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def passt_lock():
+    """The reviewed pin of passt, whose pasta and pesto ship beside bwrap."""
+    return source_lock("passt.lock.json")
+
+
+PASST_DOCUMENTS = {"passt/NOTICE.md", "passt/GPL-2.0-or-later.txt", "passt/BSD-3-Clause.txt"}
+
+
+def _verify_passt(directory, entries):
+    pin = passt_lock()
+    passt = entries.get("passt", {})
+    if passt.get("version") != pin["version"] or passt.get("license") != pin["license"]:
+        raise ValueError("passt license catalog differs from the reviewed version/license")
+    if not PASST_DOCUMENTS <= set(passt.get("documents", [])):
+        raise ValueError("passt NOTICE and both complete license texts are mandatory")
+    for name, expected in pin["license_files_sha256"].items():
+        if digest(directory / "passt" / name) != expected:
+            raise ValueError("The complete upstream passt license must remain verbatim: " + name)
+    notice = (directory / "passt/NOTICE.md").read_text(encoding="utf-8")
+    for expected in (pin["version"], pin["upstream_commit"], pin["source_sha256"], pin["license"],
+                     "BSD-3-Clause", "https://passt.top/passt/", "Stefano Brivio", "Red Hat"):
+        if expected not in notice:
+            raise ValueError("passt attribution/source notice is incomplete: " + expected)
 
 
 def digest(path):
@@ -43,6 +72,7 @@ def verify_licenses(directory, pin=None, require_libcap=False):
                      "https://github.com/containers/bubblewrap", "Alexander Larsson", "LGPL 2.1"):
         if expected not in notice:
             raise ValueError("Bubblewrap attribution/source notice is incomplete: " + expected)
+    _verify_passt(directory, entries)
     for entry in catalog["components"]:
         if not entry.get("documents"):
             raise ValueError("Every component needs offline license documents")
@@ -85,15 +115,29 @@ def verify_runtime(directory):
                 for line in data.splitlines():
                     if "Copyright" in line and line.strip().lstrip("*").strip() not in authors:
                         raise ValueError("An original Bubblewrap copyright notice is missing")
-    for name in ("build_bubblewrap.py", "check_licenses.py", "bubblewrap.lock.json", "runtime-build-requirements.txt"):
+    passt = passt_lock()
+    archive = directory / ("sources/passt-%s.tar.xz" % passt["version"])
+    if digest(archive) != passt["source_sha256"]:
+        raise ValueError("Complete, unmodified passt source must accompany pasta and pesto")
+    with tarfile.open(archive) as source:
+        for name in passt["license_files_sha256"]:
+            shipped = source.extractfile("passt-%s/LICENSES/%s" % (passt["version"], name)).read()
+            if shipped != (directory / "licenses/passt" / name).read_bytes():
+                raise ValueError("Distributed passt license differs from corresponding source: " + name)
+    for name in ("build_bubblewrap.py", "check_licenses.py", "bubblewrap.lock.json", "passt.lock.json",
+                 "runtime-build-requirements.txt"):
         if not (directory / "sources" / name).is_file():
             raise ValueError("Corresponding build configuration is missing: " + name)
     if json.loads((directory / "sources/bubblewrap.lock.json").read_text(encoding="utf-8")) != pin:
         raise ValueError("Corresponding build source lock differs from the application")
+    if json.loads((directory / "sources/passt.lock.json").read_text(encoding="utf-8")) != passt:
+        raise ValueError("Corresponding passt source lock differs from the application")
     versions = json.loads((directory / "manifests/versions.json").read_text(encoding="utf-8"))
     libcap = next(entry for entry in catalog["components"] if entry["name"] == "libcap")
     if libcap["version"] != versions["libcap"]["version"]:
         raise ValueError("The libcap license catalog and binary manifest disagree")
+    if versions.get("passt", {}).get("version") != passt["version"]:
+        raise ValueError("The passt license catalog and binary manifest disagree")
     return catalog
 
 

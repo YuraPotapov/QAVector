@@ -9,8 +9,10 @@ restrictions runs exactly as it always has.
 
 Three independent dimensions, each with a plain vocabulary:
 
-- ``network``: ``on`` (the host's own network: ports, local databases) or
-  ``off``.
+- ``network``: ``on`` (the host's own network: ports, local databases),
+  ``isolated`` (a network of its own: its ports cannot clash with anything,
+  ``publish`` puts chosen ones on this computer, ``outbound`` lets it reach the
+  internet and ``host_loopback`` the services on this computer) or ``off``.
 - ``files``: ``all`` (no file restrictions), or the program is confined to the
   project folder - ``read_write``, ``read_only`` or ``none`` - plus the
   ``folders`` explicitly listed, while the system folders stay readable so
@@ -35,8 +37,11 @@ from pathlib import PurePosixPath
 
 from .errors import RuntimePolicyError
 
-KEYS = ("network", "files", "folders", "limits", "switched_off")
-NETWORK = ("on", "off")
+KEYS = ("network", "outbound", "host_loopback", "publish", "files", "folders", "limits", "switched_off")
+NETWORK = ("on", "isolated", "off")
+#: The addresses a publication may bind without saying it means to be public.
+LOOPBACK = ("127.0.0.1", "::1")
+MAX_PUBLISH = 32
 #: Widest first: narrowing moves to the right.
 FILES = ("all", "read_write", "read_only", "none")
 ACCESS = ("read_write", "read_only")
@@ -93,8 +98,15 @@ def parse(raw, field="restrictions", layer=""):
         network = {True: "on", False: "off"}.get(raw["network"], raw["network"]) \
             if isinstance(raw["network"], bool) else raw["network"]
         if network not in NETWORK:
-            _fail("Network is on or off.", field + ".network", layer)
+            _fail("Network is on, isolated or off.", field + ".network", layer)
         result["network"] = network
+    for key in ("outbound", "host_loopback"):
+        if key in raw:
+            if not isinstance(raw[key], bool):
+                _fail("%s is true or false." % key, field + "." + key, layer)
+            result[key] = raw[key]
+    if "publish" in raw:
+        result["publish"] = publications(raw["publish"], field + ".publish", layer)
     if "files" in raw:
         if raw["files"] not in FILES:
             _fail("Files is one of %s." % ", ".join(FILES), field + ".files", layer)
@@ -146,6 +158,45 @@ def parse(raw, field="restrictions", layer=""):
     return result
 
 
+def publications(raw, field="restrictions.publish", layer=""):
+    """Check a list of publications - ``{internal_port, host_port, host_ip,
+    public}`` - and return it normalised. ``host_port`` is a number or
+    ``"auto"``; ``host_ip`` defaults to 127.0.0.1, and any address that is not
+    loopback needs ``public: true``: an explicit yes to being reachable from
+    other computers."""
+    if not isinstance(raw, list) or len(raw) > MAX_PUBLISH:
+        _fail("Publish is a list of at most %d ports." % MAX_PUBLISH, field, layer)
+    cleaned, taken = [], set()
+    for one in raw:
+        if not isinstance(one, dict) or set(one) - {"internal_port", "host_port", "host_ip", "public"} \
+                or "internal_port" not in one:
+            _fail("Each publication has an internal_port, and may have host_port, host_ip and public.", field, layer)
+        inner = one["internal_port"]
+        if type(inner) is not int or not 1 <= inner <= 65535:
+            _fail("internal_port is a port number, 1 to 65535.", field + ".internal_port", layer)
+        host = one.get("host_port", "auto")
+        if host != "auto" and (type(host) is not int or not 1 <= host <= 65535):
+            _fail("host_port is a port number or auto.", field + ".host_port", layer)
+        address = one.get("host_ip", "127.0.0.1")
+        if not isinstance(address, str) or not address.strip() or len(address) > 64:
+            _fail("host_ip is an address such as 127.0.0.1.", field + ".host_ip", layer)
+        public = one.get("public", False)
+        if not isinstance(public, bool):
+            _fail("public is true or false.", field + ".public", layer)
+        if address not in LOOPBACK and not public:
+            _fail("Publishing on %s makes the port reachable from other computers; say public: true to mean it."
+                  % address, field + ".public", layer)
+        key = (address, host) if host != "auto" else (address, "auto", inner)
+        if key in taken:
+            _fail("A host port is published twice.", field + ".host_port", layer)
+        taken.add(key)
+        entry = {"internal_port": inner, "host_port": host, "host_ip": address}
+        if public:
+            entry["public"] = True
+        cleaned.append(entry)
+    return cleaned
+
+
 def resolve(layers, project_folder="", home=None):
     """What a program actually gets, from the outermost layer inwards.
 
@@ -166,6 +217,7 @@ def resolve(layers, project_folder="", home=None):
     home = home or os.path.expanduser("~")
     project = folder_path(project_folder, home, "project_folder") if project_folder else ""
     network, files, folders, limits = "on", "all", [], {}
+    outbound, host_loopback, publish = False, False, []
     configured = {"network": "on", "files": "all"}
     switched = []
     provenance = {"network": "", "files": "", "folders": "", "switched_off": {}}
@@ -174,6 +226,12 @@ def resolve(layers, project_folder="", home=None):
         if "network" in layer:
             network = configured["network"] = layer["network"]
             provenance["network"] = name
+        if "outbound" in layer:
+            outbound, provenance["outbound"] = layer["outbound"], name
+        if "host_loopback" in layer:
+            host_loopback, provenance["host_loopback"] = layer["host_loopback"], name
+        if "publish" in layer:
+            publish, provenance["publish"] = layer["publish"], name
         if "files" in layer:
             files = configured["files"] = layer["files"]
             provenance["files"] = name
@@ -200,8 +258,12 @@ def resolve(layers, project_folder="", home=None):
     if files in ("all", "none"):
         folders = []
     folders = sorted(folders, key=lambda one: (len(PurePosixPath(one["path"]).parts), one["path"]))
-    return {"restricted": network == "off" or files != "all" or bool(limits),
+    isolated = network == "isolated"
+    return {"restricted": network != "on" or files != "all" or bool(limits),
             "network": network, "files": files, "folders": folders, "limits": limits,
+            # What an isolated network lets through; nothing for any other.
+            "outbound": isolated and outbound, "host_loopback": isolated and host_loopback,
+            "publish": publish if isolated else [],
             "switched_off": [one for one in SWITCHES if one in switched], "configured": configured,
             "project_folder": project, "provenance": provenance}
 
@@ -222,7 +284,16 @@ def summary(effective):
     """One short line for a button or a tooltip: what this program is held to."""
     if unrestricted(effective):
         return "Network on · No restrictions"
-    parts = ["Network off" if effective["network"] == "off" else "Network on"]
+    parts = [{"off": "Network off", "isolated": "Network isolated"}.get(effective["network"], "Network on")]
+    if effective["network"] == "isolated":
+        if effective.get("publish"):
+            parts.append("publishes " + ", ".join(
+                "%d" % one["internal_port"] if one["host_port"] == "auto" else
+                "%d as %d" % (one["internal_port"], one["host_port"]) for one in effective["publish"]))
+        if effective.get("outbound"):
+            parts.append("internet")
+        if effective.get("host_loopback"):
+            parts.append("this computer")
     if effective["files"] != "all":
         parts.append(_FILE_WORDS[effective["files"]])
         if effective["folders"]:

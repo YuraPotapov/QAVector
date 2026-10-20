@@ -3745,7 +3745,7 @@ def main():
     # a source checkout - see runtime_paths.ensure_user_data_root.
     runtime_paths.ensure_user_data_root()
     if len(sys.argv) > 1 and sys.argv[1].split("=", 1)[0] in (
-            "--restrictions-check", "--restrictions-preview", "--restricted-exec"):
+            "--restrictions-check", "--restrictions-preview", "--restricted-exec", "--network-ports"):
         # Before any parsing: what follows --restricted-exec's "--" is the
         # service's own command line, which is none of this parser's business.
         from execution_runtime.restricted_cli import main as restricted_main

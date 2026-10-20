@@ -26,7 +26,7 @@ KEEP_VENV=0
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
-for tool in python3 dpkg-deb fakeroot cc pkg-config readelf; do
+for tool in python3 dpkg-deb fakeroot cc make pkg-config readelf; do
   command -v "$tool" >/dev/null || die "$tool is not installed"
 done
 
@@ -62,13 +62,17 @@ fi
 mkdir -p "$BUILD"
 printf '%s\n' "$VERSION" > "$BUILD/VERSION"
 
-# ER-BB-001: compile the reviewed upstream source; no target-system bwrap dependency.
+# ER-BB-001: compile the reviewed upstream sources (Bubblewrap, and passt's pasta
+# and pesto); no target-system bwrap or pasta dependency.
 say "Building the bundled Linux runtime"
 "$VENV/bin/python" -m pip install -q -r "$ROOT/packaging/runtime-build-requirements.txt"
 NATIVE_STAGE="$(mktemp -d "$BUILD/native-runtime.XXXXXX")"
 NATIVE_ARGS=(--output="$NATIVE_STAGE/runtime")
 if [ -n "${QAVECTOR_BWRAP_SOURCE_ARCHIVE:-}" ]; then
   NATIVE_ARGS+=(--archive="$QAVECTOR_BWRAP_SOURCE_ARCHIVE")
+fi
+if [ -n "${QAVECTOR_PASST_SOURCE_ARCHIVE:-}" ]; then
+  NATIVE_ARGS+=(--passt-archive="$QAVECTOR_PASST_SOURCE_ARCHIVE")
 fi
 PATH="$VENV/bin:$PATH" "$VENV/bin/python" "$ROOT/packaging/build_bubblewrap.py" "${NATIVE_ARGS[@]}"
 

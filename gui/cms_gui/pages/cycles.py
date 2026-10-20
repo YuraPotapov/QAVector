@@ -1436,7 +1436,7 @@ class CyclesPage(QWidget):
         button.setToolTip("The defaults for the steps working in %s: %s.%s" % (
             written, restrictions_mod.summary(effective), "\nNot saved yet." if pending else ""))
         shown, state, why = restrictions_mod.switch_state([], own, "cycle", "network")
-        icons.button(self.network_toggle, "network-off" if shown == "Off" else "network", shown)
+        icons.button(self.network_toggle, restrictions_mod.network_icon(shown), shown)
         self.network_toggle.setProperty("state", {"off": "off", "on": "on"}.get(state, "locked"))
         self.network_toggle.setProperty("pending", "true" if "network" in pending else "false")
         editable = self._can_edit_graph() and self._context == DESIGN

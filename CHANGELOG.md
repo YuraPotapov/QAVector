@@ -16,6 +16,27 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Isolated network for services** (docs/QAVector_Network_Isolation_and_Port_Publishing.md):
+  Network On / **Isolated** / Off. An isolated service has ports of its own -
+  two can both listen on 8069 - and reaches only what it is allowed: **published
+  ports** on this computer (`127.0.0.1:18069` -> its `8069`, a number or auto),
+  the **internet**, and **services on this computer**, each a switch. The
+  address is on the service's row while it runs, with Open, Copy, Unpublish and
+  Publish a port… - changed without restarting it; `--network-ports` does the
+  same from the command line. Publishing to other computers asks first and
+  needs Internet on. Cycles get it in a later stage, with publish steps.
+- **pasta and pesto** (the passt project, **GPL-2.0-or-later**) ship in the Linux
+  runtime beside Bubblewrap, built from a pinned, checksummed upstream source,
+  with their license texts and notice (Help -> About -> Third-Party Licenses),
+  the unmodified source and build scripts, and an entry in the package's
+  copyright file. The license gate requires all of it.
+
+### Changed
+- With the network Off (or Isolated) and Files on "No restrictions", a program
+  no longer sees this computer's local sockets - the session bus, a Docker
+  socket, the X display: `/run` and `/tmp/.X11-unix` are its own.
+
 ## [0.16.34] - 2026-10-20
 
 ### Changed

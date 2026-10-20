@@ -29,13 +29,16 @@ import os
 import subprocess
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMenu, QPushButton, QSizePolicy, QTableWidgetItem, QToolButton,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QMenu, QMessageBox, QPushButton, QSizePolicy, QTableWidgetItem, QToolButton,
                                QVBoxLayout, QWidget, QWidgetAction)
 
 from . import background, icons, widgets
 
-NETWORK = ("on", "off")
+NETWORK = ("on", "isolated", "off")
+NETWORK_SHORT = {"on": "On", "isolated": "Isolated", "off": "Off"}
+NETWORK_ICON = {"on": "network", "isolated": "network-isolated", "off": "network-off"}
+LOOPBACK = ("127.0.0.1", "::1")
 #: Widest first: narrowing moves to the right.
 FILES = ("all", "read_write", "read_only", "none")
 LIMITS = ("cpu_cores", "memory_mb", "processes")
@@ -102,6 +105,7 @@ def resolve(layers):
     controls; the core repeats it with the real paths before anything runs.
     """
     network, files, limits, folders, switched = "on", "all", {}, [], []
+    outbound, host_loopback, publish = False, False, []
     configured = {"network": "on", "files": "all"}
     decided = {"network": "", "files": ""}
     for level, raw in layers:
@@ -109,6 +113,12 @@ def resolve(layers):
         if "network" in raw and network_value(raw["network"]) in NETWORK:
             network = configured["network"] = network_value(raw["network"])
             decided["network"] = level
+        if isinstance(raw.get("outbound"), bool):
+            outbound, decided["outbound"] = raw["outbound"], level
+        if isinstance(raw.get("host_loopback"), bool):
+            host_loopback, decided["host_loopback"] = raw["host_loopback"], level
+        if isinstance(raw.get("publish"), list):
+            publish, decided["publish"] = [dict(one) for one in raw["publish"]], level
         if raw.get("files") in FILES:
             files = configured["files"] = raw["files"]
             decided["files"] = level
@@ -130,10 +140,29 @@ def resolve(layers):
                 switched.append(kind)
     if files in ("all", "none"):
         folders = []
-    return {"restricted": network == "off" or files != "all" or bool(limits),
+    isolated = network == "isolated"
+    for one in publish:
+        one.setdefault("host_port", "auto")
+        one.setdefault("host_ip", "127.0.0.1")
+    return {"restricted": network != "on" or files != "all" or bool(limits),
             "network": network, "files": files, "folders": folders, "limits": limits,
+            "outbound": isolated and outbound, "host_loopback": isolated and host_loopback,
+            "publish": publish if isolated else [],
             "switched_off": [one for one in SWITCHES if one in switched], "configured": configured,
             "decided": decided}
+
+
+def network_icon(shown):
+    """The globe for what a Network toggle shows: on, isolated (boxed) or off (struck)."""
+    return {"Off": "network-off", "Isolated": "network-isolated"}.get(shown, "network")
+
+
+def publication_words(one, bound=None):
+    """``8069 -> localhost:18069``; ``auto`` until it is bound."""
+    host = (bound or one).get("host_port", "auto")
+    address = (bound or one).get("host_ip", "127.0.0.1")
+    where = "localhost" if address in LOOPBACK else address
+    return "%s -> %s:%s" % (one["internal_port"], where, host)
 
 
 def memory_words(megabytes):
@@ -163,9 +192,16 @@ def summary(effective):
     looking at a service most often needs to know.
     """
     effective = effective or resolve([])
-    parts = ["Network off" if effective["network"] == "off" else "Network on"]
+    parts = [{"off": "Network off", "isolated": "Network isolated"}.get(effective["network"], "Network on")]
     if not effective.get("restricted"):
         return parts[0] + " · No restrictions"
+    if effective["network"] == "isolated":
+        if effective.get("publish"):
+            parts.append("publishes " + ", ".join(str(one["internal_port"]) for one in effective["publish"]))
+        if effective.get("outbound"):
+            parts.append("internet")
+        if effective.get("host_loopback"):
+            parts.append("this computer")
     if effective["files"] != "all":
         parts.append({"read_write": "Project read and write", "read_only": "Project read-only",
                       "none": "No file access"}[effective["files"]])
@@ -179,7 +215,7 @@ def summary(effective):
 def short_summary(effective):
     """Fewer words, for a button: ``Net off · RW · 4 GB``, ``Net on · No restrictions``."""
     effective = effective or resolve([])
-    parts = ["Net off" if effective["network"] == "off" else "Net on"]
+    parts = [{"off": "Net off", "isolated": "Isolated"}.get(effective["network"], "Net on")]
     if not effective.get("restricted"):
         return parts[0] + " · No restrictions"
     if effective["files"] != "all":
@@ -223,11 +259,14 @@ def switch_state(outer, own, level, kind):
     parent = resolve(list(outer))
     where = _outer_word(outer)
     if kind == "network":
-        shown = "Off" if effective["network"] == "off" else "On"
+        shown = NETWORK_SHORT[effective["network"]]
         if mine:
             return shown, "off", "Network is switched off here. Click to turn it back on."
         if effective["network"] == "on":
             return shown, "on", "Network is on: the host's own network. Click to turn it off."
+        if effective["network"] == "isolated":
+            return shown, "on", ("Network is isolated: ports of its own, only the published ones reach this "
+                                 "computer. Click to turn it off.")
         if network_value(own.get("network")) == "off":
             return shown, "off", "Network is set to off here. Click to turn it on."
         return shown, "default", ("Network is off by the %s's default. Click to turn it on for this %s."
@@ -265,12 +304,13 @@ def click(outer, own, level, kind):
         return toggled(result, kind)
     parent = resolve(list(outer))
     if kind == "network":
-        # Back to the default when that is on - at the top level it always is;
-        # otherwise on, here.
-        if not outer or parent["network"] == "on":
+        # Back to the default when it lets the network through - at the top
+        # level it always does; otherwise what the default was configured to.
+        if not outer or parent["network"] != "off":
             result.pop("network", None)
         else:
-            result["network"] = "on"
+            configured = parent["configured"]["network"]
+            result["network"] = configured if configured != "off" else "on"
         return result
     if result.get("files") == "none":
         result.pop("files", None)
@@ -283,8 +323,10 @@ def pending(saved, current):
     """Which indicators a change touches, saved mapping against current one."""
     saved, current = saved or {}, current or {}
     found = []
-    if (network_value(saved.get("network")), "network" in (saved.get("switched_off") or [])) != (
-            network_value(current.get("network")), "network" in (current.get("switched_off") or [])):
+    def network_of(raw):
+        return (network_value(raw.get("network")), "network" in (raw.get("switched_off") or []),
+                raw.get("outbound"), raw.get("host_loopback"), raw.get("publish"))
+    if network_of(saved) != network_of(current):
         found.append("network")
     if (saved.get("files"), saved.get("folders"), "files" in (saved.get("switched_off") or [])) != (
             current.get("files"), current.get("folders"), "files" in (current.get("switched_off") or [])):
@@ -301,7 +343,23 @@ def problems(raw, level):
     if not isinstance(raw, dict):
         return ["Restrictions must be a mapping."]
     if network_value(raw.get("network", "on")) not in NETWORK:
-        found.append("Network is on or off.")
+        found.append("Network is on, isolated or off.")
+    hosts = set()
+    for one in raw.get("publish") or []:
+        inner, host = (one or {}).get("internal_port"), (one or {}).get("host_port", "auto")
+        if type(inner) is not int or not 1 <= inner <= 65535:
+            found.append("A published port needs the service's port number, 1 to 65535.")
+        if host != "auto" and (type(host) is not int or not 1 <= host <= 65535):
+            found.append("The port on this computer is a number from 1 to 65535, or auto.")
+        address = (one or {}).get("host_ip", "127.0.0.1")
+        if address not in LOOPBACK and not (one or {}).get("public"):
+            found.append("Publishing on %s needs a yes to being reachable from other computers." % address)
+        if (one or {}).get("public") and not raw.get("outbound"):
+            found.append("Publishing to other computers needs Internet on for this isolated network.")
+        if host != "auto":
+            if (address, host) in hosts:
+                found.append("Port %s on this computer is published twice." % host)
+            hosts.add((address, host))
     if raw.get("files", "all") not in FILES:
         found.append("Files is one of %s." % ", ".join(FILES))
     for key, value in (raw.get("limits") or {}).items():
@@ -357,10 +415,47 @@ def exec_argv(core, request, argv):
     return _command(core, "--restricted-exec=" + json.dumps(request, separators=(",", ":")), "--", *argv)
 
 
-def request(folder, layers, working_directory="", command=()):
+def request(folder, layers, working_directory="", command=(), network_state=""):
     return {"project_folder": folder, "layers": [[name, clean(raw)] for name, raw in layers],
             **({"working_directory": working_directory} if working_directory else {}),
-            **({"command": list(command)} if command else {})}
+            **({"command": list(command)} if command else {}),
+            **({"network_state": network_state} if network_state else {})}
+
+
+def network_state_path(project, name):
+    """Where a service's isolated network says what it publishes while it runs.
+    In the user's own cache folder, one file per service of a project."""
+    import hashlib
+    from PySide6.QtCore import QStandardPaths
+    root = QStandardPaths.writableLocation(QStandardPaths.GenericCacheLocation) or os.path.expanduser("~/.cache")
+    key = hashlib.sha256(("%s\0%s" % (project, name)).encode("utf-8")).hexdigest()[:20]
+    return os.path.join(root, "qavector", "network", key + ".json")
+
+
+def read_publications(path):
+    """What a running isolated service publishes, as its state file says; []."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        os.kill(int(state["pid"]), 0)
+        return [one for one in state.get("publications") or [] if isinstance(one, dict)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def change_publication(core, path, operation, publication):
+    """``add``/``remove`` one publication of a running service through the core."""
+    done = subprocess.run(_command(core, "--network-ports"),
+                          input=json.dumps({"state": path, "op": operation, "publication": publication}),
+                          capture_output=True, text=True, timeout=30, cwd=core.spawn_dir(),
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        answer = json.loads(done.stdout)
+    except ValueError:
+        raise ValueError("This core cannot publish ports. Select a current core in Settings.") from None
+    if not answer.get("ok"):
+        raise ValueError("; ".join(one.get("message", "") for one in answer.get("problems") or []) or "Not done.")
+    return answer
 
 
 # -- widgets ------------------------------------------------------------------------
@@ -400,6 +495,9 @@ class QuickToggles(QWidget):
 
     toggle = Signal(str)            # "network" or "files"
     limits_requested = Signal(object)  # the button, to anchor a popover
+    #: The ports button, to anchor the menu of what a running isolated
+    #: service publishes - and a way to publish one more.
+    ports_requested = Signal(object)
     open_window = Signal()
 
     def __init__(self, parent=None):
@@ -410,11 +508,20 @@ class QuickToggles(QWidget):
         self.network = self._button("Network", "network")
         self.files = self._button("Files", "folder")
         self.limits = self._button("Limits", "limits")
-        for button, widest in ((self.network, "Off"), (self.files, "All"), (self.limits, "16 GB · 2 CPU")):
+        self.ports = self._button("Published ports", "popout")
+        for button, widest in ((self.network, "Isolated"), (self.files, "All"), (self.limits, "16 GB · 2 CPU"),
+                               (self.ports, ":65535 +9")):
             button.ensurePolished()
             metrics = button.fontMetrics()
             button.setFixedWidth(metrics.horizontalAdvance(widest) + 40)
             layout.addWidget(button)
+        # Its place is kept on every row, so the columns after it line up
+        # whether or not this service publishes anything right now.
+        policy = self.ports.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.ports.setSizePolicy(policy)
+        self.ports.hide()
+        self.ports.clicked.connect(lambda: self.ports_requested.emit(self.ports))
         self.network.clicked.connect(lambda: self._clicked("network"))
         self.files.clicked.connect(lambda: self._clicked("files"))
         self.limits.clicked.connect(lambda: self.limits_requested.emit(self.limits))
@@ -431,6 +538,23 @@ class QuickToggles(QWidget):
         icons.button(button, glyph, "")
         return button
 
+    def set_ports(self, publications, live):
+        """What a running isolated service publishes: ``:18069`` (+ how many more).
+        Hidden, keeping its place, while it is not running isolated."""
+        self.ports.setVisible(bool(live))
+        if not live:
+            return
+        if publications:
+            first = publications[0]
+            text = ":%s" % first["host_port"] + (" +%d" % (len(publications) - 1) if len(publications) > 1 else "")
+            tip = "\n".join(publication_words(one) for one in publications)
+        else:
+            text, tip = "Ports", "Nothing published yet."
+        icons.button(self.ports, "popout", text)
+        self.ports.setProperty("state", "on" if publications else "locked")
+        self.ports.setToolTip("Published from its isolated network:\n" + tip + "\nClick to open, copy or publish.")
+        _repolish(self.ports)
+
     def _clicked(self, kind):
         if self._states.get(kind) == "locked":
             self.open_window.emit()
@@ -442,8 +566,8 @@ class QuickToggles(QWidget):
         for kind, button in (("network", self.network), ("files", self.files)):
             shown, state, why = switch_state(outer, own, level, kind)
             self._states[kind] = state
-            glyph = {"network": "network", "files": "folder"}[kind]
-            icons.button(button, glyph + ("-off" if shown == "Off" else ""), shown)
+            glyph = network_icon(shown) if kind == "network" else "folder" + ("-off" if shown == "Off" else "")
+            icons.button(button, glyph, shown)
             # Off here is drawn as off; off by the outer default, or with
             # nothing to go back to, is muted - this level did not decide it.
             button.setProperty("state", {"off": "off", "on": "on"}.get(state, "locked"))
@@ -654,14 +778,18 @@ class RestrictionsWindow(QDialog):
         # that is off. The value configured under it stays stored beside it
         # and is kept unless that choice is changed here.
         self._switched = set(self._own.get("switched_off") or [])
+        self._fitted = []           # tables sized to their rows once shown
         same = "Same as %s" % outer_name if self.outer else None
-        network_options = ([same] if same else []) + ["On", "Off"]
+        network_options = ([same] if same else []) + ["On", "Isolated", "Off"]
         wanted = network_value(self._own.get("network"))
-        current = "Off" if "network" in self._switched else {"off": "Off", "on": "On"}.get(wanted, same or "On")
+        current = "Off" if "network" in self._switched else \
+            {"off": "Off", "on": "On", "isolated": "Isolated"}.get(wanted, same or "On")
         self.network = widgets.Segmented(network_options, current)
         column.addWidget(widgets.field("Network", self.network,
-            "On is the host's own network: ports, local databases, the internet. "
+            "On is the host's own network: ports, local databases, the internet. Isolated is a network of its "
+            "own: its ports cannot clash with anything, and it reaches only what is allowed below. "
             "Off is nothing at all - not even this computer."))
+        column.addWidget(self._isolation_panel())
 
         file_options = ([same] if same else []) + [FILE_WORDS[one] for one in FILES]
         wanted = self._own.get("files")
@@ -678,7 +806,7 @@ class RestrictionsWindow(QDialog):
         self.folders.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self.folders.setColumnWidth(1, 150)
         self.folders.verticalHeader().hide()
-        self._fitted = [(self.folders, 3)]
+        self._fitted.append((self.folders, 3))
         widgets.empty_note(self.folders, "No other folders. Add one the program needs outside the project folder.")
         for one in self._own.get("folders") or []:
             self._add_folder(one.get("path", ""), one.get("access", "read_only"))
@@ -752,11 +880,14 @@ class RestrictionsWindow(QDialog):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._ask_core)
-        for signal in (self.network.changed, self.files.changed, self.limits.changed):
+        for signal in (self.network.changed, self.files.changed, self.limits.changed,
+                       self.internet.toggled, self.this_computer.toggled):
             signal.connect(self._changed)
         self.folders.itemChanged.connect(self._changed)
+        self.published.itemChanged.connect(self._changed)
         if not writable:
-            for widget in (self.network, self.files, self.folders, add, remove, self.limits):
+            for widget in (self.network, self.files, self.folders, add, remove, self.limits,
+                           self.internet, self.this_computer, self.published, self.publish_add, self.publish_remove):
                 widget.setEnabled(False)
             self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
         self._load_capabilities()
@@ -819,6 +950,102 @@ class RestrictionsWindow(QDialog):
                 rows.append({"path": path, "access": self.folders.cellWidget(index, 1).currentData()})
         return rows
 
+    # -- an isolated network ---------------------------------------------------------
+    def _isolation_panel(self):
+        """What an isolated network lets through: the internet, this computer's
+        services, and the ports it publishes here. Shown while it is isolated."""
+        parent = resolve(self.outer)
+        mine = resolve(self.outer + [(self.level, self._own)])
+        configured = mine["configured"]["network"] == "isolated" or parent["network"] == "isolated"
+        self.internet = QCheckBox("Internet - names resolve and connections go out")
+        self.internet.setChecked(bool(self._own.get("outbound", parent["outbound"] if configured else False)))
+        self.this_computer = QCheckBox("Services on this computer - a database, another service's published port")
+        self.this_computer.setChecked(bool(self._own.get("host_loopback", parent["host_loopback"] if configured else False)))
+        self.published = widgets.Table(0, 3)
+        self.published.setHorizontalHeaderLabels(["Service port", "On this computer", "Reachable from"])
+        self.published.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.published.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.published.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.published.setColumnWidth(2, 170)
+        self.published.verticalHeader().hide()
+        self._fitted.append((self.published, 4))
+        widgets.empty_note(self.published, "Nothing published: the service's ports stay inside its network.")
+        for one in self._own.get("publish") or []:
+            self._add_publication(one)
+        self.publish_add = QPushButton("Publish a port…")
+        self.publish_add.setProperty("variant", "ghost")
+        self.publish_add.clicked.connect(lambda: (self._add_publication({"internal_port": 8069}), self._changed()))
+        self.publish_remove = QPushButton("Remove")
+        self.publish_remove.setProperty("variant", "ghost")
+        self.publish_remove.clicked.connect(self._remove_publication)
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.internet)
+        layout.addWidget(self.this_computer)
+        ports = QWidget()
+        ports_layout = QVBoxLayout(ports)
+        ports_layout.setContentsMargins(0, 6, 0, 0)
+        ports_layout.setSpacing(4)
+        ports_layout.addWidget(self.published)
+        ports_layout.addWidget(widgets.row(self.publish_add, self.publish_remove, None))
+        # Ports are a service's own: a project publishing one port for all its
+        # services would publish it twice.
+        self.ports_field = widgets.field("Published ports", ports,
+            "Auto takes a free port on this computer when the service starts; the address is on its row. "
+            "This computer means 127.0.0.1 only.")
+        layout.addWidget(self.ports_field)
+        self.ports_field.setVisible(self.level == "service")
+        self.isolation_field = widgets.field("Isolated network lets through", box, "")
+        return self.isolation_field
+
+    def _add_publication(self, one):
+        row = self.published.rowCount()
+        self.published.insertRow(row)
+        self.published.setItem(row, 0, QTableWidgetItem(str(one.get("internal_port", ""))))
+        self.published.setItem(row, 1, QTableWidgetItem(str(one.get("host_port", "auto"))))
+        reach = QComboBox()
+        reach.addItem("This computer", "local")
+        reach.addItem("Other computers", "public")
+        reach.setCurrentIndex(1 if one.get("public") else 0)
+        reach.setProperty("address", one.get("host_ip", "127.0.0.1"))
+        reach.activated.connect(lambda index, combo=reach: self._reach_changed(combo, index))
+        self.published.setCellWidget(row, 2, reach)
+
+    def _reach_changed(self, combo, index):
+        if combo.itemData(index) == "public":
+            answer = QMessageBox.question(self, "Reachable from other computers",
+                "Anyone on your network will be able to connect to this port. Publishing does not add a "
+                "password or encryption. Publish it to other computers?")
+            if answer != QMessageBox.Yes:
+                combo.setCurrentIndex(0)
+        self._changed()
+
+    def _remove_publication(self):
+        row = self.published.currentRow()
+        if row >= 0:
+            self.published.removeRow(row)
+            self._changed()
+
+    def _publications(self):
+        rows = []
+        for index in range(self.published.rowCount()):
+            inner = (self.published.item(index, 0).text() if self.published.item(index, 0) else "").strip()
+            host = (self.published.item(index, 1).text() if self.published.item(index, 1) else "").strip() or "auto"
+            if not inner:
+                continue
+            if not inner.isdigit() or not (host == "auto" or host.isdigit()):
+                raise ValueError("A published port is a number; on this computer, a number or auto.")
+            entry = {"internal_port": int(inner), "host_port": host if host == "auto" else int(host)}
+            reach = self.published.cellWidget(index, 2)
+            if reach.currentData() == "public":
+                entry.update(host_ip="0.0.0.0", public=True)
+            elif reach.property("address") not in (None, "127.0.0.1"):
+                entry["host_ip"] = reach.property("address")
+            rows.append(entry)
+        return rows
+
     # -- the value ----------------------------------------------------------------
     def value(self):
         """The stored mapping for this level; raises ValueError when a field is wrong."""
@@ -831,8 +1058,20 @@ class RestrictionsWindow(QDialog):
                 result["network"] = network_value(self._own["network"])
         elif chosen == "Off":
             result["network"] = "off"
+        elif chosen == "Isolated":
+            result["network"] = "isolated"
         elif chosen == "On" and self.outer:
             result["network"] = "on"
+        # What isolation lets through, written where this level differs from
+        # the one around it, and kept while the network is something else.
+        parent = resolve(self.outer)
+        for key, box in (("outbound", self.internet), ("host_loopback", self.this_computer)):
+            if box.isChecked() != parent[key]:
+                result[key] = box.isChecked()
+        if self.level == "service":
+            publications = self._publications()
+            if publications:
+                result["publish"] = publications
         chosen = self.files.current()
         if "files" in kept:
             if self._own.get("files") in FILES:
@@ -859,6 +1098,7 @@ class RestrictionsWindow(QDialog):
             value, local = None, [str(exc)]
         effective = resolve(self.outer + [(self.level, value or {})])
         self.folder_field.setVisible(effective["configured"]["files"] != "all")
+        self.isolation_field.setVisible(effective["network"] == "isolated")
         self.summary.setText("Result: " + summary(effective))
         self._local = local
         self._show(local)
@@ -879,6 +1119,12 @@ class RestrictionsWindow(QDialog):
             if error or not result:
                 return
             self.capabilities = result
+            isolation = result.get("isolated_network") or {}
+            if not isolation.get("available", False):
+                button = self.network.button("Isolated")
+                if button is not None and self.network.current() != "Isolated":
+                    button.setEnabled(False)
+                    button.setToolTip(isolation.get("reason") or "An isolated network is not available here.")
             if not result.get("available"):
                 self.auto.setText("This computer cannot enforce file or network restrictions: %s" % result.get("reason", ""))
             old = self.limits

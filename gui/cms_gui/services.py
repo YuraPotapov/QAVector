@@ -594,6 +594,24 @@ class ServiceProcess(QObject):
                   ("service", self.runner.extra.get("restrictions") or {})]
         return layers if restrictions.resolve(layers)["restricted"] else None
 
+    def network_state(self):
+        """Where this service's isolated network is described while it runs."""
+        return restrictions.network_state_path(self.project, self.runner.name)
+
+    def publications(self):
+        """``[{"internal_port", "host_port", "host_ip", ...}]`` it publishes now."""
+        if self.restricted_with is None or restrictions.resolve(self.restricted_with)["network"] != "isolated":
+            return []
+        return restrictions.read_publications(self.network_state())
+
+    def change_publication(self, operation, publication):
+        """Publish (``add``) or unpublish (``remove``) a port while it runs.
+        Blocking: call it off the GUI thread."""
+        core = self.runtime_core
+        if core is None or not core.is_configured():
+            raise ValueError("No QAVector core is configured.")
+        return restrictions.change_publication(core, self.network_state(), operation, publication)
+
     # -- lifecycle ------------------------------------------------------------
     def start(self):
         # Not is_running(): a service that has been WAITING for its dependencies
@@ -637,8 +655,9 @@ class ServiceProcess(QObject):
                 return self._fail("Restrictions are set for this service, but no QAVector core is configured "
                                   "to enforce them, so it was not started.")
             folder = os.path.abspath(os.path.expanduser(self.project_dir))
+            state = self.network_state() if restrictions.resolve(layers)["network"] == "isolated" else ""
             try:
-                argv = restrictions.exec_argv(core, restrictions.request(folder, layers, cwd), argv)
+                argv = restrictions.exec_argv(core, restrictions.request(folder, layers, cwd, network_state=state), argv)
             except ValueError as exc:
                 return self._fail(str(exc))
             self.restricted_with = copy.deepcopy(layers)

@@ -17,6 +17,11 @@ def source_lock():
     return json.loads(resources.read_text(__package__, "bubblewrap.lock.json", encoding="utf-8"))
 
 
+def passt_lock():
+    """The reviewed pin of passt, whose pasta and pesto ship beside bwrap."""
+    return json.loads(resources.read_text(__package__, "passt.lock.json", encoding="utf-8"))
+
+
 def _version_tuple(value):
     try:
         return tuple(int(part) for part in value.split(".")[:2])
@@ -108,6 +113,22 @@ class BundledLauncher:
             raise
         except (OSError, ValueError, TypeError, KeyError):
             raise RuntimePolicyError("bundled_runtime_unavailable", "QAVector's bundled runtime is missing or invalid; reinstall a complete supported application build.") from None
+
+    def tool(self, name):
+        """The bundled ``pasta`` or ``pesto`` (passt, GPL-2.0-or-later), integrity-checked
+        with the rest of the runtime. A build without them cannot isolate a network."""
+        if name not in ("pasta", "pesto"):
+            raise RuntimePolicyError("bundle_tool_unknown", "Unknown runtime tool.")
+        metadata = self.inspect()
+        files = json.loads(self._read("manifests/checksums.json")[0])["files"]
+        if "bin/" + name not in files:
+            raise RuntimePolicyError("isolated_network_unavailable",
+                "This QAVector build has no network isolation (pasta); install a build that includes it.")
+        data, mode = self._read("bin/" + name)
+        if not mode & 0o111 or mode & 0o6000:
+            raise RuntimePolicyError("bundle_not_executable", "Bundled %s must be executable without setuid/setgid." % name)
+        return {"path": str(self.directory / "bin" / name), "sha256": files["bin/" + name],
+                "version": passt_lock()["version"], "bundle": metadata["path"]}
 
     def executable(self):
         metadata = self.inspect()

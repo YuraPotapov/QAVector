@@ -14,7 +14,15 @@ even inside a folder that was granted.
 Network off is a network namespace with nothing in it. Network on is the host's
 own, which is what a service listening on a port or a step talking to a local
 database needs; the resolver and the PostgreSQL socket directory are then
-mounted read-only so names resolve and ``psql`` finds its socket.
+mounted read-only so names resolve and ``psql`` finds its socket. Isolated is a
+namespace of its own that pasta connects as configured (``isolated.py``): its
+ports cannot clash, chosen ones are published, and it reaches this computer's
+services or the internet only when allowed.
+
+Whenever the network is not the host's, the host's local sockets are not the
+program's either: with the whole disk visible (Files "No restrictions") ``/run``
+- the session bus, a Docker socket, the database's - and the X display's
+``/tmp/.X11-unix`` are masked, and only what the network allows comes back.
 
 Limits go through ``systemd-run --user --scope``: the user's service manager
 creates a cgroup, applies MemoryMax/TasksMax/CPUQuota before the program runs,
@@ -29,6 +37,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import shutil
 import subprocess
+import tempfile
 import threading
 
 from ...errors import RuntimePolicyError
@@ -54,6 +63,9 @@ class Prepared:
         self.argv, self.env, self.cwd = list(argv), dict(env), cwd
         self.pass_fds = tuple(pass_fds)
         self._resources = list(resources)
+        #: For an isolated network, ``{"at": index of bwrap in argv}``: the
+        #: process that starts it adds the options that connect its network.
+        self.network = None
 
     def close(self):
         """Release what only the launch needed (the seccomp filter file)."""
@@ -86,6 +98,14 @@ def _target(path):
     """Where a protected path really is. A link is hidden where it leads: bwrap
     cannot mount over a link, and what it points at is what must stay hidden."""
     return os.path.realpath(path) if os.path.islink(path) else path
+
+
+def _host_sockets_masked():
+    """The host's local sockets, hidden when the whole disk is otherwise visible."""
+    args = ["--tmpfs", "/run"]
+    if os.path.isdir("/tmp/.X11-unix"):
+        args += ["--tmpfs", "/tmp/.X11-unix"]
+    return args
 
 
 def private_paths(home):
@@ -204,7 +224,7 @@ class RestrictedLauncher:
         if unrestricted(effective):
             return Prepared(argv, env, cwd)
         capabilities = self.capabilities()
-        sandbox = effective["network"] == "off" or effective["files"] != "all"
+        sandbox = effective["network"] != "on" or effective["files"] != "all"
         if sandbox and not capabilities["available"]:
             raise RuntimePolicyError("restrictions_unavailable", capabilities["reason"] or
                                      "Restrictions cannot be enforced on this computer.")
@@ -233,18 +253,30 @@ class RestrictedLauncher:
         if not sandbox:
             return Prepared(prefix + list(argv), environment, cwd)
         prepared = self._sandbox(capabilities["launcher"]["path"], effective, argv, cwd, environment, extra_folders)
+        if prepared.network is not None:
+            # Where bwrap is in the final argv, for the options only the
+            # process that starts it can give (isolated.Network.start).
+            prepared.network["at"] = len(prefix)
         prepared.argv = prefix + prepared.argv
         return prepared
+
+    def tool(self, name):
+        """The bundled pasta or pesto, for an isolated network."""
+        from .bundled import BundledLauncher
+        return BundledLauncher(self.bundle_directory).tool(name)["path"]
 
     def _sandbox(self, binary, effective, argv, cwd, env, extra_folders=()):
         command = [binary, "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
                    "--unshare-cgroup-try", "--die-with-parent", "--cap-drop", "ALL"]
-        if effective["network"] == "off":
+        if effective["network"] != "on":
             command.append("--unshare-net")
         resources = []
         try:
             if effective["files"] == "all":
-                command += ["--bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--chdir", cwd]
+                command += ["--bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
+                if effective["network"] != "on":
+                    command += _host_sockets_masked()
+                command += self._network_paths(effective, resources) + ["--chdir", cwd]
             else:
                 command += self._mirror(effective, extra_folders, resources)
                 command += ["--chdir", self._workdir(effective, cwd, extra_folders)]
@@ -257,7 +289,28 @@ class RestrictedLauncher:
                 one.close()
             raise
         command += ["--seccomp", str(seccomp.fileno()), "--"] + list(argv)
-        return Prepared(command, env, "/", tuple(one.fileno() for one in resources), resources)
+        prepared = Prepared(command, env, "/", tuple(one.fileno() for one in resources), resources)
+        if effective["network"] == "isolated":
+            prepared.network = {"at": 0}
+        return prepared
+
+    def _network_paths(self, effective, resources):
+        """What of the host's own sockets the network lets the program reach."""
+        args, network = [], effective["network"]
+        paths = list(NETWORK_PATHS) if network == "on" else \
+            ["/run/postgresql"] if network == "isolated" and effective.get("host_loopback") else []
+        for path in paths:
+            if os.path.isdir(path):
+                args += ["--ro-bind", path, path]
+        if network == "isolated" and effective.get("outbound"):
+            # Names resolve through pasta's forwarder to the host's resolver.
+            from .isolated import DNS_ADDRESS, resolver_target
+            data = tempfile.TemporaryFile()
+            data.write(("nameserver %s\n" % DNS_ADDRESS).encode("ascii"))
+            data.seek(0)
+            resources.append(data)
+            args += ["--ro-bind-data", str(data.fileno()), resolver_target()]
+        return args
 
     def _visible(self, effective, extra_folders):
         """(path, access) of everything granted, parents before children."""
@@ -290,10 +343,7 @@ class RestrictedLauncher:
                 args += ["--ro-bind", path, path]
         args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/var",
                  "--tmpfs", "/var/tmp", "--tmpfs", "/run", "--symlink", "../run", "/var/run"]
-        if effective["network"] == "on":
-            for path in NETWORK_PATHS:
-                if os.path.isdir(path):
-                    args += ["--ro-bind", path, path]
+        args += self._network_paths(effective, resources)
         if self.home and self.home != "/" and not os.path.islink(self.home):
             args += ["--tmpfs", self.home]
         visible = self._visible(effective, extra_folders)

@@ -472,3 +472,147 @@ def test_cycle_properties_save_the_project_folder_and_its_restrictions(qapp, dis
         assert dialog.saved["project_folder"] == "" and dialog.saved["restrictions"] == {}
     finally:
         dispose(dialog)
+
+
+# -- an isolated network: its own ports, chosen ones published ---------------------------
+def test_an_isolated_network_is_a_third_way_with_what_it_lets_through():
+    effective = R.resolve([("project", {"network": "isolated", "outbound": True}),
+                           ("service", {"publish": [{"internal_port": 8069}]})])
+    assert effective["restricted"] and effective["network"] == "isolated" and effective["outbound"]
+    assert effective["publish"] == [{"internal_port": 8069, "host_port": "auto", "host_ip": "127.0.0.1"}]
+    assert R.summary(effective) == "Network isolated · publishes 8069 · internet"
+    assert R.short_summary(effective) == "Isolated"
+    shown, state, why = R.switch_state([("project", {"network": "isolated"})], {}, "service", "network")
+    assert (shown, state) == ("Isolated", "on") and "its own" in why
+    off = R.click([("project", {"network": "isolated"})], {}, "service", "network")
+    assert off == {"switched_off": ["network"]}
+    assert R.switch_state([("project", {"network": "isolated"})], off, "service", "network")[0] == "Off"
+    assert R.click([("project", {"network": "isolated"})], off, "service", "network") == {}
+    assert R.network_icon("Isolated") == "network-isolated" and R.network_icon("Off") == "network-off"
+
+
+def test_publications_are_checked_before_the_core_is_asked():
+    assert R.pending({"network": "isolated"}, {"network": "isolated", "publish": [{"internal_port": 1}]}) == ("network",)
+    found = R.problems({"network": "isolated", "publish": [
+        {"internal_port": 8069, "host_port": 18069}, {"internal_port": 8072, "host_port": 18069},
+        {"internal_port": 99999}, {"internal_port": 8073, "host_ip": "0.0.0.0", "public": True}]}, "service")
+    assert any("published twice" in one for one in found)
+    assert any("1 to 65535" in one for one in found)
+    assert any("needs Internet on" in one for one in found)
+
+
+def test_the_window_offers_isolated_and_edits_what_it_lets_through(qapp, dispose, monkeypatch):
+    window = R.RestrictionsWindow("App", "/work/shop", "service", {},
+                                  outer=[("project", {"files": "read_write"})], outer_name="project")
+    try:
+        assert window.network.button("Isolated") is not None
+        assert window.isolation_field.isHidden()
+        window.network.set_current("Isolated")
+        assert not window.isolation_field.isHidden() and not window.ports_field.isHidden()
+        window.internet.setChecked(True)
+        window.publish_add.click()
+        window.published.item(0, 0).setText("8069")
+        window.published.item(0, 1).setText("18069")
+        assert window.value() == {"network": "isolated", "outbound": True,
+                                  "publish": [{"internal_port": 8069, "host_port": 18069}]}
+        # Other computers: an explicit yes, and only with Internet on.
+        monkeypatch.setattr(R.QMessageBox, "question", staticmethod(lambda *args: R.QMessageBox.Yes))
+        reach = window.published.cellWidget(0, 2)
+        reach.setCurrentIndex(1)
+        window._reach_changed(reach, 1)
+        assert window.value()["publish"][0] == {"internal_port": 8069, "host_port": 18069,
+                                                "host_ip": "0.0.0.0", "public": True}
+        window.internet.setChecked(False)
+        assert "needs Internet on" in window.problem.text()
+    finally:
+        dispose(window)
+
+
+def test_a_project_window_sets_isolation_but_leaves_ports_to_its_services(qapp, dispose):
+    window = R.RestrictionsWindow("Shop", "/work/shop", "project", {"network": "isolated", "host_loopback": True})
+    try:
+        assert not window.isolation_field.isHidden() and window.ports_field.isHidden()
+        assert window.this_computer.isChecked()
+        assert window.value() == {"network": "isolated", "host_loopback": True}
+    finally:
+        dispose(window)
+
+
+def test_isolated_is_offered_greyed_where_this_computer_cannot_do_it(qapp, dispose, monkeypatch):
+    monkeypatch.setattr(R, "capabilities", lambda core: {"available": True, "limits": {},
+                        "isolated_network": {"available": False, "reason": "This QAVector build has no pasta."}})
+    monkeypatch.setattr(R.background, "run", lambda job, done, owner=None: done(job(), None))
+    window = R.RestrictionsWindow("App", "/work/shop", "service", {}, core=object())
+    try:
+        button = window.network.button("Isolated")
+        assert not button.isEnabled() and "no pasta" in button.toolTip()
+    finally:
+        dispose(window)
+
+
+def test_a_running_isolated_service_shows_its_address_and_keeps_its_place_otherwise(qapp, dispose):
+    one, two = R.QuickToggles(), R.QuickToggles()
+    try:
+        one.set_ports([], False)
+        two.set_ports([{"internal_port": 8069, "host_port": 18069, "host_ip": "127.0.0.1"},
+                       {"internal_port": 8072, "host_port": 18072, "host_ip": "127.0.0.1"}], True)
+        assert one.ports.isHidden() and not two.ports.isHidden()
+        assert two.ports.text() == ":18069 +1" and "8072 -> localhost:18072" in two.ports.toolTip()
+        assert one.ports.width() == two.ports.width()
+        assert one.ports.sizePolicy().retainSizeWhenHidden()
+    finally:
+        dispose(one)
+        dispose(two)
+
+
+def test_an_isolated_service_names_its_state_file_and_reads_what_it_publishes(qapp, tmp_path, monkeypatch):
+    import json
+    import os
+    from cms_gui import services
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    supervisor = services.ServiceSupervisor()
+    row = sf.RunnerRow("App", "shell", settings={"command": "serve"},
+                       extra={"restrictions": {"publish": [{"internal_port": 8069}]}})
+    supervisor.sync([sf.ProjectRow("Shop", str(tmp_path), runners=[row],
+                                   extra={"restrictions": {"network": "isolated"}})])
+    service = supervisor.service("Shop", "App")
+    service.runtime_core = _Core()
+    started = []
+    service._start_attached = lambda argv, cwd, marker=None: started.append(argv)
+    try:
+        assert service.start()
+        request = json.loads(started[0][1].split("=", 1)[1])
+        path = request["network_state"]
+        assert path == service.network_state() and path.startswith(str(tmp_path / "cache"))
+        assert service.publications() == []                     # nothing written yet
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            json.dump({"pid": os.getpid(), "publications": [
+                {"internal_port": 8069, "host_port": 18069, "host_ip": "127.0.0.1"}]}, handle)
+        assert service.publications()[0]["host_port"] == 18069
+        with open(path, "w") as handle:                      # a service long gone says nothing
+            json.dump({"pid": 999999999, "publications": [{"internal_port": 1, "host_port": 2}]}, handle)
+        assert service.publications() == []
+    finally:
+        supervisor.dispose()
+
+
+def test_the_ports_menu_opens_copies_unpublishes_and_publishes_more(qapp, dispose, monkeypatch):
+    from cms_gui.pages import services as page_mod
+    shown = []
+
+    class Menu(page_mod.QMenu):
+        def popup(self, where):
+            shown.append([action.text() for action in self.actions() if action.text()])
+
+    monkeypatch.setattr(page_mod, "QMenu", Menu)
+    page = page_with(project_restrictions={"network": "isolated"})
+    try:
+        service = page.supervisor.service("Shop", "App")
+        monkeypatch.setattr(service, "publications", lambda: [
+            {"internal_port": 8069, "host_port": 18069, "host_ip": "127.0.0.1"}])
+        page.ports_menu("Shop", "App", strip(page, "App").restrictions.ports)
+        assert shown[0] == ["Open localhost:18069  (service port 8069)", "Copy http://localhost:18069/",
+                            "Unpublish localhost:18069", "Publish a port…"]
+    finally:
+        dispose(page)

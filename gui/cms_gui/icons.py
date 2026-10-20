@@ -499,6 +499,15 @@ def _network_off(painter, ink):
     _slash(painter)
 
 
+def _network_isolated(painter, ink):
+    """A globe in a box: a network of its own, with only chosen ports let out."""
+    _stroke(painter, ink)
+    painter.drawRoundedRect(QRectF(2.5, 2.5, 19, 19), 3, 3)
+    painter.drawEllipse(QRectF(7, 7, 10, 10))
+    painter.drawEllipse(QRectF(10, 7, 4, 10))
+    painter.drawLine(QPointF(7, 12), QPointF(17, 12))
+
+
 def _folder_off(painter, ink):
     _artifacts(painter, ink)
     _slash(painter)
@@ -540,6 +549,7 @@ def _unlock(painter, ink):
 
 DRAWINGS = {
     "network": _network,
+    "network-isolated": _network_isolated,
     "network-off": _network_off,
     "folder-off": _folder_off,
     "limits": _limits,

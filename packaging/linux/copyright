@@ -24,6 +24,22 @@ License: LGPL-2.1-or-later
  The complete upstream license, notices, corresponding source archive and
  build configuration are shipped under runtime/licenses and runtime/sources.
 
+Files: opt/qavector/core/_internal/runtime/bin/pasta
+ opt/qavector/core/_internal/runtime/bin/pasta.avx2
+ opt/qavector/core/_internal/runtime/bin/pesto
+ opt/qavector/core/_internal/runtime/sources/passt-*.tar.xz
+Copyright: Red Hat GmbH; Stefano Brivio, David Gibson, Laurent Vivier
+ and the other passt contributors
+License: GPL-2.0-or-later
+ pasta and pesto (the passt project, https://passt.top/passt/) are free software
+ under the GNU General Public License, version 2 or any later version; two of
+ their source files are also under BSD-3-Clause. They are separate programs that
+ QAVector starts as processes; QAVector's proprietary terms do not apply to them
+ and do not restrict your rights under the GPL. The complete license texts and
+ notice are shipped as runtime/licenses/passt/GPL-2.0-or-later.txt,
+ BSD-3-Clause.txt and NOTICE.md, and the complete corresponding source with its
+ build configuration under runtime/sources.
+
 Files: opt/qavector/core/_internal/runtime/lib/libcap.so.2
 Copyright: Andrew G. Morgan and the libcap contributors
 License: BSD-3-Clause
@@ -34,6 +50,7 @@ License: BSD-3-Clause
 Files: opt/qavector/core/_internal/runtime/sources/build_bubblewrap.py
  opt/qavector/core/_internal/runtime/sources/check_licenses.py
  opt/qavector/core/_internal/runtime/sources/bubblewrap.lock.json
+ opt/qavector/core/_internal/runtime/sources/passt.lock.json
  opt/qavector/core/_internal/runtime/sources/runtime-build-requirements.txt
 Copyright: 2026 Yurii Potapov
 License: LGPL-2.1-or-later

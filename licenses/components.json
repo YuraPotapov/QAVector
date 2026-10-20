@@ -6,7 +6,22 @@
       "version": "0.13.1",
       "license": "LGPL-2.1-or-later",
       "scope": "Linux execution runtime. Linux distributions include the executable and corresponding source; other platforms include these notices for reference.",
-      "documents": ["bubblewrap/NOTICE.md", "bubblewrap/AUTHORS", "bubblewrap/COPYING"]
+      "documents": [
+        "bubblewrap/NOTICE.md",
+        "bubblewrap/AUTHORS",
+        "bubblewrap/COPYING"
+      ]
+    },
+    {
+      "name": "passt",
+      "version": "2026_10_02.cba3570",
+      "license": "GPL-2.0-or-later",
+      "scope": "Linux network isolation: the pasta and pesto programs give an isolated service its own ports, publish chosen ones on this computer and reach the network. Linux distributions include the executables and corresponding source; other platforms include these notices for reference.",
+      "documents": [
+        "passt/NOTICE.md",
+        "passt/GPL-2.0-or-later.txt",
+        "passt/BSD-3-Clause.txt"
+      ]
     }
   ]
 }

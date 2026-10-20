@@ -10,20 +10,29 @@ GUI watches is the service, its output streams straight through, and Stop
 reaches it the way it always did. The GUI never builds a sandbox command.
 
 A request is ``{"project_folder", "layers": [[name, restrictions], ...],
-"working_directory"}`` - the command comes from the request (preview) or after
-``--`` (exec).
+"working_directory", "network_state"}`` - the command comes from the request
+(preview) or after ``--`` (exec).
+
+An isolated network cannot be one exec: its sandbox starts blocked while pasta
+connects it. For one, ``--restricted-exec`` stays as the process the GUI
+watches - the service's output still streams straight through - and waits for
+the program, writing ``network_state`` (what is published, and how to change
+it) while it runs. ``--network-ports`` reads that file to list, add or remove
+a publication of a running service without restarting it.
 """
 
 import json
 import os
+import signal
 import sys
 
 from ._json import parse_document
 from .errors import RuntimePolicyError
 from . import restrictions, toolfolders
 
-PREVIEW, CHECK, EXEC = "--restrictions-preview", "--restrictions-check", "--restricted-exec"
-FLAGS = (PREVIEW, CHECK, EXEC)
+PREVIEW, CHECK, EXEC, PORTS = ("--restrictions-preview", "--restrictions-check", "--restricted-exec",
+                               "--network-ports")
+FLAGS = (PREVIEW, CHECK, EXEC, PORTS)
 
 
 def _launcher():
@@ -39,12 +48,21 @@ def capabilities():
         return {"platform": sys.platform, "available": False,
                 "reason": "Restrictions are not available on this operating system yet.",
                 "launcher": {}, "limits": {name: {"available": False, "reason": "Not available on this operating system yet."}
-                                           for name in ("memory_mb", "processes", "cpu_cores")}}
-    return launcher.capabilities()
+                                           for name in ("memory_mb", "processes", "cpu_cores")},
+                "isolated_network": {"available": False, "reason": "Not available on this operating system yet."}}
+    result = dict(launcher.capabilities())
+    try:
+        launcher.tool("pasta")
+        launcher.tool("pesto")
+        result["isolated_network"] = {"available": bool(result.get("available")), "reason": result.get("reason", "")}
+    except RuntimePolicyError as exc:
+        result["isolated_network"] = {"available": False, "reason": str(exc)}
+    return result
 
 
 def _request(raw):
-    if not isinstance(raw, dict) or set(raw) - {"project_folder", "layers", "working_directory", "command"}:
+    if not isinstance(raw, dict) or set(raw) - {"project_folder", "layers", "working_directory", "command",
+                                                "network_state"}:
         raise RuntimePolicyError("invalid_request", "Expected project_folder, layers, working_directory and command.")
     layers = raw.get("layers") or []
     if (not isinstance(layers, list) or len(layers) > 4
@@ -102,7 +120,8 @@ def execute(arguments):
         command = arguments[arguments.index("--") + 1:]
         if not command:
             raise RuntimePolicyError("invalid_request", "No command to run.")
-        folder, layers, cwd, _ = _request(parse_document(spec.encode("utf-8")))
+        request = parse_document(spec.encode("utf-8"))
+        folder, layers, cwd, _ = _request(request)
         cwd = cwd or os.getcwd()
         env = dict(os.environ)
         effective, argv, tools = _plan(folder, layers, command, cwd, env)
@@ -113,6 +132,8 @@ def execute(arguments):
             if launcher is None:
                 raise RuntimePolicyError("restrictions_unavailable", capabilities()["reason"])
             prepared = launcher.prepare(effective, argv, cwd, env, tools)
+            if prepared.network is not None:
+                return _supervise(launcher, prepared, effective, str(request.get("network_state") or ""))
             prepared_argv, prepared_cwd, prepared_env = prepared.argv, prepared.cwd, prepared.env
         os.chdir(prepared_cwd)
         sys.stdout.flush()
@@ -126,10 +147,53 @@ def execute(arguments):
         return 127
 
 
+def _supervise(launcher, prepared, effective, state_path):
+    """Run an isolated program to its end; its exit status is this process's."""
+    from .backends.linux.isolated import Network
+    network = Network(launcher.tool("pasta"), launcher.tool("pesto"), effective, state_path)
+    process = None
+
+    def forward(signum, _frame):
+        # Stop is sent to the whole group, the program included, and it shuts
+        # down by itself; this process waits for it instead of leaving first,
+        # which would take the sandbox down with it mid-shutdown.
+        if process is not None and signum != signal.SIGINT:
+            process.send_signal(signum)
+
+    for each in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(each, forward)
+    try:
+        process = network.start(prepared.argv, prepared.env, prepared.cwd, prepared.pass_fds,
+                                prepared.network["at"])
+    finally:
+        prepared.close()
+    try:
+        code = process.wait()
+    finally:
+        network.close()
+    return code if code >= 0 else 128 - code
+
+
+def ports(raw):
+    """``--network-ports``: list, add or remove a publication of a running service."""
+    from .backends.linux.isolated import change
+    if not isinstance(raw, dict) or set(raw) - {"state", "op", "publication"} or not raw.get("state"):
+        raise RuntimePolicyError("invalid_request", "Expected state, op and publication.")
+    return dict({"ok": True}, **change(str(raw["state"]), str(raw.get("op") or "list"), raw.get("publication")))
+
+
 def main(arguments):
     flag = arguments[0].split("=", 1)[0] if arguments else ""
     if flag == EXEC:
         return execute(arguments)
+    if flag == PORTS and len(arguments) == 1:
+        try:
+            payload = ports(parse_document(sys.stdin.buffer.read(64 * 1024 + 1)))
+        except RuntimePolicyError as exc:
+            payload = {"ok": False, "problems": [exc.to_document()]}
+        json.dump(payload, sys.stdout, indent=2, ensure_ascii=True, allow_nan=False)
+        sys.stdout.write("\n")
+        return 0 if payload.get("ok") else 2
     if flag == CHECK and len(arguments) == 1:
         payload = {"ok": True, "capabilities": capabilities()}
     elif flag == PREVIEW and len(arguments) == 1:
@@ -139,7 +203,8 @@ def main(arguments):
             payload = {"ok": False, "problems": [exc.to_document()]}
     else:
         payload = {"ok": False, "problems": [{"code": "invalid_arguments", "field": "", "layer": "",
-                   "message": "Use --restrictions-check, --restrictions-preview or --restricted-exec=REQUEST -- COMMAND."}]}
+                   "message": "Use --restrictions-check, --restrictions-preview, --network-ports or "
+                              "--restricted-exec=REQUEST -- COMMAND."}]}
     json.dump(payload, sys.stdout, indent=2, ensure_ascii=True, allow_nan=False)
     sys.stdout.write("\n")
     return 0 if payload.get("ok") else 2

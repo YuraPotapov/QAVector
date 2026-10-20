@@ -77,6 +77,8 @@ datas = tracked_datas(ROOT, "flows") + tracked_datas(ROOT, "cycles") + [
     (os.path.join(ROOT, "licenses"), "licenses"),
     (os.path.join(ROOT, "execution_runtime", "backends", "linux", "bubblewrap.lock.json"),
      "execution_runtime/backends/linux"),
+    (os.path.join(ROOT, "execution_runtime", "backends", "linux", "passt.lock.json"),
+     "execution_runtime/backends/linux"),
 ] + playwright_driver_datas()
 
 # The Windows executable's own icon. Without this PyInstaller embeds its

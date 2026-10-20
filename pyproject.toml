@@ -49,7 +49,7 @@ include = ["engine*", "adapters*", "domain*", "cycle*", "execution_runtime*"]
 
 [tool.setuptools.package-data]
 engine = ["hud.js", "recorder.js"]
-"execution_runtime.backends.linux" = ["bubblewrap.lock.json"]
+"execution_runtime.backends.linux" = ["bubblewrap.lock.json", "passt.lock.json"]
 
 [tool.setuptools.data-files]
 "share/qavector/examples/execution_runtime" = ["examples/execution_runtime/prepare_claude_image.py"]

@@ -26,7 +26,14 @@ def test_nothing_set_is_unrestricted_and_says_so():
 
 
 @pytest.mark.parametrize("raw,message", [
-    ({"network": "maybe"}, "on or off"),
+    ({"network": "maybe"}, "on, isolated or off"),
+    ({"outbound": "yes"}, "outbound is true or false"),
+    ({"publish": [{"internal_port": 70000}]}, "port number, 1 to 65535"),
+    ({"publish": [{"internal_port": 8069, "host_port": "any"}]}, "number or auto"),
+    ({"publish": [{"internal_port": 8069, "host_ip": "0.0.0.0"}]}, "reachable from other computers"),
+    ({"publish": [{"internal_port": 8069, "host_port": 18069}, {"internal_port": 8072, "host_port": 18069}]},
+     "published twice"),
+    ({"publish": [{"port": 8069}]}, "internal_port"),
     ({"files": "everything"}, "Files is one of"),
     ({"limits": {"memory_mb": 1.5}}, "whole number"),
     ({"limits": {"cpu_cores": 0}}, "between"),
@@ -432,3 +439,33 @@ def test_stopping_a_run_ends_its_worker(tmp_path):
         assert time.monotonic() - started < 10
     finally:
         server.shutdown()
+
+
+# -- an isolated network ---------------------------------------------------------------
+def test_an_isolated_network_lets_through_only_what_it_says():
+    effective = resolve(("project", {"network": "isolated", "outbound": True}),
+                        ("service", {"publish": [{"internal_port": 8069}, {"internal_port": 8072, "host_port": 18072}]}))
+    assert effective["restricted"] and effective["network"] == "isolated"
+    assert effective["outbound"] is True and effective["host_loopback"] is False
+    assert effective["publish"] == [{"internal_port": 8069, "host_port": "auto", "host_ip": "127.0.0.1"},
+                                    {"internal_port": 8072, "host_port": 18072, "host_ip": "127.0.0.1"}]
+    assert r.summary(effective) == "Network isolated · publishes 8069, 8072 as 18072 · internet"
+    # The same settings under a network that is not isolated let nothing through.
+    plain = resolve(("project", {"network": "on", "outbound": True, "publish": [{"internal_port": 8069}]}))
+    assert plain["outbound"] is False and plain["publish"] == [] and not plain["restricted"]
+    # A quick switch-off still means off, and keeps what was configured.
+    off = resolve(("service", {"network": "isolated", "publish": [{"internal_port": 8069}], "switched_off": ["network"]}))
+    assert off["network"] == "off" and off["configured"]["network"] == "isolated" and off["publish"] == []
+
+
+def test_a_public_publication_needs_an_explicit_yes():
+    published = r.parse({"publish": [{"internal_port": 8069, "host_ip": "0.0.0.0", "public": True}]})
+    assert published["publish"][0] == {"internal_port": 8069, "host_port": "auto", "host_ip": "0.0.0.0", "public": True}
+
+
+def test_an_isolated_network_is_refused_in_cycles_until_they_can_publish_ports():
+    made = cycle(project_folder="/work", restrictions={"network": "isolated"})
+    made.steps[0].restrictions = {"network": "isolated"}
+    found = model.problems(made, REGISTRY)
+    assert any(one.startswith("the cycle: an isolated network is for services") for one in found)
+    assert any(one.startswith("test: an isolated network is for services") for one in found)

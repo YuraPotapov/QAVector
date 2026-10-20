@@ -52,12 +52,12 @@ import os
 from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                               QComboBox, QDialog, QHeaderView, QLabel,
+                               QComboBox, QDialog, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QMenu, QPlainTextEdit,
                                QPushButton, QScrollArea, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import icons
+from .. import background, icons
 from .. import logsourcesfile as lsf
 from .. import criteria as criteria_mod
 from .. import runnertypes
@@ -1380,6 +1380,7 @@ class ProjectBlock(QWidget):
         quick.toggle.connect(lambda kind, n=row.name: self.page.toggle_restriction(self.name, n, kind))
         quick.limits_requested.connect(lambda anchor, n=row.name: self.page.restriction_limits(self.name, n, anchor))
         quick.open_window.connect(lambda n=row.name: self.page.edit_restrictions(self.name, n))
+        quick.ports_requested.connect(lambda anchor, n=row.name: self.page.ports_menu(self.name, n, anchor))
         self._model_toggles(quick, row)
         return quick
 
@@ -1438,6 +1439,12 @@ class ProjectBlock(QWidget):
                                      runnertypes.STOPPING)
                 icons.button(toggle, "stop" if running else "run", "")
                 toggle.setToolTip("Stop" if running else "Start")
+            quick = getattr(strip, "restrictions", None)
+            if quick is not None and not quick.isHidden():
+                # Re-read on every repaint - the poll's, every few seconds -
+                # so an address shows once the service has bound it.
+                live = status == runnertypes.RUNNING and self.page.isolated(self.name, runner_name)
+                quick.set_ports(self.page.publications(self.name, runner_name) if live else [], live)
             return
 
     def set_criteria(self, runner_name, state):
@@ -2224,6 +2231,59 @@ class ServicesPage(QWidget):
             other.depends = [d for d in other.depends if d != row.name]
         self._rebuild()
         self._validate()
+
+    # -- what an isolated service publishes -----------------------------------------------
+    def isolated(self, project_name, runner_name):
+        service = self.supervisor.service(project_name, runner_name)
+        held = service.restricted_with if service is not None else None
+        return held is not None and restrictions_mod.resolve(held)["network"] == "isolated"
+
+    def publications(self, project_name, runner_name):
+        service = self.supervisor.service(project_name, runner_name)
+        return service.publications() if service is not None else []
+
+    def ports_menu(self, project_name, runner_name, anchor):
+        """Open, copy, unpublish what a running isolated service publishes, or
+        publish one more - without restarting it."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        service = self.supervisor.service(project_name, runner_name)
+        if service is None:
+            return
+        menu = QMenu(anchor)
+        for one in service.publications():
+            where = "localhost" if one["host_ip"] in restrictions_mod.LOOPBACK else one["host_ip"]
+            if where == "0.0.0.0":
+                where = "localhost"
+            address = "%s:%s" % (where, one["host_port"])
+            url = "http://%s/" % address
+            menu.addAction("Open %s  (service port %s)" % (address, one["internal_port"]),
+                           lambda u=url: QDesktopServices.openUrl(QUrl(u)))
+            menu.addAction("Copy %s" % url, lambda u=url: QApplication.clipboard().setText(u))
+            menu.addAction("Unpublish %s" % address,
+                           lambda p=dict(one): self._change_publication(project_name, runner_name, "remove", p))
+            menu.addSeparator()
+        menu.addAction("Publish a port…", lambda: self._publish_dialog(project_name, runner_name))
+        menu.popup(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _publish_dialog(self, project_name, runner_name):
+        port, ok = QInputDialog.getInt(self, "Publish a port",
+                                       "The service's port to publish on this computer (127.0.0.1, a free port):",
+                                       8069, 1, 65535)
+        if ok:
+            self._change_publication(project_name, runner_name, "add", {"internal_port": port, "host_port": "auto"})
+
+    def _change_publication(self, project_name, runner_name, operation, publication):
+        service = self.supervisor.service(project_name, runner_name)
+        if service is None:
+            return
+        wanted = {key: publication[key] for key in ("internal_port", "host_port", "host_ip") if key in publication}
+
+        def done(answer, error):
+            if error:
+                self._show_problem("%s · %s: %s" % (project_name, runner_name, error))
+            self._refresh_statuses()
+        background.run(lambda: service.change_publication(operation, wanted), done, owner=self)
 
     def toggle_runner(self, project_name, runner_name):
         service = self.supervisor.service(project_name, runner_name)

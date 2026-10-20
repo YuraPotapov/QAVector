@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "version": "2026_10_02.cba3570",
+  "upstream_commit": "cba357068dc586e7540971eb40bb56c5e62c4de1",
+  "source_url": "https://passt.top/passt/snapshot/passt-2026_10_02.cba3570.tar.xz",
+  "source_sha256": "aa75616cc43925f0bd6c05bcfbbaecd77397c03d7bd23591b34ef535be5dfcdc",
+  "source_date_epoch": 1790975126,
+  "target": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "libc": "glibc",
+    "minimum_glibc": "2.35",
+    "minimum_kernel": "5.3"
+  },
+  "linkage": "dynamic-glibc",
+  "license": "GPL-2.0-or-later",
+  "source_licenses": [
+    "GPL-2.0-or-later",
+    "BSD-3-Clause"
+  ],
+  "license_files_sha256": {
+    "GPL-2.0-or-later.txt": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3",
+    "BSD-3-Clause.txt": "32dfe03d9985f5feb581da26a2fe6c84530cccb6b53ede0d8dab075cd048ac5b"
+  },
+  "make_targets": [
+    "passt",
+    "passt.avx2",
+    "pesto"
+  ],
+  "executables": {
+    "bin/pasta": "passt",
+    "bin/pasta.avx2": "passt.avx2",
+    "bin/pesto": "pesto"
+  }
+}

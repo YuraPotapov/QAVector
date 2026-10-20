@@ -54,6 +54,12 @@ NEEDS_NETWORK = {
 RUN_RECORDS = ("metadata.json", "graph.json", ".execution", ".execution.lock", "logs", "steps")
 
 
+#: Isolated networks hold services first; a cycle's steps get them with the
+#: publish and unpublish steps of the next stage.
+ISOLATED_LATER = ("%s: an isolated network is for services for now - cycle steps get it with port "
+                  "publishing steps; use on or off here.")
+
+
 class Restrictions(Exception):
     """A step its restrictions do not let start; the message says why."""
 
@@ -77,7 +83,8 @@ def problems(cycle):
     if (folder or cycle.restrictions) and isinstance(cycle.execution, dict) and "runtime" in cycle.execution:
         found.append("Use either restrictions or execution.runtime, not both.")
     try:
-        restrictions.parse(cycle.restrictions, "restrictions")
+        if restrictions.parse(cycle.restrictions, "restrictions").get("network") == "isolated":
+            found.append(ISOLATED_LATER % "the cycle")
     except RuntimePolicyError as exc:
         found.append("%s: %s" % (exc.field or "restrictions", exc))
     for step in cycle.steps:
@@ -90,7 +97,8 @@ def problems(cycle):
         elif step.restrictions and is_system(step):
             found.append("%s: %s has nothing restrictions could hold; remove them." % (step.id, step.plugin))
         try:
-            restrictions.parse(step.restrictions, "%s.restrictions" % step.id)
+            if restrictions.parse(step.restrictions, "%s.restrictions" % step.id).get("network") == "isolated":
+                found.append(ISOLATED_LATER % step.id)
         except RuntimePolicyError as exc:
             found.append("%s: %s" % (exc.field or step.id, exc))
     return found
