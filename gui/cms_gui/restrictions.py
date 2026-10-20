@@ -55,7 +55,23 @@ SERVICE_TYPES = ("python", "shell")
 CYCLE_PLUGINS = frozenset((
     "command.shell", "git.checkout", "git.commit", "git.prepare_branch",
     "agent.review", "agent.edit", "agent.implement", "agent.merge", "task.brief",
+    "jira.issues", "jira.transition", "teams.message",
 ))
+#: Runs without restrictions for now - it drives a real browser - so its node
+#: says SYSTEM, like a step marked so on purpose.
+SYSTEM_PLUGINS = frozenset(("scenario.run",))
+#: Cannot work with the network off: restricted that way, the run refuses them.
+NEEDS_NETWORK = frozenset(("agent.review", "agent.edit", "agent.implement", "agent.merge",
+                           "jira.issues", "jira.transition", "teams.message"))
+
+
+def step_kind(step):
+    """``"restricted"``; ``"system"`` - runs without restrictions, and its node
+    says so; or ``""`` - nothing to restrict: an approval, a check, a report."""
+    plugin = step.get("plugin", "")
+    if step.get("system") or plugin in SYSTEM_PLUGINS:
+        return "system"
+    return "restricted" if plugin in CYCLE_PLUGINS else ""
 
 
 # -- the stored mapping, read the way the core reads it -------------------------------

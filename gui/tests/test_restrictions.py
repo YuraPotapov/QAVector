@@ -323,12 +323,15 @@ def test_a_service_in_a_folder_with_nothing_set_starts_exactly_as_before(qapp, t
 
 # -- cycles -----------------------------------------------------------------------------
 def cycle_page(document_extra=None):
-    made = graph(("build", []), ("notify", ["build"]))
-    made["nodes"][1]["plugin"] = "report.json"
+    made = graph(("build", []), ("notify", ["build"]), ("browse", ["build"]), ("tell", ["build"]))
+    for node, plugin in zip(made["nodes"][1:], ("report.json", "scenario.run", "teams.message")):
+        node["plugin"] = plugin
     document = {"id": "demo", "name": "Demo cycle",
                 "variables": {"project_dir": {"kind": "path", "value": "/work/shop"}},
                 "steps": [{"id": "build", "plugin": "command.shell", "with": {"command": "make"}},
-                          {"id": "notify", "plugin": "report.json", "needs": ["build"]}]}
+                          {"id": "notify", "plugin": "report.json", "needs": ["build"]},
+                          {"id": "browse", "plugin": "scenario.run", "needs": ["build"]},
+                          {"id": "tell", "plugin": "teams.message", "needs": ["build"]}]}
     document.update(document_extra or {})
     page = CyclesPage(Settings())
     page.set_core(FakeCore({"demo": payload(cycle=made, document=document)}))
@@ -392,14 +395,20 @@ def test_a_node_indicator_switches_into_the_draft_and_undo_takes_it_back(qapp, d
         dispose(page)
 
 
-def test_system_steps_show_a_tag_and_take_no_clicks(qapp, dispose):
-    page = cycle_page({"project_folder": "/work/shop"})
+def test_only_steps_that_run_unrestricted_say_system_and_steps_with_nothing_to_hold_say_nothing(qapp, dispose):
+    page = cycle_page({"project_folder": "/work/shop", "restrictions": {"switched_off": ["network"]}})
     try:
-        item = page.canvas.node("notify")
-        assert item.restriction == {"system": True}
-        assert item.restriction_at(item.restriction_rect("network").center()) == ""
-        build = page.canvas.node("build")
+        browser = page.canvas.node("browse")
+        assert browser.restriction == {"system": True}
+        assert browser.restriction_at(browser.restriction_rect("network").center()) == ""
+        assert page.canvas.node("notify").restriction is None          # a report: nothing to restrict
+        build, tell = page.canvas.node("build"), page.canvas.node("tell")
         assert build.restriction_at(build.restriction_rect("files").center()) == "files"
+        assert tell.restriction["network"][0] == "Off"                   # Teams is held like the rest
+        assert "Will not start: it needs the network" in tell.restriction["summary"]
+        assert "Will not start" not in build.restriction["summary"]
+        rows = dict(page._steps_for_window(page._document_now()))
+        assert "notify" not in rows and rows["browse"].startswith("System step")
     finally:
         dispose(page)
 
@@ -433,16 +442,19 @@ def test_the_step_window_shows_restrictions_only_when_the_cycle_has_a_folder(qap
                       restrictions={"folder": "/work/shop", "cycle": {"files": "read_only"}})
     report = NodeDialog({"id": "notify", "plugin": "report.json"}, {},
                         restrictions={"folder": "/work/shop", "cycle": {}})
+    browser = NodeDialog({"id": "browse", "plugin": "scenario.run"}, {},
+                         restrictions={"folder": "/work/shop", "cycle": {}})
     try:
         assert plain.system_box is None
         assert held.system_box.isEnabled() and not held.system_box.isChecked()
         assert "Net off" in held.restrict_button.text()
-        assert report.system_box.isChecked() and not report.system_box.isEnabled()
+        assert report.system_box is None and report.restrict_button is None
+        assert browser.system_box.isChecked() and not browser.system_box.isEnabled()
         held.system_box.setChecked(True)
         held._save()
         assert held.saved.get("system") is True and "restrictions" not in held.saved
     finally:
-        for one in (plain, held, report):
+        for one in (plain, held, report, browser):
             dispose(one)
 
 

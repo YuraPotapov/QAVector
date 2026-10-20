@@ -16,6 +16,27 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- **Jira and Teams steps are held by a cycle's restrictions** like shell, git and
+  agent steps: restricted, the same plugin runs as a program of its own inside
+  the sandbox, with its tokens on a pipe. Only `scenario.run` and steps marked
+  on purpose still say SYSTEM; approvals, checks, reports and memory, which have
+  nothing to restrict, show no indicators.
+- A restricted cycle step sees its own run folder: read-write for the files
+  steps hand each other (`${run.workspace}/...`), and the run's record, graph,
+  logs and every step's output readable but not rewritable. Before, it saw only
+  its own step folder, so a cycle with Files restricted could not pass a file
+  from one step to the next.
+
+### Fixed
+- An agent step with the network off retried its model's API for minutes and
+  then failed without naming the cause. An agent, Jira or Teams step whose
+  network is off now fails at once - "the network is off for this step" - and
+  its node's tooltip says it beforehand.
+- A protected path that is a link inside a granted folder (a checkout's
+  `cycle-runs` link) stopped the sandbox from starting; it is now hidden where
+  it leads.
+
 ## [0.16.32] - 2026-10-20
 
 ### Changed

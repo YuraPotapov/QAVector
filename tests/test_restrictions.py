@@ -181,6 +181,9 @@ def test_cycle_problems_name_what_is_wrong(change, message):
 def test_step_restrictions_need_the_folder_and_are_refused_on_system_steps():
     made = cycle(project_folder="/work")
     made.steps[1].restrictions = {"network": "off"}
+    assert any("report.json has nothing restrictions could hold" in one for one in model.problems(made, REGISTRY))
+    made.steps[1].restrictions, made.steps[0].system = {}, True
+    made.steps[0].restrictions = {"network": "off"}
     assert any("system step runs without restrictions" in one for one in model.problems(made, REGISTRY))
     no_folder = cycle()
     no_folder.steps[0].restrictions = {"network": "off"}
@@ -224,7 +227,7 @@ def test_a_held_thread_starts_through_the_launcher(monkeypatch):
             calls.append("closed")
 
     class Held:
-        def prepare(self, argv, cwd, env):
+        def prepare(self, argv, cwd, env, folders=()):
             calls.append((argv, cwd))
             return Prepared()
 
@@ -259,3 +262,173 @@ def test_an_unquoted_on_or_off_written_by_hand_means_on_or_off():
     assert raw == {"network": False}
     assert r.parse(raw) == {"network": "off"}
     assert r.parse(yaml.safe_load("network: on\n")) == {"network": "on"}
+
+
+# -- steps that need the network, Jira and Teams, the run's folder ------------------------
+def cycle_with(plugin, settings=None, **extra):
+    raw = {"id": "demo", "project_folder": "/work/shop",
+           "steps": [{"id": "one", "plugin": plugin, "with": settings or {}}]}
+    raw.update(extra)
+    return model.parse_cycle(raw, "demo")
+
+
+@pytest.mark.parametrize("plugin,why", [
+    ("agent.review", "an agent cannot reach its model"),
+    ("jira.issues", "Jira cannot be reached"),
+    ("teams.message", "Teams cannot be reached"),
+])
+def test_a_step_that_needs_the_network_is_refused_before_it_starts(plugin, why):
+    made = cycle_with(plugin, restrictions={"switched_off": ["network"]})
+    with pytest.raises(restrict.Restrictions) as refused:
+        restrict.for_step(made, made.steps[0], {"vars": {}}, "/runs/1/steps/one")
+    assert "network is off for this step" in str(refused.value) and why in str(refused.value)
+    assert "globe" in str(refused.value)
+    made.steps[0].restrictions = {"network": "on"}
+    assert restrict.for_step(made, made.steps[0], {"vars": {}}, "/runs/1/steps/one") is None
+
+
+def test_a_shell_step_without_the_network_still_runs():
+    made = cycle_with("command.shell", {"command": "make"}, restrictions={"network": "off"})
+    held = restrict.for_step(made, made.steps[0], {"vars": {}}, "/runs/1/steps/one")
+    assert held.effective["network"] == "off"
+
+
+def test_jira_and_teams_are_restricted_and_only_the_browser_stays_a_system_step():
+    for plugin in ("jira.issues", "jira.transition", "teams.message"):
+        assert not restrict.is_system(cycle_with(plugin).steps[0]) and plugin in restrict.IN_SANDBOX
+    assert restrict.is_system(cycle_with("scenario.run").steps[0])
+    graph = model.to_graph(cycle_with("teams.message"))
+    assert graph["nodes"][0]["restrictable"] is True
+
+
+def test_a_restricted_step_sees_its_run_folder_and_reads_but_cannot_rewrite_the_record(monkeypatch):
+    seen = {}
+
+    class Launcher:
+        def prepare(self, effective, argv, cwd, env, extra):
+            seen["extra"] = extra
+            return "prepared"
+
+    from execution_runtime.backends.linux import restricted
+    monkeypatch.setattr(restricted, "launcher", lambda: Launcher())
+    made = cycle_with("command.shell", {"command": "make"}, restrictions={"files": "read_write"})
+    held = restrict.for_step(made, made.steps[0], {"vars": {}}, "/runs/1/steps/one", "/runs/1")
+    held.prepare(["make"], "/work/shop", {})
+    access = {one["path"]: one["access"] for one in seen["extra"]}
+    assert access["/runs/1"] == "read_write" and access["/runs/1/steps/one"] == "read_write"
+    for name in ("metadata.json", "graph.json", ".execution", "logs", "steps"):
+        assert access["/runs/1/" + name] == "read_only"
+    # Without a workspace given it is the step folder's grandparent.
+    assert restrict.StepRestriction(held.effective, "/runs/1/steps/one").workspace == "/runs/1"
+    seen.clear()
+    open_files = cycle_with("command.shell", {"command": "make"}, restrictions={"network": "off"})
+    restrict.for_step(open_files, open_files.steps[0], {"vars": {}}, "/runs/1/steps/one").prepare(["make"], "/w", {})
+    assert seen["extra"] == []          # Files "No restrictions" already sees everything
+
+
+def test_the_worker_answers_with_the_plugin_s_result_and_its_errors(monkeypatch, tmp_path):
+    import io
+    import json
+    from cycle import step_worker
+
+    class Plugin:
+        def execute(self, context, step):
+            print("chatter goes to the log")
+            path = os.path.join(context.step_dir(step.id), "out.json")
+            with open(path, "w") as handle:
+                handle.write("{}")
+            if step.settings.get("fail"):
+                raise LookupError("no such project")
+            return REGISTRY.succeeded("done %s" % step.settings["token"], count=2)
+
+    monkeypatch.setattr(REGISTRY, "get", lambda plugin_id: Plugin())
+
+    def ask(settings):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        request = {"plugin": "teams.message", "workspace": str(tmp_path),
+                   "step": {"id": "notify", "plugin": "teams.message", "label": "", "settings": settings}}
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request)))
+        monkeypatch.setattr("sys.stdout", stdout)
+        monkeypatch.setattr("sys.stderr", stderr)
+        assert step_worker.main() == 0
+        return stdout.getvalue(), stderr.getvalue()
+
+    answer, log = ask({"token": "secret-value"})
+    assert "chatter" in log and "chatter" not in answer
+    result = step_worker._result(answer.encode(), 0, str(tmp_path / "missing.log"))
+    assert result.ok and result.message == "done secret-value" and result.outputs == {"count": 2}
+    assert os.path.isfile(tmp_path / "steps" / "notify" / "out.json")
+    answer, _ = ask({"fail": True})
+    with pytest.raises(Exception) as raised:
+        step_worker._result(answer.encode(), 0, "")
+    assert type(raised.value).__name__ == "LookupError" and "no such project" in str(raised.value)
+    with pytest.raises(RuntimeError, match="without a result: it broke"):
+        (tmp_path / "w.log").write_text("it broke")
+        step_worker._result(b"", 1, str(tmp_path / "w.log"))
+
+
+def _stand_in(answer_after=0.0):
+    """A local stand-in for a Teams workflow; returns (url, received, server)."""
+    import http.server
+    import threading
+    import time
+    received = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers["Content-Length"])))
+            time.sleep(answer_after)
+            self.send_response(202)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return "http://127.0.0.1:%d/hook" % server.server_address[1], received, server
+
+
+class _RunContext:
+    def __init__(self, workspace):
+        from cycle.context import CancelToken
+        self.workspace = str(workspace)
+        self.cancel = CancelToken()
+
+    def step_dir(self, step_id, *parts):
+        path = os.path.join(self.workspace, "steps", step_id, *parts)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+
+def test_a_teams_step_runs_in_a_worker_process_of_its_own(tmp_path):
+    from domain.cycle import CycleStep
+    url, received, server = _stand_in()
+    try:
+        context = _RunContext(tmp_path)
+        (tmp_path / "message.md").write_text("Release is ready")
+        step = CycleStep("notify", "teams.message", settings={"webhook": url, "text_file": "message.md"})
+        result = restrict.Sandboxed(REGISTRY.get("teams.message")).execute(context, step)
+        assert result.ok and result.outputs["sent"] is True, result.message
+        assert b"Release is ready" in received[0]
+    finally:
+        server.shutdown()
+
+
+def test_stopping_a_run_ends_its_worker(tmp_path):
+    import threading
+    import time
+    from cycle import step_worker
+    from cycle.context import Cancelled
+    from domain.cycle import CycleStep
+    url, received, server = _stand_in(answer_after=30)
+    try:
+        context = _RunContext(tmp_path)
+        step = CycleStep("notify", "teams.message", settings={"webhook": url, "text": "hello"})
+        threading.Timer(1.5, context.cancel.set, args=("stopped",)).start()
+        started = time.monotonic()
+        with pytest.raises(Cancelled):
+            step_worker.call(context, step)
+        assert time.monotonic() - started < 10
+    finally:
+        server.shutdown()

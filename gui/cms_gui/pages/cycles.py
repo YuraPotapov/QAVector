@@ -1358,16 +1358,21 @@ class CyclesPage(QWidget):
         for step in document.get("steps") or []:
             if not isinstance(step, dict) or not step.get("id"):
                 continue
-            if step.get("system") or step.get("plugin", "") not in restrictions_mod.CYCLE_PLUGINS:
+            kind = restrictions_mod.step_kind(step)
+            if kind == "system":
                 states[step["id"]] = {"system": True}
+            if kind != "restricted":
                 continue
             own = step.get("restrictions") or {}
             effective = restrictions_mod.resolve(outer + [("step", own)])
+            summary = restrictions_mod.summary(effective)
+            if effective["network"] == "off" and step.get("plugin") in restrictions_mod.NEEDS_NETWORK:
+                summary += ". Will not start: it needs the network"
             states[step["id"]] = {
                 "network": restrictions_mod.switch_state(outer, own, "step", "network")[:2],
                 "files": restrictions_mod.switch_state(outer, own, "step", "files")[:2],
                 "limits": restrictions_mod.limits_words(effective["limits"], short=True),
-                "summary": restrictions_mod.summary(effective),
+                "summary": summary,
                 "pending": set(restrictions_mod.pending((before.get(step["id"]) or {}).get("restrictions"), own)),
                 "editable": editable}
         return states
@@ -1437,8 +1442,11 @@ class CyclesPage(QWidget):
             if not isinstance(step, dict):
                 continue
             label = step.get("label") or step.get("id", "")
-            if step.get("system") or step.get("plugin", "") not in restrictions_mod.CYCLE_PLUGINS:
+            kind = restrictions_mod.step_kind(step)
+            if kind == "system":
                 rows.append((label, "System step - runs without restrictions"))
+            elif not kind:
+                continue            # nothing to restrict: an approval, a report
             elif step.get("restrictions"):
                 rows.append((label, "Its own: " + restrictions_mod.summary(
                     restrictions_mod.resolve(outer + [("step", step["restrictions"])]))))
@@ -1479,8 +1487,10 @@ class CyclesPage(QWidget):
 
     def _restrictions_menu(self, menu, step_id, step, document, editable):
         outer = [("cycle", document.get("restrictions") or {})]
-        if step.get("system") or step.get("plugin", "") not in restrictions_mod.CYCLE_PLUGINS:
+        kind = restrictions_mod.step_kind(step)
+        if kind == "system":
             menu.addAction("System step - runs without restrictions").setEnabled(False)
+        if kind != "restricted":
             return
         own = step.get("restrictions") or {}
         for kind, words in (("network", "Network"), ("files", "File access")):

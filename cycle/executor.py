@@ -1391,7 +1391,8 @@ class _Scheduler(object):
         # resolved fails the step; it never runs it unrestricted instead.
         restriction, refused = None, None
         try:
-            restriction = restrict.for_step(self.cycle, step, self._scope(), self.context.step_dir(step.id))
+            restriction = restrict.for_step(self.cycle, step, self._scope(), self.context.step_dir(step.id),
+                                            self.context.workspace)
         except Exception as exc:              # noqa: BLE001 - reported as the step's failure
             refused = exc
         pool.submit(self._work, step, plugin, settings, token, restriction, refused)
@@ -1417,6 +1418,10 @@ class _Scheduler(object):
             if refused is not None:
                 raise refused
             plugin = self.context.runtime_plan.workers.get(step.id, plugin)
+            if restriction is not None and step.plugin in restrict.IN_SANDBOX:
+                # Jira and Teams run inside QAVector, where no sandbox reaches;
+                # restricted, the same plugin runs as a program inside one.
+                plugin = restrict.Sandboxed(plugin)
             if semaphore is not None:
                 # Held for the whole of execute: the point of a group is that
                 # two members are never both inside their plugin at once.

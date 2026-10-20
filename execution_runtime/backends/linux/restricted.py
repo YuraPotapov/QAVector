@@ -82,6 +82,12 @@ def default_protected():
     return tuple(dict.fromkeys(os.path.join(root, one) for root in roots for one in names))
 
 
+def _target(path):
+    """Where a protected path really is. A link is hidden where it leads: bwrap
+    cannot mount over a link, and what it points at is what must stay hidden."""
+    return os.path.realpath(path) if os.path.islink(path) else path
+
+
 def private_paths(home):
     """Hidden when they sit inside a granted folder, unless granted themselves."""
     return tuple(os.path.join(home, one) for one in (".ssh", ".gnupg", ".aws", ".netrc", ".docker"))
@@ -305,12 +311,12 @@ class RestrictedLauncher:
                 args += ["--perms", "0600", "--file", str(handle.fileno()), one["path"]]
         sources = [path for path, _ in visible]
         masked = []
-        for path in self.protected:
+        for path in dict.fromkeys(_target(one) for one in self.protected):
             # QAVector's own data stays hidden even inside an explicitly granted folder.
             if any(within(source, path) for source in sources):
                 args += self._mask(path)
                 masked.append(path)
-        for path in private_paths(self.home):
+        for path in dict.fromkeys(_target(one) for one in private_paths(self.home)):
             if any(within(source, path) and source != path for source in sources) and not any(within(path, source) for source in sources):
                 args += self._mask(path)
                 masked.append(path)

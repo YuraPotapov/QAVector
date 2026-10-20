@@ -57,16 +57,27 @@ Save on the Services page (then restart a running service - its row says
 "(edited)"), or the cycle's own Save, where Undo takes a toggle back. A change
 not saved yet is drawn with a dashed edge.
 
-## System steps
+## Which steps they hold
 
-Some steps cannot be held to a folder: those that run inside QAVector itself
-(approvals, reports, Jira, Teams, waiting, memory) and `scenario.run`, which
-drives a browser. They are **system steps** - restrictions do not apply, and the
-node says SYSTEM. Any other step can be marked as one on purpose ("System step"
-in its window, `system: true` in the file). The steps that run inside
-restrictions are `command.shell`, `git.*`, `agent.*` and `task.brief`. A
-restricted step runs in the project folder unless its `dir` says otherwise, and
-may also write to its own step folder of the run.
+- **Held:** `command.shell`, `git.*`, `agent.*`, `task.brief`, `jira.*` and
+  `teams.message`. Jira and Teams run inside QAVector itself, so when they are
+  restricted the same plugin runs as a program of its own inside the sandbox;
+  their tokens reach it on a pipe, never on disk.
+- **Nothing to hold:** approvals, checks, choices, waiting, reports and memory
+  touch neither the network nor the project. Their nodes show no indicators.
+  `service.*` steps start a service the way the Services page does, with that
+  service's own restrictions.
+- **System steps:** `scenario.run` drives a real browser and cannot be held to a
+  folder yet, and any step marked on purpose ("System step" in its window,
+  `system: true` in the file). They run without restrictions, and the node says
+  SYSTEM.
+
+A restricted step runs in the project folder unless its `dir` says otherwise.
+
+**A step that needs the network does not start without it.** An agent, Jira or
+Teams step whose network is off fails at once, saying so and how to turn it on
+- an agent's CLI left to try would retry for minutes and then fail with nothing
+that names the cause. The node's tooltip says it beforehand.
 
 ## What a restricted program sees
 
@@ -74,6 +85,10 @@ may also write to its own step folder of the run.
   `/run` and home folder.
 - The project folder as Files says, and the **other folders** listed in the
   window, each read-only or read-write (`~/` is your home).
+- In a cycle, its own **run folder** (`${run.workspace}`), read-write, where
+  steps hand files to each other. What QAVector keeps there - the run's record,
+  graph and logs, and every step's output - is readable, so what went wrong can
+  be worked out, but not rewritable. Other runs stay hidden.
 - Folders a tool needs to start, added automatically and shown in the window: a
   virtualenv or CLI installed outside the project, `~/.claude` for the agent CLI
   (its `~/.claude.json` as a private copy), `~/.gitconfig`.
@@ -155,8 +170,9 @@ qavector --restricted-exec='{"project_folder": "/abs/project", "layers": [["proj
 ## Not covered
 
 Network is all or nothing: there is no list of allowed hosts or ports yet, and
-Network On means the host's network, local services included. Browsers
-(`scenario.run`) run as system steps. Restrictions need Linux on x86_64; on
+Network On means the host's network, local services included - an agent
+cannot be given Claude's API alone. Browsers (`scenario.run`) run as system
+steps. Restrictions need Linux on x86_64; on
 Windows the buttons say so. The stricter isolation from a reviewed file image
 ([Execution Runtime](QAVector_Execution_Runtime.md)) is configured with the
 `--runtime-*` commands only; the GUI shows such a service or cycle as configured

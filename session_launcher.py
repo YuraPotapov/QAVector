@@ -3735,6 +3735,11 @@ Example:
 
 
 def main():
+    if sys.argv[1:2] == ["--cycle-step-worker"]:
+        # A restricted Jira or Teams step, started by a cycle run inside its
+        # sandbox: first, before anything here touches the user's data folder.
+        from cycle import step_worker
+        sys.exit(step_worker.main())
     # An installed build has no checkout to fall back on, so the user's directories
     # and a starter users.json have to exist before anything reads them. A no-op in
     # a source checkout - see runtime_paths.ensure_user_data_root.

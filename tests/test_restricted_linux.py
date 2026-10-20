@@ -242,3 +242,86 @@ def test_a_cycle_whose_project_folder_cannot_be_resolved_fails_the_step(tmp_path
     result = run_cycle(cycle, str(tmp_path / "run"))
     assert result.steps["work"].status == "failed"
     assert "ran" not in (result.steps["work"].outputs or {}).get("stdout_tail", "")
+
+
+def test_restricted_steps_hand_files_over_in_their_run_folder_and_only_read_its_record(bundle, tree, tmp_path, monkeypatch):
+    from cycle.executor import run_cycle
+    from cycle.model import parse_cycle
+    monkeypatch.setenv("QAVECTOR_RUNTIME_DIR", bundle)
+    restricted.reset_capabilities()
+    cycle = parse_cycle({"id": "handoff", "project_folder": "${vars.project}", "variables": {"project": str(tree["project"])},
+        "restrictions": {"files": "read_write", "network": "off"},
+        "steps": [{"id": "make", "plugin": "command.shell", "with": {"command": "echo 3 failed > '${run.workspace}/tests.log'"}},
+                  {"id": "read", "plugin": "command.shell", "needs": ["make"],
+                   "with": {"command": "cat '${run.workspace}/tests.log'; cat '${run.workspace}/steps/make/stdout.log'"}},
+                  {"id": "rewrite", "plugin": "command.shell", "needs": ["read"], "on_failure": "continue",
+                   "with": {"command": "head -c 1 '${run.workspace}/metadata.json' && echo forged > '${run.workspace}/metadata.json'"}}]},
+        "handoff")
+    workspace = tmp_path / "run"
+    result = run_cycle(cycle, str(workspace))
+    assert result.steps["make"].status == "success", result.steps["make"].message
+    assert result.steps["read"].status == "success", result.steps["read"].message
+    assert result.steps["read"].outputs["stdout_tail"].splitlines()[0] == "3 failed"
+    assert result.steps["rewrite"].status == "failed"
+    assert result.steps["rewrite"].outputs["stdout_tail"] == "{"        # readable, not writable
+    assert "forged" not in (workspace / "metadata.json").read_text()
+
+
+def test_a_restricted_teams_step_posts_from_a_worker_inside_the_sandbox(bundle, tree, tmp_path, monkeypatch):
+    import http.server
+    from cycle.executor import run_cycle
+    from cycle.model import parse_cycle
+    monkeypatch.setenv("QAVECTOR_RUNTIME_DIR", bundle)
+    restricted.reset_capabilities()
+    received = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(202)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d/hook" % server.server_address[1]
+    try:
+        cycle = parse_cycle({"id": "tell", "project_folder": "${vars.project}",
+            "variables": {"project": str(tree["project"])}, "restrictions": {"files": "read_only"},
+            "steps": [{"id": "facts", "plugin": "command.shell",
+                       "with": {"command": "echo Release is ready > '${run.workspace}/note.md'"}},
+                      {"id": "notify", "plugin": "teams.message", "needs": ["facts"],
+                       "with": {"webhook": url, "text_file": "note.md"}},
+                      {"id": "offline", "plugin": "teams.message", "needs": ["notify"], "on_failure": "continue",
+                       "restrictions": {"network": "off"}, "with": {"webhook": url, "text": "never"}}]}, "tell")
+        workspace = tmp_path / "run"
+        result = run_cycle(cycle, str(workspace))
+        assert result.steps["notify"].status == "success", result.steps["notify"].message
+        assert len(received) == 1 and b"Release is ready" in received[0]
+        assert (workspace / "steps/notify/worker.log").exists()     # it ran as a worker
+        assert result.steps["offline"].status == "failed"
+        assert "network is off for this step" in result.steps["offline"].message
+    finally:
+        server.shutdown()
+
+
+def test_a_protected_link_inside_a_granted_folder_is_hidden_where_it_leads(bundle, tree):
+    data = tree["home"] / "QAVector/cycle-runs"
+    data.mkdir()
+    (data / "run.json").write_text("RECORD")
+    (tree["project"] / "cycle-runs").symlink_to(data)
+    launcher = restricted.RestrictedLauncher(bundle, protected=[str(tree["project"] / "cycle-runs")],
+                                             home=str(tree["home"]))
+    effective = r.resolve([("project", {"files": "read_only", "folders": [
+        {"path": str(tree["home"] / "QAVector"), "access": "read_only"}]})], str(tree["project"]), home=str(tree["home"]))
+    prepared = launcher.prepare(effective, ["/bin/sh", "-c", "cat readme.txt; cat cycle-runs/run.json; cat %s/run.json" % data],
+                                str(tree["project"]), dict(os.environ, HOME=str(tree["home"])))
+    try:
+        done = subprocess.run(prepared.argv, env=prepared.env, cwd=prepared.cwd, pass_fds=prepared.pass_fds,
+                              capture_output=True, text=True, timeout=30)
+    finally:
+        prepared.close()
+    assert "bwrap" not in done.stderr, done.stderr     # it starts at all
+    assert done.stdout == "shop\n" and "RECORD" not in done.stdout

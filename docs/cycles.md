@@ -17,8 +17,9 @@ ships with the application. Yours is searched first, so a cycle you write
 shadows a bundled one with the same id.
 
 A cycle can hold its steps to its project folder - network, files and limits,
-with each step able to set its own; steps that cannot be held to a folder are
-system steps. See [restrictions](restrictions.md).
+with each step able to set its own. Shell, git, agent, Jira and Teams steps are
+held; a browser step (`scenario.run`) and any step marked `system: true` run
+without them, and the node says SYSTEM. See [restrictions](restrictions.md).
 
 ---
 

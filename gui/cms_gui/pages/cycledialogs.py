@@ -380,16 +380,19 @@ class NodeDialog(_Editor):
         if self._restriction_context is None:
             return
         from .. import restrictions as restrictions_mod
+        # What the plugin itself is, whatever this step is marked.
+        kind = restrictions_mod.step_kind({"plugin": self._step.get("plugin", "")})
+        if not kind:
+            return          # nothing to restrict: an approval, a check, a report
         self.body_layout.addWidget(widgets.kicker("Restrictions"))
-        restrictable = self._step.get("plugin", "") in restrictions_mod.CYCLE_PLUGINS
+        restrictable = kind == "restricted"
         self.system_box = QCheckBox("System step - runs without the cycle's restrictions")
         self.system_box.setChecked(bool(self._step.get("system")) or not restrictable)
         self.system_box.setEnabled(self._writable and restrictable)
         self.restrict_button = restrictions_mod.FolderButton()
         self.restrict_button.clicked.connect(self._edit_restrictions)
-        hint = ("This plugin works inside QAVector itself or drives a browser, so restrictions do not apply to it."
-                if not restrictable else
-                "Runs in the cycle's project folder, held to the cycle's restrictions; it can only narrow them.")
+        hint = ("It drives a browser, which restrictions cannot hold yet." if not restrictable else
+                "Runs with the cycle's restrictions unless it sets its own.")
         self.body_layout.addWidget(widgets.field("", widgets.row(self.system_box, None, self.restrict_button), hint))
         self.system_box.toggled.connect(self._sync_restrictions)
         self._sync_restrictions()
