@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.34] - 2026-10-20
+
 ### Changed
 - **The cycle's header row is two groups.** Beside the name, the run on screen
   is a pill toned by how it is going - in flight, held up, failed, done or
