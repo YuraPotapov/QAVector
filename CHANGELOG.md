@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.32] - 2026-10-20
+
 ### Changed
 - The cycles toolbar no longer says the network state twice: the network toggle
   is a globe, struck through when off, and **Restrictions** beside it shows a
