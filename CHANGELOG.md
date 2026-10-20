@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.31] - 2026-10-20
+
 ### Fixed
 - The app did not start: the 0.16.30 package was built with PySide6 6.12.0, which
   aborts while the main window is built ("Fatal Python error: none_dealloc:
