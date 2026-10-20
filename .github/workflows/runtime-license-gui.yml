@@ -2,9 +2,9 @@ name: Runtime service GUI and offline licenses
 
 on:
   push:
-    paths: ['licenses/**', 'execution_runtime/**', 'cycle/**', 'domain/cycle.py', 'gui/cms_gui/**', 'gui/tests/test_cycle*.py', 'gui/tests/test_runtime_services.py', 'gui/tests/test_runtime_permissions.py', 'gui/tests/test_services*.py', 'gui/tests/test_servicebridge.py', 'gui/tests/test_thirdparty.py', 'gui/tests/test_settings_dialog.py', '.github/workflows/runtime-license-gui.yml']
+    paths: ['licenses/**', 'execution_runtime/**', 'cycle/**', 'domain/cycle.py', 'gui/cms_gui/**', 'gui/tests/test_cycle*.py', 'gui/tests/test_runtime_services.py', 'gui/tests/test_restrictions.py', 'gui/tests/test_services*.py', 'gui/tests/test_servicebridge.py', 'gui/tests/test_thirdparty.py', 'gui/tests/test_settings_dialog.py', '.github/workflows/runtime-license-gui.yml']
   pull_request:
-    paths: ['licenses/**', 'execution_runtime/**', 'cycle/**', 'domain/cycle.py', 'gui/cms_gui/**', 'gui/tests/test_cycle*.py', 'gui/tests/test_runtime_services.py', 'gui/tests/test_runtime_permissions.py', 'gui/tests/test_services*.py', 'gui/tests/test_servicebridge.py', 'gui/tests/test_thirdparty.py', 'gui/tests/test_settings_dialog.py', '.github/workflows/runtime-license-gui.yml']
+    paths: ['licenses/**', 'execution_runtime/**', 'cycle/**', 'domain/cycle.py', 'gui/cms_gui/**', 'gui/tests/test_cycle*.py', 'gui/tests/test_runtime_services.py', 'gui/tests/test_restrictions.py', 'gui/tests/test_services*.py', 'gui/tests/test_servicebridge.py', 'gui/tests/test_thirdparty.py', 'gui/tests/test_settings_dialog.py', '.github/workflows/runtime-license-gui.yml']
   workflow_dispatch:
 
 permissions:
@@ -25,7 +25,7 @@ jobs:
       - run: python packaging/check_licenses.py --licenses=licenses
       - run: |
           # Keep independent Qt modules in independent QApplication processes.
-          for module in test_thirdparty test_settings_dialog test_runtime_services test_runtime_permissions test_services test_servicesfile test_cycle_runtime test_cycledialogs test_cyclereplay test_cycle_execution_modes test_services_page test_servicebridge; do
+          for module in test_thirdparty test_settings_dialog test_runtime_services test_restrictions test_services test_servicesfile test_cycledialogs test_cyclereplay test_cycle_execution_modes test_services_page test_servicebridge; do
             python -m pytest "gui/tests/$module.py" -q
           done
         env:

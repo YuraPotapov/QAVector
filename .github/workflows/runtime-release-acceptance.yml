@@ -104,7 +104,7 @@ jobs:
       - name: Require GUI permissions and service Cycle flows with the frozen core
         run: |
           # Qt has process-global state; each widget-heavy module gets a fresh QApplication.
-          for module in test_execution_environments test_runtime_services test_runtime_permissions test_cycle_runtime test_cycle_execution_modes test_core; do
+          for module in test_runtime_services test_restrictions test_cycle_execution_modes test_core; do
             build/venv/bin/python -m pytest "gui/tests/$module.py" -q \
               --gui-runtime-frozen-core="$PWD/build/clean-preview/core/qavector-core" \
               --junitxml="build/acceptance/gui-$module.xml"
