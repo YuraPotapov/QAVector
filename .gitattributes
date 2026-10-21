@@ -1,2 +1,4 @@
 # Preserve the exact upstream license bytes used by the portable release gate.
 licenses/bubblewrap/COPYING -text
+licenses/passt/GPL-2.0-or-later.txt -text
+licenses/passt/BSD-3-Clause.txt -text
