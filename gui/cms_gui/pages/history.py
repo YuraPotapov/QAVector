@@ -72,7 +72,7 @@ class HistoryPage(QWidget):
 
         self.result_filter = widgets.Segmented(RESULTS, "All")
         self.result_filter.changed.connect(lambda _v: self.refresh())
-        self.environment_filter = QComboBox()
+        self.environment_filter = widgets.capped(QComboBox())
         self.environment_filter.addItem(ALL_ENVIRONMENTS, None)
         self.environment_filter.currentIndexChanged.connect(lambda _i: self.refresh())
         self.period_filter = widgets.Segmented(PERIODS, "All time")

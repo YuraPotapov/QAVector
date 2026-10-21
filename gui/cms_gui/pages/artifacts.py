@@ -137,7 +137,7 @@ class ArtifactsPage(QWidget):
         path_row.setContentsMargins(0, 0, 0, 0)
         path_row.setSpacing(8)
         path_row.addWidget(self.path_label, 1)
-        self.preview_mode = QComboBox()
+        self.preview_mode = widgets.capped(QComboBox())
         self.preview_mode.addItems(["Preview", "Source"])
         self.preview_mode.setToolTip("Show the HTML page or its source")
         self.preview_mode.setVisible(False)
@@ -145,7 +145,7 @@ class ArtifactsPage(QWidget):
         path_row.addWidget(self.preview_mode)
         # A scenario's folder, or its result.json: the run's guide, or the JSON
         # its result is in.
-        self.guide_mode = QComboBox()
+        self.guide_mode = widgets.capped(QComboBox())
         self.guide_mode.addItems(["Guide", "Source"])
         self.guide_mode.setToolTip("Show the run's step-by-step guide, or "
                                    "result.json as written")

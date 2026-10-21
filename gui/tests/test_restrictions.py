@@ -8,7 +8,7 @@ import copy
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QFrame
 
 from cms_gui import restrictions as R
 from cms_gui import runnertypes, servicesfile as sf
@@ -100,16 +100,32 @@ def test_a_click_switches_or_explains(qapp, dispose):
         dispose(toggles)
 
 
-def test_every_row_s_toggles_are_the_same_width(qapp, dispose):
-    one, two = R.QuickToggles(), R.QuickToggles()
+def test_each_toggle_is_as_wide_as_what_it_says(qapp, dispose):
+    """No box wider than its word on hover, and nothing kept after the last."""
+    toggles = R.QuickToggles()
     try:
-        one.set_model([], {}, "service")
-        two.set_model([], {"network": "off", "files": "read_only", "limits": {"memory_mb": 16384, "cpu_cores": 2}}, "service")
-        for name in ("network", "files", "limits"):
-            assert getattr(one, name).width() == getattr(two, name).width()
+        toggles.set_model([], {"network": "off", "limits": {"memory_mb": 16384, "cpu_cores": 2}}, "service")
+        toggles.show()
+        qapp.processEvents()
+        for button in (toggles.network, toggles.files, toggles.limits):
+            assert button.width() == button.sizeHint().width()
+        assert toggles.width() == toggles.limits.geometry().right() + 1
     finally:
-        dispose(one)
-        dispose(two)
+        dispose(toggles)
+
+
+def test_the_three_toggles_are_evenly_spaced(qapp, dispose):
+    """One gap between each two: widths kept for the widest word each could
+    show put the marks at uneven distances."""
+    toggles = R.QuickToggles()
+    try:
+        toggles.set_model([], {}, "service")
+        toggles.show()
+        qapp.processEvents()
+        network, files, limits = (one.geometry() for one in (toggles.network, toggles.files, toggles.limits))
+        assert files.left() - network.right() == limits.left() - files.right() == R.TOGGLE_GAP + 1
+    finally:
+        dispose(toggles)
 
 
 # -- the window -------------------------------------------------------------------------
@@ -193,13 +209,41 @@ def test_a_project_without_a_folder_keeps_its_rows_as_they_were(qapp, dispose):
         dispose(page)
 
 
-def test_a_container_row_keeps_the_column_but_shows_no_toggles(qapp, dispose):
+def test_a_container_row_shows_no_toggles_and_its_buttons_stay_in_the_column(qapp, dispose):
+    """The row's own buttons keep to the cell's right edge, so a row with no
+    toggles - or with wider words in them - leaves them where the others are."""
+    from PySide6.QtWidgets import QPushButton
     page = page_with()
     try:
+        page.resize(1100, 400)
+        page.show()
+        qapp.processEvents()
         assert strip(page, "App").restrictions.isVisibleTo(page)
         hidden = strip(page, "DB").restrictions
         assert hidden is not None and not hidden.isVisibleTo(page)
-        assert hidden.sizePolicy().retainSizeWhenHidden()
+
+        def console_x(name):
+            button = next(one for one in strip(page, name).findChildren(QPushButton) if one.text() == "Console")
+            return button.mapTo(page, button.rect().topLeft()).x()
+
+        assert console_x("App") == console_x("DB")
+        page.toggle_restriction("Shop", "App", "network")       # "Off" is wider than "On"
+        qapp.processEvents()
+        assert console_x("App") == console_x("DB")
+    finally:
+        dispose(page)
+
+
+def test_a_service_s_toggles_stand_between_two_dividers_and_the_project_s_have_none(qapp, dispose):
+    page = page_with()
+    try:
+        row = strip(page, "App")
+        layout = row.layout()
+        order = [layout.itemAt(index).widget() for index in range(layout.count())]
+        at = order.index(row.restrictions)
+        assert order[at - 1].property("role") == order[at + 1].property("role") == "vline"
+        header = page._blocks["Shop"].project_toggles.parentWidget()
+        assert not [one for one in header.findChildren(QFrame) if one.property("role") == "vline"]
     finally:
         dispose(page)
 
@@ -216,6 +260,44 @@ def test_a_quick_toggle_changes_the_draft_and_a_second_click_takes_it_back(qapp,
         page.toggle_restriction("Shop", "App", "network")
         assert "restrictions" not in page._project("Shop").runner("App").extra
         assert not page.is_dirty()
+    finally:
+        dispose(page)
+
+
+def test_a_quick_toggle_repaints_in_place_and_keeps_the_page_where_it_was(qapp, dispose):
+    """A rebuild made every block and row again - seconds with the window held
+    on a real file - and put the page back at the top."""
+    page = page_with()
+    try:
+        page.resize(900, 300)
+        page.show()
+        qapp.processEvents()
+        block, row_strip = page._blocks["Shop"], strip(page, "App")
+        bar = page._scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        where = bar.value()
+        page.toggle_restriction("Shop", None, "files")
+        page.toggle_restriction("Shop", "App", "network")
+        qapp.processEvents()
+        assert page._blocks["Shop"] is block and strip(page, "App") is row_strip
+        assert bar.value() == where
+        # The row the row's own buttons hold is the row that changed.
+        assert block._runner_rows[[one.name for one in block._runner_rows].index("App")] \
+            is page._project("Shop").runner("App")
+        assert row_strip.restrictions.network.text() == "Off"
+    finally:
+        dispose(page)
+
+
+def test_a_folded_project_s_toggles_are_right_when_it_opens(qapp, dispose):
+    page = page_with()
+    try:
+        page.show()
+        page._blocks["Shop"].disclosure.set_expanded(False)
+        page.toggle_restriction("Shop", None, "network")
+        page._blocks["Shop"].disclosure.set_expanded(True)
+        qapp.processEvents()
+        assert strip(page, "App").restrictions.network.text() == "Off"
     finally:
         dispose(page)
 
@@ -550,16 +632,21 @@ def test_isolated_is_offered_greyed_where_this_computer_cannot_do_it(qapp, dispo
         dispose(window)
 
 
-def test_a_running_isolated_service_shows_its_address_and_keeps_its_place_otherwise(qapp, dispose):
+def test_a_running_isolated_service_shows_its_address_and_takes_no_room_otherwise(qapp, dispose):
     one, two = R.QuickToggles(), R.QuickToggles()
     try:
-        one.set_ports([], False)
-        two.set_ports([{"internal_port": 8069, "host_port": 18069, "host_ip": "127.0.0.1"},
-                       {"internal_port": 8072, "host_port": 18072, "host_ip": "127.0.0.1"}], True)
+        for toggles in (one, two):
+            toggles.set_model([], {}, "service")
+        assert one.set_ports([], False) is False          # nothing changed
+        assert two.set_ports([{"internal_port": 8069, "host_port": 18069, "host_ip": "127.0.0.1"},
+                              {"internal_port": 8072, "host_port": 18072, "host_ip": "127.0.0.1"}], True)
         assert one.ports.isHidden() and not two.ports.isHidden()
         assert two.ports.text() == ":18069 +1" and "8072 -> localhost:18072" in two.ports.toolTip()
-        assert one.ports.width() == two.ports.width()
-        assert one.ports.sizePolicy().retainSizeWhenHidden()
+        assert one.sizeHint().width() < two.sizeHint().width()
+        # Said again on the next poll, it is not a change to measure for.
+        assert two.set_ports([{"internal_port": 8069, "host_port": 18069, "host_ip": "127.0.0.1"},
+                              {"internal_port": 8072, "host_port": 18072, "host_ip": "127.0.0.1"}], True) is False
+        assert two.set_ports([], False) is True
     finally:
         dispose(one)
         dispose(two)

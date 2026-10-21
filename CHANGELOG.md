@@ -16,6 +16,30 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- **Run this step only and Run from here are on the step.** They left the cycle's
+  header, where they meant "the selected step" and stood there with none
+  selected; a step's right-click menu has them, with their marks and a tooltip
+  saying where the other steps' results come from. The header reads Properties,
+  Restrictions, network **|** mode **|** Stop, Run - Stop wider, Run's label in
+  the middle of it.
+- **Network, Files and Limits on Services are compact.** Each is as wide as what
+  it says, one gap between them, so the marks are evenly spaced and a hover lights
+  only the word. A service's three stand between two dividers, and its Console,
+  Edit, Copy and Delete keep one column at the row's right edge whatever its
+  toggles say; the project's own three have no dividers.
+
+### Fixed
+- **The window would not maximize on a 1366 px screen.** A 45-character session
+  name in the Log page's picker held the whole window 1414 px wide - every page
+  in the stack sets the window's minimum, shown or not. Every picker in the main
+  window now grows to its items only up to a cap, and a test builds the whole
+  window with long names everywhere and checks it fits a laptop's work area.
+- **A quick toggle on Services held the window for seconds and scrolled the page
+  to the top.** Each click rebuilt every project and service row (about four
+  seconds for 131 services); it now repaints the toggles in place, in a quarter
+  of a second. A folded project's toggles are right when it opens.
+
 ## [0.16.35] - 2026-10-21
 
 ### Added

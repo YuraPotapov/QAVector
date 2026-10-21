@@ -2013,58 +2013,72 @@ def test_a_lit_line_is_not_clipped_along_its_length(opened):
 # --------------------------------------------- running one part of a cycle
 # Working on one step of a twenty-step cycle meant running all twenty, which
 # on this cycle means paying for six agent calls to reach the seventh.
-def test_the_two_part_run_buttons_have_no_text_but_do_have_tooltips(opened):
-    """They act on whichever step is selected: a label would have to name it
-    or be vague."""
-    for button in (opened.step_button, opened.from_button):
-        assert button.text() == ""
-        assert button.toolTip()
-        assert not button.icon().isNull()
+def _part_runs(opened, monkeypatch, step):
+    """The node menu's two part-run actions, as the menu offers them."""
+    seen = {}
+
+    def exec_(menu):
+        actions = menu.actions()              # held: see _pick
+        for action in actions:
+            if action.text() in ("Run this step only", "Run from here"):
+                seen[action.text()] = (action.isEnabled(), action.toolTip(),
+                                       action.icon().isNull())
+
+    _menus(monkeypatch, exec_)
+    opened._node_menu(step, QPoint())
+    return seen
 
 
-def test_they_say_where_the_other_steps_results_come_from(opened):
+def test_the_part_runs_are_on_the_step_not_in_the_header(opened, monkeypatch):
+    """They run one step, so they are offered on it: in the header they meant
+    "the selected step" and stood there with none selected."""
+    from PySide6.QtWidgets import QToolButton
+
+    header = [button.toolTip() for button in opened.findChildren(QToolButton)]
+    assert not any("Run this step only" in tip or "Run from here" in tip for tip in header)
+    seen = _part_runs(opened, monkeypatch, "b")
+    assert set(seen) == {"Run this step only", "Run from here"}
+    for enabled, _tip, no_icon in seen.values():
+        assert enabled and not no_icon
+
+
+def test_they_say_where_the_other_steps_results_come_from(opened, monkeypatch):
     """"Run one step" raises the question, so the tooltip answers it."""
-    for button in (opened.step_button, opened.from_button):
-        assert "last run" in button.toolTip()
+    for _enabled, tip, _no_icon in _part_runs(opened, monkeypatch, "b").values():
+        assert "last run" in tip
 
 
-def test_they_are_offered_only_once_a_step_is_picked(opened):
-    assert opened.step_button.isEnabled() is False
-    assert opened.from_button.isEnabled() is False
-
-    opened.canvas.node("b").setSelected(True)
-
-    assert opened.step_button.isEnabled() is True
-    assert opened.from_button.isEnabled() is True
-
-
-def test_letting_go_of_the_step_takes_them_away_again(opened):
-    opened.canvas.node("b").setSelected(True)
-    opened.canvas.scene().clearSelection()
-
-    assert opened.step_button.isEnabled() is False
+def test_they_wait_for_unsaved_changes_to_be_saved(editing, monkeypatch):
+    """A part run reads the file, not what is on screen."""
+    editing.canvas.node("b").setSelected(True)
+    editing._duplicate_step("b")
+    assert editing._draft is not None and editing._draft.dirty
+    for enabled, _tip, _no_icon in _part_runs(editing, monkeypatch, "b").values():
+        assert not enabled
 
 
-def test_one_chevron_asks_for_that_step_alone(opened):
+def test_one_chevron_asks_for_that_step_alone(opened, monkeypatch):
     asked = []
     opened.run_requested.connect(lambda *one: asked.append(one))
-    opened.canvas.node("b").setSelected(True)
-    opened.step_button.click()
+    opened.canvas.node("b").setSelected(True)       # a right-click selects it
+    _pick(monkeypatch, "Run this step only")
+    opened._node_menu("b", QPoint())
 
     assert asked == [("demo", "only", "b")]
 
 
-def test_two_chevrons_ask_for_that_step_and_what_waits_on_it(opened):
+def test_two_chevrons_ask_for_that_step_and_what_waits_on_it(opened, monkeypatch):
     asked = []
     opened.run_requested.connect(lambda *one: asked.append(one))
     opened.canvas.node("c").setSelected(True)
-    opened.from_button.click()
+    _pick(monkeypatch, "Run from here")
+    opened._node_menu("c", QPoint())
 
     assert asked == [("demo", "from", "c")]
 
 
 def test_a_part_run_with_nothing_selected_asks_for_nothing(opened):
-    """Belt and braces: the buttons are disabled, and the handler refuses
+    """Belt and braces: the actions are on a step, and the handler refuses
     anyway - a signal that named no step would run the whole cycle."""
     asked = []
     opened.run_requested.connect(lambda *one: asked.append(one))
@@ -2174,14 +2188,6 @@ def test_counting_what_waits_on_a_step():
 
 
 # --------------------------------------------------------- and visible
-def test_the_part_run_buttons_are_not_ghosts(opened):
-    """Ghost means a transparent border, which is right for the view controls
-    beside them and wrong for a button that starts work."""
-    for button in (opened.step_button, opened.from_button):
-        assert button.property("variant") != "ghost"
-    assert opened.fit_button.property("variant") == "ghost", "unlike these"
-
-
 def test_the_warning_says_what_a_run_can_actually_do(opened, asked):
     """A confirmation that only asks "are you sure" tells somebody nothing
     they did not already know when they pressed the button."""
@@ -4487,16 +4493,24 @@ def test_folded_phase_explains_root_failure_and_downstream_blocks(phased):
 
 
 # -- the header row: the cycle's own marks, and one run strip -----------------------
-def test_the_header_is_the_name_two_groups_and_one_run_strip(opened):
+def test_the_header_is_the_name_three_groups_and_one_run_strip(opened):
     from PySide6.QtWidgets import QFrame
     from cms_gui.pages import cycles as cycles_mod
     strip = opened.run_button.parentWidget()
     assert isinstance(strip, QFrame) and strip.property("role") == "runstrip"
     parts = [strip.layout().itemAt(index).widget() for index in range(strip.layout().count())]
-    assert parts == [opened.execution_mode, opened.step_button, opened.from_button,
-                     opened.stop_button, opened.run_button]
-    assert {part.height() for part in parts} == {cycles_mod.STRIP_HEIGHT}
-    assert [part.property("seam") for part in parts] == [None, "true", "true", "true", "true"]
+    assert parts == [opened.stop_button, opened.run_button]
+    assert {part.height() for part in parts + [opened.execution_mode]} == {cycles_mod.STRIP_HEIGHT}
+    assert [part.property("seam") for part in parts] == [None, "true"]
+    assert opened.stop_button.width() == cycles_mod.STOP_BUTTON_WIDTH > cycles_mod.STRIP_HEIGHT
+    # | mode |: a divider either side of it, the same height.
+    row = strip.parentWidget().layout()
+    order = [row.itemAt(index).widget() for index in range(row.count())]
+    at = order.index(opened.execution_mode)
+    before, after = order[at - 1], order[at + 1]
+    assert before.property("role") == after.property("role") == "vline"
+    assert before.height() == after.height()
+    assert order[at + 2] is strip
     for mark in (opened.properties_button, opened.restrictions_button):
         assert mark.toolButtonStyle() == Qt.ToolButtonIconOnly and mark.property("head") == "true"
     assert opened.properties_button.text() == "Properties"            # still said, to a screen reader

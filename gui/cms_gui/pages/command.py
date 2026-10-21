@@ -168,7 +168,7 @@ class CommandPage(QWidget):
             return box
 
         if flag.kind == "choice":
-            combo = QComboBox()
+            combo = widgets.capped(QComboBox())
             combo.setProperty("mono", True)
             combo.setEditable(flag.name == "--env")
             combo.addItem(flag.placeholder or "")

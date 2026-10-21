@@ -12,16 +12,17 @@ import os
 import weakref
 
 from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
-                            QPointF, QPropertyAnimation, QRectF, QSize, Qt,
-                            QTimer, Signal)
-from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QPainter, QPen
+                            QPointF, QPropertyAnimation, QRect, QRectF, QSize,
+                            Qt, QTimer, Signal)
+from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QSizePolicy,
-                               QSpinBox, QSplitter, QTableWidget, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QSpinBox, QSplitter, QStyle,
+                               QStyleOptionToolButton, QStylePainter,
+                               QTableWidget, QToolButton, QVBoxLayout, QWidget)
 
 from . import icons, theme
 
@@ -282,6 +283,44 @@ class NavButton(QToolButton):
     @staticmethod
     def _ink(token):
         return theme.color(getattr(theme, BADGE_INKS.get(token, "TEXT")))
+
+
+class CenteredToolButton(QToolButton):
+    """A tool button whose mark and words sit in the middle of it.
+
+    Qt sets a tool button's icon and text at its left edge, which on a button
+    held wider than its label - Run, kept as wide as Resume so the row does not
+    move - leaves the label off to one side. The button and its menu half are
+    drawn as ever; the label is drawn again into a rect just its own size,
+    centred in the part that is not the menu.
+    """
+
+    def paintEvent(self, _event):
+        painter = QStylePainter(self)
+        option = QStyleOptionToolButton()
+        self.initStyleOption(option)
+        label = QStyleOptionToolButton(option)
+        option.text = ""
+        option.icon = QIcon()
+        painter.drawComplexControl(QStyle.CC_ToolButton, option)
+        area = self.style().subControlRect(QStyle.CC_ToolButton, label,
+                                           QStyle.SC_ToolButton, self)
+        if self.popupMode() == QToolButton.MenuButtonPopup:
+            # Under the stylesheet the button part is the whole width, with
+            # the menu half drawn over its right end: take that end away.
+            menu = self.style().subControlRect(QStyle.CC_ToolButton, label,
+                                               QStyle.SC_ToolButtonMenu, self)
+            if menu.isValid() and menu.left() > area.left():
+                area.setRight(min(area.right(), menu.left() - 1))
+        # What CE_ToolButtonLabel lays out: the icon in the middle of a slot
+        # four pixels wider than it, then the text. The slot's first two
+        # pixels are empty, so they are left out of what is centred.
+        mark = label.iconSize.width() + 4 if not label.icon.isNull() else 0
+        width = min(area.width(), mark + self.fontMetrics().horizontalAdvance(label.text))
+        lead = 2 if mark else 0
+        label.rect = QRect(area.x() + (area.width() - width + lead) // 2 - lead, area.y(),
+                           width, area.height())
+        painter.drawControl(QStyle.CE_ToolButtonLabel, label)
 
 
 class Segmented(QWidget):
@@ -1355,6 +1394,23 @@ def elided_line(text="", role="h1"):
     label.setProperty("role", role)
     label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
     return label
+
+
+#: The widest a picker in the main window grows to fit its items.
+PICKER_MAX_WIDTH = 260
+
+
+def capped(combo, width=PICKER_MAX_WIDTH):
+    """A picker as wide as its items, up to ``width``, and no wider.
+
+    A combo sizes itself to its longest item when it first shows, and every
+    page in the window's stack sets the window's minimum width: one 45-character
+    session name in the Log page's picker held the window wider than a 1366 px
+    screen, and so unable to maximize. Past the cap the text is shortened; the
+    list still opens as wide as its items.
+    """
+    combo.setMaximumWidth(width)
+    return combo
 
 
 def kicker(text):

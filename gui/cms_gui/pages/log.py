@@ -32,6 +32,7 @@ LEVEL_COLOR = {
 LEVEL_ORDER = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR"]
 
 LIVE = "Live run"
+SESSION_MAX_WIDTH = 180            # px; a longer session name is shortened
 MAX_ARCHIVE_BYTES = 8_000_000      # a log this big is a disk problem, not a read
 
 
@@ -60,7 +61,8 @@ class LogPage(QWidget):
         head_layout.setContentsMargins(24, 14, 24, 12)
         self.level = widgets.Segmented(LEVEL_ORDER, "ALL")
         self.level.changed.connect(lambda _v: self._rerender())
-        self.session = QComboBox()
+        # Narrower than the other pickers: this row is the widest in the stack.
+        self.session = widgets.capped(QComboBox(), SESSION_MAX_WIDTH)
         self.session.addItem("all sessions")
         self.session.currentIndexChanged.connect(lambda _i: self._rerender())
         self.search = QLineEdit()

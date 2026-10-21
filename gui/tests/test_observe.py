@@ -225,6 +225,29 @@ def test_opening_an_archive_parses_it_back_into_records(history, tmp_path, qapp)
     assert page.session.itemText(1) == "localhost:8069-admin"
 
 
+def test_a_long_session_name_does_not_widen_the_page(qapp):
+    """Every page in the stack sets the window's minimum width; a picker as
+    wide as its longest session held the window wider than the screen."""
+    def shown(session):
+        # Filled before it is shown, the way a restored log is: a combo sizes
+        # itself to its items when it first appears.
+        page = LogPage(FakeSettings())
+        if session:
+            page.append({"ts": "12:00:00", "level": "INFO", "text": "step",
+                         "session": session})
+        page.show()     # a hidden layout never recomputes its minimum
+        qapp.processEvents()
+        width = page.minimumSizeHint().width()
+        page.close()
+        return page, width
+
+    # The picker grows to its cap and no further.
+    _long, long_width = shown("shop.example.invalid-a-very-long-account-name")
+    page, longer_width = shown("shop.example.invalid-" + "a-very-long-name-" * 6)
+    assert page.session.itemText(1).startswith("shop.example.invalid")
+    assert longer_width == long_width
+
+
 def test_the_filters_apply_to_an_archive(history, tmp_path, qapp):
     entry = _record(history, tmp_path, "20260813-100000", log_text=ARCHIVE)
     page = LogPage(FakeSettings())

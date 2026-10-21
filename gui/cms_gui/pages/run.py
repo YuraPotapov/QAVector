@@ -158,7 +158,7 @@ class SessionPanel(widgets.BlueprintPanel):
             "Stays open and keeps up as the run goes on.")
         self._server_popout.clicked.connect(self.open_server_window)
 
-        self._server_filter = QComboBox()
+        self._server_filter = widgets.capped(QComboBox())
         self._server_filter.addItem(ALL_LOGS)
         self._server_filter.currentIndexChanged.connect(self._repaint_server)
         save = QPushButton("Save…")

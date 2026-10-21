@@ -8,6 +8,8 @@ it was built for is actually there.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cms_gui import icons, theme, widgets
@@ -1044,3 +1046,38 @@ def test_a_quick_write_never_shows_the_veil(qapp):
         assert not busy.veiled()
     finally:
         page.deleteLater()
+
+
+# -- a tool button with its label in the middle -------------------------------------
+@pytest.mark.parametrize("text", ["Run", "Resume", "Pause"])
+def test_a_centred_tool_button_puts_its_label_in_the_middle(qapp, dispose, text):
+    """Qt sets a tool button's label at its left edge: Run, held as wide as
+    Resume, stood off to one side. Measured on what is drawn, beside the menu
+    half, to within the glyphs' own spare pixels."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMenu, QStyle, QStyleOptionToolButton, QToolButton
+
+    button = icons.button(widgets.CenteredToolButton(), "run", text)
+    button.setProperty("variant", "primary")
+    button.setProperty("hasmenu", "true")
+    button.setPopupMode(QToolButton.MenuButtonPopup)
+    button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    button.setMenu(QMenu(button))
+    button.setStyleSheet(theme.stylesheet())
+    button.setFixedSize(120, 32)
+    try:
+        button.show()
+        qapp.processEvents()
+        image = button.grab().toImage()
+        option = QStyleOptionToolButton()
+        button.initStyleOption(option)
+        menu = button.style().subControlRect(QStyle.CC_ToolButton, option,
+                                             QStyle.SC_ToolButtonMenu, button)
+        ground = image.pixelColor(3, 16).lightness()
+        drawn = [x for x in range(2, menu.left() - 1) for y in range(4, 28)
+                 if abs(image.pixelColor(x, y).lightness() - ground) > 60]
+        assert drawn, "the label is drawn"
+        middle = (min(drawn) + max(drawn)) / 2
+        assert abs(middle - (menu.left() - 1) / 2) <= 2.5
+    finally:
+        dispose(button)

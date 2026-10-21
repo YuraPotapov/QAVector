@@ -383,8 +383,10 @@ def _actions(*buttons):
     in a cell paints the global QWidget background otherwise, which is how the
     buttons ended up stranded on a rectangle of the wrong colour whenever their
     row was selected.
+
+    A ``None`` among them is where the slack goes; without one it goes last.
     """
-    strip = widgets.row(*buttons, None, spacing=2)
+    strip = widgets.row(*buttons, *(() if None in buttons else (None,)), spacing=2)
     widgets.scoped_style(strip, "background: transparent;")
     return strip
 
@@ -1349,7 +1351,12 @@ class ProjectBlock(QWidget):
                                lambda: self.page.restart_runner(self.name, name),
                                "Restart")
         quick = self._quick_toggles(row)
-        strip = _actions(toggle, restart, *([quick] if quick is not None else []),
+        # The toggles are as wide as what they say, so the slack goes after
+        # them: the row's own buttons keep one column at the cell's right
+        # whatever each row's toggles say, and a row with none lines up too.
+        held = [] if quick is None else (
+            [widgets.vline(), quick, widgets.vline()] if quick.restrictable else [quick])
+        strip = _actions(toggle, restart, *held, None,
             _cell_button("Console", lambda: self.page.open_console(self.name, row),
                          "What this service is printing."),
             _cell_button("Edit", lambda: self.page.edit_runner(self.name, row)),
@@ -1364,17 +1371,15 @@ class ProjectBlock(QWidget):
         restricted: a project with no folder keeps the row it always had.
 
         Inside a project that has one, a row that cannot be restricted (a
-        container, strict isolation from the command line) keeps the same
-        width empty, so the buttons after it stay in one column.
+        container, strict isolation from the command line) shows none; the
+        buttons after them keep their column at the cell's right edge.
         """
         if self.project is None or not (self.project.dir or "").strip():
             return None
         quick = restrictions_mod.QuickToggles()
         restrictable = row.type in restrictions_mod.SERVICE_TYPES and "execution" not in row.extra
+        quick.restrictable = restrictable
         if not restrictable:
-            policy = quick.sizePolicy()
-            policy.setRetainSizeWhenHidden(True)
-            quick.setSizePolicy(policy)
             quick.hide()
             return quick
         quick.toggle.connect(lambda kind, n=row.name: self.page.toggle_restriction(self.name, n, kind))
@@ -1401,8 +1406,12 @@ class ProjectBlock(QWidget):
             if runner_name is None or row.name == runner_name:
                 strip = self.runners.cellWidget(index, self.R_ACTIONS)
                 quick = getattr(strip, "restrictions", None)
-                if quick is not None and quick.isVisible():
+                # Not visible may be only a folded block, whose toggles must
+                # be right when it opens.
+                if quick is not None and quick.restrictable:
                     self._model_toggles(quick, row)
+        # "Off" is wider than "On": the column is as wide as its widest strip.
+        _fit_actions(self.runners, self.R_ACTIONS)
 
     def set_status(self, runner_name, status, detail="", stale=False):
         """Repaint one row's status without rebuilding the table.
@@ -1440,11 +1449,12 @@ class ProjectBlock(QWidget):
                 icons.button(toggle, "stop" if running else "run", "")
                 toggle.setToolTip("Stop" if running else "Start")
             quick = getattr(strip, "restrictions", None)
-            if quick is not None and not quick.isHidden():
+            if quick is not None and quick.restrictable:
                 # Re-read on every repaint - the poll's, every few seconds -
                 # so an address shows once the service has bound it.
                 live = status == runnertypes.RUNNING and self.page.isolated(self.name, runner_name)
-                quick.set_ports(self.page.publications(self.name, runner_name) if live else [], live)
+                if quick.set_ports(self.page.publications(self.name, runner_name) if live else [], live):
+                    _fit_actions(table, self.R_ACTIONS)
             return
 
     def set_criteria(self, runner_name, state):
@@ -1905,7 +1915,7 @@ class ServicesPage(QWidget):
                        and self._comparable() != self._baseline)
         saved = {}
         if self._baseline is not None:
-            for project in json.loads(self._baseline)["projects"]:
+            for project in self._saved()["projects"]:
                 for runner in project["runners"]:
                     saved[(project["name"], runner["name"])] = (project["dir"], runner)
         for project in self._projects:
@@ -2316,21 +2326,18 @@ class ServicesPage(QWidget):
             return
         project, row, _outer, _own, _level = found
         raw = restrictions_mod.clean(raw)
-        if row is None:
-            updated = project.copy() if hasattr(project, "copy") else project
-            if raw:
-                updated.extra["restrictions"] = raw
-            else:
-                updated.extra.pop("restrictions", None)
-            self._projects[self._projects.index(project)] = updated
+        # In place, and only the toggles repainted: they are all a block draws
+        # of restrictions. A rebuild made every block and row again - four
+        # seconds with the window held on a file of 131 services - and put the
+        # page back at the top. In place also keeps the row the row's own
+        # buttons hold, which a copy would have left behind.
+        target = project if row is None else row
+        if raw:
+            target.extra["restrictions"] = raw
         else:
-            updated = row.copy()
-            if raw:
-                updated.extra["restrictions"] = raw
-            else:
-                updated.extra.pop("restrictions", None)
-            project.runners[project.runners.index(row)] = updated
-        self._rebuild()
+            target.extra.pop("restrictions", None)
+        self.supervisor.sync(self._projects)
+        self._update_dirty()
         self._validate()
         if said:
             self._show_ok(said)
@@ -2392,11 +2399,19 @@ class ServicesPage(QWidget):
             open_window=lambda: self.edit_restrictions(project_name, runner_name))
         self._load_restriction_capabilities()
 
+    def _saved(self):
+        """The baseline, parsed once per baseline: every toggle on the page
+        asks, and parsing it for each of 131 rows was a tenth of a second."""
+        if getattr(self, "_saved_from", None) is not self._baseline:
+            self._saved_from = self._baseline
+            self._saved_parsed = json.loads(self._baseline)
+        return self._saved_parsed
+
     def pending_restrictions(self, project_name, runner_name):
         """Which toggles differ from the saved file - drawn with a dashed edge."""
         if self._baseline is None:
             return ()
-        saved_project = next((one for one in json.loads(self._baseline)["projects"]
+        saved_project = next((one for one in self._saved()["projects"]
                               if one.get("name") == project_name), None)
         if saved_project is None:
             return ("network", "files", "limits")

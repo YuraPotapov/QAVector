@@ -486,11 +486,18 @@ class FolderButton(QPushButton):
         _repolish(self)
 
 
+#: The gap between two quick toggles, in px.
+TOGGLE_GAP = 4
+
+
 class QuickToggles(QWidget):
     """Network / Files / Limits for one service or step, as they are now.
 
-    Fixed widths, measured once for the widest word each can show, so a column
-    of rows lines up whatever the rows say.
+    Each toggle as wide as what it says and no wider, one gap between them:
+    widths kept for the widest word each could show put the marks at uneven
+    distances, lit a box twice the word's width on hover and left a gap after
+    the last one. A table keeps its later columns in line by other means - see
+    the services page's row strip.
     """
 
     toggle = Signal(str)            # "network" or "files"
@@ -504,28 +511,20 @@ class QuickToggles(QWidget):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
+        layout.setSpacing(TOGGLE_GAP)
         self.network = self._button("Network", "network")
         self.files = self._button("Files", "folder")
         self.limits = self._button("Limits", "limits")
         self.ports = self._button("Published ports", "popout")
-        for button, widest in ((self.network, "Isolated"), (self.files, "All"), (self.limits, "16 GB · 2 CPU"),
-                               (self.ports, ":65535 +9")):
-            button.ensurePolished()
-            metrics = button.fontMetrics()
-            button.setFixedWidth(metrics.horizontalAdvance(widest) + 40)
+        for button in (self.network, self.files, self.limits, self.ports):
             layout.addWidget(button)
-        # Its place is kept on every row, so the columns after it line up
-        # whether or not this service publishes anything right now.
-        policy = self.ports.sizePolicy()
-        policy.setRetainSizeWhenHidden(True)
-        self.ports.setSizePolicy(policy)
         self.ports.hide()
         self.ports.clicked.connect(lambda: self.ports_requested.emit(self.ports))
         self.network.clicked.connect(lambda: self._clicked("network"))
         self.files.clicked.connect(lambda: self._clicked("files"))
         self.limits.clicked.connect(lambda: self.limits_requested.emit(self.limits))
         self._states = {}
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda _point: self.open_window.emit())
 
@@ -535,15 +534,18 @@ class QuickToggles(QWidget):
         button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         button.setAccessibleName(name)
         button.setCursor(Qt.PointingHandCursor)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         icons.button(button, glyph, "")
         return button
 
     def set_ports(self, publications, live):
         """What a running isolated service publishes: ``:18069`` (+ how many more).
-        Hidden, keeping its place, while it is not running isolated."""
+        Hidden while it is not running isolated. True when that changed how
+        wide the toggles are, so a table holding them can measure again."""
+        before = (self.ports.isHidden(), self.ports.text())
         self.ports.setVisible(bool(live))
         if not live:
-            return
+            return before[0] is False
         if publications:
             first = publications[0]
             text = ":%s" % first["host_port"] + (" +%d" % (len(publications) - 1) if len(publications) > 1 else "")
@@ -554,6 +556,7 @@ class QuickToggles(QWidget):
         self.ports.setProperty("state", "on" if publications else "locked")
         self.ports.setToolTip("Published from its isolated network:\n" + tip + "\nClick to open, copy or publish.")
         _repolish(self.ports)
+        return before != (False, text)
 
     def _clicked(self, kind):
         if self._states.get(kind) == "locked":

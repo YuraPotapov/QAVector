@@ -531,7 +531,7 @@ QToolButton[menuglyph="true"]::menu-indicator {{ image: none; width: 0; height: 
 QToolButton[variant="restriction"] {{
     border: 1px solid transparent; color: {n700}; background: transparent;
     font-family: {body}; font-size: 12px; font-weight: 500; letter-spacing: 0px;
-    padding: 1px 6px; min-height: 18px;
+    padding: 1px 4px; min-height: 18px;
 }}
 QToolButton[variant="restriction"]:hover {{ background: {a100}; color: {a700}; }}
 QToolButton[variant="restriction"][state="off"] {{ color: {warn_ink}; background: {warn_tint}; }}

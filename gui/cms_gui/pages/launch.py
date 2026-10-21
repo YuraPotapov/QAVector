@@ -194,7 +194,7 @@ class LaunchSessionsPage(QWidget):
     # -- construction ---------------------------------------------------------
     def _config_bar(self):
         panel = widgets.BlueprintPanel(padding=(14, 12, 14, 12))
-        self.config_combo = QComboBox()
+        self.config_combo = widgets.capped(QComboBox())
         self.config_combo.setMinimumWidth(240)
         self.config_combo.currentTextChanged.connect(self._config_selected)
         self.config_save = save = QPushButton("Save")
@@ -214,7 +214,7 @@ class LaunchSessionsPage(QWidget):
     def _environment_panel(self):
         panel = widgets.BlueprintPanel()
         panel.layout().addWidget(widgets.kicker("Environment"))
-        self.env_combo = QComboBox()
+        self.env_combo = widgets.capped(QComboBox())
         self.env_combo.addItem(ALL_ENVIRONMENTS)
         self.env_combo.currentTextChanged.connect(self._environment_changed)
         panel.layout().addWidget(widgets.field(
@@ -444,7 +444,7 @@ class LaunchSessionsPage(QWidget):
         self.report_list.changed.connect(self._changed)
         panel.layout().addWidget(self.report_list)
 
-        self.shots = QComboBox()
+        self.shots = widgets.capped(QComboBox())
         for mode in (launch.SHOTS_OFF, launch.SHOTS_FINISH,
                      launch.SHOTS_START_FINISH, launch.SHOTS_EACH):
             self.shots.addItem(launch.SHOT_LABELS[mode], mode)
@@ -486,7 +486,7 @@ class LaunchSessionsPage(QWidget):
         self.profile_prefix.setPlaceholderText("named after the environment")
         self.profile_prefix.textChanged.connect(self._changed)
         top.addWidget(widgets.field("Profile folder prefix", self.profile_prefix), 1)
-        self.log_level = QComboBox()
+        self.log_level = widgets.capped(QComboBox())
         for level in launch.LOG_LEVELS:
             self.log_level.addItem(level)
         self.log_level.setCurrentText("INFO")
