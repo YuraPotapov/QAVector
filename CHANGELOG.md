@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.36] - 2026-10-21
+
 ### Changed
 - **Run this step only and Run from here are on the step.** They left the cycle's
   header, where they meant "the selected step" and stood there with none
