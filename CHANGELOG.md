@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.38] - 2026-10-22
+
 ### Added
 - **A subject's Cockpit, in its row.** An open row has a Cockpit tab beside
   Stages: for the run going in this window, the live Cockpit - what runs now
