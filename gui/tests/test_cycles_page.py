@@ -3519,6 +3519,32 @@ def test_run_is_offered_only_when_there_is_a_run_to_show(opened):
     assert not opened.context_switch.button("Run").isEnabled()
 
 
+def test_a_step_asked_for_from_another_cockpit_is_shown_on_the_run_s_graph(opened, tmp_path,
+                                                                        layout_file):
+    from cms_gui import cyclelayoutfile as clf
+
+    state = RunState()
+    opened.set_run_state(state)
+    _demo_run(state, tmp_path, running=True)
+    assert opened.run_surface.currentWidget() is opened.cockpit
+    opened.show_step("b")
+    assert opened._context == "Run" and opened.run_view.current() == "Graph"
+    assert opened.run_surface.currentWidget() is opened.canvas
+    assert opened.canvas.selected() == "b"
+    assert clf.section_for("demo", layout_file) == ("Run", "Graph")
+
+
+def test_the_cockpit_lists_the_questions_it_is_told_of_and_asks_for_one(opened, tmp_path):
+    state = RunState()
+    opened.set_run_state(state)
+    _demo_run(state, tmp_path, running=True)
+    asked = []
+    opened.question_requested.connect(asked.append)
+    opened.set_questions([{"id": "4", "step": "a", "question": "Go on?", "since": 1.0}])
+    opened.cockpit.question_actions["4"].show_button.click()
+    assert asked == ["4"]
+
+
 def _demo_run(state, tmp_path, running=False):
     """A run of "demo" in the model: still going, or read back from disk."""
     from cms_gui import cyclereplay

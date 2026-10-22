@@ -75,7 +75,7 @@ def test_the_cycles_are_named_newest_first_and_the_note_is_one_line():
 # --------------------------------------------------------- what to do next
 def test_a_question_in_the_live_run_is_answered_in_its_cockpit():
     asking = subject("asking", latest={"id": LIVE, "running": True})
-    assert story.next_action(asking, LIVE, busy=True)[:3] == ("cockpit", "Answer in Cockpit", True)
+    assert story.next_action(asking, LIVE, busy=True)[:3] == ("cockpit", "Answer", True)
     assert story.can_park(asking, LIVE)
 
 

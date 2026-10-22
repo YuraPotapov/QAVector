@@ -233,19 +233,143 @@ def _open(qapp, page, sid):
     return page.detail(sid)
 
 
-def test_a_question_in_the_live_run_is_answered_in_its_cockpit_and_it_can_be_parked(qapp):
-    asking = one("QA-1", "asking", True, True,
-                 latest={"id": LIVE, "running": True, "cycle": "dev", "run_dir": "/runs/live"})
-    page = shown(qapp, Core([asking]), live=LIVE, busy=True)
+def _live_model(approval=False):
+    """The window's run model, holding the live run - with a node waiting, if asked."""
+    from cms_gui.runner import RunState
+
+    state = RunState()
+    state.handle({"kind": "cycle.run.start", "run_id": LIVE, "cycle": "dev", "name": "Dev",
+                  "execution_mode": "approve", "graph": {"nodes": [
+                      {"id": "plan", "label": "Plan it", "plugin": "agent.review", "needs": []},
+                      {"id": "push", "label": "Push the branch", "plugin": "command.shell",
+                       "needs": ["plan"]}]}})
+    state.handle({"kind": "cycle.step.end", "step": "plan", "status": "success",
+                  "active_elapsed_ms": 1000, "message": "Planned"})
+    if approval:
+        state.handle({"kind": "cycle.node.approval", "run_id": LIVE, "receipt": {
+            "id": "req-1", "fingerprint": "proof", "step": "push", "status": "pending",
+            "label": "Push the branch", "purpose": "Publish the work",
+            "resolved_inputs": {"remote": "origin"}}})
+    return state
+
+
+def _asking(state="asking"):
+    return one("QA-1", state, True, True,
+               latest={"id": LIVE, "running": True, "cycle": "dev", "run_dir": "/runs/live"})
+
+
+def test_a_question_in_the_live_run_is_answered_in_the_row_s_cockpit_and_it_can_be_parked(qapp):
+    page = shown(qapp, Core([_asking()]), live=LIVE, busy=True)
+    page.set_run_state(_live_model())
     detail = _open(qapp, page, "QA-1")
     told = []
-    page.cockpit_requested.connect(lambda: told.append("cockpit"))
     page.park_requested.connect(lambda run: told.append(("park", run)))
-    assert detail.next_button.text() == "Answer in Cockpit"
+    assert detail.next_button.text() == "Answer"
     assert detail.park_button.isVisibleTo(detail)
     detail.next_button.click()
+    assert detail.tab == "Cockpit" and detail.stage_run() == LIVE
+    assert detail.body.currentWidget() is detail.cockpit_host
+    assert detail.cockpit.isVisibleTo(detail) and "Plan it" in detail.cockpit.browser.toPlainText()
     detail.park_button.click()
-    assert told == ["cockpit", ("park", LIVE)]
+    assert told == [("park", LIVE)]
+
+
+def test_a_node_waiting_for_approval_is_approved_in_the_row(qapp):
+    page = shown(qapp, Core([_asking("node_approval")]), live=LIVE, busy=True)
+    page.set_run_state(_live_model(approval=True))
+    detail = _open(qapp, page, "QA-1")
+    answered = []
+    page.approval_answered.connect(lambda *args: answered.append(args))
+    detail.next_button.click()
+    actions = detail.cockpit.approval_actions["req-1"]
+    assert actions.isVisibleTo(detail)
+    actions.approve_button.click()
+    assert answered == [("req-1", "proof", True)]
+
+
+def test_the_live_cockpit_follows_the_model_and_its_questions(qapp):
+    state = _live_model()
+    page = shown(qapp, Core([_asking()]), live=LIVE, busy=True)
+    page.set_run_state(state)
+    detail = _open(qapp, page, "QA-1")
+    detail.next_button.click()
+    assert detail.cockpit.question_actions == {}
+
+    asked = []
+    page.question_requested.connect(asked.append)
+    page.set_questions([{"id": "3", "step": "push", "question": "Push now?", "since": 1.0}])
+    assert "Push now?" in detail.cockpit.browser.toPlainText()
+    detail.cockpit.question_actions["3"].show_button.click()
+    assert asked == ["3"]
+
+    state.handle({"kind": "cycle.step.start", "step": "push", "started_at": 5,
+                  "active_elapsed_ms": 0})
+    qapp.processEvents()
+    assert detail.cockpit.current.step_id == "push", "redrawn once the model moved"
+    assert page._cockpit_tick.isActive(), "and every second while the run is going"
+
+    detail.tabs.set_current("History")
+    assert "QA-1" not in page._cockpits
+    page.table.cellClicked.emit(page._row_of("QA-1"), C_MARK)
+    page._refresh_cockpits()
+    assert not page._cockpit_tick.isActive()
+
+
+def test_a_step_clicked_in_a_cockpit_is_shown_on_the_canvas(qapp):
+    page = shown(qapp, Core([_asking()]), live=LIVE, busy=True)
+    page.set_run_state(_live_model())
+    detail = _open(qapp, page, "QA-1")
+    detail.next_button.click()
+    asked = []
+    page.step_requested.connect(lambda *args: asked.append(args))
+    detail.cockpit.node_selected.emit("plan")
+    assert asked == [("dev", "/runs/live", LIVE, "plan")]
+
+
+def test_a_past_run_s_cockpit_is_what_it_recorded_and_answers_nothing(qapp, tmp_path):
+    runs = [{"run": "r1", "cycle": "dev", "cycle_name": "Dev", "run_dir": _run_dir(tmp_path),
+             "started_at": 1}]
+    page = shown(qapp, Staged(runs, [one("QA-1")]))
+    detail = _open(qapp, page, "QA-1")
+    detail.tabs.set_current("Cockpit")
+    qapp.processEvents()
+    assert detail.stage_runs.isVisibleTo(detail) and detail.stage_runs.currentData() == "r1"
+    assert "Cockpit" in detail.stage_runs.toolTip()
+    assert detail.cockpit.isVisibleTo(detail)
+    assert "COMPLETED" in detail.cockpit.browser.toPlainText()
+    assert detail.cockpit.approval_actions == {} and detail.cockpit.question_actions == {}
+    asked = []
+    page.step_requested.connect(lambda *args: asked.append(args))
+    detail.cockpit.node_selected.emit("plan")
+    assert asked == [("dev", runs[0]["run_dir"], "r1", "plan")]
+    # Stages of the same run come from the same reading.
+    detail.tabs.set_current("Stages")
+    assert detail.recorded.titles() == ["Thinking", "Answered"]
+
+
+def test_a_cockpit_of_a_run_nobody_knows_the_folder_of_says_so(qapp):
+    page = shown(qapp, Staged([{"run": "r9", "cycle": "dev", "run_dir": "", "started_at": 1}],
+                              [one("QA-1")]))
+    detail = _open(qapp, page, "QA-1")
+    detail.tabs.set_current("Cockpit")
+    assert not detail.cockpit.isVisibleTo(detail)
+    assert "folder is not known" in detail.cockpit_note.label.text()
+
+
+def test_a_section_in_a_window_keeps_its_cockpit(qapp):
+    page = shown(qapp, Core([_asking()]), live=LIVE, busy=True)
+    page.set_run_state(_live_model())
+    detail = _open(qapp, page, "QA-1")
+    detail.next_button.click()
+    detail.detach_button.click()
+    qapp.processEvents()
+    moved = page.detail("QA-1")
+    assert moved is not detail and moved.tab == "Cockpit" and moved.stage_run() == LIVE
+    assert "Plan it" in moved.cockpit.browser.toPlainText()
+    page.hide()
+    page._refresh_cockpits()
+    assert page._cockpit_tick.isActive(), "a window is still on screen while the page is not"
+    page.shut_windows()
 
 
 def test_a_stopped_run_is_resumed_unless_the_window_is_busy(qapp):
@@ -481,7 +605,12 @@ def test_a_past_run_s_stages_are_read_back_from_what_it_recorded(qapp, tmp_path)
     qapp.processEvents()
     assert detail.stage_runs.isVisibleTo(detail) and detail.stage_runs.currentData() == "r1"
     assert detail.recorded.titles() == ["Thinking", "Answered"]
-    assert page.table.rowHeight(page._row_of("QA-1") + 1) == page.table.detail_cap()
+    row = page._row_of("QA-1")
+    assert page.table.rowHeight(row + 1) == page.table.detail_cap(row)
+    assert page.table.detail_cap(row) == (page.table.viewport().height()
+                                          - page.table.rowHeight(row)), "the whole table"
+    detail.tabs.set_current("History")
+    assert page.table.detail_cap(row) < page.table.viewport().height() - page.table.rowHeight(row)
 
 
 def test_the_live_run_s_stages_are_the_live_panel_lent_and_always_given_back(qapp, tmp_path):

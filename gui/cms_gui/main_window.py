@@ -254,6 +254,10 @@ class MainWindow(QMainWindow):
         # rather than one for a service. It needs nothing but somewhere to
         # answer on and a window to belong to.
         self.ask_bridge = AskBridge(self.process.send_command, self)
+        # And the Cockpits list what it holds open, and bring a question back.
+        self.ask_bridge.changed.connect(self._questions_changed)
+        self.cycles.question_requested.connect(self.ask_bridge.show)
+        self.subjects_page.question_requested.connect(self.ask_bridge.show)
 
         self.workers_label = QLabel("")
         self.workers_label.setStyleSheet("padding: 0 10px;")
@@ -614,12 +618,8 @@ class MainWindow(QMainWindow):
         self._rail = rail
         self._rail_width = max(RAIL_MIN_WIDTH, widest + RAIL_SLACK)
         rail.setFixedWidth(self._rail_width)
-        self.rail_note = QLabel("")
-        self.rail_note.setStyleSheet(
-            "font-family: %s; font-size: 10px; color: %s; border-top: 1px solid %s;"
-            "padding: 8px 14px;" % (theme.MONO_CSS, theme.NEUTRAL[600], theme.DIVIDER))
-        self.rail_note.setWordWrap(True)
-        rail_layout.addWidget(self.rail_note)
+        # No versions at its foot: they are in Help -> About and Settings, and a
+        # rail is for going places.
         inner.addWidget(rail)
 
         self.stack = QStackedWidget()
@@ -699,8 +699,11 @@ class MainWindow(QMainWindow):
         self.subjects_page.park_requested.connect(self.park_cycle_run)
         # Each of these is shown here, so here comes forward - a subject's
         # section in a window of its own would otherwise stay in front of it.
-        self.subjects_page.cockpit_requested.connect(
-            lambda: (self.come_forward(), self._show_cycle_cockpit()))
+        # Answered in a subject's own Cockpit, as in the Cycles page's: the same
+        # receipts, the same control command, the same standing questions.
+        self.subjects_page.set_run_state(self.run_state)
+        self.subjects_page.approval_answered.connect(self._answer_cycle_node_approval)
+        self.subjects_page.step_requested.connect(self._show_subject_step)
         self.subjects_page.artifact_requested.connect(
             lambda run_dir, path: (self.come_forward(), self._open_artifacts(run_dir, path)))
         self.subjects_page.run_on_requested.connect(self._run_on_subject)
@@ -847,7 +850,6 @@ class MainWindow(QMainWindow):
             # one fits beside a mark - see NavButton.
             button.set_compact(collapsed)
             button.setToolTip(self._nav_tooltip(key))
-        self.rail_note.setVisible(not collapsed)
         icons.button(self.collapse_button, "expand" if collapsed else "collapse")
         self.collapse_button.setToolTip("Expand the sidebar" if collapsed
                                         else "Collapse the sidebar")
@@ -1111,8 +1113,6 @@ class MainWindow(QMainWindow):
 
             _splash_msg("Finalizing UI...")
             self.describe_label.setText(self.inventory.summary())
-            self.rail_note.setText("core %s\nPySide6 %s" % (self.inventory.version,
-                                                            _pyside_version()))
             if self.inventory.warnings:
                 self.status_right.setText(self.inventory.warnings[0][:90])
             self._update_status()
@@ -1199,13 +1199,13 @@ class MainWindow(QMainWindow):
         else:
             done(*background.call(work))
 
-    def _open_cycle_run(self, cycle_id, run_dir):
+    def _open_cycle_run(self, cycle_id, run_dir, then=None):
         """Put one earlier run on the Cycles page - a session picked on the right.
 
         Replayed first and opened after, the way _restore_last_cycle does it:
         opening a cycle paints whatever the model holds, so the model has to
         hold the run before the canvas asks. The canvas and the output show
-        their skeletons while the run is read.
+        their skeletons while the run is read. ``then`` runs once it is drawn.
         """
         if self.process.is_running() or not run_dir:
             return
@@ -1213,7 +1213,7 @@ class MainWindow(QMainWindow):
 
         def opened(restored):
             if restored:
-                self.cycles.open(cycle_id)
+                self.cycles.open(cycle_id, then=then)
             else:
                 self.cycles.show_loading(False)
 
@@ -1255,6 +1255,35 @@ class MainWindow(QMainWindow):
         self.come_forward()
         self.show_page("cycles")
         self._open_cycle_run(cycle_id, run_dir)
+
+    def _show_subject_step(self, cycle_id, run_dir, run_id, step_id):
+        """A step clicked in a subject's Cockpit, on the Cycles canvas.
+
+        The run this window holds is shown as it is; any other is read back
+        first, the way Open run does it - which waits, like Open run, for the
+        run going here to finish or be parked.
+        """
+        if run_id and (self.run_state.cycle or {}).get("run_id") == run_id:
+            self.come_forward()
+            self.show_page("cycles")
+            self.cycles.show_step(step_id)
+            return
+        if self.process.is_running():
+            widgets.note(self._asked_from(), "Subjects",
+                         "A run is going in this window. Another run can be opened once "
+                         "it has finished, or after you park or stop it.")
+            return
+        if not run_dir:
+            return
+        self.come_forward()
+        self.show_page("cycles")
+        self._open_cycle_run(cycle_id, run_dir, then=lambda: self.cycles.show_step(step_id))
+
+    def _questions_changed(self):
+        """A run's question went up or came down: both Cockpits list what stands."""
+        waiting = self.ask_bridge.waiting()
+        self.cycles.set_questions(waiting)
+        self.subjects_page.set_questions(waiting)
 
     def _resume_subject_run(self, cycle_id, run_dir, run_id):
         """Continue a subject's run where it stopped, keeping its saved mode.

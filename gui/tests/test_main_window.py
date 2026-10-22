@@ -1601,18 +1601,54 @@ def test_what_a_subject_window_opens_here_brings_this_window_forward(window, mon
     came = []
     monkeypatch.setattr(window, "raise_", lambda: came.append("raise"))
     monkeypatch.setattr(window, "activateWindow", lambda: came.append("activate"))
-    monkeypatch.setattr(window, "_open_cycle_run", lambda *args: None)
-    monkeypatch.setattr(window, "_open_artifacts", lambda *args: None)
-    monkeypatch.setattr(window, "_show_cycle_cockpit", lambda: None)
+    monkeypatch.setattr(window, "_open_cycle_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_open_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(window.process, "is_running", lambda: False)
     page = window.subjects_page
     for emit in (lambda: page.open_run_requested.emit("demo", "/runs/r1"),
-                 lambda: page.cockpit_requested.emit(),
+                 lambda: page.step_requested.emit("demo", "/runs/r1", "r1", "a"),
                  lambda: page.artifact_requested.emit("/runs/r1", "steps/a/out.txt")):
         came.clear()
         emit()
         assert came == ["raise", "activate"]
     assert window.stack.currentWidget() is window.cycles
+
+
+def test_a_standing_question_is_listed_in_both_cockpits_and_brought_back_from_them(window):
+    window.ask_bridge.handle({"kind": "cycle.ask", "id": 5, "step": "plan",
+                              "question": "Agree to the plan?", "options": ["Yes", "No"],
+                              "timeout_ms": 600000})
+    try:
+        assert [one["id"] for one in window.cycles.cockpit._questions] == ["5"]
+        assert [one["id"] for one in window.subjects_page._questions] == ["5"]
+        dialog = window.ask_bridge._open[5][0]
+        dialog.hide()
+        window.subjects_page.question_requested.emit("5")
+        assert dialog.isVisible()
+        dialog.hide()
+        window.cycles.question_requested.emit("5")
+        assert dialog.isVisible()
+    finally:
+        window.ask_bridge.cancel_all()
+    assert window.cycles.cockpit._questions == [] and window.subjects_page._questions == []
+
+
+def test_an_approval_in_a_subject_s_cockpit_is_sent_as_the_cycles_page_s_is(window,
+                                                                             monkeypatch):
+    state = window.run_state
+    state.handle({"kind": "cycle.run.start", "run_id": "r1", "cycle": "demo",
+                  "execution_mode": "approve", "execution_policy_version": 1,
+                  "graph": {"nodes": [{"id": "push", "label": "Push", "needs": []}]}})
+    state.handle({"kind": "cycle.node.approval", "run_id": "r1", "receipt": {
+        "id": "req", "fingerprint": "proof", "step": "push", "status": "pending"}})
+    sent = []
+    with monkeypatch.context() as patched:
+        patched.setattr(window.process, "send_command",
+                        lambda **kwargs: sent.append(kwargs) or True)
+        window.subjects_page.approval_answered.emit("req", "proof", True)
+    state.reset_cycle()
+    assert [(one["command"], one["request_id"], one["approved"]) for one in sent] == [
+        ("cycle.node.approval.answer", "req", True)]
 
 
 def test_a_question_about_a_subject_click_is_asked_over_the_window_it_came_from(window,

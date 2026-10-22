@@ -24,8 +24,9 @@ be. Whichever of the two arrives first, the answer is the same one.
 """
 
 import getpass
+import time
 
-from PySide6.QtCore import QObject, Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
                                QPushButton, QTabWidget, QTextEdit, QVBoxLayout)
 
@@ -327,7 +328,16 @@ class AskDialog(QDialog):
 
 
 class AskBridge(QObject):
-    """Turns ``cycle.ask`` events into windows, and windows into answers."""
+    """Turns ``cycle.ask`` events into windows, and windows into answers.
+
+    And says which questions are standing, for a Cockpit to list: a window put
+    behind another one - a subject's section in a window of its own, say - is a
+    run waiting on somebody who cannot see that it is. :meth:`show` brings one
+    back to the front.
+    """
+
+    #: A question went up or came down: :meth:`waiting` has changed.
+    changed = Signal()
 
     def __init__(self, send, parent=None):
         """``send`` is the callable that writes one control command (**kwargs)."""
@@ -336,6 +346,8 @@ class AskBridge(QObject):
         self._parent = parent
         #: request id -> (dialog, timer)
         self._open = {}
+        #: request id -> what a Cockpit says about it: id, step, question, since
+        self._about = {}
 
     def handle(self, event):
         """Take one ``cycle.ask`` or ``cycle.ask.withdrawn`` event. True when it was one."""
@@ -364,9 +376,34 @@ class AskBridge(QObject):
         seconds = [int(event.get("timeout_ms") or 0) // 1000]
         timer.timeout.connect(lambda: self._tick(request_id, seconds))
         self._open[request_id] = (dialog, timer)
+        self._about[request_id] = {"id": str(request_id), "step": str(event.get("step") or ""),
+                                   "question": str(event.get("question") or "Continue?"),
+                                   "since": time.time()}
         if seconds[0] > 0:
             dialog.countdown(seconds[0])
             timer.start()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self.changed.emit()
+        return True
+
+    def waiting(self):
+        """The questions standing on screen, oldest first."""
+        return [dict(one) for one in self._about.values()]
+
+    def show(self, request_id):
+        """One standing question's window in front of every other. False when gone.
+
+        ``request_id`` as a Cockpit has it - a string - or as the event had it.
+        """
+        found = next((pair for key, pair in self._open.items()
+                      if str(key) == str(request_id)), None)
+        if found is None:
+            return False
+        dialog = found[0]
+        if dialog.isMinimized():
+            dialog.showNormal()
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -378,11 +415,15 @@ class AskBridge(QObject):
         No answer is sent: the thing that would have read it is not there, and
         a control command written to a launcher that has exited goes nowhere.
         """
+        standing = bool(self._open)
         for request_id in list(self._open):
             dialog, timer = self._open.pop(request_id)
+            self._about.pop(request_id, None)
             timer.stop()
             dialog.close()
             dialog.deleteLater()
+        if standing:
+            self.changed.emit()
 
     def withdraw(self, request_id):
         """Close one question the core stopped waiting for. Sends nothing back.
@@ -391,12 +432,14 @@ class AskBridge(QObject):
         be read by nobody - the same reasoning as :meth:`cancel_all`, for one.
         """
         found = self._open.pop(request_id, None)
+        self._about.pop(request_id, None)
         if found is None:
             return
         dialog, timer = found
         timer.stop()
         dialog.close()
         dialog.deleteLater()
+        self.changed.emit()
 
     def _tick(self, request_id, seconds):
         """One second of the core's deadline, counted down on the window."""
@@ -424,6 +467,7 @@ class AskBridge(QObject):
 
     def _done(self, request_id):
         found = self._open.pop(request_id, None)
+        self._about.pop(request_id, None)
         if found is None:
             return
         dialog, timer = found
@@ -436,6 +480,7 @@ class AskBridge(QObject):
         self._send(command="ask.result", id=request_id, answer=dialog.answer,
                    who=_who(), **extra)
         dialog.deleteLater()
+        self.changed.emit()
 
 
 def _fitted_note(text):

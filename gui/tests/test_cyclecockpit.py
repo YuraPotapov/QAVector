@@ -366,3 +366,82 @@ def test_label_falls_back_to_plugin_display_name_then_id():
     cycle = {"graph": {"nodes": [{"id": "a", "label": "a", "plugin": "agent.implement"}]}}
     assert activity.label(cycle, "a", {"agent.implement": "Implement change"}) == "Implement change"
     assert activity.label(cycle, "a") == "a"
+
+
+def test_a_question_standing_in_its_own_window_is_listed_with_the_way_back(qapp, dispose):
+    state = state_of()
+    view = Cockpit()
+    view.refresh(state.cycle, True)
+    asked = []
+    view.question_requested.connect(asked.append)
+    view.set_questions([{"id": "7", "step": "b", "question": "Which task?", "since": 100.0}])
+
+    assert "WAITING FOR YOUR ANSWER" in view.browser.toPlainText()
+    assert "Which task?" in view.browser.toPlainText()
+    row = view.question_actions["7"]
+    assert row.label.text() == "Choose task" and not view.actions.isHidden()
+    row.show_button.click()
+    assert asked == ["7"]
+
+    view.set_questions([])
+    assert view.question_actions == {} and view.actions.isHidden()
+    dispose(view)
+
+
+def test_a_question_is_said_only_for_a_run_still_going(qapp, dispose):
+    state = state_of()
+    view = Cockpit()
+    view.set_questions([{"id": "7", "step": "b", "question": "Which task?", "since": 100.0}])
+    view.refresh(state.cycle, False)
+    assert "WAITING FOR YOUR ANSWER" not in view.browser.toPlainText()
+    assert view.question_actions == {}
+    dispose(view)
+
+
+def test_how_long_a_question_has_waited_is_said(qapp):
+    state = state_of()
+    page = render(state.cycle, True, questions=[{"id": "7", "step": "b", "question": "Which task?",
+                                                 "since": 1000.0}], now=1360.0)
+    assert "Waiting 06:00" in page
+
+
+def test_buttons_filled_in_while_hidden_have_their_whole_height_once_shown(qapp, dispose):
+    """A row's Cockpit tab not chosen yet is filled off screen, where the
+    buttons have no stylesheet padding; measured then, the box was too short."""
+    from PySide6.QtWidgets import QWidget
+
+    from cms_gui import theme
+
+    qapp.setStyleSheet(theme.stylesheet())
+    state = state_of()
+    state.handle({"kind": "cycle.node.approval", "run_id": "r", "receipt": {
+        "id": "q", "fingerprint": "f", "step": "a", "status": "pending", "label": "Baseline tests"}})
+    holder = QWidget()
+    view = Cockpit(holder)
+    view.hide()
+    view.refresh(state.cycle, True)
+    view.set_questions([{"id": "1", "step": "c", "question": "Go?", "since": 1.0}])
+    holder.resize(900, 600)
+    holder.show()
+    view.show()
+    qapp.processEvents()
+    assert view.actions.height() >= view.actions_body.sizeHint().height()
+    dispose(holder)
+
+
+def test_the_buttons_area_counts_rows_added_while_it_is_on_screen(qapp, dispose):
+    """A question standing, then an approval asked: both rows measured, so the
+    Approve and Cancel under the question are not cut off."""
+    state = state_of()
+    view = Cockpit()
+    view.resize(900, 600)
+    view.show()
+    view.refresh(state.cycle, True)
+    view.set_questions([{"id": "1", "step": "c", "question": "Go?", "since": 1.0}])
+    one_row = view.actions.height()
+    state.handle({"kind": "cycle.node.approval", "run_id": "r", "receipt": {
+        "id": "q", "fingerprint": "f", "step": "a", "status": "pending", "label": "Baseline tests"}})
+    view.refresh(state.cycle, True)
+    assert view.actions.height() > one_row
+    assert view.actions.height() >= view.actions_body.sizeHint().height()
+    dispose(view)

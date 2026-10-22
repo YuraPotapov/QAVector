@@ -12,16 +12,20 @@ rather than into a page beside the list: what somebody came to the list for is
 to compare and to switch, and the rows around the open one stay in sight. Any
 number may be open at once, and which are open is remembered.
 
-An open row says what to do next as one button - answer the question in the
-run's Cockpit, resume where it stopped, or open the run - and offers **Park**
+An open row says what to do next as one button - answer in the run's Cockpit,
+resume where it stopped, or open the run - and offers **Park**
 for a run going in this window: it stops at a point where nothing is lost and
 can be resumed from here later, which is what frees the window for another
 subject. Under that are the person's own note, and the subject's history from
 every run, as a conversation or with everything the steps did around it.
 
-Nothing here decides anything about a run. Answers are given in the Cockpit,
-runs are opened on the Cycles page, files on the Artifacts page; this page
-only says where each of those is.
+**The Cockpit and the Stages of any run** are tabs of an open row. The live
+run's are the window's own: its Cockpit drawn from the same model as the Cycles
+page's - a node approval answered in either is answered - and its Stages the
+Cycles page's panel itself, lent. Any other run shows what it recorded.
+
+Nothing else here decides anything about a run. Runs are opened on the Cycles
+page, files on the Artifacts page; this page only says where each of those is.
 """
 
 import html
@@ -37,6 +41,7 @@ from .. import (background, core as core_mod, cyclereplay, cyclesubjects, icons,
 from .. import subjecthistory as story
 from ..stages import StageList
 from ..choicetable import text_inset
+from ..cyclecockpit import Cockpit
 
 COLUMNS = ["", "Subject", "State", "Cycle", "Note", "Updated"]
 C_MARK, C_SUBJECT, C_STATE, C_CYCLE, C_NOTE, C_UPDATED = range(len(COLUMNS))
@@ -56,6 +61,15 @@ HISTORY_MORE = 50
 #: How long the list waits after something happened in a run before reading
 #: itself again: a run moving step by step should not reread it on every step.
 REFRESH_MS = 1500
+#: How often a live run's Cockpit says how long its steps have been going.
+COCKPIT_TICK_MS = 1000
+#: The least of a row's Cockpit kept for its text, which scrolls in it.
+COCKPIT_TEXT_MIN = 56
+
+#: What a row says when it starts showing one of the run tabs, and when it stops.
+#: Not "cockpit": that is the Answer button's verb (story.COCKPIT).
+SHOWN = {story.COCKPIT_TAB: "cockpit_on", story.STAGES: "stages"}
+HIDDEN = {story.COCKPIT_TAB: "cockpit_off", story.STAGES: "stages_off"}
 
 #: The key a row's subject id is kept under, on its Subject cell.
 ROLE_ID = Qt.UserRole
@@ -155,8 +169,6 @@ class SubjectDetail(QWidget):
         # Which run's Stages: the one going in this window is the live feed,
         # any other is what it recorded.
         self.stage_runs = widgets.capped(QComboBox())
-        self.stage_runs.setToolTip("Whose stages to show: the live run's as they come, "
-                                   "any other run's as it recorded them.")
         self.stage_runs.currentIndexChanged.connect(lambda _index: self._stage_run_changed())
         self._tab_row = widgets.row(self.tabs, None, self._scope_label, self.scopes,
                                     self.stage_runs)
@@ -191,9 +203,33 @@ class SubjectDetail(QWidget):
         self._live_run = ""
         self._stage_choice = ""
 
+        # The Cockpit: the run's operational view, answered in for the live one.
+        self.cockpit_host = QWidget()
+        cockpit_layout = QVBoxLayout(self.cockpit_host)
+        cockpit_layout.setContentsMargins(0, 4, 0, 0)
+        cockpit_layout.setSpacing(0)
+        self.cockpit = Cockpit()
+        self.cockpit.layout().setContentsMargins(0, 0, 0, 0)
+        # In a row the room is a share of a table: what gives way is the text,
+        # which scrolls, never the buttons under it that answer.
+        self.cockpit.browser.setMinimumHeight(COCKPIT_TEXT_MIN)
+        self.cockpit.approval_answered.connect(
+            lambda request_id, fingerprint, approved:
+            self.acted.emit("approve", (request_id, fingerprint, approved)))
+        self.cockpit.node_selected.connect(lambda step_id: self.acted.emit("step", step_id))
+        self.cockpit.question_requested.connect(
+            lambda request_id: self.acted.emit("question", request_id))
+        cockpit_layout.addWidget(self.cockpit, 1)
+        self.cockpit_note = widgets.Elsewhere("")
+        self.cockpit_note.show_button.hide()
+        cockpit_layout.addWidget(self.cockpit_note)
+        self.cockpit_note.hide()
+        self._questions_shown = None
+
         self.body = QStackedWidget()
         self.body.addWidget(self.text)
         self.body.addWidget(self.stage_host)
+        self.body.addWidget(self.cockpit_host)
         column.addWidget(self.body, 1)
         self._sync_tab()
         self.update_subject(subject)
@@ -269,7 +305,7 @@ class SubjectDetail(QWidget):
 
     def render(self):
         self._sync_tab()
-        if self.answer is None or self.tab == story.STAGES:
+        if self.answer is None or self.tab in story.RUN_TABS:
             return
         bar = self.text.verticalScrollBar()
         kept = bar.value()
@@ -315,12 +351,13 @@ class SubjectDetail(QWidget):
         """As tall as everything it holds; the table caps it and it scrolls inside.
 
         Stages always asks for the most it may have: a feed is read from the
-        bottom and grows while it is read, so it fills its share of the table.
+        bottom and grows while it is read, so it fills its share of the table -
+        and so does the Cockpit, a run's whole state, which grows as it runs.
         """
         if self.detached:
             # Its window decides its size; this only says what it would like.
             return QSize(*SubjectWindow.FIRST_SIZE)
-        if self.tab == story.STAGES:
+        if self.tab in story.RUN_TABS:
             return QSize(max(self.width(), 300), 100000)
         margins = self.layout().contentsMargins()
         spacing = self.layout().spacing()
@@ -333,6 +370,11 @@ class SubjectDetail(QWidget):
         document.setTextWidth(width)
         height += int(document.size().height()) + 8
         return QSize(max(self.width(), 300), height)
+
+    def fills_view(self):
+        """Whether its row may take the whole table (``Table.detail_cap``): on
+        the run tabs, which are read as they grow."""
+        return not self.detached and self.tab in story.RUN_TABS
 
     def changeEvent(self, event):             # noqa: N802 - Qt's own spelling
         super().changeEvent(event)
@@ -350,29 +392,47 @@ class SubjectDetail(QWidget):
         was, self.tab = self.tab, tab
         self.render()
         self.resized.emit()
-        if tab == story.STAGES:
-            self.acted.emit("stages", self.stage_run())
-        elif was == story.STAGES:
-            self.acted.emit("stages_off", None)
+        if was in story.RUN_TABS and was != tab:
+            self.acted.emit(HIDDEN[was], None)
+        if tab in story.RUN_TABS:
+            self.acted.emit(SHOWN[tab], self.stage_run())
+            if was not in story.RUN_TABS:
+                # Now taking the whole table: its row goes to the top of it.
+                self.acted.emit("room", None)
 
     def set_tab(self, tab, run_id=""):
-        """Show ``tab`` - for a row opened again with what it last showed."""
+        """Show ``tab`` - of ``run_id``, for the run tabs - whatever was picked before.
+
+        For a row opened again with what it last showed, and for Answer, which
+        opens the live run's Cockpit here.
+        """
         if run_id:
             self._stage_choice = run_id
-            self._fill_stage_runs()
+            # The picker says it too; a run it does not list yet - the history
+            # is still being read - leaves it empty until it does.
+            self.stage_runs.blockSignals(True)
+            self.stage_runs.setCurrentIndex(self.stage_runs.findData(run_id))
+            self.stage_runs.blockSignals(False)
         if tab != self.tab:
             self.tabs.set_current(tab)
+        elif tab in story.RUN_TABS and run_id:
+            self.acted.emit(SHOWN[tab], run_id)
 
     def _sync_tab(self):
-        stages = self.tab == story.STAGES
-        self.body.setCurrentIndex(1 if stages else 0)
+        self.body.setCurrentWidget({story.STAGES: self.stage_host,
+                                    story.COCKPIT_TAB: self.cockpit_host}.get(self.tab, self.text))
         self._scope_label.setVisible(self.tab == story.HISTORY)
         self.scopes.setVisible(self.tab == story.HISTORY)
-        self.stage_runs.setVisible(stages)
+        self.stage_runs.setVisible(self.tab in story.RUN_TABS)
+        self.stage_runs.setToolTip(
+            "Whose Cockpit to show: the live run's, to answer in, or any other run's "
+            "as it recorded itself." if self.tab == story.COCKPIT_TAB else
+            "Whose stages to show: the live run's as they come, any other run's as "
+            "it recorded them.")
 
-    # -- Stages ------------------------------------------------------------------
+    # -- the run tabs: Cockpit and Stages -----------------------------------------
     def stage_run(self):
-        """The run whose stages are asked for: the picked one, or the newest."""
+        """The run the Cockpit or Stages tab is asked for: the picked one, or the newest."""
         data = self.stage_runs.currentData()
         return data or self._stage_choice or ""
 
@@ -391,16 +451,32 @@ class SubjectDetail(QWidget):
         self.stage_runs.setCurrentIndex(max(index, 0) if choices else -1)
         self.stage_runs.blockSignals(False)
         chosen = self.stage_runs.currentData() or ""
-        if self.tab == story.STAGES and chosen and chosen != self._stage_choice:
+        if self.tab in story.RUN_TABS and chosen and chosen != self._stage_choice:
             self._stage_choice = chosen
-            self.acted.emit("stages", chosen)
+            self.acted.emit(SHOWN[self.tab], chosen)
         elif chosen:
             self._stage_choice = chosen
 
     def _stage_run_changed(self):
         self._stage_choice = self.stage_runs.currentData() or ""
-        if self.tab == story.STAGES:
-            self.acted.emit("stages", self._stage_choice)
+        if self.tab in story.RUN_TABS:
+            self.acted.emit(SHOWN[self.tab], self._stage_choice)
+
+    def show_cockpit(self, cycle, live=False, threshold=60, questions=()):
+        """One run's Cockpit: answered in while ``live``, read otherwise."""
+        self.cockpit_note.hide()
+        self.cockpit.show()
+        questions = [dict(one) for one in questions or ()] if live else []
+        if questions != self._questions_shown:
+            self._questions_shown = questions
+            self.cockpit.set_questions(questions)
+        self.cockpit.refresh(cycle, live, threshold=threshold)
+
+    def show_cockpit_note(self, text):
+        """Say why there is no Cockpit to show, or that it is on its way."""
+        self.cockpit.hide()
+        self.cockpit_note.set_text(text)
+        self.cockpit_note.show()
 
     def hold_panel(self, panel):
         """Show the live Stages panel here, until :meth:`release_panel`."""
@@ -567,8 +643,12 @@ class SubjectsPage(QWidget):
     resume_requested = Signal(str, str, str)
     #: run id: park the run this window is executing.
     park_requested = Signal(str)
-    #: the live run's Cockpit, where its question is answered.
-    cockpit_requested = Signal()
+    #: request id, fingerprint, approved: a node approval answered in a Cockpit here.
+    approval_answered = Signal(str, str, bool)
+    #: request id: bring the window of a question the live run asks to the front.
+    question_requested = Signal(str)
+    #: cycle id, run directory, run id, step id: that step, on the Cycles canvas.
+    step_requested = Signal(str, str, str, str)
     #: run directory, path inside it ("" for the run itself): show on Artifacts.
     artifact_requested = Signal(str, str)
     #: the subject (its id, key, title and cycles): start a cycle on it.
@@ -597,7 +677,14 @@ class SubjectsPage(QWidget):
         self._lender = None
         self._borrower = ""
         self._staged = {}
+        #: Runs read back from their folders, as the model had them (run id ->
+        #: cycle) - for the Stages and the Cockpit of a run that has ended.
         self._recordings = {}
+        #: The window's run model, the questions standing in their own windows,
+        #: and which open rows show a Cockpit, of which run.
+        self.run_state = None
+        self._questions = []
+        self._cockpits = {}
         #: Subjects whose section is in a window of its own, and what each row
         #: was last showing (tab, run) when its section moved.
         self._windows = {}
@@ -667,6 +754,16 @@ class SubjectsPage(QWidget):
         self._timer.setSingleShot(True)
         self._timer.setInterval(REFRESH_MS)
         self._timer.timeout.connect(self.refresh)
+        # A live Cockpit follows the model: once per turn of the event loop when
+        # it moves - a run reports several times a second - and each second
+        # while anything is going, for the clocks.
+        self._cockpit_soon = QTimer(self)
+        self._cockpit_soon.setSingleShot(True)
+        self._cockpit_soon.setInterval(0)
+        self._cockpit_soon.timeout.connect(self._refresh_cockpits)
+        self._cockpit_tick = QTimer(self)
+        self._cockpit_tick.setInterval(COCKPIT_TICK_MS)
+        self._cockpit_tick.timeout.connect(self._refresh_cockpits)
         self._say_empty()
 
     # -- the core and the window ------------------------------------------------------
@@ -682,6 +779,17 @@ class SubjectsPage(QWidget):
         puts it."""
         self._lender = lender
 
+    def set_run_state(self, run_state):
+        """The window's run model, which a live run's Cockpit here is drawn from."""
+        self.run_state = run_state
+        run_state.changed.connect(self._cockpit_soon.start)
+        run_state.cycle_timing_changed.connect(self._cockpit_soon.start)
+
+    def set_questions(self, questions):
+        """The questions the live run asks in windows of their own (AskBridge)."""
+        self._questions = [dict(one) for one in questions or ()]
+        self._refresh_cockpits()
+
     def set_live(self, run_id="", busy=False):
         """Which run this window is executing, and whether it is executing any.
 
@@ -695,6 +803,7 @@ class SubjectsPage(QWidget):
                 detail.update_subject(self._subject(subject_id) or detail.subject,
                                       self._live_run, self._busy)
             self._restage()
+            self._recockpit()
 
     def refresh_soon(self):
         """Something happened in a run: read the list again, once it settles."""
@@ -707,6 +816,7 @@ class SubjectsPage(QWidget):
         if self._stale or not self._loaded:
             self.refresh()
         self._restage()
+        self._refresh_cockpits()
 
     def hideEvent(self, event):               # noqa: N802 - Qt's own spelling
         # The live panel goes home whenever this page is not on screen, so the
@@ -918,6 +1028,7 @@ class SubjectsPage(QWidget):
         else:
             self._open.discard(subject_id)
             self._staged.pop(subject_id, None)
+            self._cockpits.pop(subject_id, None)
             if self._borrower == subject_id:
                 self.release_stages()
             window = self._windows.pop(subject_id, None)
@@ -952,6 +1063,8 @@ class SubjectsPage(QWidget):
         if subject_id in self._staged:
             # Opened again (the list was made anew): on Stages, as it was.
             detail.set_tab(story.STAGES, self._staged[subject_id])
+        elif subject_id in self._cockpits:
+            detail.set_tab(story.COCKPIT_TAB, self._cockpits[subject_id])
 
     def _new_detail(self, subject):
         """A section for one subject, for its row or for a window."""
@@ -999,7 +1112,7 @@ class SubjectsPage(QWidget):
         if row is not None:
             self.table.open_row(row, self._elsewhere(subject_id))
         if tab != story.HISTORY:
-            detail.set_tab(tab, run if tab == story.STAGES else "")
+            detail.set_tab(tab, run if tab in story.RUN_TABS else "")
         window.bring_forward()
 
     def _dock(self, subject_id):
@@ -1021,7 +1134,7 @@ class SubjectsPage(QWidget):
         self._open_row(row, subject, fetch=False)
         restored = self._details.get(subject_id)
         if restored is not None and tab != story.HISTORY:
-            restored.set_tab(tab, run if tab == story.STAGES else "")
+            restored.set_tab(tab, run if tab in story.RUN_TABS else "")
 
     def _bring_forward(self, subject_id):
         window = self._windows.get(subject_id)
@@ -1129,37 +1242,127 @@ class SubjectsPage(QWidget):
         if not run_id:
             detail.show_stage_note("No run to show the stages of.")
             return
-        if run_id in self._recordings:
-            detail.show_recorded(*self._recordings[run_id])
-            return
-        answer = (self._histories.get(subject_id) or (None, None, {}))[2] or {}
-        run_dir = next((one.get("run_dir") for one in answer.get("runs") or []
-                        if one.get("run") == run_id), "")
-        if not run_dir:
-            detail.show_stage_note("This run's folder is not known.")
-            return
-        detail.show_stage_note("Reading the run's stages...")
+        if run_id not in self._recordings:
+            detail.show_stage_note("Reading the run's stages...")
 
-        def done(events, error, sid=subject_id, run_id=run_id, run_dir=run_dir):
+        def show(cycle, problem, sid=subject_id):
             shown = self._details.get(sid)
+            if (shown is None or shown.tab != story.STAGES or shown.stage_run() != run_id
+                    or shown.holds_panel()):
+                return
+            if problem:
+                shown.show_stage_note("This run's folder is not known." if problem == "unknown"
+                                      else "This run kept no stages.")
+                return
+            labels = {node.get("id"): node.get("label") or node.get("id")
+                      for node in (cycle.get("graph") or {}).get("nodes") or []}
+            shown.show_recorded(list(cycle.get("stages") or []), labels)
+
+        self._read_run(subject_id, run_id, show)
+
+    def _read_run(self, subject_id, run_id, then):
+        """``then(cycle, problem)`` with a run as it recorded itself - read once.
+
+        Replayed into a model of its own, the way the window reads a run back
+        (cyclereplay), on a thread; kept for every run but the live one, which
+        is still writing. ``problem`` is "" when there is a cycle, "unknown" for
+        a run whose folder the history does not name, "empty" for one that kept
+        nothing to read.
+        """
+        if run_id in self._recordings:
+            then(self._recordings[run_id], "")
+            return
+        run_dir = self._run_of(subject_id, run_id).get("run_dir", "")
+        if not run_dir:
+            then(None, "unknown")
+            return
+
+        def done(events, error, run_id=run_id, run_dir=run_dir):
             if error is not None or not events:
-                if shown is not None and shown.stage_run() == run_id:
-                    shown.show_stage_note("This run kept no stages.")
+                then(None, "empty")
                 return
             from ..runner import RunState
             state = RunState()
             cyclereplay.restore(run_dir, state, events=events)
             cycle = state.cycle or {}
-            labels = {node.get("id"): node.get("label") or node.get("id")
-                      for node in (cycle.get("graph") or {}).get("nodes") or []}
-            stages = list(cycle.get("stages") or [])
             state.deleteLater()
             if run_id != self._live_run:
-                self._recordings[run_id] = (stages, labels)
-            if shown is not None and shown.stage_run() == run_id and not shown.holds_panel():
-                shown.show_recorded(stages, labels)
+                self._recordings[run_id] = cycle
+            then(cycle, "")
 
-        self._call("stages:" + subject_id, lambda: cyclereplay.events_of(run_dir), done)
+        self._call("run:%s:%s" % (subject_id, run_id), lambda: cyclereplay.events_of(run_dir),
+                   done)
+
+    def _run_of(self, subject_id, run_id):
+        """What the subject's history knows of one of its runs: cycle, run_dir."""
+        answer = (self._histories.get(subject_id) or (None, None, {}))[2] or {}
+        found = next((one for one in answer.get("runs") or [] if one.get("run") == run_id), None)
+        if found is not None:
+            return found
+        latest = (self._subject(subject_id) or {}).get("latest") or {}
+        return latest if latest.get("id") == run_id else {}
+
+    # -- Cockpit ---------------------------------------------------------------------------
+    def _threshold(self):
+        return getattr(self.settings, "cycle_inactivity_seconds", 60)
+
+    def _held(self):
+        """The run the window's model holds, going or just ended, or None."""
+        cycle = (self.run_state.cycle or {}) if self.run_state is not None else {}
+        return cycle if cycle.get("run_id") else None
+
+    def _show_cockpit(self, subject_id, run_id):
+        """One open row's Cockpit: the window's model for the run it holds - live,
+        and answered in, while it is going - and any other run read back."""
+        detail = self._details.get(subject_id)
+        if detail is None:
+            return
+        self._cockpits[subject_id] = run_id
+        held = self._held()
+        if run_id and held is not None and held.get("run_id") == run_id:
+            self._refresh_cockpits()
+            return
+        if not run_id:
+            detail.show_cockpit_note("No run to show the Cockpit of.")
+            return
+        if run_id not in self._recordings:
+            detail.show_cockpit_note("Reading the run...")
+
+        def show(cycle, problem, sid=subject_id):
+            shown = self._details.get(sid)
+            if shown is None or shown.tab != story.COCKPIT_TAB or shown.stage_run() != run_id:
+                return
+            if problem:
+                shown.show_cockpit_note("This run's folder is not known." if problem == "unknown"
+                                        else "This run kept nothing to show.")
+                return
+            shown.show_cockpit(cycle, False, self._threshold())
+
+        self._read_run(subject_id, run_id, show)
+
+    def _refresh_cockpits(self):
+        """Every Cockpit on screen of the run the window holds, drawn again."""
+        held = self._held()
+        going = False
+        for subject_id, run_id in list(self._cockpits.items()):
+            detail = self._details.get(subject_id)
+            if detail is None or held is None or run_id != held.get("run_id"):
+                continue
+            if not (self.isVisible() or subject_id in self._windows):
+                continue
+            live = bool(self.run_state.cycle_running)
+            detail.show_cockpit(held, live, self._threshold(), self._questions)
+            going = going or live
+        if going and not self._cockpit_tick.isActive():
+            self._cockpit_tick.start()
+        elif not going:
+            self._cockpit_tick.stop()
+
+    def _recockpit(self):
+        """The live run changed - started, ended: each Cockpit shown again."""
+        for subject_id, run_id in list(self._cockpits.items()):
+            if subject_id in self._details:
+                self._show_cockpit(subject_id, run_id)
 
     # -- what an open row asks for ------------------------------------------------------
     def _acted(self, subject_id, verb, payload):
@@ -1172,6 +1375,33 @@ class SubjectsPage(QWidget):
             self._staged.pop(subject_id, None)
             if self._borrower == subject_id:
                 self.release_stages()
+            return
+        if verb == "cockpit_on":
+            self._show_cockpit(subject_id, payload or "")
+            return
+        if verb == "room":
+            self._fit(subject_id)
+            row = self._row_of(subject_id)
+            if row is not None and subject_id not in self._windows:
+                item = self.table.item(row, C_SUBJECT)
+                QTimer.singleShot(0, lambda: self.table.scrollToItem(
+                    item, QAbstractItemView.PositionAtTop))
+            return
+        if verb == "cockpit_off":
+            self._cockpits.pop(subject_id, None)
+            return
+        if verb == "approve":
+            self.approval_answered.emit(*payload)
+            return
+        if verb == "question":
+            self.question_requested.emit(str(payload))
+            return
+        if verb == "step":
+            detail = self._details.get(subject_id)
+            run_id = detail.stage_run() if detail is not None else ""
+            run = self._run_of(subject_id, run_id)
+            self.step_requested.emit(run.get("cycle", ""), run.get("run_dir", ""), run_id,
+                                     str(payload or ""))
             return
         if verb == "detach":
             self._detach(subject_id)
@@ -1186,7 +1416,10 @@ class SubjectsPage(QWidget):
         if verb == story.OPEN:
             self.open_run_requested.emit(latest.get("cycle", ""), latest.get("run_dir", ""))
         elif verb == story.COCKPIT:
-            self.cockpit_requested.emit()
+            # Answered here: the row's own Cockpit, of the run going in this window.
+            detail = self._details.get(subject_id)
+            if detail is not None:
+                detail.set_tab(story.COCKPIT_TAB, self._live_run)
         elif verb == story.RESUME:
             offer = subject.get("resume") or {}
             self.resume_requested.emit(offer.get("cycle", ""), offer.get("run_dir", ""),

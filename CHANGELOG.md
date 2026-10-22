@@ -16,6 +16,30 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **A subject's Cockpit, in its row.** An open row has a Cockpit tab beside
+  Stages: for the run going in this window, the live Cockpit - what runs now
+  and next, how long each has taken, a node waiting for consent with Approve
+  and Cancel - drawn from the same model as the Cycles page's, so an answer
+  given in either is given; any other run's as it recorded itself. **Answer**
+  (it was Answer in Cockpit) opens it there rather than taking you to the
+  Cycles page, and a click on a step shows it on the Cycles canvas.
+- **Questions standing in their own windows are listed in the Cockpit.** An
+  approval gate, a choice or an input waiting on you is named in both
+  Cockpits, with how long it has waited and **Show the question**, which brings
+  its window back in front of whatever covered it - a subject's window, say.
+
+### Changed
+- **Cockpit and Stages take the whole list** in an open row, its line at the
+  top; History, Files and Runs keep two thirds of it.
+- **The sidebar no longer ends in version numbers.** The core's and Qt's
+  versions are in Help -> About and Settings.
+
+### Fixed
+- **The Cockpit's Approve and Cancel were cut off** when a row of them was added
+  while the Cockpit was on screen: the area was measured before the new row was
+  shown, so it was a row short.
+
 ## [0.16.37] - 2026-10-22
 
 ### Added

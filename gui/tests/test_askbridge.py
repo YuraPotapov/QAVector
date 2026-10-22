@@ -196,6 +196,32 @@ def test_withdrawing_a_question_that_is_not_open_is_harmless(qapp, bridge):
     assert bridge._open == {}
 
 
+# ------------------------------------------------- what a Cockpit is told
+def test_the_questions_standing_are_listed_until_each_is_answered_or_withdrawn(qapp, bridge):
+    told = []
+    bridge.changed.connect(lambda: told.append(len(bridge.waiting())))
+    bridge.handle(_event(id=1, step="plan"))
+    bridge.handle(_event(id=2, step="push", question="Push it?"))
+    assert [(one["id"], one["step"], one["question"]) for one in bridge.waiting()] == [
+        ("1", "plan", "Commit this?"), ("2", "push", "Push it?")]
+    assert bridge.waiting()[0]["since"] <= time.time()
+
+    _dialog(bridge)._choose("Approve")
+    _pump(qapp, lambda: bridge.sent)
+    bridge.handle({"kind": "cycle.ask.withdrawn", "id": 2})
+    assert bridge.waiting() == []
+    assert told == [1, 2, 1, 0]
+
+
+def test_show_brings_a_standing_question_back_and_says_when_it_is_gone(qapp, bridge):
+    bridge.handle(_event(id=1))
+    dialog = _dialog(bridge)
+    dialog.hide()
+    assert bridge.show("1") is True and dialog.isVisible()
+    bridge.cancel_all()
+    assert bridge.show("1") is False
+
+
 # ---------------------------------------------------------------- the look
 def test_the_detail_is_shown_where_a_line_of_it_can_be_selected(qapp):
     dialog = AskDialog("Commit?", detail="--- a/x\n+++ b/x\n", parent=None)

@@ -142,6 +142,8 @@ class CyclesPage(QWidget):
     subject_requested = Signal(str)
     control_requested = Signal(str, str)
     approval_answered = Signal(str, str, bool)
+    #: request id: bring the window of a question the run asks to the front.
+    question_requested = Signal(str)
     interaction_requested = Signal(dict)
     saved = Signal()
     #: The page put the rows a write answered with into its own list - every
@@ -452,6 +454,7 @@ class CyclesPage(QWidget):
         self.cockpit = Cockpit(self)
         self.cockpit.node_selected.connect(self._cockpit_selected)
         self.cockpit.approval_answered.connect(self.approval_answered.emit)
+        self.cockpit.question_requested.connect(self.question_requested.emit)
         self.run_surface = QStackedWidget()
         self.run_surface.addWidget(self.canvas)
         self.run_surface.addWidget(self.cockpit)
@@ -941,6 +944,34 @@ class CyclesPage(QWidget):
         self.run_surface.setCurrentWidget(self.cockpit)
         self._refresh_cockpit()
         self.cockpit.setFocus(Qt.OtherFocusReason)
+
+    def set_questions(self, questions):
+        """The questions the run asks in windows of their own (AskBridge.waiting)."""
+        self.cockpit.set_questions(questions)
+
+    def show_step(self, step_id):
+        """The run on screen at one of its steps, on its graph.
+
+        For a click on a step in a Cockpit somewhere else - a subject's row: the
+        canvas is where a step is looked at, so Run -> Graph, the step selected
+        and in the middle, its output beside it. Its window is not opened: that
+        is a double-click away, and a window over the canvas would hide what
+        the click came here to see.
+        """
+        state = (self.run_state.cycle or {}) if self.run_state else {}
+        if not state or not step_id:
+            return
+        if self.current_id() != state.get("cycle"):
+            self.open(state["cycle"], then=lambda: self.show_step(step_id))
+            return
+        if (self._live_cycle() or {}).get("graph"):
+            self.run_view.set_current("Graph", notify=False)
+            if self._context != RUN:
+                self.context_switch.set_current(RUN)
+            else:
+                self._run_view_changed("Graph")
+        self.canvas.select(step_id)
+        self._node_selected(step_id)
 
     def _cockpit_selected(self, step_id):
         self.canvas.select(step_id)

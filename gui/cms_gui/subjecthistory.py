@@ -22,8 +22,11 @@ RUN, YOU, ASKED, AGENT, CHECK, FAILED, STEP = (
     "RUN", "YOU", "ASKED", "AGENT", "CHECK", "FAILED", "STEP")
 
 #: Which tab of an opened row shows what.
-HISTORY, FILES, RUNS, STAGES = "History", "Files", "Runs", "Stages"
-TABS = (HISTORY, FILES, RUNS, STAGES)
+HISTORY, FILES, RUNS, COCKPIT_TAB, STAGES = "History", "Files", "Runs", "Cockpit", "Stages"
+TABS = (HISTORY, FILES, RUNS, COCKPIT_TAB, STAGES)
+#: The tabs that show one run, picked beside them: the live one as it goes,
+#: any other as it recorded itself.
+RUN_TABS = (COCKPIT_TAB, STAGES)
 #: The two views of a history, as the core names them.
 CONVERSATION, ALL = "conversation", "all"
 SCOPE_LABELS = {CONVERSATION: "Conversation", ALL: "All"}
@@ -144,15 +147,16 @@ def next_action(subject, live_run="", busy=False):
 
     ``live_run`` is the run this window is executing, ``busy`` whether it is
     executing anything at all. A question waiting in the live run is answered
-    in its Cockpit - not here, so there is one place a decision is made. A run
-    that can be continued is resumed; every other run is opened on its canvas.
+    in its Cockpit - the row's own Cockpit tab, the same model as the Cycles
+    page's. A run that can be continued is resumed; every other run is opened
+    on its canvas.
     """
     latest = subject.get("latest") or {}
     if not latest:
         return None
     if latest.get("running") and latest.get("id") == live_run:
         if subject.get("state") in ("asking", "node_approval"):
-            return COCKPIT, "Answer in Cockpit", True, ""
+            return COCKPIT, "Answer", True, "The run's Cockpit, here: approve, or bring its question forward."
         return OPEN, "Open run", True, ""
     offer = subject.get("resume") or {}
     if offer and not offer.get("problem"):
@@ -607,7 +611,7 @@ def _check_line(check):
 
 # -- the files and the runs -----------------------------------------------------
 def run_choices(answer, live_run=""):
-    """``[(run id, label)]`` for the Stages tab's picker, newest first."""
+    """``[(run id, label)]`` for the Cockpit and Stages tabs' picker, newest first."""
     names = run_numbers(answer)
     found = []
     for run in answer.get("runs") or []:

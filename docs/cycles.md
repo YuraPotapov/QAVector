@@ -647,8 +647,8 @@ Ctrl+K finds a subject by key, title, cycle or note.
 
 A row opens in place, across the whole list, and any number may be open at
 once - what is open is remembered. An open row says what to do next as one
-button: **Answer in Cockpit** for a question the run in this window is asking,
-**Resume** for a run that stopped where it can go on (the row says why when
+button: **Answer** for a question or a node approval the run in this window is
+waiting on - it opens the row's own Cockpit tab - **Resume** for a run that stopped where it can go on (the row says why when
 Resume would be refused - a cycle edited since, say), **Open run** otherwise.
 Under that are your note and the subject's story:
 
@@ -664,12 +664,26 @@ Under that are your note and the subject's story:
 - **Files** - each run's step files, newest run first; a click opens one on the
   Artifacts page.
 - **Runs** - every run; a click puts it on the Cycles page.
+- **Cockpit** - one run's Cockpit, picked from the subject's runs. For the run
+  going in this window it is the live one: what runs now, beside it and next,
+  how long each has taken, and a node waiting for consent with **Approve** and
+  **Cancel** (Enter and Esc) - drawn from the same model as the Cycles page's,
+  so an answer given in either is given. A question a step asks in its own
+  window (an approval gate, a choice, an input) is listed too, with how long it
+  has waited and **Show the question**, which brings its window back in front
+  of whatever covered it; the answer is given there. A click on a step shows it
+  on the Cycles canvas, Run -> Graph. Any other run shows what it recorded:
+  where it stopped, what finished, what failed, answering nothing.
 - **Stages** - one run's stages, picked from the subject's runs. The run going
   in this window shows the live feed with the box for writing to it - the
   Cycles page's own Stages panel, moved into the row while it is on screen and
   back in its tab the moment you leave, never a copy. Stages in a window of
   their own stay there; the row says so and brings the window forward. Any
   other run shows the stages it recorded.
+
+Cockpit and Stages are read as they grow, so an open row on either takes the
+whole table, its own line at the top; the other tabs take two thirds of it, so
+the rows around stay in sight.
 
 A run can say a great deal, and a row has a share of the list to say it in. The
 mark at the end of an open row's top line puts its section in **a window of its

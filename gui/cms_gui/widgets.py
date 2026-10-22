@@ -2310,11 +2310,11 @@ class Table(QTableWidget):
 
     def fit_detail(self, row):
         """Size the details open under ``row`` to what they hold, up to a share
-        of the table (see :data:`DETAIL_SHARE`), past which they scroll."""
+        of the table (see :meth:`detail_cap`), past which they scroll."""
         widget = self.detail_of(row)
         if widget is None:
             return
-        cap = max(DETAIL_MIN, int(self.viewport().height() * DETAIL_SHARE))
+        cap = self.detail_cap(row)
         self.setRowHeight(row + 1, max(1, min(widget.sizeHint().height(), cap)))
         # And the widget moved into the row as it now is. The view puts a cell's
         # widget in place when it next lays itself out, which a spanned row that
@@ -2322,8 +2322,18 @@ class Table(QTableWidget):
         # hung over the row below.
         self.updateEditorGeometries()
 
-    def detail_cap(self):
-        """The tallest an opened row's details are allowed to be just now."""
+    def detail_cap(self, row=None):
+        """The tallest an opened row's details are allowed to be just now.
+
+        A share of the view (:data:`DETAIL_SHARE`), so the rows around them stay
+        in sight - or, for details whose ``fills_view()`` says so, all of it but
+        their own row: what is read as it grows, a run's Cockpit or its feed,
+        needs a window's worth of room to be read at all.
+        """
+        widget = self.detail_of(row) if row is not None else None
+        fills = getattr(widget, "fills_view", None)
+        if callable(fills) and fills():
+            return max(DETAIL_MIN, self.viewport().height() - self.rowHeight(row))
         return max(DETAIL_MIN, int(self.viewport().height() * DETAIL_SHARE))
 
     def keyPressEvent(self, event):

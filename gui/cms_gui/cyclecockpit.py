@@ -2,6 +2,7 @@
 
 import html
 import math
+import time
 from collections import Counter
 from urllib.parse import quote, unquote
 
@@ -87,7 +88,10 @@ def _restore_reading_position(browser, position):
     browser.horizontalScrollBar().setValue(left)
 
 
-def render(cycle, live=False, plugins=None, threshold=60, expanded_details=(), include_current=True):
+def render(cycle, live=False, plugins=None, threshold=60, expanded_details=(), include_current=True,
+           questions=(), now=None):
+    """The Cockpit's page. ``questions`` are those standing in windows of their
+    own (``AskBridge.waiting``) - the run's, since a window runs one at a time."""
     if not cycle:
         return "<h2>Run Cockpit</h2><p>Start a cycle or select a saved run in Subjects.</p>"
     plugins = plugins or {}
@@ -113,6 +117,17 @@ def render(cycle, live=False, plugins=None, threshold=60, expanded_details=(), i
                 _text(receipt.get("label") or receipt.get("step")), _text(receipt.get("importance_reason") or "Approval before this step starts"),
                 cycleapproval.preview(receipt, cycleapproval.binding(receipt) in expanded_details),
                 "" if live else "<p>Resume to review this request</p>"))
+    asked = list(questions or ()) if live else []
+    if asked:
+        # Answered in its own window, not here: what the Cockpit adds is that
+        # one is standing, for how long, and the way back to it.
+        parts.append('<h3>WAITING FOR YOUR ANSWER</h3>')
+        now = time.time() if now is None else now
+        for one in asked:
+            parts.append('<p><b>%s</b><br>%s<br>Waiting %s · answered in its own window</p>' % (
+                _text(activity.label(cycle, one.get("step"), plugins) if one.get("step") else "Question"),
+                _text(one.get("question")),
+                _text(activity.duration(max(0, now - (one.get("since") or now)) * 1000))))
     phase_html = ""
     if cycle.get("phase_definition"):
         rows = []
@@ -371,9 +386,31 @@ class ApprovalActions(QWidget):
         self.answered.emit(self.request_id, self.fingerprint, approved)
 
 
+class QuestionActions(QWidget):
+    """A question a step asks in a window of its own, and the way to that window."""
+
+    shown = Signal(str)
+
+    def __init__(self, question, label, parent=None):
+        super().__init__(parent)
+        self.request_id = str(question.get("id"))
+        self.label = widgets.elided_line(label, "body")
+        self.label.setTextFormat(Qt.PlainText)
+        self.show_button = QPushButton("Show the question")
+        self.show_button.setProperty("variant", "primary")
+        self.show_button.setToolTip("Bring the question's window to the front - it is answered there.")
+        self.show_button.setAutoDefault(False)
+        self.show_button.clicked.connect(lambda: self.shown.emit(self.request_id))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(widgets.row(self.label, None, self.show_button))
+
+
 class Cockpit(QWidget):
     node_selected = Signal(str)
     approval_answered = Signal(str, str, bool)
+    #: request id: bring that question's window to the front.
+    question_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -396,6 +433,16 @@ class Cockpit(QWidget):
         self.actions_layout = QVBoxLayout(self.actions_body)
         self.actions_layout.setContentsMargins(0, 0, 0, 0)
         self.actions_layout.setSpacing(6)
+        # The questions' rows first, the approvals' after them: approvals are
+        # taken out and put back on every change, and stay below this box.
+        self.questions_box = QWidget()
+        self.questions_layout = QVBoxLayout(self.questions_box)
+        self.questions_layout.setContentsMargins(0, 0, 0, 0)
+        self.questions_layout.setSpacing(6)
+        self.actions_layout.addWidget(self.questions_box)
+        self.question_actions = {}
+        self._questions = []
+        self._questions_context = None
         self.actions.setWidget(self.actions_body)
         self.actions.hide()
         layout.addWidget(self.actions)
@@ -444,6 +491,12 @@ class Cockpit(QWidget):
                 self._expanded_details.symmetric_difference_update({key})
                 self.refresh(*self._render_context)
 
+    def set_questions(self, questions):
+        """The questions standing in windows of their own (``AskBridge.waiting``)."""
+        self._questions = [dict(one) for one in questions or ()]
+        if self._render_context:
+            self.refresh(*self._render_context)
+
     def refresh(self, cycle, live=False, plugins=None, threshold=60):
         self._render_context = (cycle, live, plugins, threshold)
         run_id = (cycle or {}).get("run_id")
@@ -454,7 +507,8 @@ class Cockpit(QWidget):
             self._details_run = run_id
         pending = {cycleapproval.binding(one) for one in _visible_approvals(cycle or {})}
         self._expanded_details.intersection_update(pending)
-        value = render(cycle, live, plugins, threshold, self._expanded_details, include_current=False)
+        value = render(cycle, live, plugins, threshold, self._expanded_details, include_current=False,
+                       questions=self._questions)
         updates = self.browser.updatesEnabled()
         self.browser.setUpdatesEnabled(False)
         try:
@@ -463,6 +517,7 @@ class Cockpit(QWidget):
                 self._html = value
             self.current.refresh(cycle, live, plugins, threshold, self._current_request)
             self._refresh_approvals(cycle or {}, live)
+            self._refresh_questions(cycle or {}, live, plugins)
             # Removing the buttons changes the reader's viewport and scroll range.
             self.layout().activate()
             _restore_reading_position(self.browser, position)
@@ -489,15 +544,55 @@ class Cockpit(QWidget):
                     actions.deleteLater()
             for actions in current.values():
                 self.actions_layout.addWidget(actions)
+                # Shown now, not when the event loop gets to it: a row not shown
+                # yet counts for nothing in the height measured just below.
+                actions.show()
             self.approval_actions = current
             self._approval_context = context
-            self.actions.setFixedHeight(min(160, self.actions_body.sizeHint().height() + 2))
+            self._fit_actions()
         if cycle.get("control_error"):
             for actions in self.approval_actions.values():
                 actions.setEnabled(True)
-        self.actions.setVisible(bool(receipts))
+        self.actions.setVisible(bool(receipts) or bool(self.question_actions))
         for shortcut in self._approval_shortcuts:
             shortcut.setEnabled(bool(receipts))
+
+    def _refresh_questions(self, cycle, live, plugins=None):
+        """A row with Show the question for each one standing, while the run is live."""
+        asked = self._questions if live and cycle else []
+        context = tuple((one.get("id"), one.get("step")) for one in asked)
+        if context != self._questions_context:
+            for actions in self.question_actions.values():
+                self.questions_layout.removeWidget(actions)
+                actions.setParent(None)
+                actions.deleteLater()
+            self.question_actions = {}
+            for one in asked:
+                label = activity.label(cycle, one.get("step"), plugins) if one.get("step") else "Question"
+                actions = QuestionActions(one, label)
+                actions.shown.connect(self.question_requested.emit)
+                self.questions_layout.addWidget(actions)
+                actions.show()
+                self.question_actions[actions.request_id] = actions
+            self._questions_context = context
+            self.questions_box.setVisible(bool(asked))
+            self._fit_actions()
+        self.actions.setVisible(bool(asked) or bool(self.approval_actions))
+
+    def _fit_actions(self):
+        """The buttons' area as tall as its rows, up to a limit past which it scrolls.
+
+        Measured polished: a Cockpit filled while not on screen - a tab not
+        chosen yet - measured its buttons without the stylesheet's padding and
+        kept a box too short for them once they had it.
+        """
+        self.actions_body.ensurePolished()
+        self.actions_body.layout().activate()
+        self.actions.setFixedHeight(min(160, self.actions_body.sizeHint().height() + 2))
+
+    def showEvent(self, event):                # noqa: N802 - Qt's own spelling
+        super().showEvent(event)
+        self._fit_actions()
 
 
 class ActiveStrip(QPushButton):
