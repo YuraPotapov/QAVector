@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.37] - 2026-10-22
+
 ### Added
 - **Subjects: everything being worked on, one row each.** A new page on the rail
   lists every subject - the key a cycle's run was about, whichever cycle made it -
