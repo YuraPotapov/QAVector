@@ -189,11 +189,21 @@ class UserChoice(CyclePlugin):
         context.stage(step.id, {"kind": "start", "title": "Waiting for a choice",
                                 "detail": question, "status": "running"})
         timeout_ms = int(step.timeout * 1000) if step.timeout else None
+        detail = str(self.setting(settings, "detail", "") or "")
         answer = ask_mod.ask(
-            question, detail=str(self.setting(settings, "detail", "") or ""),
+            question, detail=detail,
             options=[CHOOSE, CANCEL], timeout_ms=timeout_ms, step=step.id,
             cancel=context.cancel, progress=getattr(context, "progress", None),
             choice=table.question(mode, detail_template, set(checked)))
+        # What was picked, by the values a reader knows the rows by and in the
+        # list's order, as the outputs hand them on - not the rows themselves,
+        # which the step's own outputs already carry.
+        picked = [table.values[i] for i in sorted({
+            one for one in answer.get("chosen") or []
+            if isinstance(one, int) and not isinstance(one, bool)
+            and 0 <= one < len(table.values)})]
+        ask_mod.record(context, step, question, detail, [CHOOSE, CANCEL], answer,
+                       chosen=picked, rows=len(table.items))
 
         who = answer.get("who", "")
         if not answer.get("answered"):

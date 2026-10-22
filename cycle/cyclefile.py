@@ -148,6 +148,13 @@ def list_row(cycle_id, path, cycles_dir=None, registry=None):
                             pin=model.trigger_pin(parsed, one),
                             enabled=one.enabled)
                        for one in parsed.triggers]
+    # What it works on, and the variable a run started on one subject takes it
+    # through - so a front-end can start this cycle on a subject it was looking
+    # at (Subjects' "Run a cycle on it") without opening the file. Its key is
+    # a template the run resolves; only the declaration is listed.
+    subject = parsed.subject
+    if subject is not None:
+        row["subject"] = {"kind": subject.kind, "pin": subject.pin or ""}
     row["problems"] = model.problems(parsed, registry=registry, raw=raw)
     return row
 

@@ -456,3 +456,12 @@ def test_its_metadata_survives_the_wire():
 
 def test_what_it_chose_is_reused_by_resume_and_partial_runs():
     assert registry.get("user.choice").metadata.reusable is True
+
+
+def test_what_was_asked_and_chosen_is_kept_by_its_values(asking, choose, tmp_path):
+    _answer_soon("Choose", chosen=[2, 0], who="tester")
+    choose()
+    path = (tmp_path / "runs" / "20261013-000000-a" / "steps" / "pick" / ask_mod.ASKED_FILE)
+    asked = json.loads(path.read_text(encoding="utf-8"))["asked"]
+    assert asked[0]["question"] == "Which task?"
+    assert asked[0]["chosen"] == ["QA-1", "QA-3"] and asked[0]["rows"] == len(ISSUES)

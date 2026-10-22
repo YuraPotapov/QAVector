@@ -16,6 +16,53 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Subjects: everything being worked on, one row each.** A new page on the rail
+  lists every subject - the key a cycle's run was about, whichever cycle made it -
+  with what waits for you first: a question asked, a node waiting for consent, a
+  pause, a run you parked. A row opens in place, across the whole list, with the
+  one thing to do next (Answer in Cockpit, Resume, Open run), your note, and the
+  subject's history from every run of every cycle: questions with what was shown
+  and what you answered, plans sent back, messages to steps, each agent's answer,
+  as a conversation or with every step around it - an agent's entry opens its
+  prompt and its own account, call by call. Files, runs and Stages are a tab
+  away: the live run's Stages is the Cycles page's own panel, message box and
+  all, moved into the row while it is on screen; any other run shows the stages
+  it recorded.
+  Several rows may be open at once and stay open. Ctrl+K finds a subject.
+- **Park.** A run waiting for you no longer keeps the window from starting
+  another: Park stops it at a point where nothing is lost - once only questions
+  to a person are left going - and the subject's row resumes it later, asking
+  those questions again.
+- **A subject's section in a window of its own.** The mark at the end of an open
+  row puts what it holds - history, files, runs, live Stages - in a separate
+  window, to read a long run on a whole screen; the row says where it went, and
+  closing the window puts it back. What it opens in the main window - a run, the
+  Cockpit, a file - brings the main window to the front, and what it asks is
+  asked over the window it was clicked in.
+- **Notes on a subject**, added and never rewritten, shown in its row and its
+  history.
+- **Run a cycle on it.** Any cycle can be started on a subject from its row; what
+  it says joins the subject's history.
+- **A run keeps what it asked.** A question step writes each asking - question,
+  detail, options, answer, who - to `steps/<id>/asked.json`, and an agent call
+  its prompt, clarifications included, as `prompt.md`. Before this only the
+  answers were kept.
+- **CLI:** `--cycle-subject-list`, `--cycle-subject-history=KEY`,
+  `--cycle-subject-transcript=RUN:STEP` and `--cycle-subject-note=KEY`; `cycle.stop` takes a `reason`; a cycle's row in
+  `--describe` says what it works on and the variable that pins it.
+
+### Changed
+- **A cycle opens where it was left: Design or Run.** Pressing Run - or watching
+  a run of the cycle - is remembered for that cycle, with Cockpit or Graph, and
+  its next opening shows its run that way, after a restart too. A cycle with no
+  run to show opens in Design and keeps its choice for when it has one.
+- **The Cycles page's Subjects pane links to the subject's row** (Open in
+  Subjects), and says *parked* for a run put aside.
+- **Tables can open a row in place** (`widgets.Table(expandable=True)`): a row's
+  details in a row of their own under it, across every column, stepped over by
+  the cursor and shown and hidden by the search row with the row they belong to.
+
 ## [0.16.36] - 2026-10-21
 
 ### Changed

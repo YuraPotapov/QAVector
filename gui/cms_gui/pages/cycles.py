@@ -87,7 +87,8 @@ VISIBLE_LINES = 400
 LOG_SLACK = 2
 
 #: The two things the canvas can be showing - see CyclesPage.context_switch.
-DESIGN, RUN = "Design", "Run"
+#: The layout file remembers which one each cycle was left in, in these words.
+DESIGN, RUN = clf.SECTIONS
 
 #: The action that starts a cycle again from nothing, whatever the last run did.
 START_OVER = "Start over (new run)"
@@ -137,6 +138,8 @@ class CyclesPage(QWidget):
     #: The plan as just read: what the scheduler starts on time.
     planned_loaded = Signal(list)
     stop_requested = Signal()
+    #: The Subjects page was asked for, opened on this subject's key.
+    subject_requested = Signal(str)
     control_requested = Signal(str, str)
     approval_answered = Signal(str, str, bool)
     interaction_requested = Signal(dict)
@@ -171,7 +174,13 @@ class CyclesPage(QWidget):
         #: The cycle the loaded sessions were asked to put first.
         self._sessions_first = ""
         self._stages_window = None       # stageswindow.StagesWindow, while detached
+        #: While another page shows the stage panel: how to have it back.
+        self._stages_lent = None
         self._cockpit_run = ""
+        #: Per cycle, the (section, run view) last read from or written to the
+        #: layout file - so a draft edit, which says Design every keystroke,
+        #: does not rewrite the file to say what it already says.
+        self._sections = {}
         self._execution_mode_source = None
         self._build()
         self.load_projects()
@@ -430,6 +439,7 @@ class CyclesPage(QWidget):
         self.subjects.planned_remove.connect(self._remove_planned)
         self.subjects.files_picked.connect(self._open_run_files)
         self.subjects.more_requested.connect(self._more_sessions)
+        self.subjects.subject_requested.connect(self.subject_requested.emit)
 
         # Folding splitters: any panel dragged shut leaves a bold line where
         # it went, and clicking the line brings it back.
@@ -636,9 +646,11 @@ class CyclesPage(QWidget):
         if self._draft is not None and (self._draft.cycle_id != cycle_id
                                         or not self._draft.dirty):
             self._draft = None
-        if self._context == RUN and (self._live_cycle() or {}).get("cycle") != cycle_id:
-            # A run of another cycle is nothing to show this one by.
-            self._set_context(DESIGN)
+        # Back in the half of the page this cycle was left in. Run needs a run
+        # of it on screen - a run of another cycle is nothing to show this one
+        # by - and while its last run is still being read back the page waits
+        # in Design: _graph_known goes on to Run when it arrives.
+        self._restore_section()
         self.title.setText(_name_of(payload) or "Cycles")
         self._redraw(drawn)
         # And what it said, not only what it did. Without this, a run restored
@@ -847,6 +859,7 @@ class CyclesPage(QWidget):
 
     def _context_changed(self, name):
         self._context = name
+        self._remember_section()
         self._redraw()
         self._describe_state(self._open or {})
         self._update_buttons()
@@ -854,14 +867,63 @@ class CyclesPage(QWidget):
         if self.run_surface.currentWidget() is self.cockpit:
             self.cockpit.setFocus(Qt.OtherFocusReason)
 
-    def _set_context(self, name):
-        """Switch without being asked - a run started, an edit was made."""
+    def _set_context(self, name, remember=True):
+        """Switch without being asked - a run started, an edit was made.
+
+        ``remember`` False for a switch that is not the cycle's: the page put
+        back in Design because no run of the cycle is on screen says nothing
+        about where it should open next time.
+        """
         if name != self._context:
             self.context_switch.set_current(name, notify=False)
             self._context = name
+        if remember:
+            self._remember_section()
         self._refresh_cockpit()
 
+    def _remembered_section(self, cycle_id):
+        """``(section, run view)`` this cycle was last left in. Never raises."""
+        try:
+            self._sections[cycle_id] = clf.section_for(cycle_id or "")
+        except Exception:                 # noqa: BLE001 - cosmetic state only
+            return clf.SECTIONS[0], clf.RUN_VIEWS[0]
+        return self._sections[cycle_id]
+
+    def _remember_section(self, cycle_id=None):
+        """Write which half of the page a cycle is in, for its next opening.
+
+        The open cycle unless ``cycle_id`` says which: a run started from
+        History is a run of the cycle it draws, not of the one open. Never
+        fatal - a read-only data directory costs the memory, nothing else.
+        """
+        cycle_id = cycle_id or self.current_id()
+        now = (self._context, self.run_view.current())
+        if not cycle_id or self._sections.get(cycle_id) == now:
+            return
+        try:
+            clf.remember_section(cycle_id, *now)
+        except clf.CycleLayoutFileError:
+            return
+        self._sections[cycle_id] = now
+
+    def _restore_section(self):
+        """The open cycle back in the section it was left in, when it can be.
+
+        True when that switched it. Run is only possible with a run of this
+        cycle on screen; without one the page is in Design and the cycle's
+        choice stays what it was.
+        """
+        section, run_view = self._remembered_section(self.current_id())
+        if section == RUN and not (self._live_cycle() or {}).get("graph"):
+            section = DESIGN
+        if section == RUN:
+            self.run_view.set_current(run_view, notify=False)
+        changed = section != self._context
+        self._set_context(section, remember=False)
+        return changed
+
     def _run_view_changed(self, name):
+        self._remember_section()
         self.run_surface.setCurrentWidget(self.cockpit if self._context == RUN and name == "Cockpit" else self.canvas)
         self._refresh_cockpit()
         if self.run_surface.currentWidget() is self.cockpit:
@@ -874,8 +936,8 @@ class CyclesPage(QWidget):
         if self.current_id() != state.get("cycle"):
             self.open(state["cycle"], then=self.show_cockpit)
             return
-        self._set_context(RUN)
         self.run_view.set_current("Cockpit", notify=False)
+        self._set_context(RUN)
         self.run_surface.setCurrentWidget(self.cockpit)
         self._refresh_cockpit()
         self.cockpit.setFocus(Qt.OtherFocusReason)
@@ -2852,12 +2914,16 @@ class CyclesPage(QWidget):
         # A run started: the canvas is the run until somebody edits again. A
         # run read back from disk is not starting, and does not take the
         # canvas away from somebody working on the file.
-        if self.run_state and self.run_state.cycle_running:
-            self._set_context(RUN)
+        running = bool(self.run_state and self.run_state.cycle_running)
+        if running:
             run_id = (self.run_state.cycle or {}).get("run_id", "")
             if run_id != self._cockpit_run:
                 self._cockpit_run = run_id
                 self.run_view.set_current("Cockpit", notify=False)
+            # And where its cycle opens next time: watching a run is being in
+            # Run, whichever cycle happens to be open.
+            self._set_context(RUN, remember=False)
+            self._remember_section(graph.get("id"))
         if _same_shape(graph, self.canvas.graph()):
             self.canvas.clear_status()
         else:
@@ -2866,6 +2932,13 @@ class CyclesPage(QWidget):
                                   self._remembered_view(graph.get("id")),
                                   folded=self._remembered_folded(graph.get("id")))
             self._selected = ""
+        if (not running and graph.get("id") == self.current_id()
+                and not (self._draft is not None and self._draft.dirty)
+                and self._restore_section()):
+            # The open cycle's last run, read back after the cycle opened in
+            # Design for want of it: the cycle was left in Run, so Run it is.
+            self._redraw()
+            self._describe_state(self._open or {})
         # A run read back from disk arrives whole, after the canvas was drawn:
         # what it knows is painted now, since no step event will follow.
         self._apply_run_state()
@@ -3151,12 +3224,50 @@ class CyclesPage(QWidget):
                     self.artifacts_requested.emit(one["run_dir"], "")
                     return
 
+    # -- Stages shown on another page ------------------------------------------
+    def lend_stages(self, reclaim):
+        """The stage panel, for another page to show while it is on screen.
+
+        Subjects shows the live run's Stages inside the subject's row: the same
+        panel, moved - never a copy, for the reason ``stageswindow`` gives. None
+        when a window has it (that is where the person put it) or it is lent
+        already. ``reclaim()`` is how this page asks for it back - before it
+        goes to a window of its own, say; the borrower answers by handing it to
+        :meth:`take_back_stages`.
+        """
+        if self._stages_window is not None or self._stages_lent is not None:
+            return None
+        panel = self.output.take_stage_panel()
+        self.output.stages_elsewhere.set_text("Stages are open in Subjects")
+        self.output.stages_elsewhere.show_button.hide()
+        self.output.dock_button.hide()
+        self._stages_lent = reclaim
+        return panel
+
+    def take_back_stages(self, panel):
+        """The lent panel, back in its tab."""
+        if self._stages_lent is None or panel is None:
+            return
+        self._stages_lent = None
+        self.output.put_stage_panel(panel)
+        self.output.stages_elsewhere.set_text("Stages are in a separate window")
+        self.output.stages_elsewhere.show_button.show()
+        self.output.dock_button.show()
+
+    def stages_lent(self):
+        return self._stages_lent is not None
+
+    def _reclaim_stages(self):
+        if self._stages_lent is not None:
+            self._stages_lent()
+
     # -- Stages in a window of its own ----------------------------------------
     def is_stages_detached(self):
         return self._stages_window is not None
 
     def detach_stages(self):
         """Put Stages in a window of its own, or bring that window forward."""
+        self._reclaim_stages()
         if self._stages_window is not None:
             self._stages_window.bring_forward()
             return self._stages_window
@@ -3204,6 +3315,7 @@ class CyclesPage(QWidget):
     def show_stages(self):
         """Stages in front of the person, wherever it is. The caller has put
         this page on screen when Stages is a tab."""
+        self._reclaim_stages()
         if self._stages_window is not None:
             self._stages_window.bring_forward()
         else:

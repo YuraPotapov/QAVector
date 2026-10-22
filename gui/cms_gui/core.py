@@ -645,6 +645,39 @@ class Core:
         return self._flow_json("--cycle-session-delete=" + session_id,
                                *self.memory_flag())
 
+    def cycle_subject_list(self, view="all", limit=0, offset=0):
+        """Every subject, what waits for its person first - or one page of them.
+
+        A subject is everything any cycle did about one key (``cycle/subjects.py``).
+        The answer always says ``counts`` over every subject, so a filter can
+        say how many it would show without being asked for them.
+        """
+        paging = ["--cycle-subject-list-view=" + (view or "all")]
+        if limit:
+            paging.append("--cycle-subject-list-limit=%d" % int(limit))
+        if offset:
+            paging.append("--cycle-subject-list-offset=%d" % int(offset))
+        return self._flow_json("--cycle-subject-list", *paging, *self.memory_flag())
+
+    def cycle_subject_history(self, subject_id, scope="all", limit=0):
+        """One subject's story from every run that named it, oldest first."""
+        extra = ["--cycle-subject-history-scope=" + (scope or "all")]
+        if limit:
+            extra.append("--cycle-subject-history-limit=%d" % int(limit))
+        return self._flow_json("--cycle-subject-history=" + subject_id, *extra,
+                               *self.memory_flag())
+
+    def cycle_subject_transcript(self, run_id, step_id):
+        """What one agent step weighed and said, call by call."""
+        return self._flow_json("--cycle-subject-transcript=%s:%s" % (run_id, step_id),
+                               *self.memory_flag())
+
+    def cycle_subject_note(self, subject_id, text):
+        """Keep a note about one subject. Notes are added, never rewritten."""
+        return self._flow_json("--cycle-subject-note=" + subject_id,
+                               "--cycle-subject-note-text=" + text,
+                               *self.memory_flag())
+
     def cycle_plugin_action(self, plugin_id, action_key, settings=None):
         """Ask a plugin something outside a run - is it signed in, is it ready.
 

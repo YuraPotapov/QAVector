@@ -13,6 +13,7 @@ than in either page, so neither page has to know the other exists.
 
 import logging
 import os
+from types import SimpleNamespace
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
@@ -24,7 +25,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
 from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
                history as history_mod, icon, icons,
                launch as launch_mod, load as load_mod,
-               logsourcesfile as lsf, search, stageswindow, theme, titlebar,
+               logsourcesfile as lsf, search, stageswindow, subjecthistory, theme,
+               titlebar,
                widgets)
 from .askbridge import AskBridge
 from .cyclecockpit import ActiveStrip
@@ -47,6 +49,7 @@ from .pages.launch import LaunchSessionsPage
 from .pages.log import LogPage
 from .pages.run import RunPage
 from .pages.scenarios import ScenariosPage
+from .pages.subjects import SubjectsPage
 from .pages.settings_dialog import SettingsDialog
 
 # (page key, label, icon name painted by icons.icon)
@@ -57,8 +60,10 @@ CONFIGURE = [("environments", "Environments", "environments"),
              ("cycles", "Cycles", "cycles"),
              ("commands", "Command", "command"),
              ("launch", "Launch Sessions", "launch")]
-OBSERVE = [("run", "Run", "run"), ("log", "Log", "log"),
-           ("artifacts", "Artifacts", "artifacts"),
+# Run always heads Observe - what is going on now comes before everything about
+# what went on. A page added to the group goes after it.
+OBSERVE = [("run", "Run", "run"), ("subjects", "Subjects", "subjects"),
+           ("log", "Log", "log"), ("artifacts", "Artifacts", "artifacts"),
            ("history", "History", "history")]
 
 # Pages only a developer needs. Launch Sessions is never in here: it is the
@@ -193,6 +198,9 @@ class MainWindow(QMainWindow):
         self._run_source = self.settings.run_source
         self._entry_id = None
         self._stopping = False
+        #: The run being parked: paused, and stopped once nothing but a question
+        #: to a person is still going in it (see park_cycle_run).
+        self._parking = ""
         self._chrome_warned = False
         self._build_menu()
         self._build_ui()
@@ -635,6 +643,8 @@ class MainWindow(QMainWindow):
         self.log = LogPage(self.settings)
         self.artifacts = ArtifactsPage(self.settings)
         self.history_page = HistoryPage(self.history)
+        self.subjects_page = SubjectsPage(self.settings)
+        self.subjects_page.set_core(self.core)
         # Both observing pages read the run record for what to offer, so they open
         # on the last run rather than on nothing after a restart.
         self.log.set_history(self.history)
@@ -645,7 +655,8 @@ class MainWindow(QMainWindow):
                        "cycles": self.cycles,
                        "commands": self.command, "launch": self.launch,
                        "run": self.run, "log": self.log,
-                       "artifacts": self.artifacts, "history": self.history_page}
+                       "artifacts": self.artifacts, "history": self.history_page,
+                       "subjects": self.subjects_page}
         for page in self._pages.values():
             self.stack.addWidget(page)
         inner.addWidget(self.stack, 1)
@@ -683,6 +694,27 @@ class MainWindow(QMainWindow):
         self.history_page.restore_requested.connect(self.restore_entry)
         self.history_page.open_log_requested.connect(self._open_log)
         self.history_page.open_artifacts_requested.connect(self._open_artifacts)
+        self.subjects_page.open_run_requested.connect(self._open_subject_run)
+        self.subjects_page.resume_requested.connect(self._resume_subject_run)
+        self.subjects_page.park_requested.connect(self.park_cycle_run)
+        # Each of these is shown here, so here comes forward - a subject's
+        # section in a window of its own would otherwise stay in front of it.
+        self.subjects_page.cockpit_requested.connect(
+            lambda: (self.come_forward(), self._show_cycle_cockpit()))
+        self.subjects_page.artifact_requested.connect(
+            lambda run_dir, path: (self.come_forward(), self._open_artifacts(run_dir, path)))
+        self.subjects_page.run_on_requested.connect(self._run_on_subject)
+        # The live Stages panel is lent to a subject's row, never copied: the
+        # Cycles page owns it and has it back whenever it asks.
+        self.subjects_page.set_stages_lender(SimpleNamespace(
+            lend=self.cycles.lend_stages, take_back=self.cycles.take_back_stages,
+            detached=self.cycles.is_stages_detached, show_window=self.cycles.show_stages))
+        self.cycles.subject_requested.connect(self._show_subject)
+        # What a run is doing decides what an open subject offers to do next,
+        # and a run that moved has changed where its subject stands.
+        self.run_state.changed.connect(self._subjects_follow)
+        self.run_state.cycle_subject_changed.connect(self._subjects_follow)
+        self.run_state.cycle_step_changed.connect(lambda _step: self._subjects_follow())
 
         self.setCentralWidget(central)
 
@@ -1187,6 +1219,161 @@ class MainWindow(QMainWindow):
 
         self._replay(run_dir, opened)
 
+    # -- Subjects: going back to a subject, and putting one aside -------------------
+    def _subjects_follow(self):
+        """Tell the Subjects page what this window is running, and that it moved."""
+        page = getattr(self, "subjects_page", None)
+        if page is None:
+            return
+        cycle = self.run_state.cycle or {}
+        live = cycle.get("run_id", "") if self.run_state.cycle_running else ""
+        page.set_live(live, self.process.is_running())
+        page.refresh_soon()
+        self._park_if_ready()
+
+    def _show_subject(self, subject_id):
+        """The Subjects page, opened on one subject - from the Cycles sidebar."""
+        self.show_page("subjects")
+        self.subjects_page.reveal(subject_id)
+
+    def _open_subject_run(self, cycle_id, run_dir):
+        """A subject's run on the Cycles page: the live one as it is, any other
+        read back from its directory first."""
+        cycle = self.run_state.cycle or {}
+        if (self.run_state.cycle_running and run_dir
+                and os.path.basename(os.path.normpath(run_dir)) == cycle.get("run_id")):
+            self.come_forward()
+            self.show_page("cycles")
+            if self.cycles.current_id() != cycle_id:
+                self.cycles.open(cycle_id)
+            return
+        if self.process.is_running():
+            widgets.note(self._asked_from(), "Subjects",
+                         "A run is going in this window. Another run can be opened once "
+                         "it has finished, or after you park or stop it.")
+            return
+        self.come_forward()
+        self.show_page("cycles")
+        self._open_cycle_run(cycle_id, run_dir)
+
+    def _resume_subject_run(self, cycle_id, run_dir, run_id):
+        """Continue a subject's run where it stopped, keeping its saved mode.
+
+        Read back onto the canvas first, the way Resume on the Cycles page acts
+        on the run it is showing: the Cockpit then continues that run's record
+        rather than starting a blank one.
+        """
+        if not (cycle_id and run_dir and run_id):
+            return
+        if self.process.is_running():
+            widgets.note(self._asked_from(), "Subjects",
+                         "A run is going in this window. Park or stop it, then resume this one.")
+            return
+        self.come_forward()
+        self.show_page("cycles")
+        self.cycles.show_loading(True)
+
+        def opened(restored):
+            if not restored:
+                self.cycles.show_loading(False)
+                widgets.warn(self, "Resume", "This run could not be read back.", run_dir)
+                return
+            self.cycles.open(cycle_id)
+            # No mode: a Resume left to itself keeps the one the run was made in.
+            self.start_cycle_run(cycle_id, "resume", run_id)
+
+        self._replay(run_dir, opened)
+
+    def _run_on_subject(self, subject):
+        """Start a cycle the person picks on one subject, so it joins its history.
+
+        A cycle that names what it works on takes the key through the variable
+        its subject pins - the way a planned task is started; one that names
+        nothing is told what the run is about (``--cycle-subject``).
+        """
+        key = (subject or {}).get("key") or ""
+        if not key:
+            return
+        asked_from = self._asked_from()
+        if self.process.is_running():
+            widgets.note(asked_from, "Subjects", "A run is going in this window. Park or stop "
+                                                 "it, then start another one.")
+            return
+        rows = [row for row in self.inventory.cycles if not row.get("problems")]
+        if not rows:
+            widgets.note(asked_from, "Subjects", "There is no cycle to run.")
+            return
+        labels = []
+        for row in rows:
+            label = row.get("name") or row.get("id", "")
+            if row.get("project"):
+                label = "%s - %s" % (label, row["project"])
+            labels.append(label)
+        newest = ((subject.get("cycles") or [{}])[0] or {}).get("id")
+        current = next((index for index, row in enumerate(rows)
+                        if row.get("id") == newest), 0)
+        picked = widgets.ask_item(asked_from, "Run a cycle on it",
+                                  "Which cycle should work on %s?" % key, labels,
+                                  current=current,
+                                  detail="What it asks and answers joins the history of %s."
+                                         % key, agree="Run")
+        if picked is None:
+            return
+        row = rows[labels.index(picked)]
+        pin = (row.get("subject") or {}).get("pin") or ""
+        if not pin:
+            pin = next((one.get("pin") for one in row.get("triggers") or [] if one.get("pin")), "")
+        self.come_forward()
+        self.start_cycle_run(row["id"], variables={pin: key} if pin else {},
+                             subject={"key": key, "title": subject.get("title") or "",
+                                      "pin": pin})
+
+    def park_cycle_run(self, run_id=""):
+        """Put the live cycle run aside, to be resumed later, losing nothing.
+
+        Pause first, so nothing new starts; then stop once only questions to a
+        person are still going - a question is asked again on Resume - or once
+        the run has paused. An agent in the middle of a call finishes that call
+        first, because stopping it would throw away what it has been paid for.
+        Stopping says "parked", which is how the run's subject knows it was put
+        aside rather than abandoned.
+        """
+        cycle = self.run_state.cycle or {}
+        if not self.run_state.cycle_running or not cycle.get("run_id"):
+            return
+        if run_id and cycle.get("run_id") != run_id:
+            return
+        lines = subjecthistory.park_lines(cycle)
+        subject = cycle.get("subject") or {}
+        named = subject.get("key") or cycle.get("name") or cycle.get("cycle") or "this run"
+        if not widgets.confirm(self._asked_from(), "Park", "Park %s?" % named,
+                               "The run stops and keeps everything it has done:\n- "
+                               + "\n- ".join(lines), agree="Park"):
+            return
+        self._parking = cycle.get("run_id", "")
+        if not subjecthistory.park_point(cycle):
+            if cycle.get("control_version"):
+                self.process.send_command(command="cycle.pause", run_id=self._parking)
+            self.status_right.setText("parking - waiting for %s" % (
+                ", ".join(subjecthistory.working(cycle)) or "the run to pause"))
+        self._park_if_ready()
+
+    def _park_if_ready(self):
+        if not self._parking:
+            return
+        cycle = self.run_state.cycle or {}
+        if not self.run_state.cycle_running or cycle.get("run_id") != self._parking:
+            self._parking = ""
+            return
+        if not subjecthistory.park_point(cycle):
+            return
+        run_id, self._parking = self._parking, ""
+        self._stopping = True
+        cycle["_stopping"] = True
+        self.status_right.setText("parked - resume it from Subjects")
+        if not self.process.send_command(command="cycle.stop", run_id=run_id, reason="parked"):
+            self.status_right.setText("The launcher is no longer accepting control commands.")
+
     def _restore_last_cycle(self):
         """Bring the last cycle run back onto the Cycles page.
 
@@ -1654,12 +1841,25 @@ class MainWindow(QMainWindow):
             hits.extend(one._replace(section=key) for one in found)
         return hits
 
-    def open_hit(self, hit):
-        """Go to where ``hit`` lives, with it on screen - from whatever window."""
+    def come_forward(self):
+        """This window in front, back from the taskbar if it was minimized.
+
+        For a click in another window of the application that acts here - a
+        search hit, a subject's section in a window of its own opening its run:
+        what it opened must be on screen, not behind the window that asked.
+        """
         if self.isMinimized():
             self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    def _asked_from(self):
+        """Where a question about a click goes: over the window it was made in."""
+        return QApplication.activeWindow() or self
+
+    def open_hit(self, hit):
+        """Go to where ``hit`` lives, with it on screen - from whatever window."""
+        self.come_forward()
         self.show_page(hit.section)
         page = self._pages.get(hit.section)
         if page is None or page.show_found(hit.target) is False:
@@ -1945,6 +2145,9 @@ class MainWindow(QMainWindow):
         self.launch.set_running(running)
         self.status_state.setText("state: running" if running else "state: idle")
         self._update_workers()   # the count is a live fact; it goes when the run does
+        self._subjects_follow()
+        if not running:
+            self._parking = ""
         if running:
             self.status_right.setText("events: stdout · logs: stderr")
 
@@ -2257,6 +2460,10 @@ class MainWindow(QMainWindow):
             if stopping:
                 QApplication.restoreOverrideCursor()
         self._closing = True
+        # Back in its tab first: a row of Subjects going down with the window
+        # must not take the Cycles page's Stages panel with it - and the
+        # subjects open in windows of their own go with this one.
+        self.subjects_page.shut_windows()
         # Stages lives only while this window does. Shut, not docked: it was
         # detached when the application went, so it is detached when it comes
         # back.

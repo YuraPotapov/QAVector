@@ -27,6 +27,12 @@ sit beside the places, per cycle, under ``view``.
 **Which phases were folded**, under ``folded``, for the same reason: folding a
 twenty-eight step cycle down to its seven phases is work done to read it, and
 the cycle file is no place for how one person likes to look at it.
+
+**Which half of the page it was left in**, under ``section`` and ``run_view``:
+somebody who reads a cycle by its runs pressed Run, and every opening put them
+back in Design to press it again. Only what differs from an unremembered cycle
+is written - Design, and Cockpit within Run - so a cycle left the way it opens
+anyway costs no row.
 """
 
 import json
@@ -46,6 +52,11 @@ FILE_NAME = "cyclelayout.json"
 #: which reads as the node having vanished.
 LIMIT = 1000000.0
 
+#: The two halves of the Cycles page, and the two ways Run shows a run. The
+#: first of each is what a cycle nothing was remembered for opens in.
+SECTIONS = ("Design", "Run")
+RUN_VIEWS = ("Cockpit", "Graph")
+
 
 class CycleLayoutFileError(Exception):
     """The layout file could not be read or written."""
@@ -58,7 +69,7 @@ def default_path():
 
 
 def load(path=None):
-    """``{cycle id: {"places": {step id: (x, y)}, "view": {...}}}``.
+    """``{cycle id: {"places": {step id: (x, y)}, "view": {...}, ...}}``.
 
     Never raises; a bad file reads empty. Deliberately forgiving. This is
     cosmetic state, and refusing to open a cycle because the file remembering
@@ -90,9 +101,22 @@ def load(path=None):
                 kept[str(step_id)] = spot
         view = _view(entry.get("view"))
         folded = _folded(entry.get("folded"))
-        if kept or view or folded:
-            found[str(cycle_id)] = {"places": kept, "view": view, "folded": folded}
+        section = _other(entry.get("section"), SECTIONS)
+        run_view = _other(entry.get("run_view"), RUN_VIEWS)
+        if kept or view or folded or section or run_view:
+            found[str(cycle_id)] = {"places": kept, "view": view, "folded": folded,
+                                    "section": section, "run_view": run_view}
     return found
+
+
+def _other(value, words):
+    """``value`` when it is one of ``words`` other than the first, else "".
+
+    The first is what is shown when nothing was remembered, so it is never
+    written; anything that is not one of them is a file from a build that knew
+    other words, and reads as nothing remembered.
+    """
+    return value if isinstance(value, str) and value in words[1:] else ""
 
 
 def _folded(value):
@@ -149,6 +173,17 @@ def folded_for(cycle_id, path=None):
     return (load(path).get(str(cycle_id or "")) or {}).get("folded") or []
 
 
+def section_for(cycle_id, path=None):
+    """``(section, run view)`` this cycle was last left in - the defaults when none."""
+    entry = load(path).get(str(cycle_id or "")) or {}
+    return (entry.get("section") or SECTIONS[0], entry.get("run_view") or RUN_VIEWS[0])
+
+
+def remember_section(cycle_id, section, run_view, path=None):
+    """Write which half of the page this cycle is in, and how Run shows a run."""
+    _keep(cycle_id, path, section=section, run_view=run_view)
+
+
 def remember_folded(cycle_id, names, path=None):
     """Write which phases are folded. An empty list forgets it."""
     _keep(cycle_id, path, folded=sorted(set(names or ())))
@@ -185,7 +220,11 @@ def _keep(cycle_id, path=None, **changed):
         entry["view"] = _view(changed["view"])
     if "folded" in changed:
         entry["folded"] = _folded(list(changed["folded"] or ()))
-    if entry.get("places") or entry.get("view") or entry.get("folded"):
+    if "section" in changed:
+        entry["section"] = _other(changed["section"], SECTIONS)
+    if "run_view" in changed:
+        entry["run_view"] = _other(changed["run_view"], RUN_VIEWS)
+    if any(entry.get(key) for key in ("places", "view", "folded", "section", "run_view")):
         document[cycle_id] = entry
     else:
         # Arranging a cycle back to its computed layout and pressing Fit forget
@@ -217,6 +256,9 @@ def _entry(entry):
                            "center": list(entry["view"]["center"])}
     if entry.get("folded"):
         written["folded"] = list(entry["folded"])
+    for key in ("section", "run_view"):
+        if entry.get(key):
+            written[key] = entry[key]
     return written
 
 

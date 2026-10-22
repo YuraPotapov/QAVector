@@ -190,8 +190,9 @@ def test_the_navigation_has_both_groups_in_the_intended_order(window):
     assert [key for key, _l, _g in main_window_mod.CONFIGURE] == [
         "environments", "credentials", "logsources", "scenarios", "cycles",
         "commands", "launch"]
+    # Run is always the first of Observe; Subjects comes straight after it.
     assert [key for key, _l, _g in main_window_mod.OBSERVE] == [
-        "run", "log", "artifacts", "history"]
+        "run", "subjects", "log", "artifacts", "history"]
 
 
 def test_the_rail_is_wide_enough_for_every_label_it_holds(window):
@@ -1591,6 +1592,46 @@ def test_a_hit_opens_its_page_with_the_record_on_it(window):
     assert window.environments.table.selectionModel().selectedRows()[0].row() == 0
     window.open_hit(search_mod.hit("gone", target="gone", section="environments"))
     assert window.status_right.text() == "gone is no longer there"
+
+
+def test_what_a_subject_window_opens_here_brings_this_window_forward(window, monkeypatch):
+    """A subject's section in a window of its own: Open run, Resume, the
+    Cockpit, a file - each is shown in this window, so this window comes in
+    front of the one the click was made in."""
+    came = []
+    monkeypatch.setattr(window, "raise_", lambda: came.append("raise"))
+    monkeypatch.setattr(window, "activateWindow", lambda: came.append("activate"))
+    monkeypatch.setattr(window, "_open_cycle_run", lambda *args: None)
+    monkeypatch.setattr(window, "_open_artifacts", lambda *args: None)
+    monkeypatch.setattr(window, "_show_cycle_cockpit", lambda: None)
+    monkeypatch.setattr(window.process, "is_running", lambda: False)
+    page = window.subjects_page
+    for emit in (lambda: page.open_run_requested.emit("demo", "/runs/r1"),
+                 lambda: page.cockpit_requested.emit(),
+                 lambda: page.artifact_requested.emit("/runs/r1", "steps/a/out.txt")):
+        came.clear()
+        emit()
+        assert came == ["raise", "activate"]
+    assert window.stack.currentWidget() is window.cycles
+
+
+def test_a_question_about_a_subject_click_is_asked_over_the_window_it_came_from(window,
+                                                                                monkeypatch):
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    from cms_gui import widgets
+
+    elsewhere = QWidget()
+    asked = []
+    # Undone before the window is closed: a window that thinks a run is going
+    # tries to stop it on the way out.
+    with monkeypatch.context() as patched:
+        patched.setattr(QApplication, "activeWindow", staticmethod(lambda: elsewhere))
+        patched.setattr(window.process, "is_running", lambda: True)
+        patched.setattr(widgets, "note", lambda parent, *args, **kwargs: asked.append(parent))
+        window.subjects_page.open_run_requested.emit("demo", "/runs/r1")
+    assert asked == [elsewhere]
+    elsewhere.deleteLater()
 
 
 def test_ctrl_k_opens_search_over_the_window(window, qapp):

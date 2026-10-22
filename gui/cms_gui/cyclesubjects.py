@@ -163,6 +163,10 @@ MODE_WORDS = {
     "action": "A fresh bounded action; results are not borrowed from earlier runs.",
 }
 
+#: The reason a run was stopped with when its person parked it to resume later -
+#: the core's own word (cycle/subjects.py), so both pages say it the same way.
+PARKED = "parked"
+
 #: The memory fields worth a line of their own in a status, and what they say.
 REMEMBERED_STATES = {"committed": "committed"}
 
@@ -202,6 +206,8 @@ def status_word(session):
     remembered = ((session.get("memory") or {}).get("fields") or {}).get("state")
     if state == "success":
         return cycleresult.completion(session)[0]
+    if session.get("message") == PARKED:
+        return "parked · Resume continues it"
     if remembered in REMEMBERED_STATES:
         return REMEMBERED_STATES[remembered]
     word = STATUS_WORDS.get(state, state or "unknown")
@@ -359,6 +365,9 @@ def details_html(session, live=None, graph_subject=None, labels=None):
         parts.append("<p>Working on %s <b>%s</b>%s</p>" % (
             _escape(subject.get("kind") or ""), _escape(subject["key"]),
             " - %s" % _escape(subject["title"]) if subject.get("title") else ""))
+        # Everything every cycle did about it, with its notes, is one page away.
+        parts.append("<p><a href='subject:%s'>Open in Subjects &gt;</a></p>"
+                     % _escape(subject["key"]))
         if subject.get("step"):
             parts.append("<p style='color:%s'>Decided by %s.</p>"
                          % (theme.NEUTRAL[500], named(subject["step"])))
@@ -524,6 +533,8 @@ class SubjectsPanel(QWidget):
     planned_open = Signal(dict)
     #: Scrolled to the end, or the row at the foot clicked: the next page.
     more_requested = Signal()
+    #: The subject's own page was asked for, on Subjects: its key.
+    subject_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -967,6 +978,8 @@ class SubjectsPanel(QWidget):
             self.run_picked.emit(picked.get("cycle", ""), target[len("run:"):])
         elif target.startswith("files:") and picked is not None:
             self.files_picked.emit(picked.get("cycle", ""), target[len("files:"):])
+        elif target.startswith("subject:"):
+            self.subject_requested.emit(target[len("subject:"):])
         elif target.startswith(("http://", "https://")):
             from PySide6.QtGui import QDesktopServices
             QDesktopServices.openUrl(url)

@@ -21,6 +21,7 @@ differently - one pass is done when the CLI is, several passes are done only
 when the checks agree.
 """
 
+import logging
 import os
 
 from cycle.operations import (Operation, recorded, result_document,
@@ -28,6 +29,8 @@ from cycle.operations import (Operation, recorded, result_document,
 
 from cycle.plugins import agent_stream
 from cycle.plugins._process import run_process
+
+log = logging.getLogger("cycle.agent_run")
 
 #: What a reading agent is allowed. A review reads; a step asked to review
 #: something must not be able to change it.
@@ -132,6 +135,26 @@ class Reply(object):
         return round(float(value), 4) if isinstance(value, (int, float)) else None
 
 
+#: What an agent call was told, as it was told it, beside that call's output.
+PROMPT_FILE = "prompt.md"
+
+
+def _keep_prompt(directory, prompt):
+    """Keep the prompt a call is about to be given, clarifications and all.
+
+    The answer is kept already (the call's output and receipt); this keeps the
+    question, so a subject's history can show what the agent was asked, which
+    is half of the conversation. Never raises: the call matters more.
+    """
+    try:
+        with open(os.path.join(directory, PROMPT_FILE), "w", encoding="utf-8") as handle:
+            handle.write(str(prompt or ""))
+            if not str(prompt or "").endswith("\n"):
+                handle.write("\n")
+    except OSError as exc:
+        log.warning("Could not keep the prompt in %s: %s", directory, exc)
+
+
 def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
                max_turns=None, add_dir="", name="agent", effort="",
                clarify=False, last=False, disallowed=()):
@@ -198,6 +221,7 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     if snapshot:
         inbox.bind(snapshot, context.relative(operation.directory))
     operation.begin()
+    _keep_prompt(operation.directory, prompt)
     written = []
     result = run_process(operation.process_context(), step, argv, cwd, name,
                          env={"CLAUDE_CODE_SIMPLE": None},

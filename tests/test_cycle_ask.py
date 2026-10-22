@@ -441,3 +441,62 @@ def test_an_auto_answer_that_is_not_on_offer_is_refused():
     assert any("auto_answer Maybe is not one of the answers" in one for one in found)
     assert registry.get("approval.gate").problems(
         {"question": "Ship?", "auto_answer": "${steps.x.outputs.stdout_tail}"}) == []
+
+
+# ------------------------------------------------- what was asked is kept
+# The step's outputs keep the answer. What a person was shown - the plan in
+# full they approved - is kept beside them, so a subject's history can say
+# what they agreed to and not only that they did.
+def _asked(tmp_path):
+    path = tmp_path / "runs" / "20260919-000000-a" / "steps" / "gate" / ask_mod.ASKED_FILE
+    return json.loads(path.read_text(encoding="utf-8"))["asked"]
+
+
+def test_a_gate_keeps_what_it_asked_and_what_came_back(asking, gate, tmp_path):
+    _answer_soon(1, "Approve", who="tester")
+    gate(detail="The whole plan.", options=["Approve", "Reject"])
+
+    kept = _asked(tmp_path)
+    assert len(kept) == 1
+    assert kept[0]["question"] == "Commit this?" and kept[0]["detail"] == "The whole plan."
+    assert kept[0]["options"] == ["Approve", "Reject"]
+    assert (kept[0]["answered"], kept[0]["answer"], kept[0]["who"]) == (True, "Approve", "tester")
+
+
+def test_a_question_nobody_answered_is_kept_as_asked(asking, gate, tmp_path):
+    gate(_timeout=0.2)
+    kept = _asked(tmp_path)
+    assert kept[0]["question"] == "Commit this?" and kept[0]["answered"] is False
+
+
+def test_each_asking_is_added_and_a_revision_keeps_its_feedback():
+    class Context:
+        def __init__(self, where):
+            self.where = where
+
+        def step_dir(self, step_id):
+            os.makedirs(self.where, exist_ok=True)
+            return self.where
+
+    import tempfile
+    where = tempfile.mkdtemp(prefix="asked-")
+    context, step = Context(where), CycleStep(id="gate", plugin="approval.gate")
+    ask_mod.record(context, step, "Plan?", "v1", ["Go"],
+                   {"revision_requested": True, "feedback": "Smaller", "who": "ann"})
+    ask_mod.record(context, step, "Plan?", "v2", ["Go"], {"answered": True, "answer": "Go"},
+                   chosen=["QA-1"])
+    kept = json.loads(open(os.path.join(where, ask_mod.ASKED_FILE), encoding="utf-8").read())
+    first, second = kept["asked"]
+    assert (first["revision"], first["feedback"], first["detail"]) == (True, "Smaller", "v1")
+    assert (second["answer"], second["detail"], second["chosen"]) == ("Go", "v2", ["QA-1"])
+
+
+def test_a_record_that_cannot_be_written_never_fails_the_step(tmp_path):
+    class Broken:
+        def step_dir(self, step_id):
+            return str(tmp_path / "not-a-folder.txt")
+
+    (tmp_path / "not-a-folder.txt").write_text("a file, not a folder")
+    entry = ask_mod.record(Broken(), CycleStep(id="gate", plugin="approval.gate"),
+                           "Plan?", answer={"answered": True, "answer": "Go"})
+    assert entry["answer"] == "Go"

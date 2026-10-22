@@ -692,6 +692,15 @@ QHeaderView::section {{
     padding: 6px 6px;
 }}
 QTableCornerButton::section {{ background: {n200}; border: none; }}
+/* A row of the Subjects list opened in place. A shade off the rows around it,
+   with a rule in the accent down its left edge, so it reads as the row above it
+   opened up rather than as another page laid over the list - and its history,
+   inside it, as part of the same block rather than a box of its own. */
+QWidget[role="subjectdetail"] {{ background: {n100}; border-left: 2px solid {accent}; }}
+QWidget[role="subjectdetail"] QTextBrowser {{ background: {n100}; border: none; }}
+/* The strips inside it hold their buttons and words on the tint, not on bands of
+   the page colour every plain QWidget paints (the QWidget rule above). */
+QWidget[role="subjectband"] {{ background: transparent; }}
 
 /* --- tabs ---------------------------------------------------------------- */
 /* Qt's own tabs are shaded lozenges with a raised border, which is a heavier

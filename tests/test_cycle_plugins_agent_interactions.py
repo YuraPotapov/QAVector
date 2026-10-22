@@ -142,3 +142,14 @@ def test_resume_keeps_original_prompt_and_defers_messages_after_its_snapshot(ada
     assert records["m2"]["state"] == "pending"
     adapter.store.finish("review", "success")
     assert adapter.store.messages()[1]["state"] == "undelivered"
+
+
+def test_a_call_keeps_the_prompt_it_was_given_clarifications_and_all(adapter, tmp_path):
+    if adapter.kind != "cli":
+        pytest.skip("the worker adapter hands its task over in a file of its own")
+    assert adapter.invoke().ok
+    found = list(tmp_path.glob("steps/review/operations/*/" + agent_run.PROMPT_FILE))
+    assert len(found) == 1
+    kept = found[0].read_text(encoding="utf-8")
+    assert kept.rstrip("\n") == adapter.calls[0]
+    assert NOTE in kept

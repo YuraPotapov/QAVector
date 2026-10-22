@@ -71,13 +71,15 @@ class UserInput(CyclePlugin):
         context.stage(step.id, {"kind": "start", "title": "Waiting for input",
                                 "detail": question, "status": "running"})
         timeout_ms = int(step.timeout * 1000) if step.timeout else None
+        detail = str(self.setting(step.settings, "detail", "") or "")
         answer = ask_mod.ask(
-            question, detail=str(self.setting(step.settings, "detail", "") or ""),
+            question, detail=detail,
             options=[SEND, CANCEL], timeout_ms=timeout_ms, step=step.id,
             cancel=context.cancel, progress=getattr(context, "progress", None),
             text={"placeholder": str(self.setting(step.settings, "placeholder", "") or ""),
                   "default": str(self.setting(step.settings, "default", "") or ""),
                   "required": required})
+        ask_mod.record(context, step, question, detail, [SEND, CANCEL], answer)
 
         text = str(answer.get("text") or "")
         who = answer.get("who", "")

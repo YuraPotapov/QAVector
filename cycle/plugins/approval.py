@@ -166,11 +166,13 @@ class ApprovalGate(CyclePlugin):
             # Under the step's own deadline, or the executor stops the step
             # before the answer is taken.
             timeout_ms = min(wait_ms, timeout_ms - 1000) if timeout_ms else wait_ms
+        detail = str(self.setting(step.settings, "detail", "") or "")
         answer = ask_mod.ask(
-            question, detail=str(self.setting(step.settings, "detail", "") or ""),
+            question, detail=detail,
             options=options, timeout_ms=timeout_ms,
             step=step.id, cancel=context.cancel, revision=revision, auto=auto,
             progress=getattr(context, "progress", None))
+        ask_mod.record(context, step, question, detail, options, answer)
 
         if answer.get("revision_requested"):
             if not revision.get("enabled"):

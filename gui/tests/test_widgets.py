@@ -1081,3 +1081,143 @@ def test_a_centred_tool_button_puts_its_label_in_the_middle(qapp, dispose, text)
         assert abs(middle - (menu.left() - 1) / 2) <= 2.5
     finally:
         dispose(button)
+
+
+# ------------------------------------------------------------ rows that open in place
+def _open_table(qapp, rows=4, columns=3):
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    table = widgets.Table(rows, columns, expandable=True)
+    for row in range(rows):
+        for column in range(columns):
+            table.setItem(row, column, QTableWidgetItem("r%dc%d" % (row, column)))
+    table.resize(400, 300)
+    table.show()
+    qapp.processEvents()
+    return table
+
+
+def test_an_opened_row_holds_its_widget_under_it_across_every_column(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel
+
+    table = _open_table(qapp)
+    below = table.open_row(1, QLabel("details"))
+
+    assert below == 2 and table.is_detail_row(2)
+    assert table.columnSpan(2, 0) == 3
+    assert table.detail_of(1).text() == "details"
+    assert table.owner_of(2) == 1 and table.owner_of(3) == 3
+    assert table.data_rows() == [0, 1, 3, 4]
+    # Never selected: there is nothing in it to aim at but the widget.
+    assert not (table.item(2, 0).flags() & Qt.ItemIsSelectable)
+
+    assert table.close_row(1) and not table.close_row(1)
+    assert table.rowCount() == 4 and table.data_rows() == [0, 1, 2, 3]
+
+
+def test_opened_details_are_as_tall_as_they_need_up_to_a_share_of_the_table(qapp):
+    from PySide6.QtCore import QSize
+    from PySide6.QtWidgets import QWidget
+
+    class Tall(QWidget):
+        def __init__(self, height):
+            super().__init__()
+            self.height_wanted = height
+
+        def sizeHint(self):                  # noqa: N802
+            return QSize(100, self.height_wanted)
+
+    table = _open_table(qapp)
+    table.open_row(0, Tall(80))
+    assert table.rowHeight(1) == 80
+    table.open_row(2, Tall(5000))
+    assert table.rowHeight(3) == table.detail_cap() < 5000
+
+
+def test_the_cursor_steps_over_opened_details(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLabel
+
+    table = _open_table(qapp)
+    table.open_row(0, QLabel("details"))
+    table.setFocus()
+    table.setCurrentCell(0, 1)
+    QTest.keyClick(table, Qt.Key_Down)
+    assert table.currentRow() == 2
+    QTest.keyClick(table, Qt.Key_Up)
+    assert table.currentRow() == 0
+
+
+def test_right_enter_and_left_ask_for_a_row_to_open_or_close(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLabel
+
+    table = _open_table(qapp)
+    asked = []
+    table.toggle_requested.connect(lambda row, opened: asked.append((row, opened)))
+    table.setFocus()
+    table.setCurrentCell(1, 0)
+    QTest.keyClick(table, Qt.Key_Right)
+    QTest.keyClick(table, Qt.Key_Return)
+    table.open_row(1, QLabel("details"))
+    QTest.keyClick(table, Qt.Key_Left)
+    QTest.keyClick(table, Qt.Key_Right)                 # already open: nothing
+    assert asked == [(1, True), (1, True), (1, False)]
+
+
+def test_a_search_shows_and_hides_opened_details_with_their_row(qapp):
+    from PySide6.QtWidgets import QLabel
+
+    table = _open_table(qapp)
+    search = widgets.SearchRow(table)
+    table.open_row(1, QLabel("details"))
+    search.box(0).setText("r3c0")
+    assert [row for row in range(table.rowCount()) if not table.isRowHidden(row)] == [4]
+    search.box(0).setText("r1c0")
+    assert [row for row in range(table.rowCount()) if not table.isRowHidden(row)] == [1, 2]
+    search.clear()
+    assert not any(table.isRowHidden(row) for row in range(table.rowCount()))
+
+
+def test_a_question_may_take_several_lines_and_ctrl_enter_agrees(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPlainTextEdit
+
+    dialog = widgets.Message(None, "Note", "What next?", text="", lines=4)
+    try:
+        assert isinstance(dialog.field, QPlainTextEdit)
+        dialog.show()
+        dialog.activateWindow()
+        QTest.qWaitForWindowActive(dialog)
+        dialog.field.setPlainText("  line one\nline two  ")
+        QTest.keyClick(dialog.field, Qt.Key_Return, Qt.ControlModifier)
+        assert dialog.result() == 1
+        assert dialog.answer() == "line one\nline two"
+    finally:
+        dialog.deleteLater()
+
+
+def test_opened_details_never_hang_over_the_row_below_when_the_table_shrinks(qapp):
+    """A spanned row made shorter did not always move its widget: it kept its
+    old height and covered the top of the next row."""
+    from PySide6.QtCore import QSize
+    from PySide6.QtWidgets import QWidget
+
+    class Tall(QWidget):
+        def sizeHint(self):                  # noqa: N802
+            return QSize(100, 5000)
+
+    table = _open_table(qapp, rows=6)
+    table.resize(400, 600)
+    qapp.processEvents()
+    detail = Tall()
+    table.open_row(0, detail)
+    qapp.processEvents()
+    table.resize(400, 300)
+    qapp.processEvents()
+    below = table.visualRect(table.model().index(2, 1))
+    assert detail.geometry().bottom() < below.top()

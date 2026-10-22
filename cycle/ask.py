@@ -23,8 +23,11 @@ would be a gate precisely where somebody thought they had one.
 carries an id and blocks on its own event, the way a service request does.
 """
 
+import json
 import logging
+import os
 import threading
+import time
 
 from engine import events
 
@@ -43,6 +46,9 @@ DEFAULT_OPTIONS = ("Approve", "Reject")
 #: The longest text a person may hand back with an answer. The same bound as
 #: revision feedback: room for a task description, not for a pasted log.
 MAX_TEXT = 8000
+
+#: What a question step keeps of each time it asked, in its own step folder.
+ASKED_FILE = "asked.json"
 
 _lock = threading.Lock()
 _enabled = False
@@ -181,6 +187,51 @@ def ask(question, detail="", options=(), timeout_ms=None, step="",
                            % (timeout_ms / 1000.0, str(auto).strip())}
     return {"answered": False, "answer": "", "who": "",
             "message": "nobody answered within %ds" % (timeout_ms / 1000.0)}
+
+
+def record(context, step, question, detail="", options=(), answer=None, **extra):
+    """Write down one asking of ``step``: what it put to the person, and what came back.
+
+    The step's outputs keep the answer; this keeps the question - the plan in
+    full a person approved, the words of a choice - which is what somebody
+    reading a subject's history later needs to know what they agreed to.
+    Appended, once per asking, revision rounds included, to
+    ``steps/<id>/asked.json``. Never raises: a record that could not be written
+    must not fail the step that asked.
+    """
+    answer = dict(answer or {})
+    entry = {"at": time.time(), "question": str(question or ""),
+             "detail": str(detail or ""),
+             "options": [str(one) for one in options or ()],
+             "answered": bool(answer.get("answered")),
+             "answer": str(answer.get("answer") or ""),
+             "who": str(answer.get("who") or ""),
+             "automatic": bool(answer.get("automatic")),
+             "message": str(answer.get("message") or "")}
+    if answer.get("revision_requested"):
+        entry["revision"] = True
+        entry["feedback"] = str(answer.get("feedback") or "")
+    if "text" in answer:
+        entry["text"] = str(answer.get("text") or "")
+    entry.update(extra)
+    try:
+        path = os.path.join(context.step_dir(step.id), ASKED_FILE)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                kept = json.load(handle)
+        except (OSError, ValueError):
+            kept = {}
+        asked = kept.get("asked") if isinstance(kept, dict) else None
+        asked = list(asked) if isinstance(asked, list) else []
+        asked.append(entry)
+        partial = "%s.%d.tmp" % (path, os.getpid())
+        with open(partial, "w", encoding="utf-8") as handle:
+            json.dump({"asked": asked}, handle, indent=2, ensure_ascii=False, default=str)
+            handle.write("\n")
+        os.replace(partial, path)
+    except (OSError, TypeError, ValueError, AttributeError) as exc:
+        log.warning("Could not keep what %s asked: %s", getattr(step, "id", "?"), exc)
+    return entry
 
 
 def _wait(event, seconds, cancel):

@@ -194,6 +194,40 @@ def test_a_file_from_the_build_before_this_one_still_reads(path):
     assert clf.places_for("one", path) == {"a": (1.0, 2.0)}
 
 
+# --------------------------------------------------- the half it was left in
+def test_the_section_comes_back_the_way_it_went_down(path):
+    clf.remember_section("one", "Run", "Graph", path)
+
+    assert clf.section_for("one", path) == ("Run", "Graph")
+    assert clf.section_for("two", path) == ("Design", "Cockpit")
+
+
+def test_the_section_leaves_the_rest_of_the_cycle_alone(path):
+    clf.remember("one", {"a": (1.0, 2.0)}, path)
+    clf.remember_view("one", VIEW, path)
+    clf.remember_section("one", "Run", "Cockpit", path)
+
+    assert clf.places_for("one", path) == {"a": (1.0, 2.0)}
+    assert clf.view_for("one", path) == VIEW
+    clf.remember_view("one", None, path)
+    assert clf.section_for("one", path) == ("Run", "Cockpit")
+
+
+def test_a_cycle_left_the_way_it_opens_anyway_is_not_written(path):
+    clf.remember_section("one", "Run", "Graph", path)
+    clf.remember_section("one", "Design", "Cockpit", path)
+
+    assert "one" not in load_raw(path).get("cycles", {})
+
+
+def test_a_section_this_build_does_not_know_reads_as_none(path):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"version": clf.VERSION, "cycles": {
+            "one": {"section": "Elsewhere", "run_view": 3}}}, handle)
+
+    assert clf.section_for("one", path) == ("Design", "Cockpit")
+
+
 # ----------------------------------------------------------------- the file
 def test_the_file_carries_its_version(path):
     clf.remember("one", {"a": (1.0, 2.0)}, path)

@@ -161,6 +161,14 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # And pages through them, fifty at a time as the list scrolls.
              "--cycle-sessions-first", "--cycle-sessions-limit",
              "--cycle-sessions-offset",
+             # The Subjects page: its list, a subject's history, an agent
+             # call's own account and a note - each read or written for a row
+             # on screen, never typed.
+             "--cycle-subject-list", "--cycle-subject-list-view",
+             "--cycle-subject-list-limit", "--cycle-subject-list-offset",
+             "--cycle-subject-history", "--cycle-subject-history-scope",
+             "--cycle-subject-history-limit", "--cycle-subject-transcript",
+             "--cycle-subject-note", "--cycle-subject-note-text",
              # The task listener asks and marks through these, on a schedule
              # the cycle file sets. Nobody types one.
              "--cycle-watch", "--cycle-watch-seen", "--cycle-watch-plan",

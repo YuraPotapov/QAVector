@@ -163,3 +163,15 @@ def test_a_question_is_required():
 
 def test_its_metadata_survives_the_wire():
     json.dumps(registry.get("user.input").metadata.to_dict())
+
+
+def test_what_was_asked_and_written_is_kept_for_the_history(asking, step_runner, tmp_path):
+    from cycle import ask as kept_by
+
+    _answer_soon("Send", text="Add a filter by status", who="tester")
+    step_runner(question="What should the agent do?", detail="In the claim project.")
+    path = (tmp_path / "runs" / "20261013-000000-a" / "steps" / "ask" / kept_by.ASKED_FILE)
+    asked = json.loads(path.read_text(encoding="utf-8"))["asked"]
+    assert asked[0]["question"] == "What should the agent do?"
+    assert asked[0]["detail"] == "In the claim project."
+    assert asked[0]["text"] == "Add a filter by status" and asked[0]["who"] == "tester"

@@ -3519,6 +3519,105 @@ def test_run_is_offered_only_when_there_is_a_run_to_show(opened):
     assert not opened.context_switch.button("Run").isEnabled()
 
 
+def _demo_run(state, tmp_path, running=False):
+    """A run of "demo" in the model: still going, or read back from disk."""
+    from cms_gui import cyclereplay
+
+    ran = dict(DIAMOND, id="demo")
+    start = {"kind": "cycle.run.start", "run_id": "r", "cycle": "demo", "graph": ran}
+    if running:
+        state.handle(start)
+        return
+    cyclereplay.restore(str(tmp_path), state, events=[
+        start, {"kind": "cycle.run.end", "run_id": "r", "status": "success"}])
+
+
+def test_a_cycle_left_in_run_opens_in_run(page, tmp_path, layout_file):
+    """The complaint: pressing Run, and every opening putting it back in Design."""
+    from cms_gui import cyclelayoutfile as clf
+
+    clf.remember_section("demo", "Run", "Graph", layout_file)
+    state = RunState()
+    page.set_run_state(state)
+    _demo_run(state, tmp_path)
+    page.set_core(FakeCore({"demo": payload()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+
+    assert page.context_switch.current() == "Run" and page._context == "Run"
+    assert page.run_view.current() == "Graph"
+    assert page.run_surface.currentWidget() is page.canvas
+
+
+def test_its_last_run_read_back_after_the_opening_takes_it_to_run(page, tmp_path,
+                                                                  layout_file):
+    """Opening a cycle reads its last run back afterwards: Design until it is
+    there, then the Run it was left in."""
+    from cms_gui import cyclelayoutfile as clf
+
+    clf.remember_section("demo", "Run", "Cockpit", layout_file)
+    state = RunState()
+    page.set_run_state(state)
+    page.set_core(FakeCore({"demo": payload()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+    assert page._context == "Design"
+
+    _demo_run(state, tmp_path)
+    assert page.context_switch.current() == "Run"
+    assert page.run_surface.currentWidget() is page.cockpit
+
+
+def test_with_no_run_to_show_it_opens_in_design_and_keeps_its_choice(page, layout_file):
+    from cms_gui import cyclelayoutfile as clf
+
+    clf.remember_section("demo", "Run", "Graph", layout_file)
+    page.set_core(FakeCore({"demo": payload()}))
+    page.set_inventory(FakeInventory([row()], [SHELL_PLUGIN]))
+    page.open("demo")
+
+    assert page._context == "Design"
+    assert clf.section_for("demo", layout_file) == ("Run", "Graph")
+
+
+def test_pressing_design_or_graph_is_what_the_next_opening_shows(opened, tmp_path,
+                                                                 layout_file):
+    from cms_gui import cyclelayoutfile as clf
+
+    state = RunState()
+    opened.set_run_state(state)
+    _demo_run(state, tmp_path, running=True)
+    assert clf.section_for("demo", layout_file) == ("Run", "Cockpit"), \
+        "watching a run is being in Run"
+
+    opened.run_view.set_current("Graph")
+    assert clf.section_for("demo", layout_file) == ("Run", "Graph")
+    opened.context_switch.set_current("Design")
+    assert clf.section_for("demo", layout_file) == ("Design", "Graph")
+
+    opened.open("demo")
+    assert opened._context == "Design"
+
+
+def test_another_cycle_opened_without_a_run_does_not_unlearn_the_first(opened, tmp_path,
+                                                                       layout_file):
+    """Run of "demo" on screen, "other" opened: Design for "other", because
+    there is nothing of its to show - and "demo" is still remembered in Run."""
+    from cms_gui import cyclelayoutfile as clf
+
+    state = RunState()
+    opened.set_run_state(state)
+    _demo_run(state, tmp_path)
+    opened.context_switch.set_current("Run")
+    opened.core.cycles["other"] = payload("other")
+    opened.open("other")
+    assert opened._context == "Design"
+    assert clf.section_for("other", layout_file) == ("Design", "Cockpit")
+
+    opened.open("demo")
+    assert opened._context == "Run"
+
+
 def test_arrange_works_the_lines_out_once_not_once_per_node(opened, monkeypatch):
     from PySide6.QtCore import QPointF
     for item in opened.canvas._nodes.values():
@@ -4539,3 +4638,66 @@ def test_every_list_box_has_a_drawn_chevron_not_a_border_trick():
     assert 'QComboBox::down-arrow { image: url("' in sheet
     chevron = sheet.split('QComboBox::down-arrow { image: url("', 1)[1].split('")', 1)[0]
     assert os.path.isfile(chevron) and "<svg" in open(chevron).read()
+
+
+def test_stages_lent_to_subjects_are_the_same_feed_and_come_back(detachable):
+    page = detachable
+    feed, composer = page.output.stages, page.output.composer
+    returned = []
+    panel = page.lend_stages(lambda: returned.append(page.take_back_stages(borrowed)))
+    borrowed = panel
+    assert panel is page.output.stage_panel and feed.parent() is panel
+    assert page.stages_lent()
+    assert page.output.stages_elsewhere.label.text() == "Stages are open in Subjects"
+    assert page.output.stages_elsewhere.show_button.isHidden()
+    assert page.lend_stages(lambda: None) is None, "lent once at a time"
+
+    # A window of its own asks for it back first, then takes it.
+    window = page.detach_stages()
+    assert returned and not page.stages_lent()
+    assert feed.window() is window and composer.window() is window
+    assert page.lend_stages(lambda: None) is None, "never taken from its window"
+    page.dock_stages()
+    assert page.output.stages_elsewhere.label.text() == "Stages are in a separate window"
+    assert not page.output.stages_elsewhere.show_button.isHidden()
+
+
+def test_a_message_written_in_a_subject_s_row_goes_to_the_running_cycle(detachable):
+    """Lent to Subjects, the box is still this page's: what is written there
+    reaches the running agent the way it does from the Stages tab."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from cms_gui.pages.subjects import SubjectDetail
+    from cms_gui.runner import RunState
+
+    page = detachable
+    state = RunState()
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo", "name": "Demo",
+                  "graph": {"id": "demo", "nodes": [{"id": "impl", "label": "Make the change",
+                                                     "plugin": "agent.implement"}],
+                            "edges": []}, "jobs": 1, "variables": {}})
+    state.handle({"kind": "cycle.step.start", "run_id": "r", "step": "impl",
+                  "plugin": "agent.implement", "attempt": 1})
+    state.handle({"kind": "cycle.interaction.offers", "run_id": "r", "version": 1,
+                  "run": None, "steps": {"impl": {"step": "impl", "execution": 1,
+                                                  "kinds": ["text"], "state": "running",
+                                                  "when": "Before its next call"}}})
+    page.output.composer.set_context(state.cycle, True, {"impl": "Make the change"})
+    sent = []
+    page.interaction_requested.connect(sent.append)
+
+    row = SubjectDetail({"id": "QA-1", "key": "QA-1", "latest": {}})
+    panel = page.lend_stages(lambda: page.take_back_stages(row.release_panel()))
+    row.hold_panel(panel)
+    row.show()
+    composer = page.output.composer
+    assert composer.window() is row.window()
+    composer.text.setPlainText("It is also called from cron")
+    QTest.keyClick(composer.text, Qt.Key_Return)
+
+    assert len(sent) == 1
+    assert sent[0]["payload"]["text"] == "It is also called from cron"
+    assert sent[0]["step"] == "impl"
+    page.take_back_stages(row.release_panel())
+    row.deleteLater()

@@ -14,7 +14,8 @@ import weakref
 from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
                             QPointF, QPropertyAnimation, QRect, QRectF, QSize,
                             Qt, QTimer, Signal)
-from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QIcon, QPainter, QPen
+from PySide6.QtGui import (QBrush, QColor, QFontMetricsF, QIcon, QKeySequence,
+                           QPainter, QPen, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
@@ -22,7 +23,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QPlainTextEdit, QPushButton, QSizePolicy,
                                QSpinBox, QSplitter, QStyle,
                                QStyleOptionToolButton, QStylePainter,
-                               QTableWidget, QToolButton, QVBoxLayout, QWidget)
+                               QTableWidget, QTableWidgetItem, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from . import icons, theme
 
@@ -876,6 +878,12 @@ class EmptyNote(QLabel):
             self.sync()
         return False
 
+    def say(self, text):
+        """What to say when the table is empty, for a table whose reason changes -
+        a filter showing nothing is not a list that has nothing in it."""
+        self._text = text or ""
+        self.sync()
+
     def say_filtered(self, text):
         """What to say instead while a search is hiding rows. "" for none."""
         self._filtered = text or ""
@@ -1617,9 +1625,12 @@ class Message(QDialog):
     #: scroll. Tall enough for a traceback to be read rather than guessed at.
     OUTPUT_HEIGHT = 260
 
+    #: How tall a several-line answer's box is, in lines of its own text.
+    TEXT_LINES = 5
+
     def __init__(self, parent, title, message, detail="", kind="",
                  agree="OK", refuse="", output="", choices=(), text=None,
-                 items=()):
+                 items=(), lines=1):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -1675,6 +1686,16 @@ class Message(QDialog):
             self.field = QComboBox()
             self.field.addItems([str(one) for one in items])
             layout.addWidget(self.field)
+        elif text is not None and lines > 1:
+            # Words that may run to a few lines - a note - get a box that
+            # shows them; Ctrl+Enter agrees, since Enter is a new line here.
+            self.field = QPlainTextEdit(text)
+            self.field.setTabChangesFocus(True)
+            self.field.setFixedHeight(
+                self.field.fontMetrics().lineSpacing() * max(lines, 2) + 14)
+            layout.addWidget(self.field)
+            for keys in ("Ctrl+Return", "Ctrl+Enter"):
+                QShortcut(QKeySequence(keys), self, activated=self.accept)
         elif text is not None:
             self.field = QLineEdit(text)
             self.field.selectAll()
@@ -1721,6 +1742,8 @@ class Message(QDialog):
         """What was typed or picked, stripped; "" when there is no field."""
         if isinstance(self.field, QComboBox):
             return self.field.currentText()
+        if isinstance(self.field, QPlainTextEdit):
+            return self.field.toPlainText().strip()
         return self.field.text().strip() if self.field is not None else ""
 
     def showEvent(self, event):         # noqa: N802 - Qt's own spelling
@@ -1768,14 +1791,15 @@ def choose(parent, title, message, detail="", choices=(), agree="OK",
 
 
 def ask_text(parent, title, question, value="", detail="", agree="OK",
-             refuse="Cancel"):
+             refuse="Cancel", lines=1):
     """A line of text, asked for. Returns it stripped, or None if refused.
 
     None rather than "" for a refusal, so a caller can tell "cancelled" from
     "agreed to nothing" - the second is usually a field it should refuse.
+    ``lines`` above 1 asks for several lines in a box that tall.
     """
     dialog = Message(parent, title, question, detail, "", agree, refuse,
-                     text=value or "")
+                     text=value or "", lines=lines)
     try:
         return dialog.answer() if dialog.exec() == QDialog.Accepted else None
     finally:
@@ -2122,6 +2146,13 @@ class FoldingSplitter(QSplitter):
 # to pick from is a table too, and two recipes for one thing is how the columns
 # and the boxes over them stop lining up.
 
+#: How much of the visible table one opened row's details may take before they
+#: scroll inside themselves: enough to read, never so much that the rows around
+#: it - what somebody came to the list to compare - leave the screen.
+DETAIL_SHARE = 2.0 / 3.0
+#: The least an opened row's details are given, whatever the window's height.
+DETAIL_MIN = 160
+
 class Table(QTableWidget):
     """A table whose selected row can be un-selected, and which can carry a
     search row under its header.
@@ -2141,15 +2172,37 @@ class Table(QTableWidget):
     That margin belongs to QTableView - it recomputes it on every geometry change
     to make room for the header - so the only place to claim a strip of it is
     here, straight after the base class has had its say.
+
+    **Rows that open in place** (``expandable=True``). :meth:`open_row` puts a
+    widget in a row of its own straight under a row, across every column, so
+    the columns above and below it stay where they were and the list stays one
+    list rather than a list beside a page. That row is told from a row of data
+    by a mark on its first cell rather than by a map of row numbers, which every
+    insert above it would shift. The cursor steps over it, the search row shows
+    and hides it with the row it belongs to, and Right or Enter on a row asks
+    for it to open, Left for it to close (:attr:`toggle_requested`) - the page
+    decides what opening means, because only it knows what to put there.
     """
 
-    def __init__(self, *args, reclick_clears=True, **kwargs):
+    #: The mark an opened row's details carry on their first cell.
+    DETAIL_ROLE = Qt.UserRole + 41
+
+    #: (row, open): the person asked for a row's details to open or close.
+    toggle_requested = Signal(int, bool)
+
+    def __init__(self, *args, reclick_clears=True, expandable=False, **kwargs):
         """``reclick_clears=False`` keeps a row selected when it is clicked
         again: for a table whose selection only says which row is being looked
-        at, where clearing it would blank what is shown for that row."""
+        at, where clearing it would blank what is shown for that row.
+        ``expandable`` lets rows open in place (see the class docstring)."""
         super().__init__(*args, **kwargs)
         self._reclick_clears = reclick_clears
+        self._expandable = expandable
         self._search_row = None
+        if expandable:
+            # By the pixel: an opened row is far taller than the others, and
+            # scrolling a row at a time jumps over it in one go.
+            self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         # updateGeometries runs again from inside setViewportMargins, and the
         # nested call would hand the margins back to the header alone - which is
         # exactly the strip we are claiming.
@@ -2204,6 +2257,112 @@ class Table(QTableWidget):
             self.setCurrentIndex(self.model().index(-1, -1))
             return
         super().mousePressEvent(event)
+
+    # -- rows that open in place --------------------------------------------------
+    def is_detail_row(self, row):
+        """Whether ``row`` holds another row's details rather than data."""
+        item = self.item(row, 0) if 0 <= row < self.rowCount() else None
+        return bool(item is not None and item.data(self.DETAIL_ROLE))
+
+    def detail_of(self, row):
+        """The widget open under ``row``, or None when it is closed."""
+        if self.is_detail_row(row + 1):
+            return self.cellWidget(row + 1, 0)
+        return None
+
+    def owner_of(self, row):
+        """The row of data ``row`` belongs to: itself, or the one above its details."""
+        return row - 1 if self.is_detail_row(row) else row
+
+    def data_rows(self):
+        """Every row of data, in order - the details rows left out."""
+        return [row for row in range(self.rowCount()) if not self.is_detail_row(row)]
+
+    def open_row(self, row, widget):
+        """Put ``widget`` under ``row``, across every column. Returns its row.
+
+        Opening a row already open replaces what was there.
+        """
+        self.close_row(row)
+        below = row + 1
+        self.insertRow(below)
+        holder = QTableWidgetItem()
+        # Never selected and never edited: there is nothing here to aim at but
+        # the widget, which takes its own clicks.
+        holder.setFlags(Qt.ItemIsEnabled)
+        holder.setData(self.DETAIL_ROLE, True)
+        self.setItem(below, 0, holder)
+        if self.columnCount() > 1:
+            self.setSpan(below, 0, 1, self.columnCount())
+        self.setCellWidget(below, 0, widget)
+        self.setRowHidden(below, self.isRowHidden(row))
+        self.fit_detail(row)
+        return below
+
+    def close_row(self, row):
+        """Take away what is open under ``row``. True when something was."""
+        if self.detail_of(row) is None:
+            return False
+        # Removing the row deletes its widget with it: whoever opened it keeps
+        # no reference past this.
+        self.removeRow(row + 1)
+        return True
+
+    def fit_detail(self, row):
+        """Size the details open under ``row`` to what they hold, up to a share
+        of the table (see :data:`DETAIL_SHARE`), past which they scroll."""
+        widget = self.detail_of(row)
+        if widget is None:
+            return
+        cap = max(DETAIL_MIN, int(self.viewport().height() * DETAIL_SHARE))
+        self.setRowHeight(row + 1, max(1, min(widget.sizeHint().height(), cap)))
+        # And the widget moved into the row as it now is. The view puts a cell's
+        # widget in place when it next lays itself out, which a spanned row that
+        # got shorter does not always prompt: the widget kept its old height and
+        # hung over the row below.
+        self.updateEditorGeometries()
+
+    def detail_cap(self):
+        """The tallest an opened row's details are allowed to be just now."""
+        return max(DETAIL_MIN, int(self.viewport().height() * DETAIL_SHARE))
+
+    def keyPressEvent(self, event):
+        if self._expandable and self.currentRow() >= 0:
+            row = self.owner_of(self.currentRow())
+            key = event.key()
+            opened = self.detail_of(row) is not None
+            if key == Qt.Key_Right and not opened:
+                self.toggle_requested.emit(row, True)
+                return
+            if key == Qt.Key_Left and opened:
+                self.toggle_requested.emit(row, False)
+                return
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self.toggle_requested.emit(row, not opened)
+                return
+        super().keyPressEvent(event)
+
+    def moveCursor(self, action, modifiers):                 # noqa: N802 - Qt's name
+        index = super().moveCursor(action, modifiers)
+        if not self._expandable or not index.isValid() or not self.is_detail_row(index.row()):
+            return index
+        # The cursor lands on rows of data only: details are read where they
+        # are, not stepped into.
+        down = action in (QAbstractItemView.MoveDown, QAbstractItemView.MoveNext,
+                          QAbstractItemView.MovePageDown, QAbstractItemView.MoveEnd)
+        step = 1 if down else -1
+        row = index.row() + step
+        while 0 <= row < self.rowCount() and (self.is_detail_row(row) or self.isRowHidden(row)):
+            row += step
+        if not 0 <= row < self.rowCount():
+            return self.currentIndex()
+        return self.model().index(row, index.column())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._expandable:
+            for row in self.data_rows():
+                self.fit_detail(row)
 
 
 class SearchRow(QWidget):
@@ -2308,11 +2467,22 @@ class SearchRow(QWidget):
             edit.setText((state or {}).get(str(column), ""))
 
     def apply(self, *_args):
-        """Hide what does not match. Called again whenever the rows are rebuilt."""
+        """Hide what does not match. Called again whenever the rows are rebuilt.
+
+        A row's open details have no text of their own to match: they are
+        shown and hidden with the row they belong to, which is always the one
+        above them.
+        """
         needles = self.needles()
         table = self._table
+        detail = getattr(table, "is_detail_row", None)
+        hidden = False
         for row in range(table.rowCount()):
-            table.setRowHidden(row, not self._matches(row, needles))
+            if detail is not None and detail(row):
+                table.setRowHidden(row, hidden)
+                continue
+            hidden = not self._matches(row, needles)
+            table.setRowHidden(row, hidden)
         self._place()
         self.changed.emit()
 

@@ -219,3 +219,19 @@ def test_libyaml_patches_a_file_exactly_as_the_pure_parser_did(monkeypatch):
         assert written[0] == written[1], path
         checked += 1
     assert checked
+
+
+def test_a_row_says_what_the_cycle_works_on_and_the_variable_it_takes_it_by(tmp_path):
+    """So a run can be started on a subject somebody was looking at."""
+    from cycle.cyclefile import list_cycles
+
+    named = ("id: demo\nname: Demo\nvariables:\n  task_key: ''\n"
+             "subject:\n  kind: task\n  key: ${steps.todo.outputs.key}\n  pin: task_key\n"
+             "steps:\n  - id: todo\n    plugin: command.shell\n"
+             "    with:\n      command: echo ${vars.task_key}\n")
+    (tmp_path / "demo.yaml").write_text(named, encoding="utf-8")
+    (tmp_path / "plain.yaml").write_text(_CYCLE.replace("id: demo", "id: plain"),
+                                         encoding="utf-8")
+    rows = {row["id"]: row for row in list_cycles(str(tmp_path))}
+    assert rows["demo"]["subject"] == {"kind": "task", "pin": "task_key"}
+    assert "subject" not in rows["plain"]

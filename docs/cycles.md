@@ -148,7 +148,10 @@ the other change.
 **Design and Run.** Design shows the file or unsaved changes. Starting a cycle
 switches to **Run → Cockpit**, the operational summary. **Run → Graph** shows
 the graph the run started with and its statuses. A file edited afterwards has
-its own Design graph; an edit switches back to Design.
+its own Design graph; an edit switches back to Design. Which one a cycle was
+left in - and Cockpit or Graph within Run - is remembered per cycle: opening it
+again, or after a restart, shows its last run the same way. Without a run of it
+to show, it opens in Design.
 
 ### Phases
 
@@ -630,6 +633,81 @@ A subject cannot read a secret: it is written to disk and shown on screen.
 
 From a terminal: `--cycle-sessions[=CYCLE]` lists them as JSON, and
 `--cycle-session-delete=ID` deletes one.
+
+### Coming back to a subject: the Subjects page
+
+A session is one cycle's runs on one subject. The work is wider than that: a
+task is planned and built by one cycle, released by another, and somebody asks
+a single-agent cycle about it in between. **A subject** is the thing itself -
+every run, of any cycle, whose subject has that key - and **Subjects** on the
+rail lists one row each: what waits for you first (a question asked, a node
+waiting for consent, a pause, a run you parked, an approval nobody answered),
+then what is going, then the rest. *Needs you*, *Active* and *All* narrow it;
+Ctrl+K finds a subject by key, title, cycle or note.
+
+A row opens in place, across the whole list, and any number may be open at
+once - what is open is remembered. An open row says what to do next as one
+button: **Answer in Cockpit** for a question the run in this window is asking,
+**Resume** for a run that stopped where it can go on (the row says why when
+Resume would be refused - a cycle edited since, say), **Open run** otherwise.
+Under that are your note and the subject's story:
+
+- **History** - every run of every cycle that named it, oldest first, the way a
+  conversation reads: how each run began and ended, its pauses, every question
+  it asked with what was shown and what you answered (a plan sent back
+  included), every message you sent a step, every agent's answer, your notes.
+  An agent's entry unfolds its full answer, opens the prompt it was given, and
+  shows its own account - what it weighed, said and reached for, call by call,
+  without what its tools returned. *All* adds the checks, the failures and the
+  steps that simply passed. It opens on the newest entry and stays there until
+  you scroll up.
+- **Files** - each run's step files, newest run first; a click opens one on the
+  Artifacts page.
+- **Runs** - every run; a click puts it on the Cycles page.
+- **Stages** - one run's stages, picked from the subject's runs. The run going
+  in this window shows the live feed with the box for writing to it - the
+  Cycles page's own Stages panel, moved into the row while it is on screen and
+  back in its tab the moment you leave, never a copy. Stages in a window of
+  their own stay there; the row says so and brings the window forward. Any
+  other run shows the stages it recorded.
+
+A run can say a great deal, and a row has a share of the list to say it in. The
+mark at the end of an open row's top line puts its section in **a window of its
+own** - on another screen, as large as you like, minimized by itself - opening
+on the tab the row was showing, live Stages included. The row says where it
+went, with **Show window** and the way back. Closing the window, or the mark
+inside it, puts the section back in its row; closing the row closes its window
+too. The windows go with the application.
+
+Nothing there is stored twice: the history is read from the runs whenever it is
+shown. Two things a run did not keep before are kept now, so the history can
+say what was asked and not only what came back: a question step writes each
+time it asks - question, detail, options, answer, who - to
+`steps/<id>/asked.json`, and an agent call writes the prompt it was given,
+clarifications included, as `prompt.md` beside its output. Older runs show the
+answer and say that the question was not recorded.
+
+**Notes** are the one thing kept for a subject: what you write about it -
+where you stopped, what you are waiting for. They are added, never rewritten,
+kept in `subjectnotes.json` beside the cycles' memory, and shown in the row and
+in the history.
+
+**Park** frees the window. It holds one run at a time, so a run waiting at a
+question - or at a phase boundary for hours - would keep every other subject
+from starting. Park pauses the run, waits until only questions to a person are
+left going (an agent mid-call finishes that call), and stops it as *parked*:
+everything finished stays finished, and Resume, from the row, asks the open
+questions again. **Run a cycle on it...** starts any cycle on the subject: one
+that names its own subject takes the key through its `pin`; one that names
+nothing is told what the run is about (`--cycle-subject`). Either way what it
+asks and answers joins this history.
+
+From a terminal: `--cycle-subject-list` (with `-view=`, `-limit=`, `-offset=`),
+`--cycle-subject-history=KEY` (with `-scope=conversation|all`, `-limit=`),
+`--cycle-subject-transcript=RUN:STEP` (an agent step's account), and
+`--cycle-subject-note=KEY --cycle-subject-note-text=TEXT`. A control line
+`{"command": "cycle.stop", "run_id": ..., "reason": "parked"}` stops a run with
+that reason as its message.
 
 ### Starting when a new task appears
 

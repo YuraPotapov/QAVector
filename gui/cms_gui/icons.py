@@ -233,6 +233,28 @@ def _history(painter, ink):
     painter.drawLine(QPointF(12, 12), QPointF(16, 14.5))
 
 
+def _subjects(painter, ink):
+    """A speech bubble with two lines in it: a subject is a conversation.
+
+    What was asked and answered about it, what a person said to it and what
+    each agent came back with, across every run - which is the page, and is not
+    what the clock of History or the list of Log stands for.
+    """
+    _stroke(painter, ink)
+    bubble = QPainterPath()
+    bubble.moveTo(3.5, 4.5)
+    bubble.lineTo(20.5, 4.5)
+    bubble.lineTo(20.5, 16.5)
+    bubble.lineTo(11, 16.5)
+    bubble.lineTo(6.5, 20.5)
+    bubble.lineTo(6.5, 16.5)
+    bubble.lineTo(3.5, 16.5)
+    bubble.closeSubpath()
+    painter.drawPath(bubble)
+    painter.drawLine(QPointF(7.5, 9), QPointF(16.5, 9))
+    painter.drawLine(QPointF(7.5, 12.5), QPointF(13.5, 12.5))
+
+
 def _developer(painter, ink):
     """A square half filled: a mode that is either on or off."""
     _stroke(painter, ink)
@@ -582,6 +604,7 @@ DRAWINGS = {
     "scenarios": _scenarios,
     "cycles": _cycles,
     "history": _history,
+    "subjects": _subjects,
     "developer": _developer,
     "log": _log,
     "services": _services,

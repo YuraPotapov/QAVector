@@ -1007,6 +1007,48 @@ def run_session_command(command, memory_path=None, cycles_dir=None, page=None):
     sys.exit(0)
 
 
+def run_subject_command(command, memory_path=None, cycles_dir=None, options=None):
+    """Serve one --cycle-subject-* call: print JSON, then exit.
+
+    A subject is everything any cycle did about one thing - every run that
+    named its key, whichever cycle made it; see ``cycle/subjects.py``. Listing
+    is the Subjects page's list; history is one subject's story, read from the
+    runs; a note is the one thing kept that no run could have written.
+    """
+    kind, argument = command
+    options = dict(options or {})
+    try:
+        from cycle import subjects
+        if kind == "list":
+            payload = dict(subjects.listing(memory_path=memory_path, cycles_dir=cycles_dir,
+                                            view=options.get("view") or subjects.ALL,
+                                            limit=options.get("limit", 0),
+                                            offset=options.get("offset", 0)), ok=True)
+        elif kind == "history":
+            payload = dict(subjects.history(argument, memory_path=memory_path,
+                                            scope=options.get("scope") or subjects.ALL,
+                                            limit=options.get("limit", 0)), ok=True)
+        elif kind == "note":
+            payload = {"ok": True, "subject": argument,
+                       "note": subjects.add_note(argument, options.get("text", ""),
+                                                 memory_path=memory_path)}
+        elif kind == "transcript":
+            run_id, _colon, step_id = argument.partition(":")
+            payload = dict(subjects.transcript(run_id, step_id), ok=True)
+        else:                                   # unreachable; kept honest anyway
+            raise ValueError("unknown subject command %r" % kind)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        json.dump({"ok": False, "id": argument,
+                   "problems": [str(exc) if exc.__class__.__name__ == "SubjectError"
+                                else "%s: %s" % (type(exc).__name__, exc)]},
+                  sys.stdout, indent=2, ensure_ascii=False, default=str)
+        print()
+        sys.exit(2)
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, default=str)
+    print()
+    sys.exit(0)
+
+
 def _plan_document(source):
     """``{"title", "url", "items"}`` from the ``--from`` file, or {} without one."""
     if not source:
@@ -1640,7 +1682,9 @@ def _bad_option_message(arg, config_path):
         return "--cycle-jobs needs a number: how many steps may run at once."
     if arg == "--cycle-mode":
         return "--cycle-mode needs auto, important or approve."
-    if arg in ("--cycle-sessions-limit", "--cycle-sessions-offset"):
+    if arg in ("--cycle-sessions-limit", "--cycle-sessions-offset",
+               "--cycle-subject-list-limit", "--cycle-subject-list-offset",
+               "--cycle-subject-history-limit"):
         return "%s needs a whole number, e.g. %s=50." % (arg, arg)
     if arg in ("--user", "--password", "--filter-users", "--url", "--config",
                "--sessions-dir", "--user-session", "--log-level", "--report-level",
@@ -1655,7 +1699,10 @@ def _bad_option_message(arg, config_path):
                "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove",
                "--cycle-plan-schedule",
                "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin",
-               "--cycle-sessions-first"):
+               "--cycle-sessions-first", "--cycle-subject-history",
+               "--cycle-subject-history-scope", "--cycle-subject-list-view",
+               "--cycle-subject-note", "--cycle-subject-note-text",
+               "--cycle-subject-transcript"):
         return "%s needs a value: %s=VALUE (note the '=', not a space)." % (arg, arg)
     return ("Unknown option %r. Run --help for the full list." % arg)
 
@@ -3091,7 +3138,12 @@ def read_commands(windows_by_session, on_closed=None):
             # Imported here rather than at the top of the function: a scenario
             # run never reaches this branch and must not pay for the import.
             from cycle import executor as cycle_executor
-            asked = cycle_executor.request_stop(message.get("run_id"))
+            # A reason only when the window gives one - "parked", when a person
+            # put the run aside to come back to - and short: it becomes the
+            # run's own message, which lists show on one line.
+            reason = str(message.get("reason") or "").strip()[:200]
+            asked = (cycle_executor.request_stop(message.get("run_id"), reason) if reason
+                     else cycle_executor.request_stop(message.get("run_id")))
             log.info("Stopping %s", message.get("run_id") or "every cycle run")
             if not asked:
                 log.warning("No cycle run called %r is going here.",
@@ -3607,6 +3659,29 @@ write a report. The steps that do not depend on each other run at the same time.
                             names. Never a git branch or a Jira issue. Refused
                             while one of its runs is going.
 
+  --cycle-subject-list      Every subject: everything any cycle did about one
+                            key, whichever cycle made each run. What waits for
+                            a person first, then what is going, then the rest.
+                            A run with no subject is a subject of its own.
+  --cycle-subject-list-view=V   needs_you, active or all (the default).
+  --cycle-subject-list-limit=N  One page of N, after skipping
+  --cycle-subject-list-offset=K the first K. Counts cover every subject.
+  --cycle-subject-history=S Everything that happened about subject S, oldest
+                            first, from every run that named it, with its notes.
+  --cycle-subject-history-scope=conversation|all
+                            conversation keeps what passed between a person and
+                            the cycles; all (the default) adds checks, failures
+                            and the steps that passed.
+  --cycle-subject-history-limit=N  Only the newest N entries; the answer says
+                            how many came before them.
+  --cycle-subject-note=S --cycle-subject-note-text=TEXT
+                            Keep a note about subject S, beside the memory
+                            file. Notes are added, never rewritten.
+  --cycle-subject-transcript=RUN:STEP
+                            What one agent step weighed and said, call by call,
+                            read off its stream - without what its tools
+                            returned.
+
   --cycle-plugin-action=P:A Ask a plugin something outside a run, as JSON: is it
                             signed in, can it reach its provider. --from=FILE
                             carries the step's settings. What a plugin can be
@@ -3782,6 +3857,8 @@ def main():
     memory_file = None    # --cycle-memory-file: the store (None = the default)
     session_command = None  # --cycle-sessions / --cycle-session-delete: JSON, then exit
     session_page = {}       # --cycle-sessions-first/-limit/-offset: one page of them
+    subject_command = None  # --cycle-subject-list / -history / -note: JSON, then exit
+    subject_options = {}    # their view, scope, limit, offset and text
     watch_command = None  # --cycle-watch / --cycle-watch-seen: JSON, then exit
     secrets_file = None   # --cycle-secrets-file: the store (None = the default)
     users_filter = None   # None = launch every user in the config
@@ -4034,6 +4111,28 @@ def main():
                                if "=" in arg else "")
         elif arg.startswith("--cycle-session-delete="):
             session_command = ("delete", arg.split("=", 1)[1].strip())
+        elif arg == "--cycle-subject-list":
+            subject_command = ("list", "")
+        elif arg.startswith("--cycle-subject-list-view="):
+            subject_options["view"] = arg.split("=", 1)[1].strip()
+        elif arg.startswith(("--cycle-subject-list-limit=", "--cycle-subject-list-offset=",
+                             "--cycle-subject-history-limit=")):
+            name, value = arg[2:].split("=", 1)
+            try:
+                subject_options[name.rsplit("-", 1)[1]] = max(0, int(value))
+            except ValueError:
+                bad_option = "--" + name
+        elif arg.startswith("--cycle-subject-history-scope="):
+            subject_options["scope"] = arg.split("=", 1)[1].strip()
+        elif arg.startswith("--cycle-subject-history="):
+            subject_command = ("history", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-subject-note-text="):
+            # Kept as typed: a note's own line breaks and spaces are its text.
+            subject_options["text"] = arg.split("=", 1)[1]
+        elif arg.startswith("--cycle-subject-note="):
+            subject_command = ("note", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-subject-transcript="):
+            subject_command = ("transcript", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-runs-dir="):
             runtime_paths.set_cycle_runs_dir(arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-memory-file="):
@@ -4201,8 +4300,8 @@ def main():
         from execution_runtime.cli import emit as runtime_emit, main as runtime_main
         if (bad_option is not None or describe_json or init_config or flow_command
                 or cycle_command or cycle_run or plugin_action or secret_command
-                or memory_command or session_command or watch_command or run_tests
-                or recorder or server_log_show
+                or memory_command or session_command or subject_command or watch_command
+                or run_tests or recorder or server_log_show
                 or any(not arg.startswith(("--runtime-", "--from=")) for arg in sys.argv[1:])):
             sys.exit(runtime_emit(2, {"ok": False, "problems": [{
                 "code": "conflicting_commands",
@@ -4269,6 +4368,9 @@ def main():
     if session_command:
         run_session_command(session_command, memory_file, cycles_dir,
                             page=session_page)
+    if subject_command:
+        run_subject_command(subject_command, memory_file, cycles_dir,
+                            options=subject_options)
     if watch_command:
         run_watch_command(watch_command, cycles_dir, secrets_file, memory_file,
                           flow_source)
