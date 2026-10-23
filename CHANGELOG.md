@@ -16,6 +16,14 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.39] - 2026-10-24
+
+### Removed
+- **Run ▾ → Prepare task.** The Cycles page no longer offers it: it was one
+  cycle's action named in the GUI, and a cycle need not have a task or Jira
+  steps at all. A cycle's declared actions still run from the command line
+  with `--cycle-action=ID`.
+
 ## [0.16.38] - 2026-10-22
 
 ### Added
