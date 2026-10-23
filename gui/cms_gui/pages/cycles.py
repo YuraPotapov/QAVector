@@ -212,10 +212,6 @@ class CyclesPage(QWidget):
             "A new run from the first step, taking nothing from earlier runs.\n"
             "Paid services will be called again; previous runs remain saved.")
         self.hard_run_action.triggered.connect(lambda: self._run("hard"))
-        self.prepare_action = self.run_menu.addAction("Prepare task")
-        self.prepare_action.setToolTip("Prepare the chosen task and its workspace without baseline tests or agent calls.")
-        self.prepare_action.triggered.connect(lambda: self._run("action:prepare_task"))
-        self.prepare_action.setVisible(False)
         self.phase_action = self.run_menu.addAction("Run phase")
         self.phase_action.setToolTip("Run the next phase and pause before the following one.")
         self.phase_action.triggered.connect(self._phase_control)
@@ -1045,8 +1041,6 @@ class CyclesPage(QWidget):
         cycle = self._live_cycle() or {}
         action, _phase, label = self._live_run_action() if running else ("", "", "")
         self.hard_run_action.setVisible(not running)
-        preparation = (((self._open or {}).get("cycle") or {}).get("actions") or {}).get("prepare_task")
-        self.prepare_action.setVisible(bool(preparation) and not running)
         one_phase = running and action == "continue" and bool((cycle.get("phase_actions") or {}).get("run"))
         self.phase_action.setVisible(one_phase)
         menu = not running or one_phase
@@ -2826,14 +2820,6 @@ class CyclesPage(QWidget):
         development cycle spends six agent calls and moves a Jira issue, and
         neither of those is undone by pressing Stop.
         """
-        if how.startswith("action:"):
-            action = ((self._open or {}).get("cycle") or {}).get("actions", {}).get(how.split(":", 1)[1])
-            if not action:
-                return False
-            return widgets.confirm(self, action.get("title") or "Prepare task",
-                "Prepare the task in a new run?",
-                (action.get("description") or "Runs only the declared preparation steps; earlier results are not borrowed.") + self._mode_preflight(),
-                agree=action.get("title") or "Prepare task")
         if how == "resume":
             state = self.run_state.cycle if self.run_state else {}
             return widgets.confirm(
@@ -2925,10 +2911,9 @@ class CyclesPage(QWidget):
             self.canvas.clear_status()
             self.output.clear_log()
             self.output.show_log()
-        target = (how.split(":", 1)[1] if how.startswith("action:") else
-                  state["run_id"] if how == "resume" else self._selected
+        target = (state["run_id"] if how == "resume" else self._selected
                   if how in ("only", "from") else "")
-        self.run_requested.emit(cycle_id, "action" if how.startswith("action:") else "" if how == "hard" else how, target)
+        self.run_requested.emit(cycle_id, "" if how == "hard" else how, target)
 
     def _graph_known(self, graph):
         """A run started. Draw what it is running, if that is not already drawn.
@@ -3397,9 +3382,6 @@ class CyclesPage(QWidget):
         has_cycle = bool(self.current_id())
         self.run_button.setEnabled(has_cycle and not running)
         self.hard_run_action.setEnabled(has_cycle and not running)
-        preparation = (((self._open or {}).get("cycle") or {}).get("actions") or {}).get("prepare_task")
-        self.prepare_action.setVisible(bool(preparation))
-        self.prepare_action.setEnabled(has_cycle and not running)
         resume = self._resume_available()
         self.run_button.setText("Resume" if resume else "Run")
         # Said on the button, not in a line under the header: a line that came

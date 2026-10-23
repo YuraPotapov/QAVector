@@ -4553,35 +4553,13 @@ def test_a_found_cycle_opens_and_a_found_run_is_picked_as_a_click_would(opened, 
     assert not opened.show_found(("session", "demo:QA-9"))
 
 
-def test_prepare_task_is_an_explicit_bounded_run_action_with_recreation_preview(opened, monkeypatch):
+def test_run_menu_offers_no_prepare_task_even_when_the_cycle_declares_it(opened):
     import copy
     opened._open = copy.deepcopy(opened._open)
-    description = "Recreates the selected task sandbox; committed source branches are reused."
-    opened._open["cycle"]["actions"] = {"prepare_task": {
-        "title": "Prepare task", "description": description, "steps": ["a", "b"], "result": "b"}}
+    opened._open["cycle"]["actions"] = {"prepare_task": {"title": "Prepare task", "steps": ["a"]}}
     opened._update_buttons()
-    assert opened.prepare_action.isVisible() and opened.prepare_action.isEnabled()
-    questions, requests = [], []
-    monkeypatch.setattr("cms_gui.pages.cycles.widgets.confirm", lambda *a, **kw: (questions.append(a), True)[1])
-    opened.run_requested.connect(lambda *args: requests.append(args))
-    opened.prepare_action.trigger()
-    assert requests == [("demo", "action", "prepare_task")]
-    assert any(description in str(arg) for arg in questions[0])
-
-
-def test_prepare_task_is_hidden_for_cycles_without_the_action(opened):
-    assert not opened.prepare_action.isVisible()
-
-
-def test_prepare_task_is_hidden_while_a_run_is_active(opened):
-    import copy
-    opened._open = copy.deepcopy(opened._open)
-    opened._open["cycle"]["actions"] = {"prepare_task": {"steps": ["a"]}}
-    state = RunState()
-    state.cycle_running = True
-    opened.set_run_state(state)
-    opened._update_buttons()
-    assert not opened.prepare_action.isVisible() and not opened.prepare_action.isEnabled()
+    opened._sync_run_control()
+    assert "Prepare task" not in [one.text() for one in opened.run_menu.actions()]
 
 
 def test_run_opens_cockpit_and_keeps_graph_available(opened):
