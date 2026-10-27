@@ -517,6 +517,45 @@ def test_a_cycle_without_a_folder_draws_no_indicators(qapp, dispose):
         dispose(page)
 
 
+@pytest.mark.parametrize("zoom", [0.45, 1.0, 2.0])
+def test_node_tooltips_are_anchored_above_each_icon_and_hide_when_leaving(qapp, dispose, zoom):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QHelpEvent, QMouseEvent, QTransform
+    from PySide6.QtWidgets import QApplication
+    from cms_gui.cyclegraph import CycleCanvas
+
+    canvas = CycleCanvas()
+    canvas.resize(620, 420)
+    canvas.set_graph(graph(("build", [])))
+    canvas.set_restrictions({"build": {
+        "network": ("Isolated", "on"), "files": ("RW", "on"),
+        "limits": "4 GB", "summary": "Network isolated · Project read and write · Memory 4 GB"}})
+    canvas.show()
+    qapp.processEvents()
+    canvas.setTransform(QTransform.fromScale(zoom, zoom))
+    node = canvas.node("build")
+    canvas.centerOn(node)
+    qapp.processEvents()
+    for kind, expected in (("network", "Isolated"), ("files", "RW"), ("limits", "4 GB")):
+        rect = node.restriction_rect(kind)
+        point = canvas.mapFromScene(node.mapToScene(rect.center()))
+        QApplication.sendEvent(canvas.viewport(), QHelpEvent(
+            QEvent.ToolTip, point, canvas.viewport().mapToGlobal(point)))
+        tip = canvas._restriction_tip
+        assert tip.isVisible() and tip.text() == expected
+        top = canvas.viewport().mapToGlobal(canvas.mapFromScene(node.mapToScene(
+            QPointF(rect.center().x(), rect.top()))))
+        assert tip.geometry().bottom() < top.y()
+        assert abs(tip.geometry().center().x() - top.x()) <= 1
+    # Deliver directly: unrelated offscreen windows may cover this canvas.
+    QApplication.sendEvent(canvas.viewport(), QMouseEvent(
+        QEvent.MouseMove, QPointF(1, 1),
+        QPointF(canvas.viewport().mapToGlobal(QPoint(1, 1))),
+        Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+    assert not tip.isVisible()
+    dispose(canvas)
+
+
 def test_the_step_window_shows_restrictions_only_when_the_cycle_has_a_folder(qapp, dispose):
     step = {"id": "build", "plugin": "command.shell", "with": {"command": "make"}}
     plain = NodeDialog(step, SHELL_PLUGIN)
@@ -538,6 +577,40 @@ def test_the_step_window_shows_restrictions_only_when_the_cycle_has_a_folder(qap
     finally:
         for one in (plain, held, report, browser):
             dispose(one)
+
+
+@pytest.mark.parametrize("suffix", ["", "/checkout"])
+def test_properties_use_the_path_value_for_folder_preview_and_restrictions(
+        qapp, dispose, monkeypatch, tmp_path, suffix):
+    declaration = {"kind": "path", "value": str(tmp_path)}
+    written = "${vars.project_dir}" + suffix
+    document = {"id": "demo", "name": "Demo", "project_folder": written,
+                "variables": {"project_dir": declaration},
+                "steps": [{"id": "a", "plugin": "command.shell"}]}
+    captured = []
+
+    class Restrictions(QDialog):
+        saved = None
+
+        def __init__(self, title, folder, level, restrictions, **kwargs):
+            super().__init__(kwargs.get("parent"))
+            captured.append((folder, kwargs["probe"]))
+
+        def exec(self):
+            return QDialog.Rejected
+
+    monkeypatch.setattr(R, "RestrictionsWindow", Restrictions)
+    dialog = CycleDialog(document)
+    try:
+        expected = str(tmp_path) + suffix
+        assert dialog._folder() == (written, expected)
+        dialog._edit_restrictions()
+        assert captured == [(expected, {"folder": expected, "cwd": expected})]
+        dialog._save()
+        assert dialog.saved["project_folder"] == written
+        assert dialog.saved["variables"]["project_dir"] == declaration
+    finally:
+        dispose(dialog)
 
 
 def test_cycle_properties_save_the_project_folder_and_its_restrictions(qapp, dispose):

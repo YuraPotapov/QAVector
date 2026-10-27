@@ -3,7 +3,7 @@
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QVBoxLayout, QWidget
 
 from cms_gui import search
 
@@ -65,16 +65,31 @@ def test_an_empty_field_shows_what_is_active_now():
 
 
 # -- the popup ----------------------------------------------------------------------
+def _until(predicate, ms=2000):
+    """Wait for ``predicate``: activation is asynchronous, even offscreen."""
+    for _ in range(ms // 10):
+        if predicate():
+            return
+        QTest.qWait(10)
+    assert predicate()
+
+
 @pytest.fixture
 def popup(qapp, dispose):
     hits = list(_hits())
     window = QWidget()
     window.resize(1000, 700)
     window.show()
+    # Active before Search opens over it, as the window a person pressed the
+    # key in is: activated afterwards, it would take focus and close Search.
+    QTest.qWaitForWindowActive(window)
     made = search.SearchPopup(lambda: list(hits), SECTIONS, window)
     opened = []
     made.opened.connect(opened.append)
     made.open_over(window)
+    # A window of its own, activated as any window is - not a popup holding the
+    # keyboard - so the field has the keys once it is active.
+    _until(lambda: QApplication.focusWidget() is made.field)
     made.hits, made.chosen = hits, opened
     yield made
     made.hide()
@@ -221,6 +236,32 @@ def test_a_text_field_lets_ctrl_k_through_and_keeps_its_other_keys(window):
     assert _override(window.field, Qt.Key_A, Qt.ControlModifier)
 
 
+def test_search_field_guard_follows_reassignment_and_disabling(window):
+    from PySide6.QtGui import QKeySequence
+
+    action = window.actions()[0]
+    action.setShortcut(QKeySequence("Alt+F9"))
+    assert not search._is_shortcut(_key_event(Qt.Key_K), window.field)
+    assert not _override(window.field, Qt.Key_F9, Qt.AltModifier)
+    window.field.setFocus()
+    QTest.keyClick(window.field, Qt.Key_F9, Qt.AltModifier)
+    assert window.calls == [1]
+    action.setShortcut(QKeySequence())
+    QTest.keyClick(window.field, Qt.Key_F9, Qt.AltModifier)
+    assert window.calls == [1]
+    assert not search._is_shortcut(_key_event(Qt.Key_K), window.field)
+
+
+def test_reassigned_search_preserves_text_editing_keys(window):
+    from PySide6.QtGui import QKeySequence
+
+    window.actions()[0].setShortcut(QKeySequence("Ctrl+A"))
+    window.field.setFocus()
+    QTest.keyClick(window.field, Qt.Key_A, Qt.ControlModifier)
+    assert window.field.selectedText() == "hello world"
+    assert window.calls == []
+
+
 def test_a_field_made_later_is_guarded_as_the_style_polishes_it(window, qapp):
     from cms_gui import theme
 
@@ -280,3 +321,12 @@ def test_ctrl_k_in_search_itself_selects_the_query(popup):
     QTest.keyClick(popup.field, Qt.Key_K, Qt.ControlModifier)
     assert popup.field.text() == "order list"
     assert popup.field.selectedText() == "order list"
+
+
+def test_it_leaves_the_keyboard_to_the_desktop_and_goes_when_its_window_is_used(popup):
+    # A Qt.Popup grabs the keyboard on X11, and the desktop's own keys - the
+    # layout switch among them - never arrived while it was open.
+    assert popup.windowType() == Qt.Tool
+    window = popup.parentWidget()
+    window.activateWindow()
+    _until(lambda: not popup.isVisible())

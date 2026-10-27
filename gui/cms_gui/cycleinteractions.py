@@ -559,7 +559,7 @@ class InteractionComposer(QFrame):
         return True
 
 
-class ClarifyPopup(QFrame):
+class ClarifyPopup(widgets.FloatingPanel):
     """The composer over whatever window is in front - see :data:`SHORTCUT`.
 
     A popup rather than a trip to the Cycles page: the person is usually
@@ -579,7 +579,7 @@ class ClarifyPopup(QFrame):
     DROP = 96
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        super().__init__(parent)
         self.setProperty("role", "clarifypopup")
         self.setFixedWidth(self.WIDTH)
         outer = QVBoxLayout(self)

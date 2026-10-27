@@ -103,12 +103,38 @@ away from is otherwise invisible.
 
 ## Keys
 
+**Settings → Hotkeys** lists the registered actions, including those
+without a default shortcut. Double-click a shortcut cell or choose **Change**,
+then press the combination; the editor records keys rather than accepting
+typed shortcut names. `Esc` or moving focus cancels recording. **Clear**
+removes an assignment, while `Delete` and `Backspace` can themselves be recorded.
+Only one combination is stored per row; existing alternative reader keys have
+their own rows.
+
+Changes remain a draft until **Apply** or **Save**. A conflicting
+combination names the other action and offers reassignment, another recording,
+or cancellation. Reset one action or all defaults in the same draft. **Cancel**
+discards changes since the last application. Applied assignments update menus
+and button hints immediately and persist in the GUI's `QSettings`; explicitly
+clearing a shortcut keeps it empty after restarting.
+
+The defaults below are preserved. `Ctrl+S` saves credentials on the Credentials
+page and cycle changes on the Cycles page. Application actions conflict with
+shortcuts in their child contexts; separate pages can reuse a combination.
+Text widgets retain their normal editing shortcuts. These are shortcuts inside
+QAVector; combinations intercepted by the desktop or OS remain outside its
+control.
+
 `Ctrl+K` opens **Search** from any window of the application: one field over
 everything the pages list, grouped by section, each record with its state. An
 empty field shows what is active now; Enter goes to the page with the record
 selected. There is no button for it - the key is the way in, and it is taken
 even from a text field (where X11 would otherwise read it as "delete to the end
-of the line").
+of the line"). It also reads what the runs' reports say - a Jira task's reading
+copy, a guide, a log - one row per document with how often the words occur in
+it, HTML pages first; Enter opens the file with the words lit by Find. It is a
+window of its own rather than a popup, so the desktop keeps its keys (switching
+the keyboard layout among them) while it is open.
 
 `Ctrl+F` finds in whichever reader has the focus - the Artifacts preview, a
 cycle's summary or log, a subject's details, an approval's review - with every
@@ -116,6 +142,25 @@ match lit; `Enter`/`F3` go on, `Shift+Enter`/`Shift+F3` go back, `Esc` closes.
 
 `Ctrl+Shift+M` clarifies the running cycle and `Ctrl+Shift+S` goes to its
 Stages, from any window too.
+
+The recorder uses Qt key codes and canonicalizes the standard Ukrainian and
+English keyboard positions; the number row and the punctuation keys are named
+by where they are, so `Ctrl+Shift+2` is recorded as that in both layouts (not
+`@` in one and `"` in the other). Outside a component, a text, navigation or
+editing key (Tab, Return, the arrows, Backspace...) needs Ctrl, Alt or Meta;
+function keys may go bare. Checked live on X11 with `us,ua`: number-row and
+letter chords fire in either layout. One limit is Qt's, not the recorder's: with
+the Ukrainian layout active, the `.` key matches no `Ctrl+.` shortcut, and the
+`/` key types `.` and so triggers `Ctrl+.`.
+
+GUI extensions register actions through `cms_gui.hotkeys.ActionSpec` and
+`bind_action(host, spec, callback, enabled=...)`, or register an existing
+`QAction` with the owning window's `action_registry`. IDs are stable preference
+keys; categories order the table and scopes describe overlap (`application`,
+`page/<id>`, or `component/<id>`). Initially parentless components join the
+registry when attached to the window. Preferences belonging to unavailable
+plugins are retained. Ordinary widget navigation, text editing, and modal
+dialog acceptance remain managed by their Qt widgets.
 
 ## The pages
 

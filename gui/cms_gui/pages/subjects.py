@@ -217,6 +217,8 @@ class SubjectDetail(QWidget):
             lambda request_id, fingerprint, approved:
             self.acted.emit("approve", (request_id, fingerprint, approved)))
         self.cockpit.node_selected.connect(lambda step_id: self.acted.emit("step", step_id))
+        self.cockpit.artifact_requested.connect(
+            lambda run_dir, path: self.acted.emit("file", {"run_dir": run_dir, "path": path}))
         self.cockpit.question_requested.connect(
             lambda request_id: self.acted.emit("question", request_id))
         cockpit_layout.addWidget(self.cockpit, 1)

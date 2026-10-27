@@ -23,11 +23,12 @@ of two shortcuts that both want it.
 import functools
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QShortcut, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QColor, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QTextEdit,
                                QToolButton)
 
 from . import icons, theme, widgets
+from .hotkeys import ActionSpec, alternate_name, bind_action
 
 #: The most matches lit in a text reader. A long run's log can match a common
 #: word tens of thousands of times; past this the count says so ("2000+").
@@ -357,23 +358,49 @@ def install(host, resolve):
         answer = resolve()
         if answer is not None:
             bar, target = answer
+            tips(bar)
             bar.open(target)
 
     def step(forward):
         answer = resolve()
         if answer is not None:
             bar, target = answer
+            tips(bar)
             if target is not None:
                 bar.step(forward, target)
 
     made = []
-    for keys, slot in ((QKeySequence.StandardKey.Find, find),
-                       (QKeySequence.StandardKey.FindNext, functools.partial(step, True)),
-                       (QKeySequence.StandardKey.FindPrevious,
-                        functools.partial(step, False))):
-        shortcut = QShortcut(host)
-        shortcut.setKeys(QKeySequence.keyBindings(keys))
-        shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        shortcut.activated.connect(slot)
-        made.append(shortcut)
+    groups = {}
+
+    def tips(bar):
+        for key, button, label, fixed in (
+                ("previous", bar.previous, "Previous match", "Shift+Enter"),
+                ("next", bar.next, "Next match", "Enter")):
+            keys = [action.shortcut().toString(QKeySequence.NativeText)
+                    for action in groups.get(key, ()) if not action.shortcut().isEmpty()]
+            button.setToolTip("%s (%s)" % (label, ", ".join([fixed] + keys)))
+
+    def refresh_tips():
+        answer = resolve()
+        if answer is not None:
+            tips(answer[0])
+
+    for key, name, keys, slot in (
+            ("open", "Find in reader", QKeySequence.StandardKey.Find, find),
+            ("next", "Next match", QKeySequence.StandardKey.FindNext, functools.partial(step, True)),
+            ("previous", "Previous match", QKeySequence.StandardKey.FindPrevious,
+             functools.partial(step, False))):
+        groups[key] = []
+        # Qt supplies platform-specific alternatives (for example F3 and
+        # Ctrl+G). Each is its own assignable action: one combination per row.
+        for index, sequence in enumerate(QKeySequence.keyBindings(keys)):
+            suffix = "" if index == 0 else ".alternate_%d" % index
+            action = bind_action(host, ActionSpec(
+                "find." + key + suffix,
+                alternate_name(name, index),
+                "Find text in the active reader.", "Readers",
+                sequence.toString(QKeySequence.PortableText), "component/reader"), slot)
+            action.changed.connect(refresh_tips)
+            groups[key].append(action)
+            made.append(action)
     return made

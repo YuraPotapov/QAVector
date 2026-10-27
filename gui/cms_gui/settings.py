@@ -378,6 +378,29 @@ class Settings:
             return default
         return value if isinstance(value, type(default)) else default
 
+    def hotkey_overrides(self):
+        """Portable key combinations; a present empty value means unassigned.
+
+        Unknown IDs belong to temporarily unavailable plugins and are retained.
+        """
+        return {key: value for key, value in self._json("hotkeys/overrides", {}).items()
+                if isinstance(key, str) and isinstance(value, str)}
+
+    def save_hotkey_overrides(self, overrides):
+        """Commit before changing live keys, restoring the previous cache on error."""
+        key = "hotkeys/overrides"
+        existed = self._qs.contains(key)
+        previous = self._qs.value(key, "", str)
+        self._qs.setValue(key, json.dumps(overrides, sort_keys=True))
+        self._qs.sync()
+        if self._qs.status() != QSettings.NoError:
+            if existed:
+                self._qs.setValue(key, previous)
+            else:
+                self._qs.remove(key)
+            self._qs.sync()
+            raise OSError("Could not save hotkeys. Check that the settings folder is writable.")
+
     def presets(self):
         """Saved command forms: {name: state dict}."""
         raw = self._qs.value("command/presets", "", str)

@@ -1,9 +1,9 @@
 import json
 
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QUrl
 
-from cms_gui import cycleactivity as activity, cyclereplay
+from cms_gui import cycleactivity as activity, cyclereplay, widgets
 from cms_gui.cyclecockpit import ActiveStrip, Cockpit, render
 from cms_gui.runner import RunState
 from cms_gui.settings import Settings
@@ -19,6 +19,43 @@ def state_of():
     for name, started in (("a", 1000), ("b", 1001)):
         state.handle({"kind": "cycle.step.start", "step": name, "started_at": started, "active_elapsed_ms": 0})
     return state
+
+
+def test_approval_key_reassignment_shares_button_availability(qapp, tmp_path, dispose):
+    from PySide6.QtCore import QSettings, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from cms_gui.hotkeys import ActionRegistry
+
+    settings = Settings()
+    settings._qs = QSettings(str(tmp_path / "keys.ini"), QSettings.IniFormat)
+    window = QWidget()
+    window.action_registry = ActionRegistry(settings, window)
+    layout = QVBoxLayout(window)
+    view = Cockpit(window)
+    layout.addWidget(view)
+    answers = []
+    view.approval_answered.connect(lambda *answer: answers.append(answer))
+    registry = window.action_registry
+    registry.apply({"cockpit.approve": "Alt+F8"})
+    window.show()
+    window.activateWindow()
+    view.browser.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(view.browser, Qt.Key_F8, Qt.AltModifier)
+    assert answers == []
+    state = state_of()
+    state.handle({"kind": "cycle.node.approval", "run_id": "r", "receipt": {
+        "id": "approval", "fingerprint": "proof", "step": "a", "status": "pending"}})
+    view.refresh(state.cycle, True)
+    assert "Alt+F8" in view.approval_actions["approval"].approve_button.toolTip()
+    QTest.keyClick(view.browser, Qt.Key_Return)
+    assert answers == []
+    QTest.keyClick(view.browser, Qt.Key_F8, Qt.AltModifier)
+    QTest.keyClick(view.browser, Qt.Key_F8, Qt.AltModifier)
+    assert answers == [("approval", "proof", True)]
+    dispose(window)
 
 
 @pytest.mark.parametrize("ms,expected", [(0, "00:00"), (59999, "00:59"), (3599999, "59:59"),
@@ -77,6 +114,81 @@ def test_cockpit_explains_parallel_work_progress_next_and_unknown_effects(qapp, 
                      "NEXT", "Review", "requires your decision", "Not recorded"):
         assert expected in text
     assert "Testing &lt;claim&gt;" in render(state.cycle, True)
+    dispose(view)
+
+
+@pytest.mark.parametrize("recorded_html,html_exists", [(True, True), (False, True), (True, False)])
+def test_completed_link_opens_html_before_json_and_skips_missing_files(
+        qapp, dispose, tmp_path, recorded_html, html_exists):
+    state = state_of()
+    state.cycle["run_dir"] = str(tmp_path)
+    (tmp_path / "jira.json").write_text('{"issues": []}', encoding="utf-8")
+    if html_exists:
+        (tmp_path / "jira.HTML").write_text("<h1>Tasks</h1>", encoding="utf-8")
+    artifacts = [{"type": "json", "path": "jira.json"}]
+    if recorded_html:
+        artifacts.append({"type": "html", "path": "jira.HTML"})
+    for artifact in artifacts:
+        state.handle(dict(artifact, kind="cycle.artifact", step="a"))
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success",
+                  "outputs": {} if recorded_html else {"html_path": "jira.HTML"}})
+    view = Cockpit()
+    opened, nodes = [], []
+    view.artifact_requested.connect(lambda *args: opened.append(args))
+    view.node_selected.connect(nodes.append)
+    view.refresh(state.cycle)
+    page = render(state.cycle)
+    assert 'href="result:a"' in page and 'href="node:a"' not in page
+    view.browser.anchorClicked.emit(QUrl("result:a"))
+    assert opened == [(str(tmp_path), "jira.HTML" if html_exists else "jira.json")]
+    assert nodes == []
+    view.browser.anchorClicked.emit(QUrl("node:c"))
+    assert nodes == ["c"], "pending steps still open their details"
+    dispose(view)
+
+
+def test_completed_choice_without_files_shows_its_actual_outputs(qapp, dispose, monkeypatch):
+    state = state_of()
+    outputs = {"values": ["QA-123"], "items": [{"key": "QA-123", "summary": "Task <1>"}]}
+    state.handle({"kind": "cycle.step.end", "step": "b", "status": "success",
+                  "message": "chosen: QA-123", "outputs": outputs})
+    shown = []
+    monkeypatch.setattr(widgets, "output", lambda *args, **kwargs: shown.append((args, kwargs)))
+    view = Cockpit()
+    view.refresh(state.cycle)
+    view.browser.anchorClicked.emit(QUrl("result:b"))
+    assert len(shown) == 1
+    args, kwargs = shown[0]
+    assert args[1] == "Step result · Choose task"
+    assert args[2] == "chosen: QA-123"
+    assert json.loads(kwargs["text"]) == outputs
+    assert "Task" in kwargs["text"]
+    dispose(view)
+
+
+def test_result_link_uses_the_displayed_run_and_handles_missing_files(qapp, dispose, monkeypatch, tmp_path):
+    state = state_of()
+    state.cycle["run_dir"] = str(tmp_path)
+    state.handle({"kind": "cycle.artifact", "step": "a", "path": "missing.html"})
+    state.handle({"kind": "cycle.step.end", "step": "a", "status": "success",
+                  "outputs": {"count": 14}})
+    view = Cockpit()
+    view.refresh(state.cycle)
+    shown = []
+    monkeypatch.setattr(widgets, "output", lambda *args, **kwargs: shown.append(kwargs["text"]))
+    view.browser.anchorClicked.emit(QUrl("result:a"))
+    assert json.loads(shown[-1]) == {"count": 14}
+    # The same widget can switch to a different saved run. Its files must follow.
+    (tmp_path / "other.htm").write_text("<p>Other run</p>", encoding="utf-8")
+    other = {"run_id": "other", "run_dir": str(tmp_path), "steps": {
+        "a": {"status": "success", "artifacts": ["other.htm"]}}}
+    opened = []
+    view.artifact_requested.connect(lambda *args: opened.append(args))
+    view.refresh(other)
+    view.browser.anchorClicked.emit(QUrl("result:a"))
+    assert opened == [(str(tmp_path), "other.htm")]
+    view.browser.anchorClicked.emit(QUrl("result:unknown"))
+    assert len(shown) == 1 and len(opened) == 1
     dispose(view)
 
 

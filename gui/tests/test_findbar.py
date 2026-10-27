@@ -67,6 +67,41 @@ def test_ctrl_f_opens_the_bar_ready_to_type(host):
     assert page.bar.isVisible() and page.bar.field.hasFocus()
 
 
+def test_reader_keys_adopt_registry_and_update_without_duplicate_delivery(qapp, tmp_path, dispose):
+    from PySide6.QtCore import QSettings
+
+    from cms_gui.hotkeys import ActionRegistry
+    from cms_gui.settings import Settings
+
+    settings = Settings()
+    settings._qs = QSettings(str(tmp_path / "keys.ini"), QSettings.IniFormat)
+    window = QWidget()
+    window.action_registry = ActionRegistry(settings, window)
+    layout = QVBoxLayout(window)
+    page = Host(_browser())
+    layout.addWidget(page)
+    registry = window.action_registry
+    assert {"find.open", "find.next", "find.previous"} <= set(registry.bindings())
+    registry.apply({"find.open": "Alt+F9", "find.next": "F6"})
+    window.show()
+    window.activateWindow()
+    page.reader.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(page.reader, Qt.Key_F, Qt.ControlModifier)
+    assert not page.bar.isVisible()
+    QTest.keyClick(page.reader, Qt.Key_F9, Qt.AltModifier)
+    assert page.bar.isVisible()
+    QTest.keyClicks(page.bar.field, "order")
+    QTest.keyClick(page.reader, Qt.Key_F6)
+    assert page.bar.count.text() == "2 of 3"
+    assert "F6" in page.bar.next.toolTip() and "F3" not in page.bar.next.toolTip()
+    registry.apply({"find.next": ""})
+    assert "F6" not in page.bar.next.toolTip()
+    QTest.keyClick(page.reader, Qt.Key_F6)
+    assert page.bar.count.text() == "2 of 3"
+    dispose(window)
+
+
 def test_every_match_is_lit_and_counted_whatever_its_case(host):
     page = host(_browser())
     page.bar.open(findbar.target_for(page.reader))

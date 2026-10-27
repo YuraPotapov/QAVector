@@ -17,7 +17,7 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
-                               QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+                               QLineEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
                                QWidget)
 
 from .. import core as core_mod
@@ -25,6 +25,7 @@ from .. import logsourcesfile as lsf
 from .. import cycleprojectsfile as cpf
 from .. import servicesfile as sf
 from .. import theme, widgets
+from ..hotkeyeditor import HotkeyEditor
 
 
 #: The core's own name for the store, repeated rather than imported: the GUI
@@ -56,9 +57,10 @@ def _default_runs_path():
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, registry=None):
         super().__init__(parent)
         self.settings = settings
+        self.hotkey_editor = None
         self.setWindowTitle("Settings")
         self.frame = widgets.dress(self)
         self.setMinimumWidth(620)
@@ -79,7 +81,14 @@ class SettingsDialog(QDialog):
         # Never sideways: a hint is word-wrapped, so a horizontal bar would
         # only ever mean the form had been made too narrow to read.
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(self._scroll, 1)
+        if registry is not None:
+            self.tabs = QTabWidget()
+            self.tabs.addTab(self._scroll, "Settings")
+            self.hotkey_editor = HotkeyEditor(registry)
+            self.tabs.addTab(self.hotkey_editor, "Hotkeys")
+            outer.addWidget(self.tabs, 1)
+        else:
+            outer.addWidget(self._scroll, 1)
         developer = bool(settings.developer_mode)
         column.addWidget(widgets.heading("Settings", "h2"))
         column.addWidget(widgets.lede(
@@ -231,10 +240,20 @@ class SettingsDialog(QDialog):
         bottom.addWidget(widgets.row(test, None))
         bottom.addWidget(self.result)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel
+                                  | (QDialogButtonBox.Apply if registry is not None
+                                     else QDialogButtonBox.NoButton))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         buttons.button(QDialogButtonBox.Save).setProperty("variant", "primary")
+        if self.hotkey_editor is not None:
+            self.hotkey_apply_button = buttons.button(QDialogButtonBox.Apply)
+            self.hotkey_apply_button.setText("Apply")
+            self.hotkey_apply_button.setToolTip("Apply hotkeys without closing settings")
+            self.hotkey_apply_button.clicked.connect(self.hotkey_editor.apply)
+            self.hotkey_editor.changed.connect(
+                lambda: self.hotkey_apply_button.setEnabled(self.hotkey_editor.dirty))
+            self.hotkey_apply_button.setEnabled(False)
         bottom.addWidget(buttons)
         outer.addWidget(footer)
         self._fit()
@@ -252,6 +271,18 @@ class SettingsDialog(QDialog):
         available = screen.availableGeometry().height() if screen else 900
         wanted = self._body.sizeHint().height() + FOOTER_HEIGHT
         self.resize(max(620, self.width()), min(wanted, int(available * 0.9)))
+
+    def accept(self):
+        if self.hotkey_editor is not None and not self.hotkey_editor.apply():
+            return
+        super().accept()
+
+    def done(self, result):
+        if self.hotkey_editor is not None:
+            self.hotkey_editor.cancel_capture()
+            if result != QDialog.Accepted:
+                self.hotkey_editor.discard()
+        super().done(result)
 
     def showEvent(self, event):
         """Take back whatever the form did not need, once it has real geometry.
@@ -392,6 +423,8 @@ class SettingsDialog(QDialog):
                              cycles_dir=self.cycles.text().strip())
 
     def apply(self):
+        if self.hotkey_editor is not None and not self.hotkey_editor.apply():
+            return False
         self.settings.cycle_inactivity_seconds = self.cycle_inactivity.value()
         self.settings.config = self.config.text().strip()
         self.settings.services_path = self.services.text().strip()
@@ -402,3 +435,4 @@ class SettingsDialog(QDialog):
         self.settings.log_sources_path = self.log_sources.text().strip()
         self.settings.flows_path = self.flows.text().strip()
         self.settings.cycles_path = self.cycles.text().strip()
+        return True

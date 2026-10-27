@@ -33,6 +33,7 @@ from .cyclecockpit import ActiveStrip
 from .cyclewatch import Listener
 from .cycleschedule import PlanScheduler
 from .loader import LoaderThread
+from .hotkeys import ActionRegistry, ActionSpec, bind_tooltip
 from . import version as gui_version
 from .runner import LauncherProcess, RunState
 from .servicebridge import ServiceBridge
@@ -173,6 +174,7 @@ class MainWindow(QMainWindow):
         self.resize(1380, 880)
 
         self.settings = Settings()
+        self.action_registry = ActionRegistry(self.settings, self)
         self.core = core_mod.Core(None, None, self.settings.config, flows_dir=self.settings.flows_path,
                                   cycles_dir=self.settings.cycles_path,
                                   secrets_path=self.settings.cycle_secrets_path,
@@ -204,6 +206,8 @@ class MainWindow(QMainWindow):
         self._chrome_warned = False
         self._build_menu()
         self._build_ui()
+        self.command.state_changed.connect(self._update_background_action)
+        self.launch.state_changed.connect(self._update_background_action)
         self._connect_process()
         # The desktop's title bar, replaced by one in the design. Nothing under
         # it is rebuilt - see titlebar.py, which also says how to keep the
@@ -285,6 +289,10 @@ class MainWindow(QMainWindow):
         self.search_action.setShortcutContext(Qt.ApplicationShortcut)
         self.search_action.triggered.connect(self.open_search)
         self.addAction(self.search_action)
+        self._register_action(self.search_action, "application.search", "Search",
+                              "Search records across the application.", "Application")
+        self.action_registry.changed.connect(self._refresh_hotkey_hints)
+        self._refresh_hotkey_hints()
         # Planned entries somebody asked to start later. Started when their
         # time comes - after the run going on then, if there is one.
         self.scheduler = PlanScheduler(self)
@@ -309,6 +317,16 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(SPLASH_MAX_MS, self._finish_splash)
 
     # -- construction ---------------------------------------------------------
+    def _register_action(self, action, action_id, name, description, category,
+                         scope="application"):
+        """The same QAction serves its menu, buttons and configured shortcut."""
+        if scope == "application" and action.shortcutContext() != Qt.ApplicationShortcut:
+            scope = "component/main_window"
+        self.action_registry.register(ActionSpec(
+            action_id, name, description, category,
+            action.shortcut().toString(QKeySequence.PortableText), scope), action)
+        return action
+
     def _build_menu(self):
         menu = self.menuBar()
 
@@ -316,29 +334,44 @@ class MainWindow(QMainWindow):
         reload_action = QAction("&Reload users.json", self)
         reload_action.setShortcut(QKeySequence("Ctrl+R"))
         reload_action.triggered.connect(lambda: self.credentials.load(self.core.config_path))
+        self.reload_users_action = self._register_action(
+            reload_action, "credentials.reload", "Reload users.json",
+            "Reload the credentials file.", "Credentials", "page/credentials")
         file_menu.addAction(reload_action)
         save_action = QAction("&Save users.json", self)
         save_action.setShortcut(QKeySequence.Save)
-        save_action.triggered.connect(lambda: self.credentials.save())
+        save_action.triggered.connect(lambda: self.credentials.save_button.click())
+        self.save_users_action = self._register_action(
+            save_action, "credentials.save", "Save users.json",
+            "Save the credentials file.", "Credentials", "page/credentials")
         file_menu.addAction(save_action)
         file_menu.addSeparator()
         settings_action = QAction("Se&ttings…", self)
         settings_action.triggered.connect(self.open_settings)
+        self.settings_action = self._register_action(
+            settings_action, "application.settings", "Settings",
+            "Open application settings.", "Application")
         file_menu.addAction(settings_action)
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
+        self._register_action(quit_action, "application.quit", "Quit",
+                              "Close QAVector.", "Application")
         file_menu.addAction(quit_action)
 
         run_menu = menu.addMenu("&Run")
         self.run_action = QAction("&Run command", self)
         self.run_action.setShortcut(QKeySequence("Ctrl+Return"))
         self.run_action.triggered.connect(self.start_run)
+        self._register_action(self.run_action, "run.start", "Run command",
+                              "Start the current launch configuration.", "Run")
         run_menu.addAction(self.run_action)
         self.stop_action = QAction("&Stop", self)
         self.stop_action.setShortcut(QKeySequence("Ctrl+."))
         self.stop_action.triggered.connect(self.stop_run)
         self.stop_action.setEnabled(False)
+        self._register_action(self.stop_action, "run.stop", "Stop",
+                              "Stop the running launch or cycle.", "Run")
         run_menu.addAction(self.stop_action)
         run_menu.addSeparator()
         # From any window of the application, not only this one: somebody
@@ -349,6 +382,8 @@ class MainWindow(QMainWindow):
         self.clarify_action.setShortcut(QKeySequence(cycleinteractions.SHORTCUT))
         self.clarify_action.setShortcutContext(Qt.ApplicationShortcut)
         self.clarify_action.triggered.connect(self.open_clarify)
+        self._register_action(self.clarify_action, "cycle.clarify", "Clarify the running cycle",
+                              "Send a clarification to the running cycle.", "Run")
         run_menu.addAction(self.clarify_action)
         self._clarify = None
 
@@ -357,17 +392,23 @@ class MainWindow(QMainWindow):
         self.developer_action.setCheckable(True)
         self.developer_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
         self.developer_action.toggled.connect(self.set_developer_mode)
+        self._register_action(self.developer_action, "view.developer_mode", "Developer mode",
+                              "Show developer tools and the Command page.", "View")
         view_menu.addAction(self.developer_action)
         
         self.always_on_top_action = QAction("Always on Top", self)
         self.always_on_top_action.setCheckable(True)
         self.always_on_top_action.toggled.connect(self.set_always_on_top)
+        self._register_action(self.always_on_top_action, "view.always_on_top", "Always on Top",
+                              "Keep QAVector above other windows.", "View")
         view_menu.addAction(self.always_on_top_action)
         
         self.dark_mode_action = QAction("&Dark mode", self)
         self.dark_mode_action.setCheckable(True)
         self.dark_mode_action.setChecked(self.settings.dark_mode)
         self.dark_mode_action.toggled.connect(self.set_dark_mode)
+        self._register_action(self.dark_mode_action, "view.dark_mode", "Dark mode",
+                              "Switch the application colour theme.", "View")
         view_menu.addAction(self.dark_mode_action)
 
         view_menu.addSeparator()
@@ -376,6 +417,8 @@ class MainWindow(QMainWindow):
         self.stages_window_action = QAction("Stages in a separate &window", self)
         self.stages_window_action.setCheckable(True)
         self.stages_window_action.toggled.connect(self.set_stages_detached)
+        self._register_action(self.stages_window_action, "view.stages_window", "Stages in a separate window",
+                              "Detach or dock the Stages panel.", "View")
         view_menu.addAction(self.stages_window_action)
         # From any window of the application, the detached Stages included: a
         # person reading a log or another page and wanting the run's account
@@ -384,6 +427,8 @@ class MainWindow(QMainWindow):
         self.go_stages_action.setShortcut(QKeySequence(stageswindow.SHORTCUT))
         self.go_stages_action.setShortcutContext(Qt.ApplicationShortcut)
         self.go_stages_action.triggered.connect(self.go_to_stages)
+        self._register_action(self.go_stages_action, "view.go_to_stages", "Go to Stages",
+                              "Bring the cycle's Stages panel forward.", "View")
         view_menu.addAction(self.go_stages_action)
         self._stages_restored = False
 
@@ -392,6 +437,8 @@ class MainWindow(QMainWindow):
         self.collapse_action.setCheckable(True)
         self.collapse_action.setShortcut(QKeySequence("Ctrl+B"))
         self.collapse_action.toggled.connect(self.set_sidebar_collapsed)
+        self._register_action(self.collapse_action, "view.collapse_sidebar", "Collapse sidebar",
+                              "Collapse or expand the navigation sidebar.", "View")
         view_menu.addAction(self.collapse_action)
 
         # One entry per nav item, so a rail can be cut down to the pages this
@@ -412,12 +459,18 @@ class MainWindow(QMainWindow):
                 lambda on, k=key: self.set_nav_item_visible(k, on))
             items_menu.addAction(action)
             self._nav_actions[key] = action
+            self._register_action(action, "view.sidebar." + key,
+                                  "Show sidebar item: " + label,
+                                  "Show or hide this page in the sidebar.", "View")
 
         tools_menu = menu.addMenu("&Tools")
         refresh_action = QAction(self)
         refresh_action.setShortcut(QKeySequence("F5"))
         refresh_action.triggered.connect(self.refresh_inventory)
         self.wording.text(refresh_action, "Refresh", "Refresh --describe")
+        self.refresh_action = self._register_action(
+            refresh_action, "application.refresh", "Refresh",
+            "Reload the inventory from the core.", "Application")
         tools_menu.addAction(refresh_action)
         tools_menu.addSeparator()
         for plain, spelled_out, args in commands.ONE_SHOTS:
@@ -427,17 +480,23 @@ class MainWindow(QMainWindow):
             action.triggered.connect(
                 lambda _c=False, a=args, act=action: self.one_shot(act.text(), a))
             self.wording.text(action, plain, spelled_out)
+            self._register_action(action, "tools." + args[0].lstrip("-").replace("=", "."),
+                                  plain, "Run " + " ".join(args) + ".", "Tools")
             tools_menu.addAction(action)
         tools_menu.addSeparator()
         init_action = QAction("Create a starter users.json", self)
         init_action.triggered.connect(
             lambda: self.one_shot("Create a starter users.json",
                                   ["--init-users-json"]))
+        self._register_action(init_action, "tools.init_users", "Create a starter users.json",
+                              "Create an initial credentials file.", "Tools")
         tools_menu.addAction(init_action)
 
         help_menu = menu.addMenu("&Help")
         about_action = QAction("About", self)
         about_action.triggered.connect(self.about)
+        self._register_action(about_action, "application.about", "About",
+                              "Show version and third-party licences.", "Application")
         help_menu.addAction(about_action)
 
     def _build_ui(self):
@@ -461,7 +520,8 @@ class MainWindow(QMainWindow):
         self.run_button.setPopupMode(QToolButton.MenuButtonPopup)
         self.run_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.run_button.setProperty("hasmenu", "true")   # reserves the arrow's half
-        self.run_button.clicked.connect(self.start_run)
+        self.run_button.clicked.connect(self.run_action.trigger)
+        bind_tooltip(self.run_action, self.run_button, "Run the current launch configuration")
         self.run_menu = QMenu(self.run_button)
         # The tooltips carry the reason an entry is greyed out, and a menu keeps
         # its tooltips to itself unless told otherwise.
@@ -471,6 +531,8 @@ class MainWindow(QMainWindow):
         # at that moment - see _update_background_action.
         self.background_action = QAction("In Background", self)
         self.background_action.triggered.connect(self.start_background_run)
+        self._register_action(self.background_action, "run.background", "Run in Background",
+                              "Run service scenarios without a browser.", "Run")
         self.run_menu.addAction(self.background_action)
         # Whether recording continues a scenario or starts a new one follows from
         # what is selected, and is confirmed rather than guessed.
@@ -479,6 +541,8 @@ class MainWindow(QMainWindow):
             "Open the windows with the Scenario Recorder shown in each of them. "
             "Continues the selected scenario if there is one.")
         self.record_action.triggered.connect(self.start_recording)
+        self._register_action(self.record_action, "run.record", "Run with Recorder",
+                              "Launch sessions with the scenario recorder.", "Run")
         self.run_menu.addAction(self.record_action)
         # The same launch again, on profiles emptied first. Always offered: any
         # run that opens windows can start from empty ones.
@@ -488,6 +552,8 @@ class MainWindow(QMainWindow):
             "cleared first; each account signs in from scratch. The profile "
             "folders and their extensions stay.")
         self.empty_action.triggered.connect(self.start_empty_run)
+        self._register_action(self.empty_action, "run.empty_sessions", "Run Empty Sessions",
+                              "Launch sessions after clearing their browser state.", "Run")
         self.run_menu.addAction(self.empty_action)
         self.run_menu.aboutToShow.connect(self._update_background_action)
         self.run_button.setMenu(self.run_menu)
@@ -501,14 +567,16 @@ class MainWindow(QMainWindow):
         self.stop_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.stop_button.setProperty("hasmenu", "true")
         self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_run)
+        self.stop_button.clicked.connect(self.stop_action.trigger)
+        bind_tooltip(self.stop_action, self.stop_button, "Stop the current run")
         self.stop_menu = QMenu(self.stop_button)
         # Filled from the live run: which windows exist is not knowable until one
         # is running, and stale entries would offer to stop what is already gone.
         self.stop_menu.aboutToShow.connect(self._fill_stop_menu)
         self.stop_button.setMenu(self.stop_menu)
         self.refresh_button = icons.button(QPushButton("Refresh"), "refresh")
-        self.refresh_button.clicked.connect(self.refresh_inventory)
+        self.refresh_button.clicked.connect(self.refresh_action.trigger)
+        bind_tooltip(self.refresh_action, self.refresh_button, "Refresh the inventory")
         self.describe_label = widgets.mono("")
         # Out of sight: which level the window is at is not something an everyday
         # user needs to read or flip, and the mode is still one keystroke away -
@@ -520,7 +588,8 @@ class MainWindow(QMainWindow):
         self.developer_button.toggled.connect(self.set_developer_mode)
         self.developer_button.setVisible(False)
         settings_button = icons.button(QPushButton("Settings"), "settings")
-        settings_button.clicked.connect(self.open_settings)
+        settings_button.clicked.connect(self.settings_action.trigger)
+        bind_tooltip(self.settings_action, settings_button, "Open settings")
         bar_layout.addWidget(widgets.row(
             self.run_button, self.stop_button, widgets.vline(),
             self.refresh_button, None, self.describe_label, widgets.vline(),
@@ -562,8 +631,7 @@ class MainWindow(QMainWindow):
         self.collapse_button = QToolButton()
         self.collapse_button.setProperty("variant", "railhandle")
         self.collapse_button.setCursor(Qt.PointingHandCursor)
-        self.collapse_button.clicked.connect(
-            lambda: self.set_sidebar_collapsed(not self.settings.sidebar_collapsed))
+        self.collapse_button.clicked.connect(self.collapse_action.trigger)
         handle_row.addWidget(self.collapse_button)
         rail_layout.addLayout(handle_row)
 
@@ -659,6 +727,24 @@ class MainWindow(QMainWindow):
                        "subjects": self.subjects_page}
         for page in self._pages.values():
             self.stack.addWidget(page)
+        # Credentials and cycle documents may both use Save, in their own page.
+        # The menu keeps the same action and handler as its page's controls.
+        for action in (self.reload_users_action, self.save_users_action):
+            action.setParent(self.credentials)
+            action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            self.credentials.addAction(action)
+        bind_tooltip(self.reload_users_action, self.credentials.reload_button, "Reload users.json")
+        bind_tooltip(self.save_users_action, self.credentials.save_button, "Save users.json")
+        self._page_actions = {}
+        for key, label, _mark in CONFIGURE + OBSERVE:
+            action = QAction("Go to " + label, self)
+            action.triggered.connect(lambda _checked=False, k=key: self.show_page(k))
+            self.addAction(action)
+            self._register_action(action, "navigate." + key, "Go to " + label,
+                                  "Open the " + label + " page.", "Navigation")
+            self._page_actions[key] = action
+            self._nav_buttons[key].clicked.disconnect()
+            self._nav_buttons[key].clicked.connect(action.trigger)
         inner.addWidget(self.stack, 1)
         body_row.addLayout(inner)
         column.addWidget(body, 1)
@@ -757,6 +843,13 @@ class MainWindow(QMainWindow):
         if page is None:
             key, page = "launch", self.launch
         self.stack.setCurrentWidget(page)
+        # A page's own keys - Save and Reload users.json, a cycle's Save and
+        # Undo, Find - work where the focus is, and the rail does not take it.
+        # Left on the toolbar, or nowhere after a dialog closed, it kept them
+        # from the page on show until somebody clicked into it.
+        focused = QApplication.focusWidget()
+        if focused is None or not (focused is page or page.isAncestorOf(focused)):
+            page.setFocus(Qt.OtherFocusReason)
         for name, button in self._nav_buttons.items():
             button.setProperty("active", "true" if name == key else "false")
             button.style().unpolish(button)
@@ -824,6 +917,8 @@ class MainWindow(QMainWindow):
         collapsed = self.settings.sidebar_collapsed
         for key, button in self._nav_buttons.items():
             button.setVisible(self._offered(key, hidden))
+            if key in getattr(self, "_page_actions", {}):
+                self._page_actions[key].setEnabled(self._offered(key, hidden))
         for heading, keys in self._nav_headings:
             heading.setVisible(not collapsed
                                and any(self._offered(k, hidden) for k in keys))
@@ -851,8 +946,7 @@ class MainWindow(QMainWindow):
             button.set_compact(collapsed)
             button.setToolTip(self._nav_tooltip(key))
         icons.button(self.collapse_button, "expand" if collapsed else "collapse")
-        self.collapse_button.setToolTip("Expand the sidebar" if collapsed
-                                        else "Collapse the sidebar")
+        self._refresh_hotkey_hints()
         self._apply_nav_visibility()          # the headings follow the state
 
         if collapsed:
@@ -1009,6 +1103,7 @@ class MainWindow(QMainWindow):
             self.run_button.setText(_run_label("RUN COMMAND"))
         else:
             self.run_button.setText(_run_label("RUN"))
+        self._update_background_action()
 
     def _run_page(self, source=None):
         source = source or self._run_source
@@ -1450,7 +1545,7 @@ class MainWindow(QMainWindow):
         widgets.warn(self, "Google Chrome is required", problem)
 
     def open_settings(self):
-        dialog = SettingsDialog(self.settings, self)
+        dialog = SettingsDialog(self.settings, self, registry=self.action_registry)
         dialog.set_paths(*self.services.paths())
         dialog.set_flows_dir(self.inventory.dirs().get("flows") or "")
         if dialog.exec() == QDialog.Accepted:
@@ -1658,6 +1753,8 @@ class MainWindow(QMainWindow):
         show the recorder, and that nothing is run afterwards - the launcher
         stays up for as long as you are recording.
         """
+        if self.process.is_running():
+            return
         login = self.ask_recording_account()
         if login == "cancel":
             return
@@ -1691,14 +1788,17 @@ class MainWindow(QMainWindow):
     def _update_background_action(self):
         """Offer In Background only for what can run with no browser, and say why not.
 
-        Asked as the menu opens rather than kept in step with every edit: it is
-        only read then, and what RUN would run depends on which page is current at
-        that moment. Returns the blockers, empty when there are none.
+        Updated as the launch configuration changes and as the menu opens,
+        so a configured hotkey has the same availability as the menu entry.
+        Returns the blockers, empty when there are none.
         """
         _source, page = self._run_page(None)
         blockers = page.background_blockers()
-        self.background_action.setEnabled(not blockers)
+        self.background_action.setEnabled(not blockers and self.run_action.isEnabled())
         self.background_action.setToolTip(_background_tip(blockers))
+        shortcut = self.background_action.shortcut().toString(QKeySequence.NativeText)
+        if shortcut:
+            self.background_action.setToolTip(_background_tip(blockers) + "\n" + shortcut)
         return blockers
 
     def start_background_run(self):
@@ -1709,7 +1809,7 @@ class MainWindow(QMainWindow):
         trusted from when the menu opened, so a stale menu cannot start a run the
         launcher would refuse.
         """
-        if self._update_background_action():
+        if self.process.is_running() or self._update_background_action():
             return
         self.start_run(background=True)
 
@@ -1850,9 +1950,23 @@ class MainWindow(QMainWindow):
         if self._search is None:
             self._search = search.SearchPopup(
                 self.search_hits,
-                [(key, label) for key, label, _mark in CONFIGURE + OBSERVE], self)
+                [(key, label) for key, label, _mark in CONFIGURE + OBSERVE], self,
+                documents=self.search_documents)
             self._search.opened.connect(self.open_hit)
         self._search.open_over(QApplication.activeWindow() or self)
+
+    def search_documents(self):
+        """``(page key, folders)`` for every page whose files Search reads."""
+        found = []
+        for key, _label, _mark in CONFIGURE + OBSERVE:
+            folders = getattr(self._pages.get(key), "search_documents", None)
+            if folders is None or not self._offered(key):
+                continue
+            try:
+                found.append((key, folders()))
+            except Exception:           # noqa: BLE001 - one page must not end search
+                logging.exception("Search could not read the %s page's folders", key)
+        return found
 
     def search_hits(self):
         """What every page on the rail lists, filed under that page."""
@@ -2170,6 +2284,9 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(running)
         self.run_action.setEnabled(not running)
         self.stop_action.setEnabled(running)
+        self.record_action.setEnabled(not running)
+        self.empty_action.setEnabled(not running)
+        self._update_background_action()
         self.command.set_running(running)
         self.launch.set_running(running)
         self.status_state.setText("state: running" if running else "state: idle")
@@ -2448,10 +2565,21 @@ class MainWindow(QMainWindow):
         """
         button = self._nav_buttons.get(key)
         counts = button.summary() if button is not None else ""
-        if not self.settings.sidebar_collapsed:
-            return counts
-        label = self._nav_labels.get(key, "")
-        return "%s\n%s" % (label, counts) if counts else label
+        label = self._nav_labels.get(key, "") if self.settings.sidebar_collapsed else ""
+        action = getattr(self, "_page_actions", {}).get(key)
+        shortcut = action.shortcut().toString(QKeySequence.NativeText) if action else ""
+        return "\n".join(filter(None, (label, counts, shortcut)))
+
+    def _refresh_hotkey_hints(self):
+        """Dynamic hints keep their live counts as shortcuts are changed."""
+        for key, button in self._nav_buttons.items():
+            button.setToolTip(self._nav_tooltip(key))
+        hint = ("Expand the sidebar" if self.settings.sidebar_collapsed
+                else "Collapse the sidebar")
+        shortcut = self.collapse_action.shortcut().toString(QKeySequence.NativeText)
+        self.collapse_button.setToolTip("%s (%s)" % (hint, shortcut) if shortcut else hint)
+        self.cycles.output.set_stages_shortcut(self.go_stages_action.shortcut())
+        self._update_background_action()
 
     def closeEvent(self, event):
         if self.process.is_running():

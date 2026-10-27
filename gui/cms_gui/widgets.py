@@ -57,6 +57,30 @@ class BlueprintPanel(QFrame):
         return self._layout
 
 
+class FloatingPanel(QFrame):
+    """A frame over a window, typed into, that leaves the keyboard to the desktop.
+
+    Search and the clarify popup used to be Qt.Popup windows. On X11 a popup
+    grabs the keyboard for as long as it is open, so every key went to it -
+    the desktop's own ones too: Super+Space never reached GNOME, and the
+    keyboard layout could not be switched while typing in it.
+
+    This is a frameless tool window instead, which takes focus the ordinary way.
+    It goes on Esc (the subclass's) or when another window of the application
+    takes focus - a click on the window under it, as with the popup. Focus
+    leaving for the desktop - a layout switcher, another program - keeps it
+    open: what was being typed is not done.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+        QApplication.instance().focusWindowChanged.connect(self._focus_moved)
+
+    def _focus_moved(self, window):
+        if window is not None and self.isVisible() and window is not self.windowHandle():
+            self.hide()
+
+
 class Tag(QLabel):
     """Small status pill: accent (good), outline (in flight), neutral, bad."""
 

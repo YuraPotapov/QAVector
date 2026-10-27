@@ -35,12 +35,12 @@ import contextlib
 import math
 import re
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QPainter,
                            QPainterPath, QPainterPathStroker, QPen, QPolygonF)
 from PySide6.QtWidgets import (QApplication, QGraphicsItem, QGraphicsObject,
                                QGraphicsPathItem, QGraphicsPolygonItem,
-                               QGraphicsScene, QGraphicsView, QToolTip)
+                               QGraphicsScene, QGraphicsView, QLabel, QToolTip)
 
 from . import icons, theme, widgets
 
@@ -142,7 +142,7 @@ STATUS_LOOK = {
 
 #: What a status is called on a node. Short: the node is 208px wide.
 #: Room on a node's plugin line for Network, Files and Limits (or SYSTEM).
-RESTRICTION_WIDTH = 76
+RESTRICTION_WIDTH = 64
 
 STATUS_WORD = {
     "success": "passed", "failed": "failed", "timeout": "timed out",
@@ -766,15 +766,27 @@ class CycleNodeItem(QGraphicsObject):
 
     def hoverEnterEvent(self, event):
         self._hover = True
+        self.setToolTip(self._tooltip_at(event.pos()))
         self.update()
         QGraphicsObject.hoverEnterEvent(self, event)
 
+    def _tooltip_at(self, point):
+        port = self.port_at(point)
+        if port:
+            return PORT_TIP[port]
+        kind = self.restriction_at(point)
+        if kind:
+            return self.restriction_tip(kind)
+        return self._tooltip()
+
+    def restriction_tip(self, kind):
+        if kind == "limits":
+            return self.restriction.get("limits") or "No limits"
+        return self.restriction[kind][0]
+
     def hoverMoveEvent(self, event):
-        # The dots say what dragging them does; the rest of the step says what
-        # the step is. One tooltip per item, so it is swapped as the pointer
-        # moves between them.
-        port = self.port_at(event.pos())
-        tip = (PORT_TIP[port] if port else self._tooltip())
+        # One tooltip per item, updated for the indicator or port under it.
+        tip = self._tooltip_at(event.pos())
         if tip != self.toolTip():
             self.setToolTip(tip)
         QGraphicsObject.hoverMoveEvent(self, event)
@@ -1017,7 +1029,7 @@ class CycleNodeItem(QGraphicsObject):
         """Where one indicator sits: right of the plugin line, in a fixed order."""
         spec, text = self._spec["node"], self._spec["text"]
         left = spec["w"] - spec["pad_x"] - RESTRICTION_WIDTH
-        offsets = {"network": (0, 20), "files": (22, 32), "limits": (56, 20), "system": (0, RESTRICTION_WIDTH)}
+        offsets = {"network": (0, 20), "files": (22, 20), "limits": (44, 20), "system": (0, RESTRICTION_WIDTH)}
         start, width = offsets[kind]
         return QRectF(left + start, spec["pad_y"] + text["title"] + 5, width, 20)
 
@@ -1030,10 +1042,10 @@ class CycleNodeItem(QGraphicsObject):
     def _paint_restriction(self, painter):
         """Network, Files and Limits as they are now; a tag on a system step.
 
-        State is a mark and a word, never a colour alone: a slashed globe for
-        no network, the folder's access in letters, the gauge drawn in the
-        accent only when there is a limit to read. A change not saved yet is
-        underlined, on that indicator only.
+        A slashed globe or folder marks disabled access; the short access mode
+        is in the tooltip. The gauge is drawn in the accent only when there is
+        a limit to read. A change not saved yet is underlined, on that indicator
+        only.
         """
         state = self.restriction
         font = QFont(theme.FONT_BODY[0])
@@ -1057,10 +1069,8 @@ class CycleNodeItem(QGraphicsObject):
         shown, mode = state["files"]
         rect = self.restriction_rect("files")
         colour = ink("WARN" if mode == "off" else "NEUTRAL500" if mode == "locked" else "NEUTRAL700")
-        icons.paint(painter, "folder-off" if shown == "Off" else "folder", QRectF(rect.left() + 1, rect.top() + 3, 14, 14), colour)
-        painter.setPen(QPen(QColor(colour)))
-        painter.drawText(QRectF(rect.left() + 16, rect.top(), rect.width() - 16, rect.height()),
-                         Qt.AlignLeft | Qt.AlignVCenter, shown if shown != "All" else "")
+        icons.paint(painter, "folder-off" if shown == "Off" else "folder",
+                    rect.adjusted(2, 2, -2, -2), colour)
         rect = self.restriction_rect("limits")
         icons.paint(painter, "limits", rect.adjusted(2, 2, -2, -2),
                     ink("ACCENT" if state.get("limits") else "NEUTRAL500"))
@@ -1688,6 +1698,40 @@ def _rule(painter, rect, canvas, colour, major_colour):
                                  QPointF(at, rect.bottom()))
 
 
+class _RestrictionTip(QLabel):
+    """A tooltip placed against an icon rather than against the pointer."""
+
+    def __init__(self, parent):
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setObjectName("restrictionTooltip")
+        self.setTextFormat(Qt.PlainText)
+        self.setFont(QToolTip.font())
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.target = None
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide)
+
+    def show_at(self, text, top, bottom, target):
+        self.setStyleSheet("QLabel {background:%s; color:%s; border:1px solid %s; padding:4px 7px;}" % (
+            theme.NEUTRAL[800], theme.NEUTRAL[100], theme.NEUTRAL[900]))
+        self.setText(text)
+        self.adjustSize()
+        x = top.x() - self.width() // 2
+        y = top.y() - self.height() - 6
+        screen = QApplication.screenAt(top) or self.parentWidget().screen()
+        bounds = screen.availableGeometry()
+        if y < bounds.top():
+            y = bottom.y() + 6
+        x = max(bounds.left(), min(x, bounds.right() - self.width() + 1))
+        y = max(bounds.top(), min(y, bounds.bottom() - self.height() + 1))
+        self.move(x, y)
+        self.target = target
+        self.show()
+        self.timer.start(10000)
+
+
 # -- the canvas ---------------------------------------------------------------
 class CycleCanvas(QGraphicsView):
     """The whole cycle at once: every node, every connection, live status.
@@ -1734,6 +1778,7 @@ class CycleCanvas(QGraphicsView):
 
     def __init__(self, parent=None, spec=None):
         QGraphicsView.__init__(self, parent)
+        self._restriction_tip = None
         self._spec = spec or SPEC
         self._nodes = {}
         self._edges = []
@@ -1851,6 +1896,7 @@ class CycleCanvas(QGraphicsView):
         # this method would expect.
         self._nodes, self._edges, self._frames = {}, [], {}
         self._link = None                 # its line goes with the scene
+        self._hide_restriction_tip()
         self.scene().clear()
         self._graph = graph or None
         self._fitted = False
@@ -2090,6 +2136,8 @@ class CycleCanvas(QGraphicsView):
         Kept here as well as on the items, because folding rebuilds the items
         and the indicators must survive somebody tidying the view.
         """
+        if states != self._restrictions:
+            self._hide_restriction_tip()
         self._restrictions = dict(states or {})
         for step_id, item in self._nodes.items():
             item.restriction = self._restrictions.get(step_id)
@@ -2443,6 +2491,7 @@ class CycleCanvas(QGraphicsView):
         the event loop later, after the flag has been put down, which is why a
         view identical to the one just placed is not a gesture either.
         """
+        self._hide_restriction_tip()
         if self._placing or _same_view(self.view(), self._placed):
             return
         self._touched = True
@@ -2597,6 +2646,7 @@ class CycleCanvas(QGraphicsView):
         still be zoomed back in, which a fixed minimum would have prevented
         entirely.
         """
+        self._hide_restriction_tip()
         current = self.transform().m11() or 1.0
         scale = current * by
         if self._floor <= scale <= self._spec["zoom"]["max"]:
@@ -2811,6 +2861,44 @@ class CycleCanvas(QGraphicsView):
             self.link_moved.emit(*(link["replacing"] + tuple(ends)))
 
     # -- input ----------------------------------------------------------------
+    def _hide_restriction_tip(self):
+        tip = getattr(self, "_restriction_tip", None)
+        if tip is not None:
+            tip.hide()
+
+    def viewportEvent(self, event):
+        kind = ""
+        item = None
+        if event.type() in (QEvent.ToolTip, QEvent.MouseMove):
+            point = event.position().toPoint() if event.type() == QEvent.MouseMove else event.pos()
+            item = self.itemAt(point)
+            if isinstance(item, CycleNodeItem):
+                kind = item.restriction_at(item.mapFromScene(self.mapToScene(point)))
+        tip = getattr(self, "_restriction_tip", None)
+        if event.type() == QEvent.ToolTip and kind:
+            QToolTip.hideText()
+            if tip is None:
+                tip = self._restriction_tip = _RestrictionTip(self.viewport())
+            rect = item.restriction_rect(kind)
+            top = self.viewport().mapToGlobal(self.mapFromScene(item.mapToScene(
+                QPointF(rect.center().x(), rect.top()))))
+            bottom = self.viewport().mapToGlobal(self.mapFromScene(item.mapToScene(
+                QPointF(rect.center().x(), rect.bottom()))))
+            tip.show_at(item.restriction_tip(kind), top, bottom, (item.step_id, kind))
+            event.accept()
+            return True
+        if tip is not None:
+            if event.type() in (QEvent.Leave, QEvent.Hide, QEvent.MouseButtonPress, QEvent.Wheel):
+                tip.hide()
+            elif event.type() in (QEvent.ToolTip, QEvent.MouseMove):
+                if not kind or tip.target != (item.step_id, kind):
+                    tip.hide()
+        return QGraphicsView.viewportEvent(self, event)
+
+    def hideEvent(self, event):
+        self._hide_restriction_tip()
+        QGraphicsView.hideEvent(self, event)
+
     def resizeEvent(self, event):
         """Keep the graph placed while nobody has taken control of the view.
 
@@ -2821,6 +2909,7 @@ class CycleCanvas(QGraphicsView):
         a cycle opens rather than fitting it, which is why the same cycle no
         longer looks different in a tall window and a short one.
         """
+        self._hide_restriction_tip()
         QGraphicsView.resizeEvent(self, event)
         # How far the canvas can be dragged is measured from the viewport, so
         # it is recomputed whenever the viewport changes size.

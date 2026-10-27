@@ -1,26 +1,50 @@
 """The run's operational view, with native approval controls."""
 
 import html
+import json
 import math
+import os
 import time
 from collections import Counter
 from urllib.parse import quote, unquote
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QApplication, QFrame, QProgressBar, QPushButton, QScrollArea,
                                QSizePolicy, QTextBrowser, QVBoxLayout, QWidget)
 
 from . import cycleactivity as activity, cycleapproval, cycleresult, theme, widgets
+from .hotkeys import ActionSpec, bind_action
 
 
 def _text(value):
     return html.escape(str(value or ""))
 
 
-def _link(cycle, name, plugins):
+def _link(cycle, name, plugins, target="node"):
     node = next((one for one in (cycle.get("graph") or {}).get("nodes", []) if one.get("id") == name), {})
-    return '<a href="node:%s">%s%s</a>' % (quote(name, safe=""), "! " if node.get("important") else "", _text(activity.label(cycle, name, plugins)))
+    return '<a href="%s:%s"%s>%s%s</a>' % (
+        target, quote(name, safe=""), ' title="Open step result"' if target == "result" else "",
+        "! " if node.get("important") else "", _text(activity.label(cycle, name, plugins)))
+
+
+def _result_artifact(cycle, step):
+    """Prefer a readable HTML report, then another available result file."""
+    run_dir = cycle.get("run_dir")
+    if not run_dir:
+        return ""
+    paths = []
+    outputs = step.get("outputs") or {}
+    for key in ("html_path", "report_path"):
+        path = outputs.get(key)
+        if isinstance(path, str) and path:
+            paths.append(path)
+    for artifact in step.get("artifacts") or []:
+        path = artifact.get("path") if isinstance(artifact, dict) else artifact
+        if isinstance(path, str) and path and path not in paths:
+            paths.append(path)
+    paths.sort(key=lambda path: os.path.splitext(path)[1].lower() not in (".html", ".htm"))
+    return next((path for path in paths if os.path.isfile(os.path.join(run_dir, path))), "")
 
 
 def _visible_approvals(cycle, status="pending"):
@@ -174,7 +198,7 @@ def render(cycle, live=False, plugins=None, threshold=60, expanded_details=(), i
         step = steps[name]
         evidence = step.get("message") or "%d artifact(s)" % len(step.get("artifacts") or [])
         parts.append('<p>%s · %s<br>%s%s</p>' % (
-            _link(cycle, name, plugins), _text(activity.duration(activity.elapsed(step))), _text(evidence[:700]),
+            _link(cycle, name, plugins, "result"), _text(activity.duration(activity.elapsed(step))), _text(evidence[:700]),
             " · reused from " + _text(step["source_run"]) if step.get("source_run") else ""))
     if not completed:
         parts.append("<p>No completed steps yet.</p>")
@@ -370,9 +394,9 @@ class ApprovalActions(QWidget):
         self.label.setTextFormat(Qt.PlainText)
         self.approve_button = QPushButton("Approve")
         self.approve_button.setProperty("variant", "primary")
-        self.approve_button.setToolTip("Approve this step with the inputs shown above (Enter).")
+        self.approve_button.setToolTip("Approve this step with the inputs shown above.")
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setToolTip("Decline this approval and pause the run (Esc). This step will stay pending.")
+        self.cancel_button.setToolTip("Decline this approval and pause the run. This step will stay pending.")
         for button, decision in ((self.approve_button, True), (self.cancel_button, False)):
             button.setAutoDefault(False)
             button.setDefault(False)
@@ -408,6 +432,7 @@ class QuestionActions(QWidget):
 
 class Cockpit(QWidget):
     node_selected = Signal(str)
+    artifact_requested = Signal(str, str)
     approval_answered = Signal(str, str, bool)
     #: request id: bring that question's window to the front.
     question_requested = Signal(str)
@@ -454,13 +479,30 @@ class Cockpit(QWidget):
         self._current_request = None
         QApplication.instance().focusChanged.connect(self._focus_changed)
         self._approval_shortcuts = []
-        for key, approved in ((Qt.Key_Return, True), (Qt.Key_Enter, True), (Qt.Key_Escape, False)):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-            shortcut.setAutoRepeat(False)
+        for action_id, name, key, approved in (
+                ("cockpit.approve", "Approve current step", Qt.Key_Return, True),
+                ("cockpit.approve_keypad", "Approve current step (keypad)", Qt.Key_Enter, True),
+                ("cockpit.decline", "Decline current approval", Qt.Key_Escape, False)):
+            shortcut = bind_action(self, ActionSpec(
+                action_id, name, "Answer the selected pending approval.", "Cycles",
+                QKeySequence(key).toString(QKeySequence.PortableText), "component/cockpit"),
+                lambda decision=approved: self._answer_shortcut(decision))
             shortcut.setEnabled(False)
-            shortcut.activated.connect(lambda decision=approved: self._answer_shortcut(decision))
+            shortcut.changed.connect(self._approval_tooltips)
             self._approval_shortcuts.append(shortcut)
+
+    def _approval_tooltips(self):
+        approve = [action.shortcut().toString(QKeySequence.NativeText)
+                   for action in self._approval_shortcuts[:2] if not action.shortcut().isEmpty()]
+        decline = [action.shortcut().toString(QKeySequence.NativeText)
+                   for action in self._approval_shortcuts[2:] if not action.shortcut().isEmpty()]
+        for actions in self.approval_actions.values():
+            actions.approve_button.setToolTip(
+                "Approve this step with the inputs shown above."
+                + (" (%s)" % ", ".join(approve) if approve else ""))
+            actions.cancel_button.setToolTip(
+                "Decline this approval and pause the run. This step will stay pending."
+                + (" (%s)" % ", ".join(decline) if decline else ""))
 
     def _focus_changed(self, _previous, focus):
         if focus is None or not self._render_context:
@@ -483,6 +525,8 @@ class Cockpit(QWidget):
         value = url.toString()
         if value.startswith("node:"):
             self.node_selected.emit(unquote(value[5:]))
+        elif value.startswith("result:") and self._render_context:
+            self._open_result(unquote(value[7:]))
         elif value.startswith("details:") and self._render_context:
             cycle = self._render_context[0] or {}
             receipt = (cycle.get("node_approvals") or {}).get(unquote(value[8:]))
@@ -490,6 +534,24 @@ class Cockpit(QWidget):
                 key = cycleapproval.binding(receipt)
                 self._expanded_details.symmetric_difference_update({key})
                 self.refresh(*self._render_context)
+
+    def _open_result(self, name):
+        cycle, _live, plugins, _threshold = self._render_context
+        cycle = cycle or {}
+        step = (cycle.get("steps") or {}).get(name) or {}
+        if step.get("status") != "success":
+            return
+        path = _result_artifact(cycle, step)
+        if path:
+            self.artifact_requested.emit(cycle["run_dir"], path)
+            return
+        outputs = step.get("outputs") or {}
+        text = json.dumps(outputs, ensure_ascii=False, indent=2) if outputs else "\n".join(
+            str(line) for _stream, line in step.get("log") or [])
+        message = (step.get("message") or "Step completed") if text else (
+            "No output data or result files were recorded for this step.")
+        widgets.output(self, "Step result · " + activity.label(cycle, name, plugins),
+                       _text(message), text=text)
 
     def set_questions(self, questions):
         """The questions standing in windows of their own (``AskBridge.waiting``)."""
@@ -556,6 +618,7 @@ class Cockpit(QWidget):
         self.actions.setVisible(bool(receipts) or bool(self.question_actions))
         for shortcut in self._approval_shortcuts:
             shortcut.setEnabled(bool(receipts))
+        self._approval_tooltips()
 
     def _refresh_questions(self, cycle, live, plugins=None):
         """A row with Show the question for each one standing, while the run is live."""

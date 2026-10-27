@@ -213,3 +213,86 @@ def test_a_hint_is_given_the_height_its_own_text_needs(dialog, qapp):
             assert hint.height() >= hint.heightForWidth(hint.width())
     finally:
         dialog.close()
+
+
+def _hotkey_dialog(qapp):
+    from cms_gui.hotkeys import ActionRegistry, ActionSpec
+    from cms_gui.hotkeyeditor import HotkeyEditor
+
+    settings = Settings()
+    registry = ActionRegistry(settings)
+    registry.register(ActionSpec("settings.test.action", "Test action", default_shortcut="Ctrl+F11"))
+    view = SettingsDialog(settings, registry=registry)
+    assert isinstance(view.hotkey_editor, HotkeyEditor)
+    return view, registry
+
+
+def test_hotkey_tab_applies_without_closing_and_cancel_discards_only_later_edits(qapp):
+    view, registry = _hotkey_dialog(qapp)
+    original = view.settings.hotkey_overrides()
+    try:
+        assert view.tabs.tabText(1) == "Hotkeys"
+        view.hotkey_editor.propose("settings.test.action", "Ctrl+F10")
+        assert registry.bindings()["settings.test.action"] == "Ctrl+F11"
+        view.hotkey_apply_button.click()
+        assert registry.bindings()["settings.test.action"] == "Ctrl+F10"
+        assert not view.hotkey_apply_button.isEnabled()
+        view.hotkey_editor.propose("settings.test.action", "Ctrl+F9")
+        view.reject()
+        assert registry.bindings()["settings.test.action"] == "Ctrl+F10"
+        assert view.hotkey_editor.draft["settings.test.action"] == "Ctrl+F10"
+    finally:
+        view.settings.save_hotkey_overrides(original)
+        view.close()
+
+
+def test_save_failure_keeps_settings_dialog_open_and_can_be_retried(qapp, monkeypatch):
+    from cms_gui import widgets
+    from PySide6.QtWidgets import QDialog
+
+    view, registry = _hotkey_dialog(qapp)
+    original = view.settings.hotkey_overrides()
+    try:
+        view.hotkey_editor.propose("settings.test.action", "Ctrl+F10")
+        notices = []
+        monkeypatch.setattr(widgets, "warn", lambda *args: notices.append(args))
+        save = registry.settings.save_hotkey_overrides
+
+        def fail(_values):
+            raise OSError("Cannot access settings")
+
+        monkeypatch.setattr(registry.settings, "save_hotkey_overrides", fail)
+        view.accept()
+        assert QDialog.result(view) != QDialog.Accepted
+        assert registry.bindings()["settings.test.action"] == "Ctrl+F11"
+        assert notices
+        monkeypatch.setattr(registry.settings, "save_hotkey_overrides", save)
+        view.accept()
+        assert QDialog.result(view) == QDialog.Accepted
+        assert registry.bindings()["settings.test.action"] == "Ctrl+F10"
+    finally:
+        monkeypatch.setattr(registry.settings, "save_hotkey_overrides", save)
+        view.settings.save_hotkey_overrides(original)
+        view.close()
+
+
+def test_captured_enter_does_not_accept_settings_dialog(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+
+    view, registry = _hotkey_dialog(qapp)
+    view.show()
+    view.activateWindow()
+    QTest.qWaitForWindowActive(view)
+    try:
+        view.tabs.setCurrentIndex(1)
+        view.hotkey_editor.start_capture()
+        QTest.keyClick(view.hotkey_editor.table, Qt.Key_Return)
+        assert view.isVisible()
+        assert QDialog.result(view) != QDialog.Accepted
+        # Captured - and refused: a bare Return would stop every form confirming.
+        assert view.hotkey_editor.draft["settings.test.action"] == "Ctrl+F11"
+        assert not registry.suspended
+    finally:
+        view.close()

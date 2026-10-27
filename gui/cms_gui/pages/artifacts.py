@@ -272,7 +272,30 @@ class ArtifactsPage(QWidget):
                                     target=entry["run_dir"]))
         return found
 
-    def show_found(self, run_dir):
+    def search_documents(self):
+        """``(folder, label)`` of every run whose files Search reads: the ones
+        the picker offers, and a folder opened by hand."""
+        found = [(self._run_dir, CURRENT)] if self._run_dir else []
+        for entry in (self.history.with_artifacts() if self.history else []):
+            if entry.get("run_dir") != self._run_dir:
+                found.append((entry["run_dir"], history_mod.entry_label(entry)))
+        if self._shown_dir and self._shown_dir not in (path for path, _label in found):
+            found.append((self._shown_dir, os.path.basename(self._shown_dir.rstrip(os.sep))))
+        return found
+
+    def show_found(self, target):
+        """A run (its folder); or a document in one, with what was searched
+        for ready in Find - lit in it, wherever it is."""
+        if isinstance(target, tuple) and target and target[0] == "file":
+            _kind, run_dir, path, words = target
+            if not os.path.isdir(run_dir):
+                return False
+            if not self.reveal(run_dir, path):
+                return False
+            self.find_bar.field.setText(words)
+            self.find_bar.open(self._find_target())
+            return True
+        run_dir = target
         if not run_dir or not os.path.isdir(run_dir):
             return False
         if os.path.normpath(run_dir) != os.path.normpath(self._shown_dir or os.sep):

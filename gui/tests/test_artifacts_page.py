@@ -1,6 +1,7 @@
 """HTML is rendered in the artifact pane; technical files still show source."""
 
 import json
+import os
 import time
 
 import pytest
@@ -482,3 +483,18 @@ def test_search_lists_the_runs_with_reports_and_reveal_shows_one(page, tmp_path)
     assert page.show_found(str(other))
     assert page._shown_dir == str(other)
     assert not page.show_found(str(tmp_path / "gone"))
+
+
+def test_search_reads_every_run_and_opens_a_document_with_find_ready(page, tmp_path):
+    current = tmp_path / "run"
+    (current / "steps").mkdir(parents=True)
+    (current / "steps" / "notes.txt").write_text("QA-123 is ready\n", encoding="utf-8")
+    page.set_run_dir(str(current))
+    assert page.search_documents() == [(str(current), "Current run")]
+    target = ("file", str(current), os.path.join("steps", "notes.txt"), "qa-123")
+    assert page.show_found(target)
+    assert page._selected_path() == str(current / "steps" / "notes.txt")
+    assert page.find_bar.isVisible() and page.find_bar.field.text() == "qa-123"
+    assert page.find_bar.count.text() == "1 of 1"
+    # A document gone since the search: the run is shown, and Search says so.
+    assert not page.show_found(("file", str(current), "gone.txt", "qa-123"))

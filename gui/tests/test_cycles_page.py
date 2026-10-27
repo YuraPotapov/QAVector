@@ -3966,6 +3966,20 @@ def _asked(page):
     return asked
 
 
+def test_completed_cockpit_link_requests_the_html_result(opened, tmp_path):
+    from PySide6.QtCore import QUrl
+
+    run = _ran(opened, tmp_path)
+    report = os.path.join("steps", "a", "report.html")
+    with open(os.path.join(run, report), "w", encoding="utf-8") as handle:
+        handle.write("<h1>Result</h1>")
+    opened.run_state.cycle["steps"]["a"]["artifacts"].append({"path": report})
+    opened._refresh_cockpit()
+    asked = _asked(opened)
+    opened.cockpit.browser.anchorClicked.emit(QUrl("result:a"))
+    assert asked == [(run, report)]
+
+
 def test_a_step_s_file_is_opened_from_its_menu(opened, monkeypatch, tmp_path):
     run = _ran(opened, tmp_path)
     asked = _asked(opened)

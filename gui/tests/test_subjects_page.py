@@ -347,6 +347,27 @@ def test_a_past_run_s_cockpit_is_what_it_recorded_and_answers_nothing(qapp, tmp_
     assert detail.recorded.titles() == ["Thinking", "Answered"]
 
 
+def test_saved_cockpit_result_opens_its_file_without_switching_to_the_graph(qapp, tmp_path):
+    run_dir = _run_dir(tmp_path)
+    from pathlib import Path
+
+    report = Path(run_dir) / "result.html"
+    report.write_text("<h1>Saved result</h1>", encoding="utf-8")
+    runs = [{"run": "r1", "cycle": "dev", "run_dir": run_dir, "started_at": 1}]
+    page = shown(qapp, Staged(runs, [one("QA-1")]))
+    detail = _open(qapp, page, "QA-1")
+    detail.tabs.set_current("Cockpit")
+    qapp.processEvents()
+    cycle = detail.cockpit._render_context[0]
+    cycle["steps"]["plan"].update(status="success", artifacts=[{"path": "result.html"}])
+    files, nodes = [], []
+    page.artifact_requested.connect(lambda *args: files.append(args))
+    page.step_requested.connect(lambda *args: nodes.append(args))
+    detail.cockpit.browser.anchorClicked.emit(QUrl("result:plan"))
+    assert files == [(run_dir, "result.html")]
+    assert nodes == []
+
+
 def test_a_cockpit_of_a_run_nobody_knows_the_folder_of_says_so(qapp):
     page = shown(qapp, Staged([{"run": "r9", "cycle": "dev", "run_dir": "", "started_at": 1}],
                               [one("QA-1")]))

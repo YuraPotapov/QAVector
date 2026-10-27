@@ -8,12 +8,18 @@ same frame over whatever window is in front, the same head band, the same keys
 line where a button would be.
 
 What it searches is what the pages list - names, ids, keys, tags, descriptions,
-statuses - never the inside of a file and never a secret. Each page answers for
-its own records (``search_rows()``) and knows how to put one on screen
-(``show_found(target)``); this module only matches and shows. Results come grouped
-by section, in the rail's order, and anything with a state - a service running
-or failed, a cycle listening, a run going - says so, which is also what an
-empty field shows: what is active now.
+statuses - and never a secret. Each page answers for its own records
+(``search_rows()``) and knows how to put one on screen (``show_found(target)``);
+this module only matches and shows. Results come grouped by section, in the
+rail's order, and anything with a state - a service running or failed, a cycle
+listening, a run going - says so, which is also what an empty field shows: what
+is active now.
+
+A page may also offer folders whose files are worth reading
+(``search_documents()``): the Artifacts page offers its runs, so a task is found
+by what its reading copy says, not only by the run's name. That is read off the
+GUI thread, a moment after typing stops (:mod:`cms_gui.contentsearch`), one row
+per document with how often the words occur in it - pages first, then the rest.
 
 **Ctrl+K is a shortcut text fields let through.** It is a QAction on the
 main window, so it works from every window and a modal dialog keeps its keys.
@@ -24,16 +30,19 @@ themselves, tells them it is not theirs.
 """
 
 import collections
+import logging
 import re
 import weakref
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication,
                                QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPlainTextEdit, QTextEdit,
                                QVBoxLayout)
 
-from . import widgets
+from . import background, widgets
+from .hotkeys import registry_for, sequence_from_event
 
 #: What opens Search, from any window of the application.
 SHORTCUT = "Ctrl+K"
@@ -150,7 +159,7 @@ class _HitRow(QFrame):
                 widget.style().polish(widget)
 
 
-class SearchPopup(QFrame):
+class SearchPopup(widgets.FloatingPanel):
     """The field and what it finds, over whatever window is in front."""
 
     #: A hit was chosen - Enter, or a click.
@@ -164,9 +173,11 @@ class SearchPopup(QFrame):
     LIST_HEIGHT = 440
     #: How often the states shown are read again while it is open.
     TICK_MS = 1000
+    #: How long typing has to pause before the files are read.
+    FILES_AFTER_MS = 300
 
-    def __init__(self, collect, sections, parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+    def __init__(self, collect, sections, parent=None, documents=None):
+        super().__init__(parent)
         self.setProperty("role", "clarifypopup")
         self.setFixedWidth(self.WIDTH)
         self._collect = collect
@@ -175,6 +186,16 @@ class SearchPopup(QFrame):
         self._expanded = set()
         self._shown = None
         self._rows = []                  # (item, widget, hit or a section to expand)
+        # What the files say: ``documents()`` answers [(section, roots)]; the
+        # documents found so far, and which query they answer. Each query is a
+        # generation - a pass still reading for an older one stops and is
+        # dropped. ``_run`` is background.run, which the tests replace.
+        self._documents = documents
+        self._run = background.run
+        self._documents_found = []
+        self._documents_query = ""
+        self._reading = False
+        self._generation = 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -198,7 +219,8 @@ class SearchPopup(QFrame):
         field_row = QVBoxLayout(box)
         field_row.setContentsMargins(12, 8, 12, 8)
         self.field = QLineEdit()
-        self.field.setPlaceholderText("Services, scenarios, cycles, runs, accounts...")
+        self.field.setPlaceholderText("Services, scenarios, cycles, runs, accounts, "
+                                      "words in reports...")
         self.field.installEventFilter(self)
         self.field.textChanged.connect(self._typed)
         field_row.addWidget(self.field)
@@ -221,6 +243,10 @@ class SearchPopup(QFrame):
         self._tick = QTimer(self)
         self._tick.setInterval(self.TICK_MS)
         self._tick.timeout.connect(self._read_again)
+        self._files_after = QTimer(self)
+        self._files_after.setSingleShot(True)
+        self._files_after.setInterval(self.FILES_AFTER_MS)
+        self._files_after.timeout.connect(self.read_documents)
 
     # -- opening ---------------------------------------------------------------
     def open_over(self, window=None):
@@ -233,7 +259,9 @@ class SearchPopup(QFrame):
         self._hits = self._collect()
         self._expanded = set()
         self._shown = None
+        self._forget_documents()
         self._fill(keep=False)
+        self._files_after.start()
         self.adjustSize()
         if window is not None and window is not self:
             frame = window.frameGeometry()
@@ -248,6 +276,8 @@ class SearchPopup(QFrame):
 
     def hideEvent(self, event):               # noqa: N802 - Qt's own spelling
         self._tick.stop()
+        self._files_after.stop()
+        self._generation += 1            # a pass still reading stops
         super().hideEvent(event)
 
     def keyPressEvent(self, event):          # noqa: N802 - Qt's own spelling
@@ -258,15 +288,79 @@ class SearchPopup(QFrame):
 
     # -- what it shows ---------------------------------------------------------
     def groups(self):
-        """The groups on show now: the matches, or what is active."""
+        """The groups on show now: the matches, or what is active.
+
+        Documents come after what the section lists by name, in the order they
+        were read: pages first, then the rest.
+        """
         query = self.field.text()
         order = list(self._sections)
-        return (find(self._hits, query, order) if words(query)
-                else active(self._hits, order))
+        if not words(query):
+            return active(self._hits, order)
+        named = find(self._hits, query, order)
+        if query != self._documents_query or not self._documents_found:
+            return named
+        merged = collections.OrderedDict((section, []) for section in order)
+        for group in named:
+            merged.setdefault(group.section, []).extend(group.hits)
+        for found in self._documents_found:
+            merged.setdefault(found.section, []).append(found)
+        return [Group(section, rows) for section, rows in merged.items() if rows]
 
     def _typed(self, _text):
         self._expanded = set()
+        self._forget_documents()
         self._fill(keep=False)
+        self._files_after.start()
+
+    # -- what the files say ------------------------------------------------------
+    def _forget_documents(self):
+        self._generation += 1
+        self._documents_found = []
+        self._documents_query = ""
+        self._reading = False
+
+    def read_documents(self):
+        """Read the offered folders for the words in the field: pages, then the rest."""
+        from . import contentsearch
+
+        query = self.field.text()
+        if self._documents is None or not contentsearch.wanted(query):
+            return
+        sources = [(section, [contentsearch.Root(*root) for root in roots])
+                   for section, roots in self._documents() if roots]
+        if not sources:
+            return
+        self._forget_documents()
+        self._documents_query = query
+        self._reading = True
+        self._read_pass(sources, query, self._generation,
+                        (contentsearch.PAGES, contentsearch.FILES))
+        self._fill(keep=True)
+
+    def _read_pass(self, sources, query, generation, kinds):
+        from . import contentsearch
+
+        def stale():
+            return generation != self._generation
+
+        def work():
+            return [found._replace(section=section) for section, roots in sources
+                    for found in contentsearch.scan(roots, query, kinds[0], stale)]
+
+        def done(found, error):
+            if stale():
+                return
+            if error is not None:
+                logging.warning("Search could not read the files: %s", error)
+            self._documents_found.extend(found or [])
+            if len(kinds) > 1 and error is None:
+                self._read_pass(sources, query, generation, kinds[1:])
+            else:
+                self._reading = False
+            self._fill(keep=True)
+
+        self._run(work, done, owner=self)
 
     def _read_again(self):
         """The states shown are live: read them again, keeping the place."""
@@ -284,6 +378,7 @@ class SearchPopup(QFrame):
                                      for h in hits), more)
                      for section, hits, more in shown]
         if keep and signature == self._shown:
+            self._say(groups, sum(len(group.hits) for group in groups))
             return
         current = self._current_key() if keep else None
         self._shown = signature
@@ -310,9 +405,13 @@ class SearchPopup(QFrame):
         query = self.field.text().strip()
         sections = len(groups)
         if query:
-            self.summary.setText("%d found in %d section%s" % (
+            found = ("%d found in %d section%s" % (
                 count, sections, "" if sections == 1 else "s") if count else "")
-            self.empty.setText("" if count else "Nothing matches \"%s\"." % query)
+            reading = "reading files..." if self._reading else ""
+            self.summary.setText(" · ".join(part for part in (found, reading) if part))
+            self.empty.setText("" if count else
+                               "Reading files for \"%s\"..." % query if self._reading
+                               else "Nothing matches \"%s\"." % query)
         else:
             self.summary.setText("%d active now" % count if count else "")
             self.empty.setText("" if count else
@@ -429,8 +528,8 @@ class SearchPopup(QFrame):
         """The field keeps the keys; these few move over the list instead."""
         if watched is self.field and event.type() == QEvent.KeyPress:
             key = event.key()
-            if _is_shortcut(event):
-                # Ctrl+K again, in Search itself: the query, ready to type over -
+            if _needs_search_override(event, self):
+                # The Search key again: the query, ready to type over -
                 # never the field's own "delete to the end of the line".
                 self.field.selectAll()
                 return True
@@ -462,13 +561,57 @@ class SearchPopup(QFrame):
 FIELDS = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)
 
 
-def _is_shortcut(event):
-    return (event.key() == Qt.Key_K
-            and event.modifiers() & ~Qt.KeypadModifier == Qt.ControlModifier)
+def _search_action(widget):
+    """Find the owning main window, also from its detached child windows."""
+    owner = widget
+    while owner is not None:
+        action = getattr(owner, "search_action", None)
+        if action is not None:
+            return action
+        # Small standalone hosts (including plugins) can expose their action
+        # without implementing the main window's attribute convention.
+        if hasattr(owner, "actions") and callable(owner.actions):
+            for action in owner.actions():
+                if isinstance(action, QAction) and action.text().replace("&", "") == "Search":
+                    return action
+        owner = owner.parent()
+    for window in QApplication.topLevelWidgets():
+        action = getattr(window, "search_action", None)
+        if action is not None and window.isVisible():
+            return action
+    return None
+
+
+def _is_shortcut(event, widget=None):
+    registry = registry_for(widget) if widget is not None else None
+    if registry is not None and registry.suspended:
+        return False
+    action = _search_action(widget) if widget is not None else None
+    if action is not None:
+        if not action.isEnabled():
+            return False
+        sequence = action.shortcut()
+    elif registry is not None:
+        sequence = registry.shortcut("application.search")
+    else:
+        sequence = QKeySequence(SHORTCUT)
+    return (not sequence.isEmpty()
+            and QKeySequence(sequence_from_event(event), QKeySequence.PortableText) == sequence)
+
+
+def _needs_search_override(event, widget):
+    # Ctrl+K was deliberately reserved for Search before keys were configurable.
+    # Other assignments use Qt's ordinary shortcut precedence: an editor keeps
+    # its Copy/Paste/Undo and navigation keys even if Search uses the same chord.
+    # Asked of every key typed in every field: the cheap test goes first, and
+    # the walk up to the window's Search action only for Ctrl+K itself.
+    return (QKeySequence(sequence_from_event(event), QKeySequence.PortableText)
+            == QKeySequence(SHORTCUT)
+            and _is_shortcut(event, widget))
 
 
 class KeyCatcher(QObject):
-    """Lets Ctrl+K past a text field to the application's Search shortcut.
+    """Lets the configured Search combination past a text field.
 
     The shortcut itself is a QAction on the main window (ApplicationShortcut),
     so it works from every window and a modal dialog keeps the keys, as with
@@ -494,7 +637,7 @@ class KeyCatcher(QObject):
             self._watched.add(widget)
 
     def eventFilter(self, watched, event):     # noqa: N802 - Qt's own spelling
-        if (event.type() == QEvent.ShortcutOverride and _is_shortcut(event)
+        if (event.type() == QEvent.ShortcutOverride and _needs_search_override(event, watched)
                 and QApplication.activeModalWidget() is None):
             event.ignore()               # not the field's: the shortcut's
             return True

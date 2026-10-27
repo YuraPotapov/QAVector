@@ -1052,7 +1052,10 @@ class CycleDialog(_Editor):
         resolved = written
         for row in self.variables.rows():
             if not row["secret"]:
-                resolved = resolved.replace("${vars.%s}" % row["name"], str(self.variables.value_of(row)))
+                value = self.variables.value_of(row)
+                if isinstance(value, dict):
+                    value = value.get("value", "")
+                resolved = resolved.replace("${vars.%s}" % row["name"], str(value))
         if "${" in resolved or not resolved:
             return written, ""
         return written, os.path.abspath(os.path.expanduser(resolved))

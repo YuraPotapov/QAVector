@@ -31,7 +31,7 @@ import re
 import subprocess
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QPainter
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout,
                                QLabel, QMenu, QComboBox,
                                QPlainTextEdit, QPushButton, QStackedWidget,
@@ -55,6 +55,7 @@ from ..cycleoutput import implementation_html
 from ..cyclesubjects import PAGE as SUBJECTS_PAGE, SPEC as SUBJECTS_SPEC, SubjectsPanel
 from ..stages import StageList
 from ..cycleinteractions import InteractionComposer
+from ..hotkeys import ActionSpec, alternate_name, bind_action
 from .cycledialogs import CycleDialog, NodeDialog
 
 
@@ -297,10 +298,10 @@ class CyclesPage(QWidget):
         self._draft = None
         self.draft_note = widgets.mono("")
         self.undo_button = icons.button(QPushButton(), "undo", "Undo")
-        self.undo_button.setToolTip("Undo the last change (Ctrl+Z).")
+        self.undo_button.setToolTip("Undo the last change.")
         self.undo_button.clicked.connect(self._undo)
         self.redo_button = icons.button(QPushButton(), "redo", "Redo")
-        self.redo_button.setToolTip("Redo it (Ctrl+Shift+Z).")
+        self.redo_button.setToolTip("Redo it.")
         self.redo_button.clicked.connect(self._redo)
         self.changes_button = QPushButton("Changes")
         self.changes_button.setToolTip("What saving would change in the file.")
@@ -310,7 +311,7 @@ class CyclesPage(QWidget):
         self.revert_draft_button.clicked.connect(self._revert_draft)
         self.save_draft_button = QPushButton("Save")
         self.save_draft_button.setProperty("variant", "primary")
-        self.save_draft_button.setToolTip("Write the changes to the cycle file (Ctrl+S).")
+        self.save_draft_button.setToolTip("Write the changes to the cycle file.")
         self.save_draft_button.clicked.connect(self._save_draft)
         for button in (self.undo_button, self.redo_button, self.changes_button,
                        self.revert_draft_button):
@@ -320,12 +321,6 @@ class CyclesPage(QWidget):
                                       self.revert_draft_button,
                                       self.save_draft_button)
         self.draft_bar.setVisible(False)
-        for keys, slot in ((QKeySequence.Undo, self._undo),
-                           (QKeySequence.Redo, self._redo),
-                           (QKeySequence.Save, self._save_shortcut)):
-            shortcut = QShortcut(keys, self)
-            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(slot)
         # Not ghost, deliberately. Ghost means a transparent border, which is
         # right for the view controls beside them and wrong for these: they
         # start work, the way Run and Stop do, and a button that starts
@@ -449,6 +444,7 @@ class CyclesPage(QWidget):
         self.run_view.hide()
         self.cockpit = Cockpit(self)
         self.cockpit.node_selected.connect(self._cockpit_selected)
+        self.cockpit.artifact_requested.connect(self.artifacts_requested.emit)
         self.cockpit.approval_answered.connect(self.approval_answered.emit)
         self.cockpit.question_requested.connect(self.question_requested.emit)
         self.run_surface = QStackedWidget()
@@ -501,7 +497,65 @@ class CyclesPage(QWidget):
         self._cockpit_timer.timeout.connect(self._refresh_cockpit)
         self._cockpit_timer.start(1000)
 
+        self._register_hotkeys()
         self._update_buttons()
+
+    def _register_hotkeys(self):
+        """Buttons and keys enter the same handlers and availability checks."""
+        self.hotkey_actions = {}
+        for key, name, button, standard in (
+                ("undo", "Undo cycle change", self.undo_button, QKeySequence.Undo),
+                ("redo", "Redo cycle change", self.redo_button, QKeySequence.Redo),
+                ("changes", "Review cycle changes", self.changes_button, None),
+                ("revert", "Revert cycle changes", self.revert_draft_button, None),
+                ("properties", "Cycle properties", self.properties_button, None),
+                ("restrictions", "Cycle restrictions", self.restrictions_button, None),
+                ("arrange", "Arrange cycle graph", self.arrange_button, None),
+                ("fit", "Fit cycle graph", self.fit_button, None),
+                ("zoom_in", "Zoom into cycle graph", self.zoom_in_button, None),
+                ("zoom_out", "Zoom out of cycle graph", self.zoom_out_button, None),
+                ("fold", "Fold cycle phases", self.fold_button, None),
+                ("add_step", "Add cycle step", self.add_button, None),
+                ("problems", "Show cycle problems", self.validity, None)):
+            actions = self._hotkey_group(
+                key, name, button.toolTip(), standard, button.click,
+                enabled=lambda control=button: control.isEnabled() and control.isVisibleTo(self))
+            self._hotkey_tooltip(actions, button)
+        save = self._hotkey_group(
+            "save", "Save cycle changes", "Save the current cycle draft or YAML changes.",
+            QKeySequence.Save, self._save_shortcut,
+            enabled=lambda: self.save_draft_button.isEnabled() or self.output.save_button.isEnabled())
+        for button in (self.save_draft_button, self.output.save_button):
+            self._hotkey_tooltip(save, button)
+
+    def _hotkey_group(self, key, name, description, standard, callback, enabled):
+        # QShortcut(StandardKey) previously included every platform alternative.
+        # Preserve those defaults as independently assignable single chords.
+        sequences = QKeySequence.keyBindings(standard) if standard is not None else [QKeySequence()]
+        defaults = dict.fromkeys(sequence.toString(QKeySequence.PortableText) for sequence in sequences)
+        made = []
+        for index, default in enumerate(defaults or {"": None}):
+            suffix = "" if index == 0 else ".alternate_%d" % index
+            action = bind_action(self, ActionSpec(
+                "cycles." + key + suffix,
+                alternate_name(name, index),
+                description, "Cycles", default, "page/cycles"), callback, enabled=enabled)
+            self.hotkey_actions[key + suffix] = action
+            made.append(action)
+        return made
+
+    @staticmethod
+    def _hotkey_tooltip(actions, button):
+        base = button.toolTip()
+
+        def update():
+            keys = [action.shortcut().toString(QKeySequence.NativeText)
+                    for action in actions if not action.shortcut().isEmpty()]
+            button.setToolTip(base + (" (%s)" % ", ".join(keys) if keys else ""))
+
+        for action in actions:
+            action.changed.connect(update)
+        update()
 
     # -- what the window gives it --------------------------------------------
     def set_core(self, core):
@@ -1137,7 +1191,8 @@ class CyclesPage(QWidget):
 
     def _save_shortcut(self):
         if self._draft is not None and self._draft.dirty:
-            self._save_draft()
+            if self.save_draft_button.isEnabled():
+                self._save_draft()
         elif self.output.save_button.isEnabled():
             self._save_yaml(self.output.yaml.toPlainText())
 
@@ -3784,10 +3839,10 @@ class _Output(QWidget):
         self._host_layout.addWidget(self.stage_panel, 1)
         self.stages_elsewhere = widgets.Elsewhere("Stages are in a separate window")
         self.stages_elsewhere.setContentsMargins(12, 4, 8, 4)
-        keys = QLabel(stageswindow.SHORTCUT)
-        keys.setProperty("role", "keys")
-        keys.setToolTip("Goes to Stages from any window of the application.")
-        self.stages_elsewhere.add_widget(keys)
+        self.stages_keys = QLabel(stageswindow.SHORTCUT)
+        self.stages_keys.setProperty("role", "keys")
+        self.stages_keys.setToolTip("Goes to Stages from any window of the application.")
+        self.stages_elsewhere.add_widget(self.stages_keys)
         self.stages_elsewhere.show_requested.connect(self.show_window_requested)
         self.dock_button = _icon_button(
             "dock", "Bring Stages back into this tab.")
@@ -3833,6 +3888,14 @@ class _Output(QWidget):
         self._place_detach()
 
     # -- Stages, here or in a window of its own -------------------------------
+    def set_stages_shortcut(self, sequence):
+        keys = QKeySequence(sequence).toString(QKeySequence.NativeText)
+        self.stages_keys.setText(keys)
+        self.stages_keys.setVisible(bool(keys))
+        self.detach_button.setToolTip(
+            "Detach Stages into a separate window."
+            + ("\n%s goes to Stages wherever they are." % keys if keys else ""))
+
     def take_stage_panel(self):
         """Hand the stage panel over to a window; the tab says where it went."""
         self._host_layout.removeWidget(self.stage_panel)
