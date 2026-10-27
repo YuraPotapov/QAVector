@@ -16,6 +16,67 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.44] - 2026-10-27
+
+### Added
+- **Configurable GUI shortcuts.** Settings lists registered actions, records
+  key combinations, checks conflicts by context, and supports reassignment,
+  clearing and restoring defaults. Apply updates menus and button hints without
+  restarting; explicit removals and unavailable plugins' assignments persist.
+  Credentials and cycle Save shortcuts are scoped to their own pages.
+- **The Scenario Recorder writes `doc:`.** Each step in the panel takes the
+  sentence the run's guide shows for it - added with ¶, edited or deleted from
+  the line under the step, or in the step's own editor.
+- **Search reads what the reports say.** Ctrl+K also finds words inside the
+  runs' files - a Jira task's reading copy, a guide, a log - one row per
+  document with how often they occur, HTML pages first; opening one lights the
+  words with Find.
+
+### Fixed
+- **Continuing a scenario in the Recorder keeps its `doc:` and `retry:`.**
+  Finish wrote back only each step's action, target, value, timeout and state,
+  erasing the rest from every step already in the file.
+- **The keyboard layout can be switched while Search or the clarify popup is
+  open.** Both were popups, which hold the X11 keyboard; Super+Space never
+  reached the desktop.
+
+## [0.16.43] - 2026-10-26
+
+### Added
+- **`jira.transition` moves several issues in one step.** `issues` takes a list
+  or the keys a shell step printed, and moves each with the same checks as a
+  single `issue`. One that cannot be moved does not stop the rest; the step
+  fails naming it, and `results` / `failed` say what happened to each.
+
+### Fixed
+- **A `jira.transition` re-run with both `lands_in` and `expect_status` no
+  longer fails.** An issue already where the step wanted it is recognised
+  before its former status is checked.
+- **The Linux build checks that the frozen core carries the source tree's cycle
+  plugins.** A plugin field missing from the bundle fails the build instead of
+  the installed application refusing a cycle that uses it.
+
+## [0.16.42] - 2026-10-26
+
+### Fixed
+- **Cycle Properties resolves Path variables to their values.** Restrictions
+  previews and the project folder picker no longer treat the variable's
+  declaration as part of the directory name.
+
+## [0.16.41] - 2026-10-26
+
+### Fixed
+- **File access on cycle nodes uses an icon without a clipped RW/RO label.**
+  The compact indicators leave more room for the plugin name. Network, Files
+  and Limits show short tooltips anchored above their own icons.
+
+## [0.16.40] - 2026-10-26
+
+### Fixed
+- **Completed steps in Cockpit open their results.** Links in Cycles and
+  Subjects prefer an available HTML report, then another result file. Steps
+  without available files show their output data or log instead of node settings.
+
 ## [0.16.39] - 2026-10-24
 
 ### Removed
