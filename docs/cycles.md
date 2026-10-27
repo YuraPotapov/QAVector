@@ -266,7 +266,7 @@ appears to the left of something it depends on.
 | `agent.merge` | Lets an agent merge branches and resolve conflicts in a repository with no remote. Local git only, from a fixed list; it cannot push. Reports every command it ran. |
 | `git.commit` | Commits the tree that was verified, and refuses anything else. Local only — no push. |
 | `jira.issues` | Reads a person's Jira issues and the comments on them. Reads only. |
-| `jira.transition` | Moves one issue along its workflow. Writes — and only this. |
+| `jira.transition` | Moves one issue, or several, along its workflow. Writes — and only this. |
 | `memory.recall` | What earlier runs remembered about a key. Reads only. |
 | `memory.remember` | Writes something into a key's record, or moves a counter. |
 | `memory.claim` | Takes a task for this run; given back when the run ends. |
@@ -477,6 +477,25 @@ the status, not the author. Where that matters, record your own intent with
 Use `${steps.todo.outputs.key}` — the first issue's key — rather than `keys`:
 `${...}` cannot index a list, so a step handed `keys` gets the whole list where
 it wanted one issue.
+
+**Several issues are `issues`, not `issue`.** A release carries several tasks:
+
+```yaml
+  - id: on_prod
+    plugin: jira.transition
+    with:
+      ...
+      issues: ${steps.pick.outputs.values}   # or "QA-1, QA-4" a shell step printed
+      to: ON PROD
+      lands_in: ON PROD
+      expect_status: Ready for release
+```
+
+Each one goes through exactly the checks above, one after another. One that
+cannot be moved does not stop the rest; the step fails naming it, and
+`outputs.results` says what happened to each, `outputs.failed` which ones did
+not get there. An empty list moves nothing and succeeds. Give `issue` or
+`issues`, not both.
 
 ### What a cycle remembers between runs
 

@@ -1,4 +1,4 @@
-"""Moving one Jira issue along its workflow.
+"""Moving Jira issues along their workflow - one, or several in a row.
 
 ``jira.issues`` reads and says so in its own first line, which is what lets a
 cycle point it at a production instance without thinking. This writes, so it is
@@ -26,6 +26,13 @@ Where that distinction matters, a cycle records its own intent with
 ``memory.remember`` before this step and reads it back after - the plugin does
 not pretend to know.
 
+**Several issues are one step.** A release carries several tasks, and ``${...}``
+cannot index a list, so a step per issue would need a step per position.
+``issues`` takes the list itself and moves each one in turn with exactly the
+checks a single issue gets. One that cannot be moved does not stop the others -
+they are independent writes, and leaving them unmoved would only hide which
+one was the trouble - but the step fails, naming it.
+
 **What it does not do.** No create, no assign, no edit of fields outside the
 transition screen, no delete. Each of those is a different kind of write and
 deserves to be asked for by name.
@@ -39,7 +46,8 @@ from cycle.registry import CyclePlugin, PluginMetadata, field, output
 class JiraTransition(CyclePlugin):
     metadata = PluginMetadata(
         id="jira.transition", name="Jira Transition", category=registry.ACTION,
-        summary="Move one issue along its workflow. Writes - and only this.",
+        summary="Move one issue, or several, along its workflow. Writes - and "
+                "only this.",
         permissions=("network",),
         inputs=(
             field("site", "Site", required=True,
@@ -59,8 +67,14 @@ class JiraTransition(CyclePlugin):
             field("token", "API token", required=True,
                   hint="Reference a secret variable - ${vars.jira_token} - so "
                        "the value stays out of this file."),
-            field("issue", "Issue", required=True,
-                  hint="The key, such as QA-7, or the numeric id."),
+            field("issue", "Issue",
+                  hint="The key, such as QA-7, or the numeric id. Or Issues, "
+                       "not both."),
+            field("issues", "Issues", "args",
+                  hint="Several keys, moved one after another with the same "
+                       "checks - a list, such as ${steps.todo.outputs.keys}, "
+                       "or keys separated by commas or spaces. Empty moves "
+                       "nothing and succeeds. Or Issue, not both."),
             field("to", "Transition", required=True,
                   hint="The transition's name as the workflow spells it - "
                        "'Start Progress', not the status it leads to - or its "
@@ -86,14 +100,27 @@ class JiraTransition(CyclePlugin):
                        "that says it edits."),
         ),
         outputs=(
-            output("key", "text", "The issue that was moved."),
-            output("status", "text", "The status it is in now."),
-            output("from_status", "text", "The status it was in before."),
+            output("key", "text", "The issue that was moved. With Issues, "
+                                  "all of them, separated by commas."),
+            output("status", "text", "The status it is in now. Blank with "
+                                     "Issues - see results."),
+            output("from_status", "text", "The status it was in before. Blank "
+                                          "with Issues."),
             output("changed", "boolean",
-                   "False when it was already there and nothing was done."),
-            output("transition", "text", "The transition that was used."),
+                   "False when it was already there and nothing was done. With "
+                   "Issues, true when any of them moved."),
+            output("transition", "text", "The transition that was used. Blank "
+                                         "with Issues."),
             output("available", "list",
-                   "What the workflow offered, which is what a refusal names."),
+                   "What the workflow offered, which is what a refusal names. "
+                   "Empty with Issues."),
+            output("keys", "list", "Only with Issues: every issue it was given, "
+                                   "in order."),
+            output("results", "list",
+                   "Only with Issues: one entry per issue - key, ok, status, "
+                   "from_status, changed, transition and what happened."),
+            output("failed", "list", "Only with Issues: the issues it could "
+                                     "not move where they were wanted."),
         ),
     )
 
@@ -104,6 +131,13 @@ class JiraTransition(CyclePlugin):
                     "comment"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
+        if "issues" in settings and not isinstance(settings["issues"], (list, str)):
+            found.append("issues must be a list of keys.")
+        has_one = str(settings.get("issue") or "").strip() != ""
+        if has_one and "issues" in settings:
+            found.append("Give Issue or Issues, not both.")
+        elif not has_one and "issues" not in settings:
+            found.append("Issue or Issues is required.")
         site = str(settings.get("site") or "")
         if site and "${" not in site and not site.startswith(("http://", "https://")):
             found.append("Site must start with http:// or https://.")
@@ -125,13 +159,55 @@ class JiraTransition(CyclePlugin):
             token=str(self.setting(step.settings, "token")),
             verify=True)
         flavour = self.setting(step.settings, "flavour", CLOUD)
-        key = str(self.setting(step.settings, "issue")).strip()
         wanted = str(self.setting(step.settings, "to")).strip()
+        if "issues" in (step.settings or {}):
+            return self._move_each(context, ask, flavour,
+                                   _keys(step.settings.get("issues")), wanted, step)
+        key = str(self.setting(step.settings, "issue")).strip()
 
         try:
             return self._move(context, ask, flavour, key, wanted, step)
         except JiraError as exc:
             return registry.failed(str(exc))
+
+    def _move_each(self, context, ask, flavour, keys, wanted, step):
+        """Every issue of ``issues`` through :meth:`_move`, one after another.
+
+        Each answer is kept whatever it was, so the step says which issue
+        failed and why instead of stopping at the first and leaving the rest
+        unexplained.
+        """
+        results, failed = [], []
+        for key in keys:
+            context.cancel.raise_if_set()
+            try:
+                one = self._move(context, ask, flavour, key, wanted, step)
+            except JiraError as exc:
+                one = registry.failed(str(exc))
+            outputs = one.outputs or {}
+            results.append({"key": key, "ok": one.ok,
+                            "status": outputs.get("status", ""),
+                            "from_status": outputs.get("from_status", ""),
+                            "changed": bool(outputs.get("changed")),
+                            "transition": outputs.get("transition", ""),
+                            "message": one.message})
+            if not one.ok:
+                failed.append(key)
+        outputs = {"key": ", ".join(keys), "status": "", "from_status": "",
+                   "changed": any(one["changed"] for one in results),
+                   "transition": "", "available": [], "keys": list(keys),
+                   "results": results, "failed": failed}
+        lines = [one["message"] for one in results]
+        if failed:
+            return registry.PluginResult(
+                "failed", outputs=outputs,
+                message="jira: %d of %d issue(s) not moved (%s)\n%s"
+                        % (len(failed), len(keys), ", ".join(failed),
+                           "\n".join(lines)))
+        if not keys:
+            return registry.succeeded(message="jira: no issues to move",
+                                      **outputs)
+        return registry.succeeded(message="\n".join(lines), **outputs)
 
     def _move(self, context, ask, flavour, key, wanted, step):
         version = "3" if flavour == CLOUD else "2"
@@ -139,21 +215,22 @@ class JiraTransition(CyclePlugin):
                     {"fields": "status"})
         before = ((issue.get("fields") or {}).get("status") or {}).get("name", "")
 
+        lands_in = str(self.setting(step.settings, "lands_in", "") or "").strip()
+        if lands_in and before.strip().lower() == lands_in.lower():
+            # Where a re-run lands: the work was done, and the workflow has
+            # stopped offering the move that did it. Before expect_status,
+            # which the issue left when it was moved.
+            return registry.succeeded(
+                key=key, status=before, from_status=before, changed=False,
+                transition="", available=[],
+                message="jira: %s is already in %s" % (key, before))
+
         expected = str(self.setting(step.settings, "expect_status", "") or "").strip()
         if expected and expected.lower() != before.lower():
             return registry.failed(
                 "%s is in %r, not %r. Nothing was changed: the issue moved "
                 "after the run decided what to do with it."
                 % (key, before, expected))
-
-        lands_in = str(self.setting(step.settings, "lands_in", "") or "").strip()
-        if lands_in and before.strip().lower() == lands_in.lower():
-            # Where a re-run lands: the work was done, and the workflow has
-            # stopped offering the move that did it.
-            return registry.succeeded(
-                key=key, status=before, from_status=before, changed=False,
-                transition="", available=[],
-                message="jira: %s is already in %s" % (key, before))
 
         context.cancel.raise_if_set()
         offered = _transitions(ask, version, key)
@@ -206,6 +283,22 @@ class JiraTransition(CyclePlugin):
             transition=chosen["name"],
             available=[one["name"] for one in offered],
             message="jira: %s %s -> %s" % (key, before or "?", now or "?"))
+
+
+def _keys(value):
+    """The keys of ``issues``: a list, or the line a shell step printed.
+
+    Commas or whitespace between them, either; the same key twice is moved
+    once, since the second time could only report "already there".
+    """
+    if isinstance(value, str):
+        value = value.replace(",", " ").split()
+    keys = []
+    for one in value or []:
+        one = str(one).strip()
+        if one and one not in keys:
+            keys.append(one)
+    return keys
 
 
 # -- the workflow -------------------------------------------------------------

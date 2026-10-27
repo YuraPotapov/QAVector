@@ -44,13 +44,27 @@ WORKFLOW = {
 
 
 class _Jira(object):
-    """A loopback Jira with one issue whose status actually changes."""
+    """A loopback Jira with one issue whose status actually changes - or, given
+    ``others``, more issues, each with a status of its own."""
 
-    def __init__(self, status="To Do", workflow=None, refuse=0):
+    def __init__(self, status="To Do", workflow=None, refuse=0, others=None):
         self.status = status
+        self.others = dict(others or {})    # key -> status, besides QA-7
         self.workflow = workflow if workflow is not None else WORKFLOW
         self.seen = []                  # (method, path, body)
         outer = self
+
+        def key_of(path):
+            return path.split("/issue/")[1].split("/")[0].split("?")[0]
+
+        def status_of(key):
+            return outer.others.get(key, outer.status)
+
+        def move_to(key, status):
+            if key in outer.others:
+                outer.others[key] = status
+            else:
+                outer.status = status
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -75,11 +89,15 @@ class _Jira(object):
                     # A bare refusal, with nothing in it - which is when the
                     # plugin's own wording about which credential is wanted.
                     return self._send(refuse, None)
+                key = key_of(self.path)
+                if key not in outer.others and key != "QA-7":
+                    return self._send(404, {"errorMessages":
+                                            ["Issue does not exist"]})
                 if "/transitions" in self.path:
-                    return self._send(200, {"transitions":
-                                            outer.workflow.get(outer.status, [])})
-                self._send(200, {"key": "QA-7",
-                                 "fields": {"status": {"name": outer.status}}})
+                    return self._send(200, {"transitions": outer.workflow.get(
+                        status_of(key), [])})
+                self._send(200, {"key": key,
+                                 "fields": {"status": {"name": status_of(key)}}})
 
             def do_POST(self):          # noqa: N802
                 body = json.loads(self.rfile.read(
@@ -88,9 +106,10 @@ class _Jira(object):
                 if refuse:
                     return self._send(refuse, None)
                 wanted = str((body.get("transition") or {}).get("id"))
-                for one in outer.workflow.get(outer.status, []):
+                key = key_of(self.path)
+                for one in outer.workflow.get(status_of(key), []):
                     if one["id"] == wanted:
-                        outer.status = one["to"]["name"]
+                        move_to(key, one["to"]["name"])
                         return self._send(204, None)
                 self._send(400, {"errorMessages": ["transition not available"]})
 
@@ -240,6 +259,19 @@ def test_a_rerun_that_finds_it_already_there_reports_so_rather_than_failing(
     assert len(server.posts()) == 1, "it must not transition a second time"
 
 
+def test_a_rerun_with_expect_status_finds_it_already_there(jira, move):
+    """The issue left expect_status when the first run moved it; the second
+    must see the work done, not an issue that moved under it."""
+    server = jira()
+    assert move(server.site, lands_in="In Progress", expect_status="To Do").ok
+
+    again = move(server.site, lands_in="In Progress", expect_status="To Do")
+
+    assert again.ok, again.message
+    assert again.outputs["changed"] is False
+    assert len(server.posts()) == 1
+
+
 def test_being_asked_for_the_status_it_is_already_in_is_not_a_failure(jira,
                                                                       move):
     server = jira(status="In Progress")
@@ -328,6 +360,88 @@ def test_what_the_workflow_offered_is_an_output(jira, move):
     server = jira()
     result = move(server.site)
     assert result.outputs["available"] == ["Start Progress"]
+
+
+# ------------------------------------------------------- several at once
+def test_several_issues_are_each_moved_and_each_reported(jira, move):
+    """A release carries several tasks, and ${...} cannot index a list."""
+    server = jira(others={"QA-8": "To Do"})
+    result = move(server.site, issue="", issues=["QA-7", "QA-8"],
+                  lands_in="In Progress")
+
+    assert result.ok, result.message
+    assert server.status == "In Progress" and server.others["QA-8"] == "In Progress"
+    assert result.outputs["keys"] == ["QA-7", "QA-8"]
+    assert result.outputs["changed"] is True
+    assert result.outputs["failed"] == []
+    assert [(one["key"], one["from_status"], one["status"], one["changed"])
+            for one in result.outputs["results"]] == [
+        ("QA-7", "To Do", "In Progress", True),
+        ("QA-8", "To Do", "In Progress", True)]
+    assert "QA-7" in result.message and "QA-8" in result.message
+
+
+def test_the_line_a_shell_step_printed_is_a_list_of_keys(jira, move):
+    server = jira(others={"QA-8": "To Do", "QA-9": "To Do"})
+    result = move(server.site, issue="", issues="QA-7, QA-8 QA-9,QA-7")
+
+    assert result.ok, result.message
+    assert result.outputs["keys"] == ["QA-7", "QA-8", "QA-9"], \
+        "commas or spaces, and the same key once"
+    assert len(server.posts()) == 3
+
+
+def test_one_that_cannot_be_moved_does_not_stop_the_others(jira, move):
+    """They are independent writes; the step fails and names the one."""
+    server = jira(others={"QA-8": "In Progress", "QA-9": "To Do"})
+    result = move(server.site, issue="", issues=["QA-7", "QA-8", "QA-9"],
+                  expect_status="To Do")
+
+    assert not result.ok
+    assert result.outputs["failed"] == ["QA-8"]
+    assert "QA-8" in result.message and "In Progress" in result.message
+    assert server.status == "In Progress" and server.others["QA-9"] == "In Progress"
+    assert server.others["QA-8"] == "In Progress", "left as it was"
+    assert [one["ok"] for one in result.outputs["results"]] == [True, False, True]
+
+
+def test_an_issue_jira_does_not_know_is_a_failure_of_its_own(jira, move):
+    server = jira(others={"QA-8": "To Do"})
+    result = move(server.site, issue="", issues=["QA-404", "QA-8"])
+
+    assert not result.ok
+    assert result.outputs["failed"] == ["QA-404"]
+    assert server.others["QA-8"] == "In Progress"
+
+
+def test_several_already_there_are_a_rerun_not_a_failure(jira, move):
+    server = jira(status="In Progress", others={"QA-8": "In Progress"})
+    result = move(server.site, issue="", issues=["QA-7", "QA-8"],
+                  lands_in="In Progress")
+
+    assert result.ok
+    assert result.outputs["changed"] is False
+    assert server.posts() == []
+
+
+def test_no_issues_moves_nothing_and_succeeds(jira, move):
+    server = jira()
+    result = move(server.site, issue="", issues=[])
+
+    assert result.ok
+    assert result.outputs["keys"] == [] and result.outputs["changed"] is False
+    assert server.seen == [], "nothing to ask Jira"
+
+
+def test_issue_or_issues_but_not_both_nor_neither():
+    plugin = registry.get("jira.transition")
+    base = {"site": "https://x.invalid", "email": "e", "token": "t", "to": "Go"}
+    assert "Give Issue or Issues, not both." in plugin.problems(
+        dict(base, issue="QA-7", issues=["QA-8"]))
+    assert "Issue or Issues is required." in plugin.problems(base)
+    assert plugin.problems(dict(base, issues="${steps.pick.outputs.values}")) == []
+    assert "issues must be a list of keys." in plugin.problems(
+        dict(base, issues={"QA-7": 1}))
 
 
 # ------------------------------------------------------------- the shape
