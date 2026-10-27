@@ -355,6 +355,34 @@ def test_the_frozen_health_check_names_what_is_wrong():
         ["playwright unavailable"]
 
 
+def test_the_frozen_core_must_carry_the_source_trees_cycle_plugins():
+    """A field a cycle uses that the installed core does not know makes the
+    application refuse the whole cycle - found after install, not at build."""
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packaging"))
+    import check_frozen
+
+    def plugin(inputs, outputs=("key",)):
+        return {"id": "jira.transition",
+                "inputs": [{"key": one} for one in inputs],
+                "outputs": [{"key": one} for one in outputs]}
+
+    healthy = {"version": "1.2.3", "scenarios": [{"id": "a"}],
+               "extensions": [{"name": "x"}], "warnings": [],
+               "cycle_plugins": [plugin(["issue", "issues"], ["key", "results"])]}
+    assert check_frozen.problems(healthy, "1.2.3", source=healthy) == []
+    # Without the source, as the Windows build calls it, nothing is compared.
+    assert check_frozen.problems(dict(healthy, cycle_plugins=[]), "1.2.3") == []
+
+    stale = dict(healthy, cycle_plugins=[plugin(["issue"])])
+    found = check_frozen.problems(stale, "1.2.3", source=healthy)
+    assert any("lacks inputs issues" in p for p in found)
+    assert any("lacks outputs results" in p for p in found)
+    assert check_frozen.problems(dict(healthy, cycle_plugins=[]), "1.2.3",
+                                 source=healthy) == \
+        ["cycle plugin jira.transition is not in the bundle"]
+
+
 def test_cycle_runs_can_be_sent_elsewhere_and_back(tmp_path):
     default = rp.cycle_runs_dir()
     try:

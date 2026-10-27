@@ -112,7 +112,11 @@ say "Checking the frozen core"
 CMS_HOME="$BUILD/smoke" "$CORE_BIN" --version
 CMS_HOME="$BUILD/smoke" "$CORE_BIN" --describe > "$BUILD/describe.json"
 CMS_HOME="$BUILD/smoke" "$CORE_BIN" --runtime-bundle-info > "$BUILD/runtime-bundle.json"
-python3 "$ROOT/packaging/check_frozen.py" "$BUILD/describe.json" "$VERSION"
+# The same question to the tree it was frozen from: the bundle must carry its
+# cycle plugins field for field, or a cycle using a new field is refused.
+( cd "$ROOT" && CMS_HOME="$BUILD/smoke" "$VENV/bin/python" session_launcher.py --describe ) \
+    > "$BUILD/describe-source.json"
+python3 "$ROOT/packaging/check_frozen.py" "$BUILD/describe.json" "$VERSION" "$BUILD/describe-source.json"
 
 # -- 5. icons -----------------------------------------------------------------
 say "Rendering icons"
