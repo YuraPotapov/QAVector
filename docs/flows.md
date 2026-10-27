@@ -316,6 +316,10 @@ steps:
   `description` as the introduction.
 - `doc:` is free text in whatever language the guide is for, and takes `{{...}}`
   parameters like any other field. It is never matched against the page.
+- **The Scenario Recorder writes it too**, while the page is still on screen: ¶ on a
+  step's row adds one, the line it then shows under the step edits (✎) or deletes (✕)
+  it, and the step's own editor (✎ on the row) has a Doc field beside Target and Value.
+  Continuing a scenario keeps the docs it already had.
 - If the run fails, the guide says where it stopped, with the error and a picture.
 
 The few words the guide adds itself (contents, "expected result", the draft's

@@ -44,6 +44,12 @@ POLL_SECONDS = 0.15
 #: already on screen.
 PERFORMED = ("click", "fill", "select", "press", "goto")
 
+#: What a step carries through a recording, read from a scenario being continued
+#: and written back at Finish. Everything here survives the round trip: a field
+#: missing from this list was erased from every step of a continued scenario -
+#: which is how its docs and retries used to disappear.
+STEP_FIELDS = ("action", "target", "value", "timeout", "state", "retry", "doc")
+
 
 def _load_recorder_js():
     with open(_RECORDER_JS_PATH, encoding="utf-8") as handle:
@@ -92,8 +98,7 @@ class Recording:
         self.meta = dict(existing.get("meta") or {})
         for step in existing.get("steps") or []:
             if step.get("action"):
-                self.steps.append({key: step.get(key) for key in
-                                   ("action", "target", "value", "timeout", "state")
+                self.steps.append({key: step.get(key) for key in STEP_FIELDS
                                    if step.get(key) is not None})
 
     def state(self):
@@ -101,7 +106,8 @@ class Recording:
         return {"scenario": self.scenario_id, "status": "recording",
                 "steps": [{"action": s["action"],
                            "target": s.get("target") or "",
-                           "value": s.get("value") or ""} for s in self.steps]}
+                           "value": s.get("value") or "",
+                           "doc": s.get("doc") or ""} for s in self.steps]}
 
     def add(self, step):
         self.steps.append(step)
@@ -122,8 +128,7 @@ class Recording:
         meta["id"] = self.scenario_id
         return flowfile.save(
             self.scenario_id, self.flows_dir, meta=meta,
-            steps=[{key: value for key, value in step.items()
-                    if key in ("action", "target", "value", "timeout", "state")}
+            steps=[{key: value for key, value in step.items() if key in STEP_FIELDS}
                    for step in self.steps])
 
 
@@ -271,12 +276,21 @@ def _handle(adapter, recording, event):
         _capture(adapter, recording, event.get("step") or {})
     elif kind == "finish":
         _finish(adapter, recording)
-    elif kind in ("delete", "move", "edit"):
+    elif kind in ("delete", "move", "edit", "doc"):
         _amend(adapter, recording, kind, event)
 
 
+def _set_doc(step, text):
+    """Give ``step`` the doc the panel sent - or take it away, when it is empty."""
+    text = text.strip() if isinstance(text, str) else ""
+    if text:
+        step["doc"] = text
+    else:
+        step.pop("doc", None)
+
+
 def _amend(adapter, recording, kind, event):
-    """Delete, reorder or retarget a step from the panel.
+    """Delete, reorder, retarget or describe a step from the panel.
 
     Fixing a capture belongs in the recording, not only afterwards: while the
     page is still on screen it is obvious which step went wrong and what it
@@ -301,6 +315,14 @@ def _amend(adapter, recording, kind, event):
         steps[index], steps[target] = steps[target], steps[index]
         events.emit("recorder.step_moved", session=recording.session,
                     index=index + 1, to=target + 1)
+    elif kind == "doc":
+        # The sentence the run's guide shows for this step (engine.livedoc).
+        # Added, rewritten or deleted - an empty one is a delete - while the
+        # page it describes is still on screen; the step itself stays.
+        step = recording.steps[index]
+        _set_doc(step, event.get("doc"))
+        events.emit("recorder.step_documented", session=recording.session,
+                    index=index + 1, action=step.get("action"), doc=step.get("doc"))
     else:                                        # edit
         step = recording.steps[index]
         target = (event.get("target") or "").strip()
@@ -309,9 +331,12 @@ def _amend(adapter, recording, kind, event):
             step["target"] = target
         # An emptied value means "no value", which is not the same as untouched.
         step["value"] = value if (value or "").strip() else None
+        if "doc" in event:
+            _set_doc(step, event.get("doc"))
         events.emit("recorder.step_edited", session=recording.session,
                     index=index + 1, action=step.get("action"),
-                    target=step.get("target"), value=step.get("value"))
+                    target=step.get("target"), value=step.get("value"),
+                    doc=step.get("doc"))
     adapter.recorder_call("recorder.render(arg)", recording.state())
 
 

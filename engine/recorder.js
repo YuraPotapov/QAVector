@@ -69,14 +69,23 @@
     ".card.collapsed{opacity:0.35;transition:opacity .12s ease}" +
     ".card.collapsed:hover{opacity:1}" +
     ".hint{padding:6px 10px;color:#9aa0a6;border-bottom:1px solid rgba(255,255,255,0.08)}" +
-    ".step{display:flex;gap:8px;padding:4px 2px;align-items:baseline;" +
+    ".step{display:flex;flex-wrap:wrap;gap:0 8px;padding:4px 2px;align-items:baseline;" +
       "border-bottom:1px solid rgba(255,255,255,0.05)}" +
     ".step-n{color:#6b7076;min-width:18px;text-align:right;flex:0 0 auto}" +
     ".step-a{color:#8ab4f8;font-weight:600;flex:0 0 auto}" +
     ".step-t{color:#cfd3d7;word-break:break-all;flex:1 1 auto;min-width:0}" +
     // Shown on hover: four marks on every row would be louder than the steps.
     ".step-tools{display:flex;gap:2px;flex:0 0 auto;opacity:0}" +
-    ".step:hover .step-tools{opacity:1}" +
+    // The step's marks, not while the pointer is on its doc: that line has its
+    // own, and two sets at once would leave it unclear which one acts on what.
+    ".step:hover:not(:has(.step-doc:hover))>.step-tools{opacity:1}" +
+    // The step's doc: what the run's guide will say for it, on a line of its
+    // own under the step, with its own two marks - edit and delete.
+    ".step-doc{flex:1 0 100%;box-sizing:border-box;display:flex;gap:6px;" +
+      "align-items:baseline;padding:2px 0 1px 26px;color:#c3c7cb;font-style:italic}" +
+    ".step-doc-t{flex:1 1 auto;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}" +
+    ".step-doc .step-tools{font-style:normal}" +
+    ".step-doc:hover .step-tools{opacity:1}" +
     ".step-btn{width:18px;height:18px;display:flex;align-items:center;" +
       "justify-content:center;border-radius:4px;cursor:pointer;color:#9aa0a6;" +
       "background:rgba(255,255,255,0.06);font-size:11px}" +
@@ -842,7 +851,12 @@
           self._push({ kind: "move", index: index, delta: 1 });
         }));
       }
-      tools.appendChild(this._stepBtn("✎", "Edit what it points at", function () {
+      if (!step.doc) {
+        tools.appendChild(this._stepBtn("¶", "Add a doc for the guide", function () {
+          self._editDoc(step, index);
+        }));
+      }
+      tools.appendChild(this._stepBtn("✎", "Edit this step", function () {
         self._editStep(step, index);
       }));
       tools.appendChild(this._stepBtn("✕", "Delete this step", function () {
@@ -853,7 +867,81 @@
       row.appendChild(a);
       row.appendChild(t);
       row.appendChild(tools);
+      if (step.doc) row.appendChild(this._docLine(step, index));
       return row;
+    },
+
+    // The sentence a run's guide shows for the step (engine/livedoc.py). Python
+    // keeps it, like everything else about a step: these marks only ask.
+    _docLine: function (step, index) {
+      var self = this;
+      var line = elem("div", "step-doc");
+      var text = elem("div", "step-doc-t");
+      text.textContent = step.doc;
+      var tools = elem("div", "step-tools");
+      tools.appendChild(this._stepBtn("✎", "Edit the doc", function () {
+        self._editDoc(step, index);
+      }));
+      tools.appendChild(this._stepBtn("✕", "Delete the doc", function () {
+        self._push({ kind: "doc", index: index, doc: "" });
+      }));
+      line.appendChild(text);
+      line.appendChild(tools);
+      return line;
+    },
+
+    _editDoc: function (step, index) {
+      var self = this;
+      var box = this._editor("step " + (index + 1) + " · doc");
+      var doc = this._field(box, "Doc - what the guide says for this step", step.doc || "");
+      this._editorFoot(box, "Enter saves · empty deletes · Esc cancels");
+      this._editorKeys([doc], function () {
+        self._push({ kind: "doc", index: index, doc: doc.value });
+      });
+      doc.focus();
+      doc.select();
+    },
+
+    // A box beside the panel for changing one step: the step editor's and the
+    // doc editor's. Beside the panel rather than at the pointer: the row being
+    // edited is over there, and the pointer is wherever it happens to be.
+    _editor: function (title) {
+      this._closeMenu();
+      var box = elem("div", "menu");
+      var head = elem("div", "menu-head");
+      head.textContent = title;
+      box.appendChild(head);
+      return box;
+    },
+
+    _editorFoot: function (box, text) {
+      var foot = elem("div", "menu-foot");
+      foot.textContent = text;
+      box.appendChild(foot);
+      this._shadow.appendChild(box);
+      this._menu = box;
+      this._menuAt = { x: Math.max(8, window.innerWidth - 780), y: 90 };
+      this._placeMenu(box);
+    },
+
+    // The inputs own the keyboard while the box is open - text, digits, a
+    // Ukrainian letter - and only Enter and Esc mean anything else.
+    _editorKeys: function (inputs, commit) {
+      var self = this;
+      this._valueInput = inputs[0];
+      inputs.forEach(function (input) {
+        input.addEventListener("keydown", function (e) {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            self._closeMenu();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            self._closeMenu();
+          }
+        });
+      });
     },
 
     _stepBtn: function (glyph, tip, handler) {
@@ -869,37 +957,14 @@
 
     _editStep: function (step, index) {
       var self = this;
-      this._closeMenu();
-      var box = elem("div", "menu");
-      var head = elem("div", "menu-head");
-      head.textContent = "step " + (index + 1) + " · " + (step.action || "");
-      box.appendChild(head);
-
+      var box = this._editor("step " + (index + 1) + " · " + (step.action || ""));
       var target = this._field(box, "Target", step.target || "");
       var value = this._field(box, "Value", step.value || "");
-
-      var foot = elem("div", "menu-foot");
-      foot.textContent = "Enter saves · Esc cancels";
-      box.appendChild(foot);
-      this._shadow.appendChild(box);
-      this._menu = box;
-      // Beside the panel rather than at the pointer: the row being edited is
-      // over there, and the pointer is wherever it happens to be.
-      this._menuAt = { x: Math.max(8, window.innerWidth - 780), y: 90 };
-      this._placeMenu(box);
-      this._valueInput = target;
-
-      function commit() {
-        self._closeMenu();
-        self._push({ kind: "edit", index: index,
-                     target: target.value, value: value.value });
-      }
-      [target, value].forEach(function (input) {
-        input.addEventListener("keydown", function (e) {
-          e.stopPropagation();
-          if (e.key === "Enter") { e.preventDefault(); commit(); }
-          else if (e.key === "Escape") { e.preventDefault(); self._closeMenu(); }
-        });
+      var doc = this._field(box, "Doc", step.doc || "");
+      this._editorFoot(box, "Enter saves · Esc cancels");
+      this._editorKeys([target, value, doc], function () {
+        self._push({ kind: "edit", index: index, target: target.value,
+                     value: value.value, doc: doc.value });
       });
       target.focus();
       target.select();

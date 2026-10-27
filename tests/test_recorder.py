@@ -185,7 +185,7 @@ def test_a_navigation_brings_the_panel_back_with_its_steps(tree):
     recorder._tick(adapter, rec, {}, {})
     assert any(c.startswith("recorder.start") for c in adapter.calls)
     assert adapter.rendered[-1]["steps"] == [{"action": "click", "target": "first",
-                                              "value": ""}]
+                                              "value": "", "doc": ""}]
     assert rec.active                      # still the same recording
 
 
@@ -1104,3 +1104,150 @@ def test_what_is_saved_is_what_the_panel_last_showed(tree):
     flow = loader.load_flow(rec.scenario_id)
     assert [compiler.parse_step(s).target for s in flow.steps] == [
         "menu_settings", "third"]
+
+
+# ----------------------------------------------------------------- the step's doc
+#
+# What a run's guide says for a step (engine.livedoc). Written in the panel while
+# the page it describes is still on screen; kept by Python like the step itself.
+
+def test_a_doc_can_be_added_rewritten_and_deleted(tree):
+    rec = _three(tree)
+    _amend(rec, "doc", index=1, doc="  Press Settings  ")
+    assert rec.steps[1]["doc"] == "Press Settings"
+    _amend(rec, "doc", index=1, doc="Open the settings")
+    assert rec.steps[1]["doc"] == "Open the settings"
+    adapter = _amend(rec, "doc", index=1, doc="")
+    # Deleted: no doc at all, and the step stays where it was.
+    assert "doc" not in rec.steps[1]
+    assert [s["target"] for s in rec.steps] == ["first", "second", "third"]
+    assert adapter.rendered[-1]["steps"][1]["doc"] == ""
+
+
+def test_the_panel_is_painted_with_the_doc(tree):
+    rec = _three(tree)
+    adapter = _amend(rec, "doc", index=0, doc="Open the menu")
+    assert [s["doc"] for s in adapter.rendered[-1]["steps"]] == ["Open the menu", "", ""]
+
+
+def test_a_doc_for_a_stale_index_is_ignored(tree):
+    rec = _three(tree)
+    _amend(rec, "doc", index=7, doc="lost")
+    assert not any("doc" in step for step in rec.steps)
+
+
+def test_the_step_editor_carries_the_doc_too(tree):
+    rec = _three(tree)
+    _amend(rec, "edit", index=2, target="third", value=None, doc="Check it")
+    assert rec.steps[2]["doc"] == "Check it"
+    _amend(rec, "edit", index=2, target="third", value=None)     # no doc in it
+    assert rec.steps[2]["doc"] == "Check it"
+    _amend(rec, "edit", index=2, target="third", value=None, doc=" ")
+    assert "doc" not in rec.steps[2]
+
+
+def test_a_recorded_doc_is_written_and_reads_back(tree):
+    # Ukrainian, as a guide is usually written; escaped so the source stays English.
+    sentence = "\u041d\u0430\u0442\u0438\u0441\u043d\u0456\u0442\u044c Settings"
+    rec = _three(tree)
+    _amend(rec, "doc", index=0, doc=sentence)
+    assert rec.save()["ok"]
+    described = flowfile.describe_flow(rec.scenario_id)
+    assert [s.get("doc") for s in described["steps"]] == [sentence, None, None]
+
+
+def test_continuing_keeps_every_doc_and_retry_the_file_had(tree):
+    """Finish used to write back only action, target, value, timeout and state -
+    every doc: and retry: of a scenario being continued was erased."""
+    flowfile.save("wip", steps=[
+        {"action": "click", "target": "menu_settings", "doc": "Open the settings"},
+        {"action": "click", "target": "save_button",
+         "retry": {"attempts": 3, "delay": 1}}])
+    rec = recorder.Recording("s", "wip", None)
+    rec.add({"action": "assert_visible", "target": "dashboard", "value": None})
+    assert rec.save()["ok"]
+    steps = flowfile.describe_flow("wip")["steps"]
+    assert steps[0]["doc"] == "Open the settings"
+    assert steps[1]["retry"] == {"attempts": 3, "delay": 1}
+    assert [s["action"] for s in steps] == ["click", "click", "assert_visible"]
+
+
+def test_the_panel_offers_and_sends_a_doc():
+    """The row's marks and the doc editor queue the intents Python acts on."""
+    node = _node()
+    if not node:
+        pytest.skip("no node available to run the recorder")
+    path = os.path.join(os.path.dirname(os.path.abspath(recorder.__file__)),
+                        "recorder.js")
+    harness = r"""
+      function Node(tag) {
+        this.tagName = tag.toUpperCase(); this.children = []; this.className = '';
+        this.textContent = ''; this.title = ''; this.value = ''; this.style = {};
+        this.listeners = {}; this.parentNode = null;
+      }
+      Node.prototype.appendChild = function (c) { c.parentNode = this; this.children.push(c); return c; };
+      Node.prototype.removeChild = function (c) {
+        this.children = this.children.filter(function (x) { return x !== c; }); c.parentNode = null; };
+      Node.prototype.addEventListener = function (k, f) { (this.listeners[k] = this.listeners[k] || []).push(f); };
+      Node.prototype.fire = function (k, e) { (this.listeners[k] || []).forEach(function (f) { f(e); }); };
+      Node.prototype.setAttribute = function () {};
+      Node.prototype.focus = function () {}; Node.prototype.select = function () {};
+      Node.prototype.getBoundingClientRect = function () { return {width: 300, height: 120}; };
+      function all(node, out) { out = out || []; out.push(node);
+        node.children.forEach(function (c) { all(c, out); }); return out; }
+      function byClass(node, cls) { return all(node).filter(function (n) {
+        return (' ' + n.className + ' ').indexOf(' ' + cls + ' ') >= 0; }); }
+      var event = {stopPropagation() {}, preventDefault() {}};
+      global.document = {
+        getElementById: () => null, createElement: (t) => new Node(t),
+        documentElement: {appendChild() {}, hasAttribute: () => false, removeAttribute() {}},
+        addEventListener() {}, removeEventListener() {}
+      };
+      global.window = {innerWidth: 1200, innerHeight: 800};
+      require(%s);
+      const r = window.__Recorder;
+      r._shadow = new Node('shadow');
+      const out = {};
+      const bare = r._stepRow({action: 'click', target: '#save', doc: ''}, 0, 1);
+      out.bareTools = byClass(bare, 'step-btn').map((b) => b.title);
+      out.bareDocLine = byClass(bare, 'step-doc').length;
+
+      const said = 'Press Save';
+      const row = r._stepRow({action: 'click', target: '#save', doc: said}, 0, 1);
+      const line = byClass(row, 'step-doc')[0];
+      out.docText = byClass(line, 'step-doc-t')[0].textContent;
+      out.docTools = byClass(line, 'step-btn').map((b) => b.title);
+      byClass(line, 'step-btn').filter((b) => b.title === 'Delete the doc')[0].fire('click', event);
+      out.deleted = r.drain();
+
+      byClass(line, 'step-btn').filter((b) => b.title === 'Edit the doc')[0].fire('click', event);
+      const input = all(r._menu).filter((n) => n.tagName === 'INPUT')[0];
+      out.editorValue = input.value;
+      input.value = 'Press Save to keep it';
+      input.fire('keydown', Object.assign({key: 'Enter'}, event));
+      out.edited = r.drain();
+      out.closed = r._menu === null;
+
+      r._editStep({action: 'click', target: '#save', value: '', doc: said}, 0);
+      const fields = all(r._menu).filter((n) => n.tagName === 'INPUT');
+      out.stepFields = fields.length;
+      fields[2].value = 'Keep it';
+      fields[2].fire('keydown', Object.assign({key: 'Enter'}, event));
+      out.stepEdit = r.drain();
+      console.log(JSON.stringify(out));
+    """ % json.dumps(path)
+    done = subprocess.run([node, "-e", harness], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout.strip())
+    assert out["bareTools"] == ["Add a doc for the guide", "Edit this step",
+                                "Delete this step"]
+    assert out["bareDocLine"] == 0
+    assert out["docText"] == "Press Save"
+    assert out["docTools"] == ["Edit the doc", "Delete the doc"]
+    assert out["deleted"] == [{"kind": "doc", "index": 0, "doc": ""}]
+    assert out["editorValue"] == "Press Save"
+    assert out["edited"] == [{"kind": "doc", "index": 0, "doc": "Press Save to keep it"}]
+    assert out["closed"] is True
+    assert out["stepFields"] == 3
+    assert out["stepEdit"] == [{"kind": "edit", "index": 0, "target": "#save",
+                                "value": "", "doc": "Keep it"}]
