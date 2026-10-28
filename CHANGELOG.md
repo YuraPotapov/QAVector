@@ -16,6 +16,62 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.45] - 2026-10-28
+
+### Added
+- **Launch Sessions works by project, environment and configuration.** Three
+  pickers head the page; a configuration belongs to an environment, and *Use
+  with another environment…* copies it to another. Projects, environments and
+  their variables live in `launch-projects.json` beside `services.json` (Settings
+  moves it), edited on the Environments page; every `users.json` env value no
+  project claims shows under *Workspace*.
+- **One address box with variables.** `http://localhost:{{port}}/web` shows as
+  the address it opens, the values in blue; clicking one opens the variables
+  panel on it. A value comes from the project default, the environment, the
+  configuration or this run, nearest wins. `{{` completes names, an undefined
+  one offers *Define…*, and a problem under the box stops RUN. Another port of
+  the same app keeps its accounts and profile folders: the core gets the account
+  key as `--env` and the address as `--url`.
+- **+ Account** adds an account to the chosen environment from Launch Sessions.
+  The accounts are a table - tick, role, login, own scenarios - with search and
+  All / Selected.
+- **What to do: Open windows, Run scenarios or Record.** Record continues an
+  existing scenario or starts a new one (*Record into*).
+- **`--no-autologin`** opens the windows without signing them in, for a scenario
+  that signs in by itself; the Auto-login switch is in Advanced → Extensions.
+- **`--no-password-prompts`**: Chrome neither offers to save a password nor
+  warns that one was breached (*Don't offer to save passwords*).
+
+### Changed
+- **Unsaved edits are kept per configuration.** Switching configuration,
+  environment or project never discards them; *Revert* does, and the footer
+  says *Changes not saved*.
+- **Launch Sessions keeps its height.** Accounts and What to do are one fixed
+  height and scroll inside; *Sessions at once* is a button over a small panel
+  with the machine's load (memory pressure still shows on the page). Server
+  logs fold on their own; reports and diagnostics, profiles, windows and
+  extensions are grouped under Advanced.
+- **Configurations moved to `launch-presets.json`.** `configs.json` is read
+  once and left untouched; one whose environment no longer exists says so and
+  offers *Move to…* instead of being reassigned silently.
+
+### Fixed
+- **A desktop link launches its own configuration**, not the last working copy.
+- **A configuration keeps its environment when another localhost port is
+  added.** It stores the `users.json` env value, not the alias derived from it.
+- **Credentials can no longer overwrite an unreadable `users.json` with an empty
+  one.** Unsaved table edits survive a refresh, a new row takes the selected
+  row's environment, and validation catches `{{` in an env value and the same
+  server written two ways - both of which stopped every launch.
+- **History's Open in Launch Sessions opens the entry unsaved**, so Save can no
+  longer overwrite the configuration that was open.
+- **All environments without a start address is refused with a reason** rather
+  than reaching the launcher's usage message.
+
+### Compatibility
+- The profile layout `<env>-<login>` is unchanged; changing an address or a
+  port never renames a profile folder.
+
 ## [0.16.44] - 2026-10-27
 
 ### Added
