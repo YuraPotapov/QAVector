@@ -303,11 +303,45 @@ class Settings:
         self._qs.setValue("window/run_source", value or "launch")
 
     # -- per-environment extras (the core has no place for these) -------------
-    def env_override(self, alias):
-        return self._qs.value("env/override/" + alias, "", str)
+    def env_urls(self):
+        """``{env value: address}`` set on the Environments page.
 
-    def set_env_override(self, alias, url):
-        self._qs.setValue("env/override/" + alias, url or "")
+        Keyed by the users.json ``env`` value rather than the alias: the alias
+        is worked out from the address and renames itself when another
+        environment with the same host appears, which would strand an address
+        filed under it. One JSON value rather than a key per environment,
+        because an env value is often a URL and QSettings reads every "/" in a
+        key as a group.
+        """
+        return {key: value for key, value in self._json("env/urls", {}).items()
+                if isinstance(key, str) and isinstance(value, str) and value}
+
+    def set_env_url(self, value, url):
+        urls = self.env_urls()
+        url = (url or "").strip()
+        if url:
+            urls[value] = url
+        else:
+            urls.pop(value, None)
+        self._qs.setValue("env/urls", json.dumps(urls, sort_keys=True))
+
+    def legacy_env_overrides(self):
+        """``{alias: url}`` saved by the old URL override, which nothing applied.
+
+        Kept rather than adopted: switching them on now would change where a
+        run opens without anyone having asked for it today. The Environments
+        page offers each one to apply or discard.
+        """
+        self._qs.beginGroup("env/override")
+        try:
+            found = {alias: self._qs.value(alias, "", str)
+                     for alias in self._qs.childKeys()}
+        finally:
+            self._qs.endGroup()
+        return {alias: url for alias, url in found.items() if url}
+
+    def discard_legacy_env_override(self, alias):
+        self._qs.remove("env/override/" + alias)
 
     # -- what the observing pages were last looking at ------------------------
     @property
@@ -360,6 +394,47 @@ class Settings:
 
     def save_launch_state(self, config):
         self._qs.setValue("launch/state", json.dumps(config))
+
+    def launch_context(self):
+        """Where Launch Sessions was: ``{"environment": id, "preset": id}``.
+
+        By id rather than by name: a configuration can be renamed, and two
+        projects can each have one called "Smoke".
+        """
+        return self._json("launch/context", {})
+
+    def save_launch_context(self, context):
+        self._qs.setValue("launch/context", json.dumps(context, sort_keys=True))
+
+    def launch_last_presets(self):
+        """``{environment id: preset id}`` - what was open in each, last time."""
+        return {key: value for key, value in self._json("launch/last", {}).items()
+                if isinstance(key, str) and isinstance(value, str)}
+
+    def save_launch_last_presets(self, last):
+        self._qs.setValue("launch/last", json.dumps(last, sort_keys=True))
+
+    def launch_last_environments(self):
+        """``{project id: environment id}`` - where each project was left."""
+        return {key: value for key, value in self._json("launch/last_env", {}).items()
+                if isinstance(key, str) and isinstance(value, str)}
+
+    def save_launch_last_environments(self, last):
+        self._qs.setValue("launch/last_env", json.dumps(last, sort_keys=True))
+
+    @property
+    def launch_projects_path(self):
+        """Where launch-projects.json lives; empty means beside services.json.
+
+        The GUI's own file - the launcher has never heard of it - with a default
+        worth overriding for the reason the other two have one: a source
+        checkout would otherwise put it among the code.
+        """
+        return self._qs.value("launch/projects_path", "", str)
+
+    @launch_projects_path.setter
+    def launch_projects_path(self, value):
+        self._qs.setValue("launch/projects_path", value or "")
 
     @property
     def launch_config_name(self):

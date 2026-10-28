@@ -248,16 +248,39 @@ because the launcher rejects them without it, so an invalid line cannot be
 built. There is a live, copyable preview of the exact command. Developer mode
 only.
 
-**Launch Sessions** — the same launcher without the launcher: which environment,
-whose accounts, how many at once, which scenarios, how much to record. It reads
-back as a sentence, refuses to run a configuration with a problem in it, and
-saves named configurations you can duplicate, rename and delete. Rules a user
-could not guess are applied for them - asking for screenshots adds the `screen`
-artifact the core needs before it will take `--report-screen` - and the flow and
-report options simply do not apply when nothing is scripted, which the page says
-out loud rather than dropping them quietly. Anything genuinely technical (start
-address, profile prefix, log level, the three folders, the execution overlay)
-is folded away under *Advanced*.
+**Launch Sessions** — the same launcher without the launcher, read top to
+bottom: a **Project**, one of its **Environments** and a saved **Configuration**
+of it; the **Start address** the windows open; the accounts beside what they do
+(*Open windows*, *Run scenarios*, *Record* - into a new scenario or one being
+continued); then *Server logs* and *Advanced*. A configuration belongs to an
+environment, so the same name can mean different things in two projects, and
+*Use with another environment…* copies one across. Unsaved edits are kept per
+configuration: switching never discards them, *Revert* does, and the footer
+says which are pending. RUN refuses a configuration with a problem in it, and
+rules a user could not guess are applied for them - asking for screenshots adds
+the `screen` artifact the core needs before it will take `--report-screen`.
+
+The address is one box. It shows the address as it will open, the parts a
+variable put there in blue: `http://localhost:{{port}}/web` reads as
+`http://localhost:8070/web`. A blue part opens the variables panel on that
+variable; the text or the pencil edits the template, `{{` completes names, and
+a name nobody defined offers *Define…*. A value comes from the project's
+default, the environment, the configuration or this run, nearest wins, and the
+tag beside the box says which. The core sees none of this: it gets `--env` (the
+environment's account key, which also names the profile folders) and `--url`
+when the address is not the account key's own origin - so another port of the
+same app keeps its accounts and profiles.
+
+The **Environments** page edits the registry behind it (`launch-projects.json`
+beside `services.json`; Settings moves it): projects, their environments - a
+name, an account key from `users.json`, an address template, values - and their
+variables. Every account key nobody has claimed yet shows under *Workspace*, so
+nothing in `users.json` goes missing before it is organised. *+ Account* adds an
+account to the chosen environment without leaving the page. *Advanced* holds
+what most runs never touch, in groups: reports and diagnostics (scripted runs
+only), profiles, windows and the launcher, and extensions - including the
+launcher's own **Auto-login**, which a scenario that signs in by itself turns
+off (`--no-autologin`).
 
 **RUN ▾ → In Background** runs the same launch with no browser at all, for
 scenarios made only of service steps and their checks. It is greyed out whenever
@@ -322,10 +345,13 @@ last 7 days).
 | | |
 | --- | --- |
 | paths, the last form state, the current mode, what Artifacts and Log were last showing | `QSettings` (`~/.config/qavector/gui.conf` on Linux) |
-| history, saved configurations, archived logs | `~/.local/share/qavector/gui/` |
+| history, saved configurations (`launch-presets.json`) and their unsaved edits, archived logs | `~/.local/share/qavector/gui/` |
+| projects, environments and their variables | `launch-projects.json`, beside `services.json` |
 
-Both are plain files, and the history is readable JSON. Nothing the launcher owns
-(users, environments, scenarios) is copied into either.
+All are plain files, and the history is readable JSON. Nothing the launcher owns
+(users, scenarios) is copied into them: an environment refers to its accounts by
+their `users.json` env value. The configurations of earlier versions
+(`configs.json`) are read once into `launch-presets.json` and left as they were.
 
 The run record is what makes the observing pages persistent: Artifacts and Log
 have no store of their own, they read it for the list of runs worth offering. So

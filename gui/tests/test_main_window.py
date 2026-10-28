@@ -16,7 +16,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cms_gui import history as history_mod, launch, main_window as main_window_mod
+from cms_gui import launchpresetsfile as lps
 from cms_gui.settings import Settings
+
+
+def _address_editor(window):
+    """The Start address box, open for typing: a text field on the Launch page."""
+    window.launch.url_field.begin_edit()
+    return window.launch.url_field.editor
 
 
 @pytest.fixture
@@ -1569,8 +1576,10 @@ def test_search_collects_from_every_page_on_the_rail_under_its_section(window):
     from cms_gui import search as search_mod
 
     window.credentials._rows = []
-    window.environments._envs = [{"alias": "shop", "value": "shop.example.invalid",
-                                  "origin": "https://shop.example.invalid", "count": 2}]
+    from cms_gui import launchprojectsfile as lpf
+    window.environments._envs = [lpf.Environment(
+        "env:shop.example.invalid", lpf.WORKSPACE, "shop", "shop.example.invalid",
+        "", {}, "https://shop.example.invalid", 2, True)]
     hits = window.search_hits()
     assert all(isinstance(hit, search_mod.Hit) for hit in hits)
     assert ("environments", "shop") in [(hit.section, hit.title) for hit in hits]
@@ -1583,8 +1592,10 @@ def test_search_collects_from_every_page_on_the_rail_under_its_section(window):
 def test_a_hit_opens_its_page_with_the_record_on_it(window):
     from cms_gui import search as search_mod
 
-    window.environments._envs = [{"alias": "shop", "value": "shop.example.invalid",
-                                  "origin": "", "count": 0}]
+    from cms_gui import launchprojectsfile as lpf
+    window.environments._envs = [lpf.Environment(
+        "env:shop.example.invalid", lpf.WORKSPACE, "shop", "shop.example.invalid",
+        "", {}, "", 0, True)]
     window.environments.table.setRowCount(1)
     window.show_page("history")
     window.open_hit(search_mod.hit("shop", target="shop", section="environments"))
@@ -1676,10 +1687,79 @@ def test_ctrl_k_opens_search_over_the_window(window, qapp):
 
     window.activateWindow()
     QTest.qWaitForWindowActive(window)
-    field = window.launch.url                       # a text field with the focus
+    field = _address_editor(window)                       # a text field with the focus
     field.setFocus()
     field.setText("http://shop.example.invalid")
     QTest.keyClick(field, Qt.Key_K, Qt.ControlModifier)
     assert window._search is not None and window._search.isVisible()
     assert field.text() == "http://shop.example.invalid"
     window._search.hide()
+
+
+# ------------------------------------------------------------- desktop links
+
+def test_a_desktop_link_runs_the_configuration_it_names(qapp, dispose, monkeypatch):
+    """Not the last thing on screen: the settings saved under that id."""
+    win = main_window_mod.MainWindow(auto_launch="", headless=True)
+    try:
+        page = win.launch
+        saved = page.controller.presets.put(lps.Preset(
+            "", "Linked", "workspace", "", 0,
+            lps.without_environment(launch.merged({
+                "sessions": dict(launch.DEFAULTS["sessions"], jobs=6)})),
+            all_environments=True))
+        page.jobs.setValue(2)                 # what happened to be on screen
+        ran = []
+        monkeypatch.setattr(win, "start_run", lambda *a, **k: ran.append(page.state()))
+        win._auto_launch = saved.id
+        win._run_auto_launch()
+        from PySide6.QtTest import QTest
+        QTest.qWait(250)
+        assert ran and ran[0]["sessions"]["jobs"] == 6
+    finally:
+        win.launch.controller.presets.remove(saved.id)
+        dispose(win)
+
+
+def test_a_desktop_link_to_a_missing_configuration_runs_nothing(qapp, dispose,
+                                                                monkeypatch):
+    win = main_window_mod.MainWindow(auto_launch="Never saved", headless=True)
+    try:
+        quit_calls, ran = [], []
+        monkeypatch.setattr(main_window_mod.QApplication, "quit",
+                            lambda *a: quit_calls.append(True))
+        monkeypatch.setattr(win, "start_run", lambda *a, **k: ran.append(True))
+        win._run_auto_launch()
+        from PySide6.QtTest import QTest
+        QTest.qWait(250)
+        assert quit_calls and not ran
+    finally:
+        dispose(win)
+
+
+def test_record_on_launch_sessions_runs_the_recorder_path(window, monkeypatch):
+    """Record is an answer to "what to do": RUN goes the With Recorder way."""
+    calls = []
+    monkeypatch.setattr(window, "start_recording", lambda: calls.append("record"))
+    window.launch.what.set_current("Record")
+    try:
+        window.start_run("launch")
+        assert calls == ["record"]
+    finally:
+        window.launch.what.set_current("Open windows")
+
+
+def test_record_on_launch_sessions_records_into_what_it_names(window, monkeypatch):
+    started = []
+    monkeypatch.setattr(window, "ask_recording_account", lambda: "")
+    monkeypatch.setattr(window, "ask_recording_target",
+                        lambda: (_ for _ in ()).throw(AssertionError("asked again")))
+    monkeypatch.setattr(window, "start_run", lambda **k: started.append(k))
+    window.launch.what.set_current("Record")
+    window.launch.record_into.addItem("shop_order", "shop_order")
+    window.launch.record_into.setCurrentIndex(window.launch.record_into.count() - 1)
+    try:
+        window.start_recording()
+        assert started and started[0]["recorder"] == "shop_order"
+    finally:
+        window.launch.what.set_current("Open windows")

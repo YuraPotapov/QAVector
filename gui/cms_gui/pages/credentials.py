@@ -30,6 +30,13 @@ class CredentialsPage(QWidget):
         self._revealed = set()
         self._fingerprint = None
         self._loading = False
+        # Why the file could not be read; "" when it could. While it is set the
+        # table is not the file, so nothing here may be written over it.
+        self._unreadable = ""
+        # Edited since loaded or saved - and so not to be replaced by a refresh.
+        self._dirty = False
+        # The file changed on disk under an edit that was kept.
+        self._changed_on_disk = False
 
         column = QVBoxLayout(self)
         column.setContentsMargins(24, 20, 24, 20)
@@ -41,7 +48,7 @@ class CredentialsPage(QWidget):
         self.duplicate_button = QPushButton("Duplicate")
         self.duplicate_button.clicked.connect(self.duplicate_row)
         self.reload_button = QPushButton("Reload")
-        self.reload_button.clicked.connect(lambda: self.load(self._path))
+        self.reload_button.clicked.connect(lambda: self.reload())
         self.save_button = QPushButton("Save users.json")
         self.save_button.setProperty("variant", "primary")
         self.save_button.clicked.connect(self.save)
@@ -79,20 +86,69 @@ class CredentialsPage(QWidget):
     def load(self, path):
         self._path = path or ""
         self.path_label.setText(self._path or "(no config path configured)")
+        self._unreadable = ""
         try:
             self._rows = usersfile.load(self._path)
         except usersfile.UsersFileError as exc:
             self._rows = []
-            self._show_problem(str(exc))
+            self._unreadable = str(exc)
         self._fingerprint = usersfile.fingerprint(self._path)
         self._revealed.clear()
+        self._changed_on_disk = False
+        self._set_dirty(False)
         self._rebuild()
+        editable = not self._unreadable
+        self.table.setEnabled(editable)
+        for button in (self.add_button, self.duplicate_button):
+            button.setEnabled(editable)
         self._validate()
+
+    def refresh(self, path):
+        """Load ``path`` - unless the table holds an edit not saved yet.
+
+        Every save elsewhere in the window refreshes what the core reads, and
+        that used to reload this table with it, throwing the edit away. An edit
+        is kept now; if the file changed underneath it, that is said, and Save
+        asks before replacing it.
+        """
+        if self._dirty and (path or "") == self._path:
+            if usersfile.fingerprint(self._path) != self._fingerprint:
+                self._changed_on_disk = True
+            self._validate()
+            return
+        self.load(path)
+
+    def reload(self, path=None):
+        """Read the file again on request; an unsaved edit is asked about first.
+
+        The one place that throws the table away on purpose, so the one place
+        that asks: the edits on screen are nowhere else.
+        """
+        if self._dirty and not widgets.confirm(
+                self, "Reload users.json",
+                "Drop the changes on screen and read the file again?",
+                "Nothing has been saved since they were made.",
+                agree="Drop and reload", kind="warn"):
+            return
+        self.load(self._path if path is None else path)
+
+    def is_dirty(self):
+        return self._dirty
+
+    def _set_dirty(self, dirty):
+        self._dirty = bool(dirty)
+        self.save_button.setProperty("dirty", "true" if self._dirty else "false")
+        self.save_button.setToolTip("Unsaved changes to users.json" if self._dirty
+                                    else "")
+        self.save_button.style().unpolish(self.save_button)
+        self.save_button.style().polish(self.save_button)
 
     def save(self):
         if not self._path:
             self._show_problem("No config path configured (Settings -> Config).")
             return
+        if self._unreadable:
+            return          # what is on screen is not the file; see _validate
         current = usersfile.fingerprint(self._path)
         if self._fingerprint is not None and current != self._fingerprint:
             if not widgets.confirm(
@@ -108,16 +164,22 @@ class CredentialsPage(QWidget):
             self._show_problem(str(exc))
             return
         self._fingerprint = usersfile.fingerprint(self._path)
+        self._changed_on_disk = False
+        self._set_dirty(False)
         self._show_ok("Saved %d row(s) to %s (previous kept as .bak)."
                       % (len(self._rows), self._path))
         self.saved.emit()
 
     # -- rows -----------------------------------------------------------------
     def add_row(self):
-        env = self._rows[-1].env if self._rows else ""
+        # The selected row's environment - the one being looked at - rather than
+        # the last row's, which belongs to whatever happened to be added last.
+        index = self.table.currentRow()
+        env = self._rows[index].env if 0 <= index < len(self._rows) else ""
         self._rows.append(usersfile.UserRow(env=env, cls="", login="", password=""))
         self._rebuild()
         self.table.setCurrentCell(len(self._rows) - 1, self.COL_CLASS)
+        self._set_dirty(True)
         self._validate()
 
     def duplicate_row(self):
@@ -129,6 +191,7 @@ class CredentialsPage(QWidget):
         self._rows.insert(index + 1, clone)
         self._rebuild()
         self.table.setCurrentCell(index + 1, self.COL_LOGIN)
+        self._set_dirty(True)
         self._validate()
 
     def delete_row(self, index):
@@ -145,6 +208,7 @@ class CredentialsPage(QWidget):
         del self._rows[index]
         self._revealed.discard(index)
         self._rebuild()
+        self._set_dirty(True)
         self._validate()
 
     def _rebuild(self):
@@ -209,10 +273,19 @@ class CredentialsPage(QWidget):
             except usersfile.UsersFileError as exc:
                 self._show_problem(str(exc))
                 return
+        self._set_dirty(True)
         self._validate()
 
     # -- validation -----------------------------------------------------------
     def _validate(self):
+        if self._unreadable:
+            # Never "0 rows, all fine": the table is empty because the file could
+            # not be read, and saving it would write an empty list over the only
+            # copy of every password - one the launcher then refuses to load.
+            self._show_problem("%s\nFix the file, or put its .bak back, and press "
+                               "Reload. Saving is off until it reads." % self._unreadable)
+            self.save_button.setEnabled(False)
+            return False
         problems = usersfile.validate(self._rows)
         if problems:
             self._show_problem("\n".join(problems[:6]))
@@ -220,6 +293,10 @@ class CredentialsPage(QWidget):
             self._show_ok("%d row(s) · env+login unique · every row has class, login "
                           "and password · run-tests uses tag: (not tags:)"
                           % len(self._rows))
+        if self._changed_on_disk:
+            self.status.setText(self.status.text() + "\nusers.json changed on disk "
+                                "since this table was loaded. Save asks before "
+                                "replacing it; Reload reads it and drops these edits.")
         self.save_button.setEnabled(not problems)
         return not problems
 

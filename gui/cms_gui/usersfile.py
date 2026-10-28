@@ -12,6 +12,8 @@ because this file holds the only copy of the passwords.
 
 import json
 import os
+import re
+from urllib.parse import urlsplit
 
 # Keys the launcher reads. Anything else in an entry (comments, notes) is
 # preserved as-is when a row round-trips through the editor.
@@ -126,6 +128,71 @@ def validate(rows):
                             "profile folder and must be unique." % (where, seen[key]))
         elif row.login:
             seen[key] = index
+    problems.extend(env_problems([row.env for row in rows]))
+    return problems
+
+
+def _split_env(value):
+    """session_launcher.split_env_value: a bare host:port parsed as one."""
+    return urlsplit(value if "://" in value else "//" + value)
+
+
+def _env_alias(value):
+    """session_launcher.env_alias, mirrored: the GUI does not import the core."""
+    split = _split_env(value)
+    host = (split.hostname or value.strip()).lower()
+    if ":" in host or re.fullmatch(r"[0-9.]+", host):
+        return host
+    return host.split(".")[0]
+
+
+def env_problems(values):
+    """What in these ``env`` values would stop the launcher reading the file.
+
+    Each is a crash in the core rather than a message, and it takes every launch
+    and the environment list down with it, so it is caught here before the file
+    is written: a ``{{...}}`` placeholder or an unreadable port (env_origin
+    raises on the port), and the same server spelled two ways
+    (build_environments asserts every environment ends up with its own name -
+    ``localhost:8069`` and ``http://localhost:8069/`` cannot). The naming
+    mirrors session_launcher.build_environments step for step.
+    """
+    problems = []
+    distinct = []
+    for value in values:
+        if value and value not in distinct:
+            distinct.append(value)
+    readable = []
+    for value in distinct:
+        if "{{" in value or "}}" in value:
+            problems.append("env %r has a {{...}} placeholder, which the launcher "
+                            "cannot read. Put variables in the environment's "
+                            "address instead." % value)
+            continue
+        try:
+            _split_env(value).port
+        except ValueError:
+            problems.append("env %r has a port the launcher cannot read." % value)
+            continue
+        readable.append(value)
+    names = {value: _env_alias(value) for value in readable}
+    groups = {}
+    for value, alias in names.items():
+        groups.setdefault(alias, []).append(value)
+    for alias, group in groups.items():
+        if len(group) < 2:
+            continue
+        for value in group:
+            netloc = _split_env(value).netloc.lower()
+            names[value] = netloc if netloc and netloc != alias else value
+    by_name = {}
+    for value, name in names.items():
+        by_name.setdefault(name, []).append(value)
+    for name, group in by_name.items():
+        if len(group) > 1:
+            problems.append("env %s are the same server written %d ways; the "
+                            "launcher cannot tell them apart. Write them the same."
+                            % (" and ".join(repr(v) for v in group), len(group)))
     return problems
 
 

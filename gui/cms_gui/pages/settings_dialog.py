@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
 from .. import core as core_mod
 from .. import logsourcesfile as lsf
 from .. import cycleprojectsfile as cpf
+from .. import launchprojectsfile as lpf
 from .. import servicesfile as sf
 from .. import theme, widgets
 from ..hotkeyeditor import HotkeyEditor
@@ -182,6 +183,19 @@ class SettingsDialog(QDialog):
             "above on purpose - a project can have cycles and no services. "
             "Which cycles belong to one is written in each cycle, not here."))
 
+        # Launch Sessions' own projects: environments, where each opens, and
+        # the variables an address is written with. Another file again - a
+        # launch project groups places to sign in to, not services or cycles.
+        self.launch_projects = QLineEdit(settings.launch_projects_path)
+        self.launch_projects.setProperty("mono", True)
+        self.launch_projects.setPlaceholderText(lpf.default_path())
+        column.addWidget(widgets.field(
+            "Launch projects",
+            widgets.row(self.launch_projects,
+                        self._browse_button(self._pick_launch_projects)),
+            "Environments, their addresses and the variables those are written "
+            "with ({{port}}), for Launch Sessions. The launcher never reads it."))
+
         # The values of secret variables, kept out of the cycle files because
         # those are committed and shipped inside the build.
         self.cycle_secrets = QLineEdit(settings.cycle_secrets_path)
@@ -338,6 +352,13 @@ class SettingsDialog(QDialog):
         if path:
             self.cycle_projects.setText(path)
 
+    def _pick_launch_projects(self):
+        path = widgets.pick_path(self, lpf.FILE_NAME,
+                                 self.launch_projects.text() or lpf.default_path(),
+                                 save=True)
+        if path:
+            self.launch_projects.setText(path)
+
     def _pick_cycle_secrets(self):
         path = widgets.pick_path(self, SECRETS_NAME,
                                  self.cycle_secrets.text() or _default_secrets_path(),
@@ -429,6 +450,7 @@ class SettingsDialog(QDialog):
         self.settings.config = self.config.text().strip()
         self.settings.services_path = self.services.text().strip()
         self.settings.cycle_projects_path = self.cycle_projects.text().strip()
+        self.settings.launch_projects_path = self.launch_projects.text().strip()
         self.settings.cycle_secrets_path = self.cycle_secrets.text().strip()
         self.settings.cycle_memory_path = self.cycle_memory.text().strip()
         self.settings.cycle_runs_path = self.cycle_runs.text().strip()

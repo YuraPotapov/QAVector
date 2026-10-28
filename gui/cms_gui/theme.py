@@ -87,6 +87,15 @@ TAG_INK = ACCENT_RAMP[800]
 #: Red and amber as text, which the marks above can carry on either ground.
 BAD_INK = BAD
 WARN_INK = WARN
+#: A value in an address that a variable put there (widgets.UrlField): blue,
+#: and its own token because the accent is slate and has to stay the brand -
+#: the part of an address you can change has to stand out from the part you
+#: cannot at a glance, in either theme.
+VAR_INK = "#1f5fbf"
+#: The ground of one group of settings inside a panel (role="section"): just
+#: off the page, so groups read apart without boxes - and still lighter than
+#: an input in light, between page and input in dark, so fields keep showing.
+SECTION_BG = "#f7f7f9"
 
 # --- what a cycle step is ----------------------------------------------------
 # Keyed by the family of the plugin - the part of its id before the dot. A wash
@@ -139,7 +148,7 @@ LOG_CRITICAL_BG = "#f7ddda"
 def set_dark_mode(enabled: bool):
     global BG, SURFACE, TEXT, ACCENT, NEUTRAL, ACCENT_RAMP, DIVIDER, DIVIDER_STRONG, OK, WARN, BAD, BAD_TINT
     global WARN_TINT, MARK_TINT, MARK_INK, BAD_INK, WARN_INK, LOG_LEVEL, LOG_CRITICAL_BG
-    global TAG_TINT, TAG_INK
+    global TAG_TINT, TAG_INK, VAR_INK, SECTION_BG
     global SELECT_BG, SELECT_INK, SELECT_MUTED
     global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
 
@@ -171,6 +180,8 @@ def set_dark_mode(enabled: bool):
         SELECT_MUTED = ACCENT_RAMP[300]
         BAD_INK = "#ef6a5e"
         WARN_INK = "#e0a33f"
+        VAR_INK = "#7fb2ff"
+        SECTION_BG = "#202125"
 
         # The same nine families, as inks for a dark ground rather than washes
         # for paper. The light values are pale tints and would be blinding
@@ -232,6 +243,8 @@ def set_dark_mode(enabled: bool):
         SELECT_MUTED = ACCENT_RAMP[800]
         BAD_INK = BAD
         WARN_INK = WARN
+        VAR_INK = "#1f5fbf"
+        SECTION_BG = "#f7f7f9"
 
         PLUGIN_TINT = {
             "agent": "#efe9fb",
@@ -589,6 +602,14 @@ QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QTimeEdit:disabled {{
     background: {n200}; color: {n500};
 }}
 QLineEdit[mono="true"], QComboBox[mono="true"] {{ font-family: {mono}; font-size: 12px; }}
+/* widgets.UrlField showing its address: drawn as the input it turns into when
+   clicked, so the two modes are one box that changes what it lets you do. */
+QFrame[role="urlfield"] {{ background: {surface}; border: 1px solid {divider}; }}
+QFrame[role="urlfield"]:hover {{ border-color: {divider_strong}; }}
+QFrame[role="urlfield"]:disabled {{ background: {n200}; }}
+QFrame[role="urlfield"] QLabel {{ font-family: {mono}; font-size: 12px; color: {text}; background: transparent; }}
+QFrame[role="urlfield"] QLabel[empty="true"] {{ color: {n500}; }}
+QFrame[role="urlfield"] QToolButton {{ border: none; background: transparent; padding: 0; }}
 /* The search row under a table's header: one box per column, standing in the
    band the header leaves for it. Slimmer than a form input on purpose - it is a
    fitting on the table rather than a field to fill in, and at form height it
@@ -726,6 +747,11 @@ QTabBar::tab:disabled {{ color: {n400}; }}
 
 /* --- containers ---------------------------------------------------------- */
 QFrame[role="panel"] {{ background: transparent; border: 1px solid {divider}; }}
+/* The one panel a page is about (Launch Sessions' start address): an accent
+   rule down its left edge, the mark the Subjects page gives its open detail. */
+QFrame[role="panel"][emphasis="primary"] {{ border-left: 3px solid {accent}; }}
+QFrame[role="section"] {{ background: {section}; border: none; }}
+QFrame[role="section"] QWidget[seethrough="true"] {{ background: transparent; }}
 /* A panel for something that is always there, as against the ones a person
    makes: Connections and the block for logs belonging to no project, beside the
    projects themselves. Same frame, filled rather than clear, so the page reads
@@ -909,7 +935,7 @@ def stylesheet():
         a900=ACCENT_RAMP[900],
         cell_v=CELL_INSET_V, cell_h=CELL_INSET_H,
         tb_bg=TITLEBAR_BG, tb_text=TITLEBAR_TEXT, tb_muted=TITLEBAR_MUTED,
-        select_bg=SELECT_BG, select_ink=SELECT_INK,
+        select_bg=SELECT_BG, select_ink=SELECT_INK, section=SECTION_BG,
         chevron=_chevron(NEUTRAL[600]), chevron_off=_chevron(NEUTRAL[400]),
     )
 

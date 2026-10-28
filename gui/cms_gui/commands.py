@@ -53,6 +53,10 @@ FLAGS = [
     Flag("--detach", "flag", GENERAL,
          "Fire-and-forget: leave windows running after the launcher exits."),
     Flag("--maximized", "flag", GENERAL, "Open every window maximized."),
+    Flag("--no-password-prompts", "flag", GENERAL,
+         "Chrome never offers to save a password or warns about a breached one."),
+    Flag("--no-autologin", "flag", GENERAL,
+         "Do not sign the windows in: they open on the sign-in form."),
     # No needs_run_tests: a plain launch streams these into the Run page's
     # session panels just as a --run-tests one does. Choices come from
     # --describe (log_sources), filtered to the environment being launched.
@@ -229,12 +233,14 @@ def for_background(args):
     last). What only means something to a window comes out: ``--detach`` (there
     is none to leave running), ``--execution-overlay`` (no page to draw it in),
     ``--report-screen`` (nothing to photograph), ``--report-doc`` (a guide is a
-    picture of every page), and ``--maximized`` and ``--lock-windows`` (no window
-    to size or lock). Everything else - --jobs above all - is the run exactly as
+    picture of every page), and ``--maximized``, ``--lock-windows``,
+    ``--no-password-prompts`` and ``--no-autologin`` (no window to size, lock,
+    prompt in or sign in). Everything else - --jobs above all - is the run exactly as
     it was configured.
     """
     drop = {"--detach", "--execution-overlay", "--report-screen", "--report-doc",
-            "--maximized", "--lock-windows"}
+            "--maximized", "--lock-windows", "--no-password-prompts",
+            "--no-autologin"}
     return ["--no-browser"] + [a for a in args if a.split("=", 1)[0] not in drop]
 
 

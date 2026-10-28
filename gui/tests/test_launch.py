@@ -12,6 +12,8 @@ import copy
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cms_gui import commands, core, launch
@@ -266,7 +268,8 @@ def test_the_state_it_produces_covers_every_flag_the_command_page_offers():
 # ------------------------------------------------------------------ validation
 
 def test_choosing_scenarios_without_choosing_any_is_a_problem():
-    config = _config(scenarios={"mode": launch.SCENARIOS_PICK, "selected": []})
+    config = _config(environment="localhost:8069",
+                     scenarios={"mode": launch.SCENARIOS_PICK, "selected": []})
     assert any("scenario" in p for p in launch.validate(config))
     config["scenarios"]["selected"] = ["auth.login"]
     assert launch.validate(config) == []
@@ -328,8 +331,36 @@ def test_an_unknown_environment_is_reported():
     assert any("staging" in p for p in problems)
 
 
-def test_the_default_configuration_has_nothing_to_fix():
-    assert launch.validate(launch.DEFAULTS) == []
+def test_the_default_configuration_needs_only_an_environment():
+    assert launch.validate(_config(environment="localhost:8069")) == []
+
+
+def test_every_environment_with_no_address_is_a_problem():
+    """The core exits on it - no --env and no --url leaves nothing to open."""
+    problems = launch.validate(launch.DEFAULTS)
+    assert len(problems) == 1 and "Choose an environment" in problems[0]
+    with_address = _config(advanced=dict(launch.DEFAULTS["advanced"],
+                                         url="http://localhost:8069"))
+    assert launch.validate(with_address) == []
+
+
+def test_every_environment_says_that_all_accounts_share_one_address():
+    inventory = core.Inventory({
+        "envs": [{"alias": "local", "value": "localhost:8069",
+                  "origin": "http://localhost:8069"},
+                 {"alias": "staging", "value": "https://staging.example.invalid/",
+                  "origin": "https://staging.example.invalid"}],
+        "users": [{"env": "localhost:8069", "login": "admin"},
+                  {"env": "https://staging.example.invalid/", "login": "admin"}],
+    })
+    config = _config(advanced=dict(launch.DEFAULTS["advanced"],
+                                   url="localhost:8070"))
+    notes = launch.notes(config, inventory)
+    assert any("2 environments will all open http://localhost:8070" in note
+               for note in notes)
+    # One environment chosen: nothing to warn about.
+    assert not any("environments will all open" in note for note in
+                   launch.notes(dict(config, environment="local"), inventory))
 
 
 # ------------------------------------------------------------------ how it reads
@@ -622,3 +653,190 @@ def test_a_guide_with_nothing_scripted_is_said_to_not_apply():
     assert "--report-doc" not in launch.argv(config)
     assert any("step-by-step guide" in note for note in launch.notes(config))
 
+
+
+# ------------------------------------------------ where the windows open
+
+def _envs_inventory():
+    return core.Inventory({
+        "envs": [{"alias": "localhost:8069", "value": "localhost:8069",
+                  "origin": "http://localhost:8069", "count": 1},
+                 {"alias": "localhost:8070", "value": "localhost:8070",
+                  "origin": "http://localhost:8070", "count": 1},
+                 {"alias": "staging", "value": "https://staging.example.invalid/",
+                  "origin": "https://staging.example.invalid", "count": 1}],
+        "users": [{"env": "localhost:8069", "login": "admin"},
+                  {"env": "localhost:8070", "login": "admin"},
+                  {"env": "https://staging.example.invalid/", "login": "agent"}],
+    })
+
+
+@pytest.mark.parametrize("typed, url", [
+    ("localhost:8074", "http://localhost:8074"),
+    ("localhost:8074/web/login", "http://localhost:8074/web/login"),
+    ("127.0.0.1:8069", "http://127.0.0.1:8069"),
+    ("[::1]:8069", "http://[::1]:8069"),
+    ("shop.localhost:8069", "http://shop.localhost:8069"),
+    ("staging.example.invalid/", "https://staging.example.invalid/"),
+    ("http://staging.example.invalid", "http://staging.example.invalid"),
+    ("  https://staging.example.invalid/web  ", "https://staging.example.invalid/web"),
+])
+def test_an_address_gets_the_scheme_the_core_would_give_its_env_value(typed, url):
+    assert launch.normalize_address(typed) == (url, "")
+
+
+@pytest.mark.parametrize("typed, problem", [
+    ("localhost:0", "port"),
+    ("localhost:65536", "port"),
+    ("localhost:abc", "port"),
+    ("ftp://files.example.invalid", "http"),
+    ("http://", "host"),
+    ("http://local host:8069", "space"),
+    ("localhost:{{port}}", "{{"),
+])
+def test_an_address_the_core_could_not_open_is_named(typed, problem):
+    url, said = launch.normalize_address(typed)
+    assert url == "" and problem in said
+
+
+def test_the_address_comes_from_the_configuration_then_the_environment():
+    inventory = _envs_inventory()
+    config = _config(environment="localhost:8069")
+    address = launch.effective_url(config, inventory)
+    assert address[:4] == ("http://localhost:8069", launch.SOURCE_ENV, "", "")
+    assert address.parts == [("http://localhost:8069", "")]
+
+    urls = {"localhost:8069": "localhost:8074"}
+    address = launch.effective_url(config, inventory, urls)
+    assert address.url == "http://localhost:8074"
+    assert address.source == launch.SOURCE_ENV_ADDRESS
+
+    own = dict(config, advanced=dict(launch.DEFAULTS["advanced"],
+                                     url="localhost:8075/web"))
+    address = launch.effective_url(own, inventory, urls)
+    assert address.url == "http://localhost:8075/web"
+    assert address.source == launch.SOURCE_CONFIG
+    # What Reset would go back to.
+    assert address.inherited == "http://localhost:8074"
+
+
+def test_the_command_line_passes_the_address_only_when_it_is_not_the_origin():
+    inventory = _envs_inventory()
+    config = _config(environment="localhost:8069")
+    assert _flag(launch.argv(config, inventory), "--url") is None
+    argv = launch.argv(config, inventory, {"localhost:8069": "localhost:8074"})
+    assert _flag(argv, "--url") == "http://localhost:8074"
+    assert _flag(argv, "--env") == "localhost:8069"
+
+
+def test_the_environment_is_passed_as_the_value_its_accounts_are_filed_under():
+    """An alias drifts; the value is what --env matches exactly."""
+    inventory = _envs_inventory()
+    config = _config(environment="staging")
+    assert _flag(launch.argv(config, inventory), "--env") == \
+        "https://staging.example.invalid/"
+    # A saved value wins over whatever the alias now names.
+    drifted = _config(environment="localhost", environment_value="localhost:8070")
+    assert launch.environment_value(drifted, inventory) == "localhost:8070"
+    assert launch.validate(drifted, inventory) == []
+
+
+def test_an_alias_that_moved_on_names_the_environments_it_could_mean():
+    inventory = _envs_inventory()
+    problems = launch.validate(_config(environment="localhost"), inventory)
+    assert any("localhost:8069, localhost:8070" in p for p in problems)
+
+
+def test_a_saved_value_that_is_gone_is_reported_with_it():
+    inventory = _envs_inventory()
+    config = _config(environment="localhost:8071",
+                     environment_value="localhost:8071")
+    assert any("localhost:8071" in p and "any more" in p
+               for p in launch.validate(config, inventory))
+
+
+def test_default_folders_apply_only_where_the_configuration_names_none():
+    # Scripted, or the reports folder is one of the flags with nothing to do.
+    config = _config(environment="localhost:8069",
+                     scenarios={"mode": launch.SCENARIOS_ALL, "selected": []})
+    dirs = {"reports": "/srv/reports", "sessions": "/srv/profiles"}
+    argv = launch.argv(config, None, None, dirs)
+    assert _flag(argv, "--reports-dir") == "/srv/reports"
+    assert _flag(argv, "--sessions-dir") == "/srv/profiles"
+    own = dict(config, advanced=dict(launch.DEFAULTS["advanced"],
+                                     reports_dir="/tmp/mine"))
+    assert _flag(launch.argv(own, None, None, dirs), "--reports-dir") == "/tmp/mine"
+
+
+def test_the_summary_says_where_a_changed_address_came_from():
+    inventory = _envs_inventory()
+    rows = dict(launch.summarise(_config(environment="localhost:8069"), inventory,
+                                 {"localhost:8069": "localhost:8074"}))
+    assert rows["Start URL"] == "http://localhost:8074 (environment address)"
+    assert "Start URL" not in dict(launch.summarise(
+        _config(environment="localhost:8069"), inventory))
+
+
+# ------------------------------------------------ variables in the address
+
+def _port_scope(run=None, environment=8069):
+    from cms_gui import launchvars
+    definitions, _problems = launchvars.definitions_from(
+        {"port": {"type": "port", "default": 8069}})
+    return launchvars.Scope(definitions, [
+        launchvars.Layer("environment", {"port": environment}),
+        launchvars.Layer("this run", run or {})])
+
+
+def test_a_variable_fills_the_address_and_the_parts_say_which_part():
+    inventory = _envs_inventory()
+    config = _config(environment="localhost:8069")
+    urls = {"localhost:8069": "localhost:{{port}}/web"}
+    address = launch.effective_url(config, inventory, urls, _port_scope({"port": 8074}))
+    assert address.url == "http://localhost:8074/web" and address.problem == ""
+    assert address.parts == [("http://", ""), ("localhost:", ""), ("8074", "port"),
+                             ("/web", "")]
+    assert address.values["port"].source == "this run"
+    argv = launch.argv(config, inventory, urls, None, _port_scope({"port": 8074}))
+    assert _flag(argv, "--url") == "http://localhost:8074/web"
+    assert _flag(argv, "--env") == "localhost:8069"
+
+
+def test_an_unknown_variable_stops_the_run_with_its_name():
+    inventory = _envs_inventory()
+    config = _config(environment="localhost:8069",
+                     advanced=dict(launch.DEFAULTS["advanced"], url="localhost:{{port}}"))
+    problems = launch.validate(config, inventory)
+    assert any("{{port}} is not defined" in p for p in problems)
+    assert launch.validate(config, inventory, None, _port_scope()) == []
+
+
+def test_a_bad_value_is_said_with_the_variable_it_belongs_to():
+    inventory = _envs_inventory()
+    config = _config(environment="localhost:8069",
+                     advanced=dict(launch.DEFAULTS["advanced"], url="localhost:{{port}}"))
+    problems = launch.validate(config, inventory, None, _port_scope({"port": 70000}))
+    assert any(p.startswith("port has to be a port") for p in problems)
+
+
+def test_auto_login_off_reaches_the_command_line_and_the_summary():
+    config = _config(environment="localhost:8069",
+                     extensions=dict(launch.DEFAULTS["extensions"], autologin=False))
+    assert "--no-autologin" in launch.argv(config)
+    assert "not signed in" in launch.windows_label(config)
+    assert "--no-autologin" not in launch.argv(_config(environment="localhost:8069"))
+    assert "--no-autologin" not in commands.for_background(launch.argv(config))
+
+
+def test_a_configuration_saved_before_the_switch_keeps_auto_login_on():
+    config = _config(environment="localhost:8069",
+                     extensions={"mode": launch.EXT_ALL, "names": []})
+    assert "--no-autologin" not in launch.argv(config)
+
+
+def test_no_password_prompts_reaches_the_command_line():
+    config = _config(environment="localhost:8069",
+                     sessions=dict(launch.DEFAULTS["sessions"], no_password_prompts=True))
+    assert "--no-password-prompts" in launch.argv(config)
+    assert "--no-password-prompts" not in launch.argv(_config(environment="localhost:8069"))
+    assert "--no-password-prompts" not in commands.for_background(launch.argv(config))

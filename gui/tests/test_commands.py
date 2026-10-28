@@ -261,3 +261,38 @@ def test_empty_sessions_is_a_mode_the_gui_adds_not_a_form_field():
 def test_recording_drops_the_lock_it_would_lock_the_recorder_out_with():
     # The recorder is used by clicking in the window; the lock needs --run-tests.
     assert commands.for_recording(["--maximized", "--lock-windows"]) == ["--maximized"]
+
+
+# ------------------------------------------------ the environment's address
+
+def test_the_command_page_opens_the_environment_address_too(qapp, tmp_path):
+    """One rule on both pages: an empty --url takes the environment's address,
+    its variables filled in from what the environment and its project say."""
+    from PySide6.QtCore import QSettings
+    from cms_gui import core, launchprojectsfile as lpf
+    from cms_gui.pages.command import CommandPage
+    from cms_gui.settings import Settings
+    settings = Settings()
+    settings._qs = QSettings(str(tmp_path / "gui.ini"), QSettings.IniFormat)
+    registry = lpf.Registry(str(tmp_path / lpf.FILE_NAME))
+    inventory = core.Inventory({
+        "envs": [{"alias": "local", "value": "localhost:8069",
+                  "origin": "http://localhost:8069"}]})
+
+    def change(projects):
+        lpf.define(projects, lpf.WORKSPACE, "port", "port", 8069)
+        row = lpf.environment_row(projects, registry.environments(inventory)[0])
+        row.address, row.variables = "localhost:{{port}}", {"port": 8074}
+    registry.update(change)
+    page = CommandPage(settings, registry=registry)
+    try:
+        page.set_inventory(inventory)
+        page._controls["--env"].setCurrentText("local")
+        assert "--url=http://localhost:8074" in page.argv()
+        assert "http://localhost:8074" in page.preview.text()
+        assert "environment address" in page._controls["--url"].placeholderText()
+        # Typed, the form's own value wins.
+        page._controls["--url"].setText("http://localhost:9999")
+        assert "--url=http://localhost:9999" in page.argv()
+    finally:
+        page.close()

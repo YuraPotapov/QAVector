@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
 
 from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
                history as history_mod, icon, icons,
-               launch as launch_mod, load as load_mod,
+               launch as launch_mod, launchprojectsfile as lpf, load as load_mod,
                logsourcesfile as lsf, search, stageswindow, subjecthistory, theme,
                titlebar,
                widgets)
@@ -333,7 +333,7 @@ class MainWindow(QMainWindow):
         file_menu = menu.addMenu("&File")
         reload_action = QAction("&Reload users.json", self)
         reload_action.setShortcut(QKeySequence("Ctrl+R"))
-        reload_action.triggered.connect(lambda: self.credentials.load(self.core.config_path))
+        reload_action.triggered.connect(lambda: self.credentials.reload(self.core.config_path))
         self.reload_users_action = self._register_action(
             reload_action, "credentials.reload", "Reload users.json",
             "Reload the credentials file.", "Credentials", "page/credentials")
@@ -691,7 +691,11 @@ class MainWindow(QMainWindow):
         inner.addWidget(rail)
 
         self.stack = QStackedWidget()
-        self.environments = EnvironmentsPage(self.settings)
+        # One reading of launch-projects.json for the three pages that use it:
+        # where an environment opens is set on one and shown on the others.
+        self.launch_registry = lpf.Registry(
+            lpf.resolve_path(self.settings.launch_projects_path))
+        self.environments = EnvironmentsPage(self.settings, registry=self.launch_registry)
         self.credentials = CredentialsPage()
         self.services = ServicesPage(self.settings)
         self.services.set_core(self.core)
@@ -705,8 +709,11 @@ class MainWindow(QMainWindow):
         self.cycles.planned_opened.connect(self._open_planned)
         self.cycles.artifacts_requested.connect(self._open_artifacts)
         self.cycles.stages_detached_changed.connect(self._stages_detached_changed)
-        self.command = CommandPage(self.settings)
-        self.launch = LaunchSessionsPage(self.settings)
+        self.command = CommandPage(self.settings, registry=self.launch_registry)
+        self.launch = LaunchSessionsPage(self.settings, registry=self.launch_registry)
+        # A desktop link's run is a windowless copy of the application; it must
+        # not decide what the next ordinary start opens on.
+        self.launch.set_persistent(not self._headless)
         self.run = RunPage(self.run_state)
         self.log = LogPage(self.settings)
         self.artifacts = ArtifactsPage(self.settings)
@@ -770,6 +777,10 @@ class MainWindow(QMainWindow):
         self.cycles.control_requested.connect(self._control_cycle)
         self.cycles.approval_answered.connect(self._answer_cycle_node_approval)
         self.environments.directories_changed.connect(self._directories_changed)
+        self.environments.addresses_changed.connect(self._addresses_changed)
+        self.launch.environments_changed.connect(self._launch_environments_changed)
+        # + Account wrote users.json: read it again, as a Credentials save does.
+        self.launch.accounts_changed.connect(self.refresh_inventory)
         self.run_state.run_dir_known.connect(self.artifacts.set_run_dir)
         # Recorded the moment the run says where it is writing, not only when
         # it ends: a run the application was killed during is exactly the one
@@ -1115,6 +1126,39 @@ class MainWindow(QMainWindow):
         self.command.set_inventory(self.inventory)
         self.launch.set_inventory(self.inventory)
 
+    def _run_auto_launch(self):
+        """Run the configuration a desktop link named (``--launch NAME``).
+
+        The configuration as saved: a link names a configuration, not whatever
+        edit of it - or of another one entirely - was last on screen. A name
+        nothing is saved under runs nothing.
+        """
+        name, self._auto_launch = self._auto_launch, None
+        self.show_page("launch")
+        if not self.launch.open_configuration(name, use_draft=False):
+            candidates = self.launch.link_candidates(name)
+            if candidates:
+                logging.error("The desktop link names %r, which %d saved configurations "
+                              "share (%s); recreate the link from the one you mean.",
+                              name, len(candidates), ", ".join(candidates))
+            else:
+                logging.error("No saved Launch Sessions configuration is called %r.",
+                              name)
+            if self._headless:
+                QApplication.quit()
+            return
+        QTimer.singleShot(100, self.launch.run_requested.emit)
+
+    def _launch_environments_changed(self):
+        """Launch Sessions changed an environment: the other two pages show it."""
+        self.environments.set_inventory_rows()
+        self.command.refresh_address()
+
+    def _addresses_changed(self):
+        """An environment changed: both pages show where a run opens."""
+        self.launch.refresh_address()
+        self.command.refresh_address()
+
     # -- core -----------------------------------------------------------------
     def refresh_inventory(self):
         # The first refresh is a delayed singleShot, so a window closed inside
@@ -1190,7 +1234,9 @@ class MainWindow(QMainWindow):
             self.listener.set_inventory(self.inventory)
             
             _splash_msg("Loading credentials...")
-            self.credentials.load(self.inventory.config_path or self.core.config_path)
+            # refresh, not load: an edit not saved yet stays where it is.
+            self.credentials.refresh(self.inventory.config_path or self.core.config_path)
+            self.launch.users_path = self.inventory.config_path or self.core.config_path
 
             _splash_msg("Loading services and logs...")
             self.services.set_environments([env.get("value", "")
@@ -1230,10 +1276,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._restore_last_cycle)
 
             if self._auto_launch:
-                self.show_page("launch")
-                self.launch._reload_configs(select=self._auto_launch)
-                QTimer.singleShot(100, self.launch.run_requested.emit)
-                self._auto_launch = None
+                self._run_auto_launch()
                 
         self.describe_label.setText("reading the configuration …")
         # The list of cycles is part of what this reads; while there is none
@@ -1550,6 +1593,8 @@ class MainWindow(QMainWindow):
         dialog.set_flows_dir(self.inventory.dirs().get("flows") or "")
         if dialog.exec() == QDialog.Accepted:
             dialog.apply()
+            self.launch_registry.path = lpf.resolve_path(self.settings.launch_projects_path)
+            self.launch_registry.reload()
             self.core = core_mod.Core(None, None, self.settings.config,
                                       flows_dir=self.settings.flows_path,
                                       cycles_dir=self.settings.cycles_path,
@@ -1758,9 +1803,14 @@ class MainWindow(QMainWindow):
         login = self.ask_recording_account()
         if login == "cancel":
             return
-        choice, scenario = self.ask_recording_target()
-        if choice == "cancel":
-            return
+        source, page = self._run_page(None)
+        if source == "launch" and page.recording():
+            # Launch Sessions' Record already says what it records into.
+            scenario = page.record_target()
+        else:
+            choice, scenario = self.ask_recording_target()
+            if choice == "cancel":
+                return
         self.start_run(recorder=scenario or True, only_login=login or None)
 
     def ask_recording_account(self):
@@ -1826,6 +1876,12 @@ class MainWindow(QMainWindow):
                                                  "the GUI from a checkout.")
             return
         source, page = self._run_page(source)
+        if source == "launch" and not recorder and not background and not empty \
+                and page.recording():
+            # Record is one of Launch Sessions' answers to "what to do": the
+            # same path as RUN -> With Recorder, which asks what it has to.
+            self.start_recording()
+            return
         if source == "launch":
             problems = page.problem_list()
             if problems:
@@ -1897,12 +1953,11 @@ class MainWindow(QMainWindow):
         except core_mod.CoreError:
             display = " ".join(argv)
         if source == "launch":
-            config = page.state()
             return history_mod.LAUNCH, {
                 "argv": list(argv), "display_command": display,
                 "summary": (EMPTY_PREFIX if empty else "") + page.describe_line(background),
-                "launch_config": config,
-                "command_state": launch_mod.to_command_state(config, self.inventory)}
+                "launch_config": page.state(),
+                "command_state": page.command_state()}
         state = page.state()
         return history_mod.COMMAND, {
             "argv": list(argv), "display_command": display,
@@ -2302,7 +2357,9 @@ class MainWindow(QMainWindow):
         """Put a recorded run back into the page that produced it."""
         kind = entry.get("kind")
         if kind == history_mod.LAUNCH:
-            self.launch.set_state(entry.get("launch_config") or {})
+            # As (unsaved): never as an edit of whichever configuration is open,
+            # which Save would then have written over.
+            self.launch.open_unsaved(entry.get("launch_config") or {})
             self.show_page("launch")
             return "launch"
         # The Command page needs nothing new for this: set_state is its own API.

@@ -6,9 +6,11 @@ segmented control, the tag pill - plus small constructors so pages read as
 layout rather than as widget configuration.
 """
 
+import html
 import itertools
 import math
 import os
+import re
 import weakref
 
 from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
@@ -21,7 +23,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QSizePolicy,
-                               QSpinBox, QSplitter, QStyle,
+                               QSpinBox, QSplitter, QStackedLayout, QStyle,
                                QStyleOptionToolButton, QStylePainter,
                                QTableWidget, QTableWidgetItem, QToolButton,
                                QVBoxLayout, QWidget)
@@ -752,6 +754,272 @@ class CheckList(QWidget):
 #: The two views a :class:`CheckList` with ``selected_view`` switches between.
 VIEW_ALL = "All"
 VIEW_SELECTED = "Selected"
+
+
+class UrlField(QWidget):
+    """One address: shown as it will open, edited as it is written.
+
+    Showing, it is a box the size of an input holding the address a run will
+    open, with each part a variable supplied drawn in :data:`theme.VAR_INK` and
+    the rest in the ordinary ink - an address with no variables in it is all
+    plain text. Clicking the plain text, or the pencil, turns the same box into
+    the editor for what was actually written (placeholders and all); Enter or
+    leaving it shows the address again, Escape puts back what was there.
+    Clicking a highlighted part asks for that variable instead
+    (:attr:`value_clicked`) - the page decides what that opens.
+
+    Two widgets in one place rather than one painted editor: a QLineEdit cannot
+    colour part of its text, and a label cannot be typed into. They are held to
+    one height so switching between them never moves the page.
+    """
+
+    #: The text written, committed by Enter or by leaving the editor.
+    edited = Signal(str)
+    #: The name of the variable whose highlighted value was clicked.
+    value_clicked = Signal(str)
+
+    def __init__(self, placeholder="", parent=None):
+        super().__init__(parent)
+        self._parts = []
+        self._template = ""
+        self._placeholder = placeholder
+        self._editing = False
+
+        self._stack = QStackedLayout(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
+
+        self.frame = QFrame()
+        self.frame.setProperty("role", "urlfield")
+        self.frame.setCursor(Qt.IBeamCursor)
+        row = QHBoxLayout(self.frame)
+        # The border, the input's 8px padding and the 2px a QLineEdit keeps
+        # inside itself: the shown text starts where the typed text will.
+        row.setContentsMargins(10, 0, 2, 0)
+        row.setSpacing(4)
+        self.label = _UrlLabel(self)
+        # Never as wide as its text: a long address is clipped in the box (the
+        # whole of it is one click away, in the editor) rather than widening
+        # the page - and with it the window - past the screen.
+        self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.label.setMinimumWidth(0)
+        row.addWidget(self.label, 1)
+        self.pencil = QToolButton()
+        icons.button(self.pencil, "edit")
+        self.pencil.setToolTip("Edit the address as it is written")
+        self.pencil.setCursor(Qt.PointingHandCursor)
+        self.pencil.clicked.connect(self.begin_edit)
+        row.addWidget(self.pencil)
+
+        self.editor = _UrlEditor(self)
+        self.editor.setProperty("mono", True)
+        self.editor.returnPressed.connect(self._commit)
+        self.editor.editingFinished.connect(self._commit)
+
+        self._stack.addWidget(self.frame)
+        self._stack.addWidget(self.editor)
+        self.frame.setFixedHeight(self.editor.sizeHint().height())
+        self._render()
+
+    # -- contents -------------------------------------------------------------
+    def set_address(self, parts, template=""):
+        """Show ``parts`` and keep ``template`` as what the editor starts from.
+
+        ``parts`` is ``[(text, variable name or "")]`` in order; ``template``
+        the address as written. Ignored while the editor is open, so a refresh
+        never takes the text out from under someone typing it.
+        """
+        self._parts = [(str(text), name or "") for text, name in parts if text]
+        self._template = template or ""
+        if not self._editing:
+            self._render()
+
+    def set_placeholder(self, text):
+        self._placeholder = text or ""
+        self.editor.setPlaceholderText(self._placeholder)
+        self._render()
+
+    def set_variables(self, names):
+        """The variables the address can name, offered while it is typed."""
+        self.editor.set_names(names)
+
+    def text(self):
+        """The address as shown, variables filled in."""
+        return "".join(text for text, _name in self._parts)
+
+    def is_editing(self):
+        return self._editing
+
+    # -- switching ------------------------------------------------------------
+    def begin_edit(self):
+        if self._editing or not self.isEnabled():
+            return
+        self._editing = True
+        self.editor.setText(self._template)
+        self._stack.setCurrentWidget(self.editor)
+        self.editor.setFocus(Qt.MouseFocusReason)
+        self.editor.end(False)
+
+    def cancel_edit(self):
+        if not self._editing:
+            return
+        self._editing = False
+        self._stack.setCurrentWidget(self.frame)
+        self._render()
+
+    def _commit(self):
+        # returnPressed and editingFinished both arrive for one Enter, and
+        # leaving the box sends the second on its own: only the first counts.
+        if not self._editing:
+            return
+        self._editing = False
+        text = self.editor.text().strip()
+        self._stack.setCurrentWidget(self.frame)
+        self._render()
+        self.edited.emit(text)
+
+    # -- drawing --------------------------------------------------------------
+    def _render(self):
+        if not self._parts:
+            self.label.setProperty("empty", "true")
+            self.label.setText(html.escape(self._placeholder))
+        else:
+            self.label.setProperty("empty", "false")
+            chunks = []
+            for text, name in self._parts:
+                escaped = html.escape(text)
+                if name:
+                    # Read now, not at import: set_dark_mode rewrites the ink.
+                    chunks.append('<a href="var:%s" style="color: %s; '
+                                  'text-decoration: none;">%s</a>'
+                                  % (html.escape(name, quote=True), theme.VAR_INK,
+                                     escaped))
+                else:
+                    chunks.append(escaped)
+            self.label.setText("".join(chunks))
+        self.label.style().unpolish(self.label)
+        self.label.style().polish(self.label)
+
+    def changeEvent(self, event):             # noqa: N802 - Qt's own spelling
+        super().changeEvent(event)
+        if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
+            self._render()
+
+
+class _UrlLabel(QLabel):
+    """The shown address: a highlighted part asks for its variable, the rest edits."""
+
+    def __init__(self, field):
+        super().__init__()
+        self._field = field
+        self.setTextFormat(Qt.RichText)
+        self.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.linkActivated.connect(self._link)
+        self.linkHovered.connect(self._hover)
+        self._hovered = ""
+
+    def _link(self, href):
+        if href.startswith("var:"):
+            self._field.value_clicked.emit(href[len("var:"):])
+
+    def _hover(self, href):
+        self._hovered = href or ""
+        self.setCursor(Qt.PointingHandCursor if href else Qt.IBeamCursor)
+
+    def mouseReleaseEvent(self, event):       # noqa: N802 - Qt's own spelling
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and not self._hovered:
+            self._field.begin_edit()
+
+
+#: What may stand after an open ``{{`` while a name is still being typed.
+_PARTIAL_NAME = re.compile(r"\s*(vars\.)?[A-Za-z0-9_]*")
+
+
+class _UrlEditor(QLineEdit):
+    """The editor half of :class:`UrlField`: Escape gives the old text back.
+
+    It also finishes variable names. After ``{{`` - or ``{{po`` - the rest of
+    the first name that fits is written in and left selected: typing on
+    replaces it, Enter, Tab or Right keeps it. Inline rather than in a pop-up
+    list, because a pop-up holds the X11 keyboard while it is open and the
+    keyboard layout could not be switched under it. Deleting never completes,
+    or a completion could not be taken back. The context menu lists them too.
+    """
+
+    def __init__(self, field):
+        super().__init__()
+        self._field = field
+        self._names = []
+        # What was typed, without a completion pending: a key that replaces the
+        # selected completion makes the text shorter than with it, and is still
+        # typing on rather than deleting.
+        self._typed = ""
+        self.textEdited.connect(self._complete)
+
+    def set_names(self, names):
+        self._names = sorted(names or ())
+        self.setToolTip("Type {{ for a variable: %s" % ", ".join(self._names)
+                        if self._names else "")
+
+    def setText(self, text):                  # noqa: N802 - Qt's own spelling
+        super().setText(text)
+        self._typed = text
+
+    def _complete(self, text):
+        grew = len(text) > len(self._typed)
+        self._typed = text
+        cursor = self.cursorPosition()
+        if not grew or not self._names or re.match(r"[A-Za-z0-9_]", text[cursor:cursor + 1]):
+            return                  # deleting, nothing to offer, or inside a word
+        before = text[:cursor]
+        start = before.rfind("{{")
+        if start < 0 or "}}" in before[start:]:
+            return
+        partial = before[start + 2:]
+        if not _PARTIAL_NAME.fullmatch(partial):
+            return
+        bare = partial.strip()
+        bare = bare[len("vars."):] if bare.startswith("vars.") else bare
+        match = next((name for name in self._names if name.startswith(bare)), None)
+        if match is None:
+            return
+        rest = match[len(bare):] + ("" if text[cursor:].startswith("}}") else "}}")
+        if not rest:
+            return
+        QLineEdit.setText(self, text[:cursor] + rest + text[cursor:])
+        self.setSelection(cursor, len(rest))
+
+    def variable_actions(self, menu):
+        """Add "Insert variable" to ``menu``; returns the actions added."""
+        if not self._names:
+            return []
+        menu.addSeparator()
+        inner = menu.addMenu("Insert variable")
+        found = []
+        for name in self._names:
+            action = inner.addAction("{{%s}}" % name)
+            action.triggered.connect(lambda _c=False, n=name: self.insert("{{%s}}" % n))
+            found.append(action)
+        return found
+
+    def contextMenuEvent(self, event):        # noqa: N802 - Qt's own spelling
+        menu = self.createStandardContextMenu()
+        self.variable_actions(menu)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+    def keyPressEvent(self, event):           # noqa: N802 - Qt's own spelling
+        if event.key() == Qt.Key_Escape and self._field.is_editing():
+            self._field.cancel_edit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):           # noqa: N802 - Qt's own spelling
+        super().focusOutEvent(event)
+        # A menu of this box's own (right click) is not leaving it.
+        if event.reason() != Qt.PopupFocusReason:
+            self._field._commit()
 
 
 class Disclosure(QWidget):
@@ -1561,6 +1829,50 @@ def field(label_text, widget, hint=None):
     # another answer - a log's target is a path, a container, a unit or a URL.
     box.label = label
     return box
+
+
+class _LevelWith(QObject):
+    """Keeps buttons as tall as the control they stand beside (see level_with)."""
+
+    def __init__(self, anchor, buttons):
+        super().__init__(anchor)
+        self._buttons = list(buttons)
+        anchor.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            for button in self._buttons:
+                button.setFixedHeight(watched.height())
+        return False
+
+
+def level_with(anchor, row_widget, *buttons):
+    """Stand ``buttons`` level with ``anchor`` in ``row_widget``'s row.
+
+    For a row where a labelled control (a combo with its caption above it)
+    sits beside plain buttons: centred on the row, the buttons stood level with
+    the caption and the control together - higher than the control. Here they
+    take the control's height, whatever the stylesheet makes it, and its
+    bottom edge, so the two share their top, bottom and centre.
+    """
+    for button in buttons:
+        row_widget.layout().setAlignment(button, Qt.AlignBottom)
+    return _LevelWith(anchor, buttons)
+
+
+def see_through(section):
+    """Let a ``role="section"`` frame's ground show through what it holds.
+
+    The theme gives every QWidget the page's background, so the rows, fields
+    and lists inside a section would each paint a patch of page over it. The
+    plain containers among them - and a list's viewport - are marked
+    transparent; inputs and buttons keep their own fill. Call it once the
+    section is filled.
+    """
+    for child in section.findChildren(QWidget):
+        if type(child) is QWidget or isinstance(child, (CheckList, Segmented,
+                                                         QListWidget)):
+            child.setProperty("seethrough", "true")
 
 
 def row(*widgets, spacing=8, stretch_last=False):
@@ -2486,6 +2798,16 @@ class SearchRow(QWidget):
 
     def searching(self):
         return bool(self.needles())
+
+    def place(self):
+        """Put every box over its column again - for a table that has just set
+        its own widths, which a stretching column takes without saying so."""
+        self._place()
+
+    def matches(self, row):
+        """Whether ``row`` passes what is typed - for a table that hides rows on
+        more than this alone and so decides the hiding itself."""
+        return self._matches(row, self.needles())
 
     def clear(self):
         for edit in self._edits.values():

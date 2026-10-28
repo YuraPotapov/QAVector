@@ -10,6 +10,12 @@ from cms_gui.hotkeys import portable
 from cms_gui.settings import Settings
 
 
+def _address_editor(window):
+    """The Start address box, open for typing: a text field on the Launch page."""
+    window.launch.url_field.begin_edit()
+    return window.launch.url_field.editor
+
+
 @pytest.fixture
 def window(qapp, tmp_path, monkeypatch, dispose):
     settings = Settings()
@@ -41,7 +47,7 @@ def test_apply_updates_menu_button_and_dispatches_only_the_new_key(window, qapp)
     calls = []
     window.refresh_action.triggered.connect(lambda: calls.append("refresh"))
     window.show_page("launch")
-    field = window.launch.url
+    field = _address_editor(window)
     field.setFocus()
     qapp.processEvents()
     QTest.keyClick(field, Qt.Key_F5)
@@ -76,12 +82,12 @@ def test_disabled_action_and_hidden_navigation_do_not_execute(window, qapp):
     window.stop_action.triggered.connect(lambda: stopped.append(True))
     window.action_registry.apply({"run.stop": "Alt+F10", "navigate.history": "Alt+F11"})
     window.show_page("launch")
-    window.launch.url.setFocus()
+    _address_editor(window).setFocus()
     qapp.processEvents()
-    QTest.keyClick(window.launch.url, Qt.Key_F10, Qt.AltModifier)
+    QTest.keyClick(_address_editor(window), Qt.Key_F10, Qt.AltModifier)
     assert stopped == []
     window.set_nav_item_visible("history", False)
-    QTest.keyClick(window.launch.url, Qt.Key_F11, Qt.AltModifier)
+    QTest.keyClick(_address_editor(window), Qt.Key_F11, Qt.AltModifier)
     assert window._page_key == "launch"
 
 
@@ -126,7 +132,7 @@ def _focus_on(window, where):
 
     if where == "page":
         window.show_page("launch")
-        window.launch.url.setFocus()
+        _address_editor(window).setFocus()
     elif where == "toolbar":
         window.refresh_button.setFocus()       # clicked: a push button takes focus
     else:

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QLineEdit, QListWidget, QListWidgetItem, QPushButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from .. import commands, icons, launch, theme, widgets
+from .. import commands, icons, launch, launchprojectsfile as lpf, launchvars, theme, widgets
 
 
 class ScenarioPicker(QDialog):
@@ -77,9 +77,11 @@ class CommandPage(QWidget):
     run_requested = Signal()
     state_changed = Signal()
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, registry=None):
         super().__init__(parent)
         self.settings = settings
+        self.registry = registry or lpf.Registry(
+            lpf.resolve_path(settings.launch_projects_path))
         self.inventory = None
         self.core = None
         self._controls = {}     # flag name -> the editing widget
@@ -234,7 +236,50 @@ class CommandPage(QWidget):
         self._changed()
 
     def argv(self):
-        return commands.build_argv(self.state())
+        return commands.build_argv(self.run_state())
+
+    def run_state(self):
+        """The form as it will run: an empty ``--url`` takes the environment's
+        address from the Environments page, as Launch Sessions does.
+
+        Done here rather than written into the box, so the form still shows what
+        was typed and the preview shows what will be passed - one rule for both
+        pages (:func:`launch.effective_url`'s middle step).
+        """
+        state = self.state()
+        if not state.get("--url"):
+            address = self._env_address(state.get("--env") or "")
+            if address:
+                state["--url"] = address
+        return state
+
+    def _env_address(self, env):
+        """The address of the environment ``--env`` names; "" when it has none.
+
+        Its variables filled in with what the environment and its project say -
+        this page has no configuration or run of its own to give them other
+        values. When they cannot be filled, the launcher's origin applies.
+        """
+        if not env:
+            return ""
+        value = (self.inventory.env_value(env) if self.inventory else "") or env
+        holders = [row for row in self.registry.environments(self.inventory)
+                   if row.account_key == value]
+        if len(holders) != 1 or not holders[0].address:
+            return ""
+        holder = holders[0]
+        project = self.registry.project(holder.project_id)
+        result = launchvars.resolve(
+            holder.address, project.definitions() if project else {},
+            [launchvars.Layer("environment", dict(holder.variables))])
+        if result.problems:
+            return ""
+        return launch.normalize_address(result.text)[0]
+
+    def refresh_address(self):
+        """An environment's address changed on the Environments page."""
+        self.registry.reload()
+        self._changed()
 
     def background_blockers(self):
         """What stops this command running with no browser; [] if nothing.
@@ -267,7 +312,12 @@ class CommandPage(QWidget):
                 row = self._flag_rows.get(flag.name)
                 if row is not None:
                     row.setEnabled(run_tests)
-        self.preview.setText(commands.preview(state, self.core))
+        url = self._controls.get("--url")
+        if isinstance(url, QLineEdit):
+            address = self._env_address(state.get("--env") or "")
+            url.setPlaceholderText("%s   (environment address)" % address if address
+                                   else (commands.BY_NAME["--url"].placeholder or ""))
+        self.preview.setText(commands.preview(self.run_state(), self.core))
         self.settings.save_command_state(state)
         self.state_changed.emit()
 

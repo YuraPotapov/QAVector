@@ -340,6 +340,20 @@ def _browse(painter, ink):
         painter.drawRect(QRectF(x, 10.5, 3, 3))
 
 
+def _edit(painter, ink):
+    """A pencil, point down to the left: write this one yourself."""
+    _stroke(painter, ink)
+    path = QPainterPath()
+    path.moveTo(4.5, 19.5)
+    path.lineTo(5.5, 15.0)
+    path.lineTo(15.5, 5.0)
+    path.lineTo(19.0, 8.5)
+    path.lineTo(9.0, 18.5)
+    path.closeSubpath()
+    painter.drawPath(path)
+    painter.drawLine(QPointF(13.0, 7.5), QPointF(16.5, 11.0))
+
+
 def _more(painter, ink):
     """The same three dots, stood up: a menu of the rest."""
     _fill(painter, ink)
@@ -618,6 +632,7 @@ DRAWINGS = {
     "group": _chevron_right,
     "browse": _browse,
     "more": _more,
+    "edit": _edit,
     "disclosure_open": _chevron_down,
     "disclosure_closed": _chevron_right,
     # The rail's handle, named for what it does rather than which way it points,

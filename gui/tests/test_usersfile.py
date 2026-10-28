@@ -138,3 +138,53 @@ def test_fingerprint_notices_a_change(tmp_path):
     before = usersfile.fingerprint(path)
     usersfile.save(path, [_row()])
     assert usersfile.fingerprint(path) != before
+
+
+# ---------------------------------------- env values the launcher cannot read
+
+def _rows(*envs):
+    return [usersfile.UserRow(env=env, cls="A", login="u%d" % i, password="p")
+            for i, env in enumerate(envs)]
+
+
+def test_a_placeholder_in_an_env_value_is_refused():
+    problems = usersfile.validate(_rows("localhost:{{port}}"))
+    assert any("placeholder" in p for p in problems)
+
+
+def test_an_unreadable_port_in_an_env_value_is_refused():
+    assert any("port" in p for p in usersfile.validate(_rows("localhost:99999")))
+
+
+@pytest.mark.parametrize("first, second", [
+    ("localhost:8069", "http://localhost:8069/"),
+    ("https://shop.example.invalid/", "https://shop.example.invalid/x"),
+])
+def test_one_server_spelled_two_ways_is_refused(first, second):
+    problems = usersfile.validate(_rows(first, second))
+    assert any("same server" in p for p in problems)
+
+
+def test_different_servers_with_the_same_host_are_fine():
+    assert usersfile.validate(_rows("localhost:8069", "localhost:8070",
+                                    "https://a.example.invalid/",
+                                    "https://b.example.invalid/")) == []
+
+
+def test_the_collision_rule_matches_the_launcher():
+    """Mirrored, not imported: checked against the core's own naming."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    session_launcher = pytest.importorskip("session_launcher")
+    samples = [["localhost:8069", "http://localhost:8069/"],
+               ["localhost:8069", "localhost:8070"],
+               ["https://a.example.invalid/", "https://a.example.invalid/x"],
+               ["https://a.example.invalid/", "https://a.other.invalid/"],
+               ["127.0.0.1:8069", "localhost:8069"]]
+    for values in samples:
+        try:
+            session_launcher.build_environments(values)
+            core_refuses = False
+        except AssertionError:
+            core_refuses = True
+        assert bool(usersfile.env_problems(values)) == core_refuses, values
