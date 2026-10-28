@@ -2283,6 +2283,41 @@ def set_profile_name(profile, name, maximized=False):
         json.dump(prefs, fh)
 
 
+# The Preferences keys --no-password-prompts sets: Chrome's offer to save a
+# password, the password manager behind it, and its warning that a password was
+# found in a data breach - a test account's "admin" is in every such list.
+PASSWORD_PROMPT_PREFS = (("credentials_enable_service",),
+                         ("profile", "password_manager_enabled"),
+                         ("profile", "password_manager_leak_detection"))
+
+
+def set_password_prompts(profile, quiet):
+    """Turn Chrome's password offers and breach warnings off (``quiet``) or back.
+
+    Rewritten on every launch, so leaving the flag off later gives the profile
+    back Chrome's own defaults rather than keeping the last run's answer. The
+    auto-login extension fills the form itself, so it needs none of this.
+    Merged into Preferences like set_profile_name; run while the window is closed.
+    """
+    prefs_path = os.path.join(profile, "Default", "Preferences")
+    try:
+        with open(prefs_path, encoding="utf-8") as fh:
+            prefs = json.load(fh)
+    except (ValueError, OSError):
+        prefs = {}
+    for path in PASSWORD_PROMPT_PREFS:
+        holder = prefs
+        for key in path[:-1]:
+            holder = holder.setdefault(key, {})
+        if quiet:
+            holder[path[-1]] = False
+        else:
+            holder.pop(path[-1], None)
+    os.makedirs(os.path.dirname(prefs_path), exist_ok=True)
+    with open(prefs_path, "w", encoding="utf-8") as fh:
+        json.dump(prefs, fh)
+
+
 def clear_previous_tabs(profile):
     """Remove Chrome's saved tab/session state so the next launch opens a single tab.
 
@@ -2427,7 +2462,7 @@ AUTOLOGIN_SRC = os.path.join(EXTENSIONS_DIR, "_autologin")
 
 
 def write_autologin_extension(ext_dir, origin, login, password, key_b64=None,
-                              selectors=None, src_dir=None):
+                              selectors=None, src_dir=None, enabled=True):
     """Install the auto-login extension into ext_dir, with this user's credentials.
 
     The behaviour lives in extensions/_autologin/ as ordinary, editable, lintable
@@ -2441,6 +2476,11 @@ def write_autologin_extension(ext_dir, origin, login, password, key_b64=None,
     key_b64 is the base64 DER public key; embedding it gives the extension a stable,
     key-derived id (see install_autologin_extension) so Chrome can load it from the
     profile without --load-extension, which recent Chrome (137+) blocks.
+
+    enabled=False (--no-autologin) writes it switched off, with no credentials in
+    it at all. Switched off rather than left out: Chrome keeps loading an extension
+    once it is in the profile, so skipping the install would leave last launch's
+    copy signing in. The next launch without the flag writes it on again.
     """
     src = src_dir or AUTOLOGIN_SRC
     if os.path.isdir(ext_dir):
@@ -2458,8 +2498,9 @@ def write_autologin_extension(ext_dir, origin, login, password, key_b64=None,
         json.dump(manifest, fh)
 
     config = {
-        "login": login,
-        "password": password,
+        "enabled": bool(enabled),
+        "login": login if enabled else "",
+        "password": password if enabled else "",
         "selectors": dict(DEFAULT_LOGIN_SELECTORS, **(selectors or {})),
     }
     with open(os.path.join(ext_dir, "config.js"), "w", encoding="utf-8") as fh:
@@ -2520,7 +2561,7 @@ def _merge_extension_pref(profile, ext_id, entry):
         json.dump(prefs, fh)
 
 
-def install_autologin_extension(profile, origin, login, password):
+def install_autologin_extension(profile, origin, login, password, enabled=True):
     """Install the auto-login extension straight into the profile, no --load-extension.
 
     Recent Chrome (137+) refuses to load unpacked extensions from the command line
@@ -2540,7 +2581,8 @@ def install_autologin_extension(profile, origin, login, password):
     ext_id = _extension_id_from_key(base64.b64decode(key_b64))
     version = "1.0"
     version_dir = os.path.join(ext_root, ext_id, version + "_0")
-    write_autologin_extension(version_dir, origin, login, password, key_b64=key_b64)
+    write_autologin_extension(version_dir, origin, login, password, key_b64=key_b64,
+                              enabled=enabled)
 
     # The extension only touches its own site, so it just needs that host permission.
     host = [origin + "/*"]
@@ -3485,6 +3527,14 @@ Options:
   --maximized               Open every window maximized. Without it a window
                             opens at its normal size, even one that was
                             maximized the last time it closed.
+  --no-password-prompts     Chrome never offers to save a password or warns
+                            that one was found in a data breach. Without it the
+                            profile has Chrome's own defaults again.
+  --no-autologin            Do not sign the windows in: a profile without a
+                            live session opens on the sign-in form, for a
+                            person or a scenario to fill (--empty-sessions
+                            drops the session). Without it the auto-login
+                            extension signs in again.
   --empty-sessions          Start every profile empty: its cache, cookies, site
                             storage, history and form data are deleted before
                             the window opens, so each account signs in from
@@ -3873,6 +3923,8 @@ def main():
     close_after = False   # with --run-tests: close windows after the run (default: keep open)
     no_browser = False    # --no-browser: service-only scenarios, no Chrome at all
     maximized = False     # --maximized: every window opens maximized
+    no_password_prompts = False   # --no-password-prompts: no save-password offers
+    no_autologin = False  # --no-autologin: windows open on the sign-in form
     empty_sessions = False   # --empty-sessions: clear each profile's data first
     lock_windows = False  # --lock-windows: pages ignore the user while scenarios run
     report_level = None   # raw --report-level value (None = flag absent -> default artifacts)
@@ -3922,6 +3974,10 @@ def main():
             no_browser = True
         elif arg == "--maximized":
             maximized = True
+        elif arg == "--no-password-prompts":
+            no_password_prompts = True
+        elif arg == "--no-autologin":
+            no_autologin = True
         elif arg == "--empty-sessions":
             # Checked after the loop: every profile must be closed before any of
             # them is emptied.
@@ -4420,6 +4476,8 @@ def main():
         # with none is still the run that was asked for.
         for flag, given in (("--lock-windows", lock_windows),
                             ("--maximized", maximized),
+                            ("--no-password-prompts", no_password_prompts),
+                            ("--no-autologin", no_autologin),
                             ("--empty-sessions", empty_sessions)):
             if given:
                 log.info("%s does nothing with --no-browser: there are no windows "
@@ -4747,12 +4805,14 @@ def main():
             log.info("Emptying %s: %d item(s) of cache, cookies, storage and history "
                      "removed.", session_dir, clear_session_data(profile))
         set_profile_name(profile, "%s - %s" % (cls, login), maximized=maximized)
+        set_password_prompts(profile, no_password_prompts)
         clear_previous_tabs(profile)  # always start with one tab, keep the login
         # Install the auto-login extension into the profile (must run after
         # set_profile_name, which writes the Preferences file this merges into).
         planted = []      # the directories Chrome is asked to load on Windows
         try:
-            planted.append(install_autologin_extension(profile, origin, login, password))
+            planted.append(install_autologin_extension(profile, origin, login, password,
+                                                       enabled=not no_autologin))
         except Exception as exc:  # a broken extension must not block the launch
             log.warning("Skipping auto-login extension for %s: %s", login, exc)
         for ext_name, ext_kind, ext_path in ready:

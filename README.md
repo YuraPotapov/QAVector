@@ -375,6 +375,11 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
 - `--detach` — fire-and-forget: leave windows running after the script exits.
 - `--maximized` — open every window maximized. Without it a window opens at its
   normal size, even one Chrome last closed maximized.
+- `--no-password-prompts` — Chrome never offers to save a password or warns that
+  one was found in a data breach. Without it the profile has Chrome's defaults.
+- `--no-autologin` — do not sign the windows in: a profile without a live session
+  opens on the sign-in form, for a person or a scenario to fill (`--empty-sessions`
+  drops the session). Without it the auto-login extension signs in again.
 - `--empty-sessions` — start every profile empty: its cache, cookies, site storage,
   history and form data are deleted before the window opens, so each account signs
   in from scratch. The profile folder, its extensions and the saved password stay.

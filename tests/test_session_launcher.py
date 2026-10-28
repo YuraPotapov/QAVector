@@ -2598,3 +2598,77 @@ def test_report_doc_asks_for_the_guide_and_nothing_else(launched, monkeypatch, c
 def test_report_doc_needs_flows_to_run(monkeypatch, config):
     message = _main(monkeypatch, config, "--url=http://x", "--report-doc")
     assert "--report-doc" in message and "require" in message
+
+
+# ------------------------------------------------ --no-password-prompts
+
+def test_password_prompts_are_turned_off_and_back(tmp_path):
+    profile = tmp_path / "localhost:8069-admin"
+    (profile / "Default").mkdir(parents=True)
+    prefs = profile / "Default" / "Preferences"
+    prefs.write_text(json.dumps({"profile": {"name": "Admin - admin"}, "keep": 1}))
+    sl.set_password_prompts(str(profile), True)
+    data = json.loads(prefs.read_text())
+    assert data["credentials_enable_service"] is False
+    assert data["profile"]["password_manager_enabled"] is False
+    assert data["profile"]["password_manager_leak_detection"] is False
+    assert data["profile"]["name"] == "Admin - admin" and data["keep"] == 1
+    sl.set_password_prompts(str(profile), False)
+    data = json.loads(prefs.read_text())
+    assert "credentials_enable_service" not in data
+    assert "password_manager_enabled" not in data["profile"]
+    assert data["profile"]["name"] == "Admin - admin"
+
+
+def test_password_prompts_on_a_profile_with_no_preferences_yet(tmp_path):
+    profile = tmp_path / "fresh"
+    sl.set_password_prompts(str(profile), True)
+    data = json.loads((profile / "Default" / "Preferences").read_text())
+    assert data["credentials_enable_service"] is False
+
+
+# ------------------------------------------------ --no-autologin
+
+def test_autologin_written_switched_off_carries_no_credentials(tmp_path):
+    out = tmp_path / "ext"
+    sl.write_autologin_extension(str(out), "http://localhost:8069", "admin", "s3cr3t",
+                                 enabled=False)
+    config = json.loads((out / "config.js").read_text(encoding="utf-8")
+                        .split("=", 1)[1].rstrip().rstrip(";"))
+    assert config["enabled"] is False
+    assert config["login"] == "" and config["password"] == ""
+    assert "s3cr3t" not in (out / "config.js").read_text(encoding="utf-8")
+    # The extension stays a valid one: Chrome keeps loading what is in the profile.
+    assert (out / "content.js").exists() and (out / "manifest.json").exists()
+
+
+def test_autologin_switched_back_on_signs_in_again(tmp_path):
+    out = tmp_path / "ext"
+    sl.write_autologin_extension(str(out), "http://x", "u", "p", enabled=False)
+    sl.write_autologin_extension(str(out), "http://x", "u", "p")
+    config = (out / "config.js").read_text(encoding="utf-8")
+    assert '"enabled": true' in config and '"password": "p"' in config
+
+
+def test_the_content_script_stands_down_when_switched_off():
+    source = open(os.path.join(sl.AUTOLOGIN_SRC, "content.js"), encoding="utf-8").read()
+    assert "AUTOLOGIN.enabled === false" in source
+    assert source.index("AUTOLOGIN.enabled === false") < source.index("function fill")
+
+
+def test_no_autologin_reaches_every_profile(launched, local_config, monkeypatch):
+    seen = []
+    monkeypatch.setattr(sl, "install_autologin_extension",
+                        lambda profile, origin, login, password, enabled=True:
+                        seen.append(enabled))
+    launched(local_config, "--env=localhost", "--no-autologin")
+    assert seen and not any(seen)
+
+
+def test_autologin_is_on_without_the_flag(launched, local_config, monkeypatch):
+    seen = []
+    monkeypatch.setattr(sl, "install_autologin_extension",
+                        lambda profile, origin, login, password, enabled=True:
+                        seen.append(enabled))
+    launched(local_config, "--env=localhost")
+    assert seen and all(seen)

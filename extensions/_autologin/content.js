@@ -8,6 +8,9 @@
 // profile and loads first (same content_scripts entry -> same isolated world, so
 // its globals are visible here). Nothing secret lives in this file.
 (function () {
+  // Written switched off by --no-autologin: the extension stays in the profile
+  // (Chrome keeps loading it) and does nothing.
+  if (AUTOLOGIN.enabled === false) return;
   var LOGIN = AUTOLOGIN.login, PASSWORD = AUTOLOGIN.password;
   var SEL = AUTOLOGIN.selectors;
 
