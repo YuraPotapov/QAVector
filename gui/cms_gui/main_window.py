@@ -1386,6 +1386,8 @@ class MainWindow(QMainWindow):
         of a second on this one - and fed to the model here when it arrives;
         the page paints it when the model says so.
         """
+        # What the project comes back to - see _restore_last_cycle.
+        self.settings.save_open_cycle(cycle_id)
         state = self.run_state
         if (self.process.is_running() or state.cycle_running
                 or (state.cycle or {}).get("cycle") == cycle_id):
@@ -1626,8 +1628,17 @@ class MainWindow(QMainWindow):
         A run started in the meantime wins: this is a courtesy to somebody who
         has just opened the window, not something that may overwrite what they
         are actually watching.
+
+        The cycle somebody last had open in this project comes first - after
+        a restart and after coming back from another project alike; opening
+        it reads its own last run back. The last run of any cycle is for when
+        nothing was open, or what was is gone.
         """
         if self.process.is_running():
+            return
+        remembered = self.settings.open_cycle()
+        if remembered and any(row.get("id") == remembered for row in self.inventory.cycles):
+            self.cycles.open(remembered)
             return
         try:
             where = cyclereplay.last_run_dir(self.history)
@@ -1917,6 +1928,9 @@ class MainWindow(QMainWindow):
         self.credentials.load(self.settings.config)
         self._fill_projects()
         self._after_switch = then
+        # Back to the cycle this project had open - unless Search is about to
+        # show one of its rows, which is what was asked for.
+        self._last_cycle_restored = then is not None
         self.refresh_inventory()
         return True
 

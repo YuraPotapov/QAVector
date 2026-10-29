@@ -198,3 +198,42 @@ def test_a_context_left_over_from_before_is_not_offered(window, qapp):
     window.switch_project(project.id)
     _wait(qapp, window)
     assert window.launch.env_combo.count() == 0
+
+
+def _cycle_in(project, cycle_id):
+    path = os.path.join(pf.paths(project.folder).cycles, cycle_id + ".yaml")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("id: %s\nname: %s\nsteps: []\n" % (cycle_id, cycle_id.title()))
+
+
+def _open_now(qapp, window, cycle_id, seconds=30):
+    """Until the Cycles page has ``cycle_id`` open - it is read on a thread."""
+    import time
+    end = time.monotonic() + seconds
+    while time.monotonic() < end and window.cycles.current_id() != cycle_id:
+        qapp.processEvents()
+        time.sleep(0.02)
+    return window.cycles.current_id()
+
+
+def test_each_project_comes_back_to_the_cycle_it_had_open(window, qapp):
+    first, second = pf.add("First"), pf.add("Second")
+    _cycle_in(first, "alpha")
+    _cycle_in(first, "gamma")
+    _cycle_in(second, "beta")
+    window.switch_project(first.id)
+    _wait(qapp, window)
+    window.cycles.open("gamma")
+    assert _open_now(qapp, window, "gamma") == "gamma"
+
+    window.switch_project(second.id)
+    _wait(qapp, window)
+    window.cycles.open("beta")
+    assert _open_now(qapp, window, "beta") == "beta"
+
+    window.switch_project(first.id)
+    _wait(qapp, window)
+    assert _open_now(qapp, window, "gamma") == "gamma"
+    window.switch_project(second.id)
+    _wait(qapp, window)
+    assert _open_now(qapp, window, "beta") == "beta"

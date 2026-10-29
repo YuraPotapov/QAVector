@@ -324,6 +324,13 @@ class Settings:
     def save_folds(self, page, states):
         self._qs.setValue(self._scoped("folds/" + page), json.dumps(states, sort_keys=True))
 
+    def open_cycle(self):
+        """The cycle last open on the Cycles page of the project in use, or ""."""
+        return str(self._qs.value(self._scoped("cycles/open"), "") or "")
+
+    def save_open_cycle(self, cycle_id):
+        self._qs.setValue(self._scoped("cycles/open"), cycle_id or "")
+
     def splitter(self, key):
         """How one splitter was last left: {"sizes": [...], "open": [...]}.
 
