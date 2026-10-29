@@ -565,12 +565,23 @@ class CyclesPage(QWidget):
 
     # -- what the window gives it --------------------------------------------
     def set_core(self, core):
+        changed = self.core is not None and core is not self.core
         self.core = core
+        if changed and self._sessions_loaded:
+            # Another project (or other paths from Settings): the sessions on
+            # the right are the old core's runs until asked again.
+            self.refresh_sessions()
 
     def set_inventory(self, inventory):
         self.inventory = inventory
         self._cycles = list(inventory.cycles) if inventory else []
         self.explorer.fill(self._cycles, self._projects)
+        open_id = self.current_id()
+        if open_id and not any(row.get("id") == open_id for row in self._cycles):
+            # Gone from the list - another project was picked, or the file went
+            # elsewhere. Reading it again only says it is not there.
+            self._draft = None
+            self._close()
         if getattr(self, "_pending_open", ""):
             self._open_pending()
         elif self._open and self._changed_since_opened():
@@ -2841,6 +2852,7 @@ class CyclesPage(QWidget):
         self.state.setText("")
         self.output.set_problems([])
         self.output.set_yaml("", writable=False)
+        self.subjects.set_state(cycle="", live=None)
         self._update_buttons()
 
     # -- asking -----------------------------------------------------------------

@@ -420,6 +420,26 @@ def test_what_was_open_survives_the_inventory_being_read_again(opened):
     assert sorted(opened.canvas.node_ids()) == ["a", "b", "c", "d"]
 
 
+def test_another_project_closes_the_cycle_it_does_not_have(opened):
+    """Picking another project used to read the open cycle again from the new
+    project's folder - where it is not - and show that as a problem."""
+    other = FakeCore()
+    opened.set_inventory(FakeInventory())
+    opened.set_core(other)
+    opened.set_inventory(FakeInventory([row("nightly", "Nightly")], [SHELL_PLUGIN]))
+
+    assert opened.current_id() == ""
+    assert other.shown == []
+    assert opened.canvas.node_ids() == []
+    assert opened.title.text() == "Cycles"
+
+
+def test_another_project_reads_its_own_sessions(opened):
+    other = FakeCore()
+    opened.set_core(other)
+    assert other.sessions_asked == 1
+
+
 # ------------------------------------------------------------------ inspector
 # ----------------------------------------------------------------- live runs
 def test_a_run_repaints_the_nodes_it_already_drew(opened):
