@@ -33,8 +33,8 @@ class AccountForm(QDialog):
         column = QVBoxLayout(self)
         column.setSpacing(8)
         column.addWidget(widgets.lede(
-            "For %s. Its accounts are filed under %s, and so is this one's profile."
-            % (environment.name, environment.account_key)))
+            "A user of %s: what its window is called, its login and its password."
+            % environment.name))
 
         self.role = QLineEdit()
         self.role.setPlaceholderText("what the window is called - Operator, Admin…")

@@ -152,6 +152,8 @@ class Explorer(QWidget):
     cycle_reidentified = Signal(str)     # change the id, which renames the file
     cycle_deleted = Signal(str)
     cycle_imported = Signal()
+    #: What to tick in Export: {"cycles": [id]} or {"cycle_projects": [name]}.
+    exported = Signal(dict)
     #: Move a cycle to another project: (cycle id, project, "" for none).
     cycle_moved = Signal(str, str)
     #: A person opened or shut a group: every answer so far, {name: open}.
@@ -188,9 +190,10 @@ class Explorer(QWidget):
         self.new_cycle_button.clicked.connect(
             lambda: self.cycle_added.emit(self.current_project()))
         self.more_button = icons.button(QPushButton(), "more")
-        self.more_button.setToolTip("More: import a cycle file.")
+        self.more_button.setToolTip("More: import or export cycles.")
         self.more_menu = QMenu(self.more_button)
-        self.more_menu.addAction("Import a cycle file...", self.cycle_imported.emit)
+        self.more_menu.addAction("Import...", self.cycle_imported.emit)
+        self.more_menu.addAction("Export...", self._export_selected)
         self.more_button.clicked.connect(lambda: self.more_menu.exec(
             self.more_button.mapToGlobal(self.more_button.rect().bottomLeft())))
         for button in (self.new_project_button, self.new_cycle_button,
@@ -232,7 +235,7 @@ class Explorer(QWidget):
 
         self.empty = widgets.empty_zone(
             "No cycles yet",
-            "Press Cycle to write one, or import a cycle file from More.")
+            "Press Cycle to write one, or import one from More.")
         self.stack = QStackedWidget()
         self.stack.addWidget(self.tree)
         self.stack.addWidget(self.empty)
@@ -517,6 +520,8 @@ class Explorer(QWidget):
             self._move_menu(menu, cycle_id, row)
             menu.addAction("Duplicate...",
                            lambda: self.cycle_duplicated.emit(cycle_id))
+            menu.addAction("Export...",
+                           lambda: self.exported.emit({"cycles": [cycle_id]}))
             menu.addAction("Delete...\tDel",
                            lambda: self.cycle_deleted.emit(cycle_id))
             menu.addSeparator()
@@ -524,6 +529,8 @@ class Explorer(QWidget):
             name = item.data(0, ROLE_ID)
             menu.addAction("New cycle here...",
                            lambda: self.cycle_added.emit(name))
+            menu.addAction("Export project...",
+                           lambda: self.exported.emit({"cycle_projects": [name]}))
             menu.addSeparator()
             if kind == "unlisted":
                 menu.addAction("Add to the projects list",
@@ -538,8 +545,21 @@ class Explorer(QWidget):
         menu.addAction("New project...", self.project_added.emit)
         menu.addAction("New cycle...",
                        lambda: self.cycle_added.emit(self.current_project()))
-        menu.addAction("Import a cycle file...", self.cycle_imported.emit)
+        menu.addAction("Import...", self.cycle_imported.emit)
         menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    def _export_selected(self):
+        """Export, with the cycle or project picked in the tree ticked."""
+        item = self.tree.currentItem()
+        kind = item.data(0, ROLE_KIND) if item is not None else ""
+        if kind == "cycle":
+            self.exported.emit({"cycles": [item.data(0, ROLE_ID)]})
+        elif kind in ("project", "unlisted"):
+            self.exported.emit({"cycle_projects": [item.data(0, ROLE_ID)]})
+        elif kind == "unassigned":
+            self.exported.emit({"cycle_projects": [""]})
+        else:
+            self.exported.emit({})
 
     def _move_menu(self, menu, cycle_id, row):
         """"Move to project": every project but the one it is in, and none."""

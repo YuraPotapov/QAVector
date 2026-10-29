@@ -219,8 +219,8 @@ def test_rename_keeps_the_id_and_delete_goes_back_to_new(make):
 
 def test_a_value_is_labelled_with_the_place_that_gave_it(make):
     controller = _ready(make())
-    controller.define("port", "port", 8069)
     controller.set_environment_value("port", 8070)
+    assert controller.environment().variables == {"port": "8070"}
     saved = controller.save(_state(controller, variables={"port": 8071}), "Port")
     scope = controller.scope(_state(controller))
     from cms_gui import launchvars
@@ -261,3 +261,21 @@ def test_a_desktop_link_run_writes_nothing(make):
     controller.keep_draft(state, True, _signature(state))
     assert controller.settings.launch_context() == {}
     assert controller.draft() is None
+
+
+def test_a_configuration_saved_without_an_environment_is_all_environments(make):
+    """Not "? (missing)": nothing was picked, so every account opens the address."""
+    controller = make()
+    controller.set_inventory(core.Inventory({"envs": []}))
+    assert controller.environment() is None
+    saved = controller.save(_state(controller), "No environment")
+    assert saved.all_environments
+    assert controller.preset_environment_id(saved) == lc.ALL_ENVIRONMENTS
+    assert controller.environment().name == "All environments"
+
+
+def test_one_saved_before_with_no_environment_reads_as_all_environments(make):
+    controller = _ready(make())
+    preset = controller.save(_state(controller), "Old")
+    preset.environment_id, preset.legacy, preset.all_environments = "", None, False
+    assert controller.preset_environment_id(preset) == lc.ALL_ENVIRONMENTS

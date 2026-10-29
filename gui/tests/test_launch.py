@@ -807,7 +807,7 @@ def test_an_unknown_variable_stops_the_run_with_its_name():
     config = _config(environment="localhost:8069",
                      advanced=dict(launch.DEFAULTS["advanced"], url="localhost:{{port}}"))
     problems = launch.validate(config, inventory)
-    assert any("{{port}} is not defined" in p for p in problems)
+    assert any("{{port}} has no value" in p for p in problems)
     assert launch.validate(config, inventory, None, _port_scope()) == []
 
 

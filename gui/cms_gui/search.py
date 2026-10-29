@@ -49,9 +49,11 @@ SHORTCUT = "Ctrl+K"
 
 #: One thing found: where it lives (a page's key), how it reads, what state it
 #: is in and in which tone (a :class:`widgets.Tag` variant), what else it may
-#: be found by, what the page needs to show it - and whether it is active now.
+#: be found by, what the page needs to show it, whether it is active now - and
+#: the project it is in, when that is not the one on screen ("" when it is).
 Hit = collections.namedtuple(
-    "Hit", "section title detail status tone keys target live")
+    "Hit", "section title detail status tone keys target live project",
+    defaults=("",))
 #: One section of the results: its page's key, and its hits, best first.
 Group = collections.namedtuple("Group", "section hits")
 

@@ -17,16 +17,18 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLayout,
+                               QLabel,
                                QMainWindow, QMenu,
                                QPushButton, QSizePolicy, QStackedWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
 from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
-               history as history_mod, icon, icons,
+               cyclelayoutfile as clf, cycleprojectsfile as cpf, history as history_mod,
+               icon, icons, projectsearch, projectsfile,
                launch as launch_mod, launchprojectsfile as lpf, load as load_mod,
                logsourcesfile as lsf, search, stageswindow, subjecthistory, theme,
-               titlebar,
+               titlebar, transfer, usersfile,
                widgets)
 from .askbridge import AskBridge
 from .cyclecockpit import ActiveStrip
@@ -52,6 +54,7 @@ from .pages.run import RunPage
 from .pages.scenarios import ScenariosPage
 from .pages.subjects import SubjectsPage
 from .pages.settings_dialog import SettingsDialog
+from .pages.transferdialogs import ExportDialog, ImportDialog
 
 # (page key, label, icon name painted by icons.icon)
 CONFIGURE = [("environments", "Environments", "environments"),
@@ -175,16 +178,18 @@ class MainWindow(QMainWindow):
 
         self.settings = Settings()
         self.action_registry = ActionRegistry(self.settings, self)
-        self.core = core_mod.Core(None, None, self.settings.config, flows_dir=self.settings.flows_path,
-                                  cycles_dir=self.settings.cycles_path,
-                                  secrets_path=self.settings.cycle_secrets_path,
-                                  memory_path=self.settings.cycle_memory_path,
-                                  runs_path=self.settings.cycle_runs_path)
+        # The project every page shows: its files, from the start.
+        self._adopt_launch_projects()
+        self._use_project(self._project(self.settings.current_project))
+        self.core = self._new_core()
         self._aim_log_sources()
         self.inventory = core_mod.Inventory()
         self.run_state = RunState(self)
         self.process = LauncherProcess(self)
-        self.history = history_mod.History(parent=self)
+        self.history = history_mod.History(self.settings.data_dir(), parent=self)
+        self._project_name_at_start = self._project(self.settings.project_id).name
+        #: Called once the inventory of a project just switched to has loaded.
+        self._after_switch = None
 
         # The menu names things twice - plainly, and by the flag - and developer
         # mode picks. See widgets.Phrasing; the pages keep their own.
@@ -331,21 +336,33 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
 
         file_menu = menu.addMenu("&File")
+        import_action = QAction("&Import…", self)
+        import_action.triggered.connect(lambda: self.import_items())
+        self._register_action(import_action, "transfer.import", "Import",
+                              "Import projects, environments, users or cycles from a "
+                              "file.", "Application")
+        file_menu.addAction(import_action)
+        export_action = QAction("&Export…", self)
+        export_action.triggered.connect(lambda: self.export_items())
+        self._register_action(export_action, "transfer.export", "Export",
+                              "Export projects, environments, users or cycles to a "
+                              "file.", "Application")
+        file_menu.addAction(export_action)
+        file_menu.addSeparator()
+        # Not in the menu: Credentials has its own Reload and Save, and these
+        # are their keys (Ctrl+R, Ctrl+S) on that page.
         reload_action = QAction("&Reload users.json", self)
         reload_action.setShortcut(QKeySequence("Ctrl+R"))
         reload_action.triggered.connect(lambda: self.credentials.reload(self.core.config_path))
         self.reload_users_action = self._register_action(
             reload_action, "credentials.reload", "Reload users.json",
             "Reload the credentials file.", "Credentials", "page/credentials")
-        file_menu.addAction(reload_action)
         save_action = QAction("&Save users.json", self)
         save_action.setShortcut(QKeySequence.Save)
         save_action.triggered.connect(lambda: self.credentials.save_button.click())
         self.save_users_action = self._register_action(
             save_action, "credentials.save", "Save users.json",
             "Save the credentials file.", "Credentials", "page/credentials")
-        file_menu.addAction(save_action)
-        file_menu.addSeparator()
         settings_action = QAction("Se&ttings…", self)
         settings_action.triggered.connect(self.open_settings)
         self.settings_action = self._register_action(
@@ -360,12 +377,24 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         run_menu = menu.addMenu("&Run")
+        #: The menu bar's Run: the RUN button's three ways of launching (put in
+        #: once the toolbar has made them), the last cycle again, Stop.
+        self.menu_run = run_menu
+        self.last_cycle_action = QAction("Run &Last Cycle", self)
+        self.last_cycle_action.triggered.connect(self.run_last_cycle)
+        self._register_action(self.last_cycle_action, "run.last_cycle", "Run Last Cycle",
+                              "Run again the cycle that ran last.", "Run")
+        run_menu.addAction(self.last_cycle_action)
+        self._run_menu_gap = run_menu.addSeparator()
+        run_menu.aboutToShow.connect(self._update_run_menu)
         self.run_action = QAction("&Run command", self)
         self.run_action.setShortcut(QKeySequence("Ctrl+Return"))
         self.run_action.triggered.connect(self.start_run)
         self._register_action(self.run_action, "run.start", "Run command",
                               "Start the current launch configuration.", "Run")
-        run_menu.addAction(self.run_action)
+        # The RUN button and Ctrl+Return, not a menu item: the menu said "Run
+        # command" for what is a launch configuration or a cycle.
+        self.addAction(self.run_action)
         self.stop_action = QAction("&Stop", self)
         self.stop_action.setShortcut(QKeySequence("Ctrl+."))
         self.stop_action.triggered.connect(self.stop_run)
@@ -373,7 +402,6 @@ class MainWindow(QMainWindow):
         self._register_action(self.stop_action, "run.stop", "Stop",
                               "Stop the running launch or cycle.", "Run")
         run_menu.addAction(self.stop_action)
-        run_menu.addSeparator()
         # From any window of the application, not only this one: somebody
         # notices the work heading the wrong way while reading a log window
         # or another page, and that is where they should be able to say so.
@@ -384,7 +412,8 @@ class MainWindow(QMainWindow):
         self.clarify_action.triggered.connect(self.open_clarify)
         self._register_action(self.clarify_action, "cycle.clarify", "Clarify the running cycle",
                               "Send a clarification to the running cycle.", "Run")
-        run_menu.addAction(self.clarify_action)
+        # Beside Run Last Cycle: both are about a cycle, Stop is about any run.
+        run_menu.insertAction(self._run_menu_gap, self.clarify_action)
         self._clarify = None
 
         view_menu = menu.addMenu("&View")
@@ -557,6 +586,10 @@ class MainWindow(QMainWindow):
         self.run_menu.addAction(self.empty_action)
         self.run_menu.aboutToShow.connect(self._update_background_action)
         self.run_button.setMenu(self.run_menu)
+        # The same three in the menu bar's Run, above Run Last Cycle.
+        self.menu_run.insertActions(self.last_cycle_action, [
+            self.background_action, self.record_action, self.empty_action])
+        self.menu_run.insertSeparator(self.last_cycle_action)
         # Stop mirrors RUN: the button is the whole run, the arrow is the one
         # window you are actually looking at. Same shape, because "stop" reads as
         # one idea with a narrower version of itself inside it.
@@ -574,9 +607,20 @@ class MainWindow(QMainWindow):
         # is running, and stale entries would offer to stop what is already gone.
         self.stop_menu.aboutToShow.connect(self._fill_stop_menu)
         self.stop_button.setMenu(self.stop_menu)
-        self.refresh_button = icons.button(QPushButton("Refresh"), "refresh")
+        # Beside Settings, as an icon: reading everything again is a thing done
+        # now and then, not the second most important thing in the window.
+        self.refresh_button = icons.button(QPushButton(""), "refresh")
+        self.refresh_button.setProperty("variant", "ghost")
         self.refresh_button.clicked.connect(self.refresh_action.trigger)
         bind_tooltip(self.refresh_action, self.refresh_button, "Refresh the inventory")
+        # The project is what every page shows, so it is the window's: picked
+        # here, its folder is where every page reads and writes.
+        self.project_combo = widgets.capped(QComboBox())
+        self.project_combo.setMinimumWidth(200)
+        self.project_combo.setPlaceholderText("Project")
+        self.project_combo.setToolTip("The project: every page shows its data")
+        self.project_combo.activated.connect(self._project_picked)
+        self._fill_projects()
         self.describe_label = widgets.mono("")
         # Out of sight: which level the window is at is not something an everyday
         # user needs to read or flip, and the mode is still one keystroke away -
@@ -592,8 +636,8 @@ class MainWindow(QMainWindow):
         bind_tooltip(self.settings_action, settings_button, "Open settings")
         bar_layout.addWidget(widgets.row(
             self.run_button, self.stop_button, widgets.vline(),
-            self.refresh_button, None, self.describe_label, widgets.vline(),
-            self.developer_button, settings_button))
+            self.project_combo, None, self.describe_label, widgets.vline(),
+            self.developer_button, self.refresh_button, settings_button))
         column.addWidget(bar)
         self.cycle_strip = ActiveStrip(self.run_state, self.settings, self,
                                        navigation_needed=self._cycle_navigation_needed)
@@ -607,7 +651,6 @@ class MainWindow(QMainWindow):
         body = QWidget()
         body_row = QVBoxLayout(body)
         body_row.setContentsMargins(0, 0, 0, 0)
-        from PySide6.QtWidgets import QHBoxLayout
         inner = QHBoxLayout()
         inner.setContentsMargins(0, 0, 0, 0)
         inner.setSpacing(0)
@@ -691,6 +734,9 @@ class MainWindow(QMainWindow):
         inner.addWidget(rail)
 
         self.stack = QStackedWidget()
+        # Over the pages while a project just picked is being read: they show
+        # nothing of the one left, and cannot be acted on half-loaded.
+        self.switching = widgets.Busy(self.stack)
         # One reading of launch-projects.json for the three pages that use it:
         # where an environment opens is set on one and shown on the others.
         self.launch_registry = lpf.Registry(
@@ -711,6 +757,7 @@ class MainWindow(QMainWindow):
         self.cycles.stages_detached_changed.connect(self._stages_detached_changed)
         self.command = CommandPage(self.settings, registry=self.launch_registry)
         self.launch = LaunchSessionsPage(self.settings, registry=self.launch_registry)
+        self.launch.project_name = self._project_name_at_start
         # A desktop link's run is a windowless copy of the application; it must
         # not decide what the next ordinary start opens on.
         self.launch.set_persistent(not self._headless)
@@ -776,11 +823,19 @@ class MainWindow(QMainWindow):
         self.cycles.stop_requested.connect(self.stop_run)
         self.cycles.control_requested.connect(self._control_cycle)
         self.cycles.approval_answered.connect(self._answer_cycle_node_approval)
-        self.environments.directories_changed.connect(self._directories_changed)
         self.environments.addresses_changed.connect(self._addresses_changed)
         self.launch.environments_changed.connect(self._launch_environments_changed)
-        # + Account wrote users.json: read it again, as a Credentials save does.
+        # + Account wrote users.json, or the Environments page did (who is in
+        # an environment): read it again, as a Credentials save does.
         self.launch.accounts_changed.connect(self.refresh_inventory)
+        self.environments.accounts_changed.connect(self.refresh_inventory)
+        # Projects are managed on the Environments page, picked in the top bar.
+        self.environments.project_action.connect(self._project_action)
+        # Export from a page opens File -> Export with what it shows ticked.
+        self.environments.export_requested.connect(self.export_items)
+        self.credentials.export_requested.connect(self.export_items)
+        self.cycles.export_requested.connect(self.export_items)
+        self.cycles.import_requested.connect(lambda: self.import_items())
         self.run_state.run_dir_known.connect(self.artifacts.set_run_dir)
         # Recorded the moment the run says where it is writing, not only when
         # it ends: a run the application was killed during is exactly the one
@@ -1122,10 +1177,6 @@ class MainWindow(QMainWindow):
             return "commands", self.command
         return "launch", self.launch
 
-    def _directories_changed(self):
-        self.command.set_inventory(self.inventory)
-        self.launch.set_inventory(self.inventory)
-
     def _run_auto_launch(self):
         """Run the configuration a desktop link named (``--launch NAME``).
 
@@ -1155,9 +1206,13 @@ class MainWindow(QMainWindow):
         self.command.refresh_address()
 
     def _addresses_changed(self):
-        """An environment changed: both pages show where a run opens."""
+        """An environment changed: both pages show where a run opens, and
+        Credentials what it is called."""
         self.launch.refresh_address()
         self.command.refresh_address()
+        if self.inventory is not None:
+            self.credentials.set_environments(
+                self.launch_registry.environments(self.inventory))
 
     # -- core -----------------------------------------------------------------
     def refresh_inventory(self):
@@ -1197,6 +1252,7 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
 
         def _on_error(exc):
+            self.switching.stop()
             self.cycles.inventory_loading(False)
             self.describe_label.setText("could not read the configuration")
             self.status_right.setText("the core did not answer")
@@ -1234,6 +1290,8 @@ class MainWindow(QMainWindow):
             self.listener.set_inventory(self.inventory)
             
             _splash_msg("Loading credentials...")
+            self.credentials.set_environments(
+                self.launch_registry.environments(self.inventory))
             # refresh, not load: an edit not saved yet stays where it is.
             self.credentials.refresh(self.inventory.config_path or self.core.config_path)
             self.launch.users_path = self.inventory.config_path or self.core.config_path
@@ -1241,8 +1299,12 @@ class MainWindow(QMainWindow):
             _splash_msg("Loading services and logs...")
             self.services.set_environments([env.get("value", "")
                                             for env in self.inventory.envs])
-            self.services.load(self.core.legacy_log_sources
-                               or self.inventory.log_sources_path,
+            # Another project's log sources are its own file: never the old
+            # one beside the launcher, which is Workspace's from before.
+            self.services.load(self.settings.log_sources_path
+                               if self.settings.project_folder
+                               else (self.core.legacy_log_sources
+                                     or self.inventory.log_sources_path),
                                self.settings.services_path,
                                self.settings.log_sources_path)
             # Loading replaces the supervisor's whole set, and a service that
@@ -1252,10 +1314,21 @@ class MainWindow(QMainWindow):
             self._update_services()
             self._update_nav_badges()
 
+            self.switching.stop()
+            # Search showing a row of the project just switched to.
+            if self._after_switch is not None:
+                then, self._after_switch = self._after_switch, None
+                QTimer.singleShot(0, then)
+
             _splash_msg("Finalizing UI...")
             self.describe_label.setText(self.inventory.summary())
-            if self.inventory.warnings:
-                self.status_right.setText(self.inventory.warnings[0][:90])
+            # A project with no users.json yet is a new one, not a problem.
+            warnings = [one for one in self.inventory.warnings
+                        if not (self.settings.project_folder
+                                and not os.path.exists(self.settings.config)
+                                and one.startswith("Could not read config"))]
+            if warnings:
+                self.status_right.setText(warnings[0][:90])
             self._update_status()
             self._warn_about_chrome()
             
@@ -1587,23 +1660,339 @@ class MainWindow(QMainWindow):
         self._chrome_warned = True
         widgets.warn(self, "Google Chrome is required", problem)
 
+    # -- export and import ----------------------------------------------------
+    def _users_rows(self, title):
+        """users.json as it is now, or None with the reason said."""
+        try:
+            return usersfile.load(self.inventory.config_path or self.core.config_path)
+        except usersfile.UsersFileError as exc:
+            widgets.warn(self, title, "users.json cannot be read.", str(exc))
+            return None
+
+    def _cycle_projects(self):
+        path = cpf.resolve_path(self.settings.cycle_projects_path)
+        try:
+            return path, cpf.load(path)
+        except cpf.CycleProjectsFileError:
+            return path, []
+
+    def export_items(self, chosen=None):
+        """File -> Export, or a page's Export with what it shows ticked."""
+        rows = self._users_rows("Export")
+        if rows is None:
+            return
+        self.launch_registry.reload()
+        dialog = ExportDialog(self, self.launch_registry.projects,
+                              self.launch_registry.environments(self.inventory), rows,
+                              self.inventory.cycles, chosen,
+                              secrets_included=True,
+                              project_name=self._project(self.settings.project_id).name)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        from PySide6.QtWidgets import QFileDialog
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Export", os.path.join(widgets.start_dir("~"), dialog.suggested_name()),
+            "QAVector export (*%s)" % transfer.SUFFIX)
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += transfer.SUFFIX
+        chosen = dialog.selection()
+        _path, cycle_projects = self._cycle_projects()
+        try:
+            document = transfer.bundle(
+                dialog.launch_document_part(),
+                transfer.cycles_part(self.inventory.cycles, chosen["cycles"],
+                                     chosen["cycle_projects"], cycle_projects,
+                                     secrets=self.core.cycle_secret_export))
+            transfer.write(path, document)
+        except (transfer.TransferError, core_mod.CoreError) as exc:
+            widgets.warn(self, "Export", "Nothing was exported.", str(exc))
+            return
+        widgets.note(self, "Export", "Exported %s." % transfer.counts(document), path)
+
+    def import_items(self, path=None):
+        """File -> Import: an export file, or a single cycle file."""
+        if not path:
+            from PySide6.QtWidgets import QFileDialog
+            path, _filter = QFileDialog.getOpenFileName(
+                self, "Import", widgets.start_dir("~"),
+                "QAVector export or cycle (*.json *.yaml *.yml)")
+        if not path:
+            return
+        try:
+            document = transfer.read(path)
+        except transfer.TransferError as exc:
+            widgets.warn(self, "Import", "This file cannot be imported.", str(exc))
+            return
+        rows = self._users_rows("Import")
+        if rows is None:
+            return
+        self.launch_registry.reload()
+        catalog = self.launch_registry.environments(self.inventory)
+        projects_path, cycle_projects = self._cycle_projects()
+        cycle_ids = [row.get("id") for row in self.inventory.cycles]
+        items = transfer.plan(document, self.launch_registry.projects, catalog, rows,
+                              [project.name for project in cycle_projects], cycle_ids)
+        dialog = ImportDialog(self, path, document, items)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        mode = dialog.mode()
+        said = []
+        users_path = self.inventory.config_path or self.core.config_path
+        if document["projects"] or document["environments"] or document["users"]:
+            def change(projects):
+                users = usersfile.load(users_path)
+                said.extend(transfer.apply_launch(document, mode, projects, catalog,
+                                                  users))
+                problems = usersfile.validate(users) + lpf.validate(projects)
+                if problems:
+                    raise lpf.LaunchProjectsError("\n".join(problems))
+                usersfile.save(users_path, users)
+            try:
+                self.launch_registry.update(change)
+            except (lpf.LaunchProjectsError, usersfile.UsersFileError) as exc:
+                widgets.warn(self, "Import", "Nothing was imported.", str(exc))
+                return
+        if document["cycles"] or document["cycle_projects"]:
+            try:
+                said.extend(transfer.apply_cycles(document, mode, self.core,
+                                                  projects_path, cycle_ids))
+            except (transfer.TransferError, core_mod.CoreError) as exc:
+                said.append("Cycles were not imported: %s" % exc)
+        widgets.output(self, "Import", "Imported from %s." % os.path.basename(path),
+                       "\n".join(said))
+        self._addresses_changed()
+        self.environments.set_inventory_rows()
+        self.refresh_inventory()
+
     def open_settings(self):
         dialog = SettingsDialog(self.settings, self, registry=self.action_registry)
         dialog.set_paths(*self.services.paths())
         dialog.set_flows_dir(self.inventory.dirs().get("flows") or "")
+        dialog.set_run_dirs(self.inventory.dirs())
         if dialog.exec() == QDialog.Accepted:
             dialog.apply()
             self.launch_registry.path = lpf.resolve_path(self.settings.launch_projects_path)
             self.launch_registry.reload()
-            self.core = core_mod.Core(None, None, self.settings.config,
-                                      flows_dir=self.settings.flows_path,
-                                      cycles_dir=self.settings.cycles_path,
-                                      secrets_path=self.settings.cycle_secrets_path,
-                                      memory_path=self.settings.cycle_memory_path,
-                                      runs_path=self.settings.cycle_runs_path)
+            self.core = self._new_core()
             self._aim_log_sources()
             self.listener.set_core(self.core)
+            self.subjects_page.set_core(self.core)
             self.refresh_inventory()
+
+    # -- projects -------------------------------------------------------------
+    def _new_core(self):
+        """A core for the project in use: every path from its settings."""
+        return core_mod.Core(None, None, self.settings.config,
+                             flows_dir=self.settings.flows_path,
+                             cycles_dir=self.settings.cycles_path,
+                             secrets_path=self.settings.cycle_secrets_path,
+                             memory_path=self.settings.cycle_memory_path,
+                             runs_path=self.settings.cycle_runs_path)
+
+    def _adopt_launch_projects(self):
+        """Once: the projects Launch Sessions had become projects of their own
+        (an empty one) or part of Workspace (one with environments)."""
+        if os.path.exists(projectsfile.default_path()):
+            return
+        registry = lpf.Registry(lpf.resolve_path(self.settings.launch_projects_path))
+        if registry.error:
+            return              # asked again next start, once the file reads
+        try:
+            if any(project.id != lpf.WORKSPACE for project in registry.projects):
+                registry.update(projectsfile.adopt_launch_projects)
+            else:
+                projectsfile.adopt_launch_projects([])
+        except (lpf.LaunchProjectsError, projectsfile.ProjectsFileError) as exc:
+            logging.getLogger(__name__).warning("projects not adopted: %s", exc)
+
+    def _projects(self):
+        try:
+            return projectsfile.load()
+        except projectsfile.ProjectsFileError as exc:
+            logging.getLogger(__name__).warning("%s", exc)
+            return [projectsfile.workspace()]
+
+    def _project(self, project_id):
+        return projectsfile.find(self._projects(), project_id) or projectsfile.workspace()
+
+    def _use_project(self, project):
+        """Point the settings, and the files no setting names, at ``project``."""
+        self.settings.use_project(project)
+        if project.folder:
+            projectsfile.make_folder(project.folder)
+        clf.use_path(projectsfile.paths(project.folder).cycle_layout
+                     if project.folder else None)
+
+    #: The project list's last entry: not a project, the way to add one.
+    NEW_PROJECT = "__new__"
+
+    def _fill_projects(self):
+        combo = self.project_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for project in self._projects():
+            combo.addItem(project.name, project.id)
+        combo.insertSeparator(combo.count())
+        combo.addItem("New…", self.NEW_PROJECT)
+        combo.setCurrentIndex(max(0, combo.findData(self.settings.project_id)))
+        combo.blockSignals(False)
+
+    def _project_picked(self, index):
+        project_id = self.project_combo.itemData(index)
+        if project_id == self.NEW_PROJECT:
+            self._fill_projects()           # back to the one in use, whatever comes
+            self.add_project()
+            return
+        if project_id and project_id != self.settings.project_id:
+            if not self.switch_project(project_id):
+                self._fill_projects()
+
+    def _may_leave_project(self):
+        """Whether the project in use can be left now; asks what has to be asked."""
+        if self.process.is_running():
+            widgets.note(self, "Projects", "A run is going.",
+                         "Stop it, or let it finish, before picking another project: "
+                         "it writes its results into this one.")
+            return False
+        unsaved = []
+        if self.credentials.is_dirty():
+            unsaved.append("users on Credentials")
+        if self.scenarios.is_dirty():
+            unsaved.append("the scenario being edited")
+        if self.cycles.has_unsaved_draft():
+            unsaved.append("the cycle being edited")
+        if unsaved and not widgets.confirm(
+                self, "Unsaved changes", "Drop the changes to %s?" % " and ".join(unsaved),
+                "They are not saved, and another project has its own.",
+                agree="Drop them", kind="warn"):
+            return False
+        if not self.services.confirm_discard():
+            return False
+        running = self.services.detained()
+        if running and not widgets.confirm(
+                self, "Services are running",
+                "%d service(s) of this project stop when another one is picked."
+                % len(running),
+                ", ".join("%s · %s" % (one.project, one.name) for one in running[:6]),
+                agree="Stop them and switch", kind="warn"):
+            return False
+        return True
+
+    def switch_project(self, project_id, then=None):
+        """Show ``project_id``: every page from its own files.
+
+        ``then`` runs once its inventory has loaded - what Search does to show
+        a row of another project. False when the project in use cannot be left.
+        """
+        if project_id == self.settings.project_id:
+            if then is not None:
+                then()
+            return True
+        if not self._may_leave_project():
+            return False
+        project = self._project(project_id)
+        self.settings.current_project = project.id
+        self._use_project(project)
+        self.launch_registry.path = lpf.resolve_path(self.settings.launch_projects_path)
+        self.launch_registry.reload()
+        self.history.set_directory(self.settings.data_dir())
+        self.switching.start("Opening %s…" % project.name)
+        # Launch Sessions onto the new project's files FIRST: anything it saves
+        # from here on - its context, a draft - must be that project's, never
+        # the one left written under the new project's name.
+        self.inventory = core_mod.Inventory()
+        self.launch.project_name = project.name
+        self.launch.switch_project(self.inventory)
+        # Nothing of the project left stays on screen while this one is read:
+        # every page that lists what the core read is emptied now.
+        for page in (self.environments, self.command, self.launch, self.scenarios):
+            page.set_inventory(self.inventory)
+        self.cycles.set_inventory(self.inventory)
+        self.core = self._new_core()
+        self._aim_log_sources()
+        self.listener.set_core(self.core)
+        self.subjects_page.set_core(self.core)
+        self.credentials.load(self.settings.config)
+        self._fill_projects()
+        self._after_switch = then
+        self.refresh_inventory()
+        return True
+
+    def add_project(self):
+        name = widgets.ask_text(self, "New project", "Name the project:", "",
+                                "It starts empty, in a folder of its own: its users, "
+                                "environments, services, scenarios and cycles.")
+        if not name:
+            return
+        try:
+            project = projectsfile.add(name)
+        except projectsfile.ProjectsFileError as exc:
+            widgets.warn(self, "New project", "The project was not added.", str(exc))
+            return
+        self._fill_projects()
+        self.switch_project(project.id)
+
+    def rename_project(self):
+        project = self._project(self.settings.project_id)
+        if project.id == projectsfile.WORKSPACE:
+            widgets.note(self, "Rename project", "Workspace keeps its name.")
+            return
+        name = widgets.ask_text(self, "Rename project", "New name:", project.name)
+        if not name or name == project.name:
+            return
+        try:
+            projectsfile.rename(project.id, name)
+        except projectsfile.ProjectsFileError as exc:
+            widgets.warn(self, "Rename project", "The name was not changed.", str(exc))
+            return
+        self._fill_projects()
+        self.launch.project_name = name.strip()
+        self.launch.refresh_address()
+
+    def delete_project(self):
+        project = self._project(self.settings.project_id)
+        if project.id == projectsfile.WORKSPACE:
+            return
+        if not widgets.confirm(
+                self, "Delete project", "Take \"%s\" off the list?" % project.name,
+                "Its folder stays on disk, with everything in it:\n%s" % project.folder,
+                agree="Take it off", kind="warn"):
+            return
+        if not self.switch_project(projectsfile.WORKSPACE):
+            return
+        try:
+            projectsfile.remove(project.id)
+        except projectsfile.ProjectsFileError as exc:
+            widgets.warn(self, "Delete project", "The project was not removed.", str(exc))
+        self._fill_projects()
+
+    def _project_action(self, action):
+        """What the Environments page asked to be done to the project in use."""
+        if action == "add":
+            self.add_project()
+        elif action == "rename":
+            self.rename_project()
+        elif action == "delete":
+            self.delete_project()
+        elif action == "export":
+            self.export_project()
+
+    def export_project(self):
+        """File -> Export with the whole project ticked."""
+        rows = self._users_rows("Export")
+        if rows is None:
+            return
+        _path, cycle_projects = self._cycle_projects()
+        names = {row.get("project") or "" for row in self.inventory.cycles}
+        self.export_items({
+            "projects": [project_id for project_id, _name in lpf.project_names(
+                self.launch_registry.projects,
+                self.launch_registry.environments(self.inventory))],
+            "users": [person.key for person in usersfile.credentials(rows)
+                      if person.login],
+            "cycle_projects": sorted(names)})
 
     # -- new tasks ------------------------------------------------------------
     def _update_listening(self):
@@ -1835,6 +2224,31 @@ class MainWindow(QMainWindow):
             return "cancel"
         return chosen
 
+    def _last_cycle(self):
+        """``(id, name)`` of the cycle that ran last and is still here; ("", "")."""
+        known = {row.get("id"): row for row in self.inventory.cycles}
+        for entry in self.history.entries(history_mod.CYCLE):
+            cycle_id = (entry.get("config") or {}).get("cycle") or ""
+            if cycle_id in known:
+                return cycle_id, known[cycle_id].get("name") or cycle_id
+        return "", ""
+
+    def _update_run_menu(self):
+        """Run Last Cycle says which cycle, and is off when there is none or a
+        run is going."""
+        self._update_background_action()
+        cycle_id, name = self._last_cycle()
+        self.last_cycle_action.setText("Run &Last Cycle%s" % (" (%s)" % name if name else ""))
+        self.last_cycle_action.setEnabled(bool(cycle_id) and not self.process.is_running())
+
+    def run_last_cycle(self):
+        cycle_id, _name = self._last_cycle()
+        if not cycle_id or self.process.is_running():
+            return
+        self.show_page("cycles")
+        self.cycles.explorer.select(cycle_id)
+        self.start_cycle_run(cycle_id)
+
     def _update_background_action(self):
         """Offer In Background only for what can run with no browser, and say why not.
 
@@ -2037,7 +2451,37 @@ class MainWindow(QMainWindow):
                 logging.exception("Search could not read the %s page", key)
                 continue
             hits.extend(one._replace(section=key) for one in found)
+        # The other projects, from their own files: a row of any of them is
+        # found, and opening it picks that project.
+        offered = {key for key, _label, _mark in CONFIGURE + OBSERVE if self._offered(key)}
+        try:
+            hits.extend(one for one in projectsearch.other_projects(
+                self.settings.project_id, self._workspace_paths())
+                if one.section in offered)
+        except Exception:               # noqa: BLE001 - one project must not end search
+            logging.exception("Search could not read the other projects")
         return hits
+
+    def _workspace_paths(self):
+        """Workspace's files - its settings - for searching it from another project."""
+        if not self.settings.project_folder:
+            return None
+        here = (self.settings.project_id, self.settings.project_folder)
+        self.settings.use_project(projectsfile.workspace())
+        try:
+            from .store import app_data_dir
+            return projectsfile.Paths(
+                users=self.settings.config or self.core.config_path,
+                launch_projects=lpf.resolve_path(self.settings.launch_projects_path),
+                launch_presets=os.path.join(app_data_dir(), "launch-presets.json"),
+                launch_drafts="", services=self.settings.services_path
+                or os.path.join(core_mod.home_folder(), "services.json"),
+                log_sources=self.settings.log_sources_path,
+                flows=self.settings.flows_path, cycles=self.settings.cycles_path,
+                cycle_projects="", cycle_layout="", cycle_secrets="", cycle_memory="",
+                cycle_runs="", reports="", sessions="", history=app_data_dir())
+        finally:
+            self.settings.use_project(projectsfile.Project(here[0], "", here[1]))
 
     def come_forward(self):
         """This window in front, back from the taskbar if it was minimized.
@@ -2056,8 +2500,16 @@ class MainWindow(QMainWindow):
         return QApplication.activeWindow() or self
 
     def open_hit(self, hit):
-        """Go to where ``hit`` lives, with it on screen - from whatever window."""
+        """Go to where ``hit`` lives, with it on screen - from whatever window.
+
+        A hit of another project picks that project first; the row is shown
+        once its data has loaded.
+        """
         self.come_forward()
+        if hit.project and hit.project != self.settings.project_id:
+            self.switch_project(hit.project, then=lambda: self.open_hit(
+                hit._replace(project="")))
+            return
         self.show_page(hit.section)
         page = self._pages.get(hit.section)
         if page is None or page.show_found(hit.target) is False:
@@ -2131,6 +2583,10 @@ class MainWindow(QMainWindow):
         args = (["--cycle-run=" + cycle_id, "--events=-", "--control=-"]
                 + self.core.secrets_flag() + self.core.memory_flag()
                 + ["--cycle-var=%s=%s" % one for one in sorted((variables or {}).items())])
+        # A project's browser profiles are its own; its scenario steps are
+        # handed them along with --config and --log-sources.
+        if self.settings.project_folder:
+            args.append("--sessions-dir=" + self.settings.directory("sessions"))
         if execution_mode in ("auto", "important", "approve"):
             args.append("--cycle-mode=" + execution_mode)
         if subject and subject.get("key") and not how:
@@ -2239,6 +2695,9 @@ class MainWindow(QMainWindow):
     def _on_event(self, event):
         self.run_state.handle(event)
         kind = event.get("kind")
+        if (kind == "flow.end" and self._entry_id is not None and not self._stopping
+                and event.get("status") in ("pass", "fail", "error")):
+            self.history.note(self._entry_id, last_scenario_status=event["status"])
         if kind == "cycle.control.refused":
             self.status_right.setText(event.get("reason", "Control action refused."))
         if kind == "cycle.run.start":
@@ -2517,8 +2976,9 @@ class MainWindow(QMainWindow):
         it is still the only one there - and until Save moves it, that is the one
         the core is pointed at too.
         """
-        read_from, _target = lsf.resolve_path(self.settings.log_sources_path,
-                                              self.core.legacy_log_sources)
+        read_from, _target = lsf.resolve_path(
+            self.settings.log_sources_path,
+            "" if self.settings.project_folder else self.core.legacy_log_sources)
         self.core.log_sources = read_from
 
     def _confirm_close_with_services(self):

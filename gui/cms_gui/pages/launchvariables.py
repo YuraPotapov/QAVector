@@ -2,27 +2,24 @@
 
 Opened by clicking a value a variable put into the address (the blue part), by
 the Variables button, or by "Define port..." when the address names a variable
-nobody has defined. Each row is one variable: its type, the value this run
-gives it, where that value came from, what it would be without it, and Reset.
-A value typed here is this run's; Save keeps it with the configuration, and
-"Make default" makes it the environment's own, so every configuration of this
-environment gets it. A port is a number in a box here and nowhere else - the address
-itself only shows it.
+nobody has given a value. Each row is one variable: the value this run gives it,
+where that value came from, what it would be without it, and Reset. A value
+typed here is this run's; Save keeps it with the configuration, and "Save to
+environment" makes it the environment's own, so every configuration of this
+environment gets it. Values are text, as they are on the Environments page.
 
 The panel draws rows and reports what was asked; the page decides what each
 answer changes (see LaunchSessionsPage._variable_*).
 """
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
-from .. import launchvars, widgets
+from .. import widgets
 
-#: Where a newly defined variable's value goes: (label, key).
-LEVELS = (("This run", "run"), ("Environment default", "environment"),
-          ("Project default", "project"))
+#: Where a new variable's first value goes: (label, key).
+LEVELS = (("This run", "run"), ("This environment", "environment"))
 
 
 class VariablesPanel(widgets.FloatingPanel):
@@ -32,8 +29,8 @@ class VariablesPanel(widgets.FloatingPanel):
     value_changed = Signal(str, object)
     #: (name, value): make it the environment's own value.
     environment_value = Signal(str, object)
-    #: (name, type, value, level key) for a variable nobody defined yet.
-    define_requested = Signal(str, str, object, str)
+    #: (name, value, level key) for a variable nobody gave a value yet.
+    define_requested = Signal(str, object, str)
 
     WIDTH = 640
 
@@ -93,15 +90,15 @@ class VariablesPanel(widgets.FloatingPanel):
         self._editors = {}
         self.empty.setVisible(not rows)
         if not rows:
-            self.grid.addWidget(self.empty, 0, 0, 1, 6)
+            self.grid.addWidget(self.empty, 0, 0, 1, 5)
         line = 0
         ports = False
         for row in rows:
             if row.get("defined"):
                 line = self._defined_row(line, row, can_set_environment)
-                ports = ports or row.get("type") == "port"
             else:
                 line = self._undefined_row(line, row)
+            ports = ports or row["name"].lower() == "port"
         self.footnote.setText(
             "Another port of the same environment opens the same profiles, signed "
             "in as before. Two ports of localhost share their cookies, so open "
@@ -113,8 +110,6 @@ class VariablesPanel(widgets.FloatingPanel):
         name = row["name"]
         label = QLabel(name, self.body)
         label.setProperty("role", "mono")
-        kind = QLabel(row.get("type", ""), self.body)
-        kind.setProperty("role", "hint")
         editor = self._editor(row)
         source = widgets.Tag(row.get("source") or "no value", "neutral", self.body)
         inherited = QLabel(self._inherited_text(row), self.body)
@@ -124,34 +119,30 @@ class VariablesPanel(widgets.FloatingPanel):
         reset.setEnabled(bool(row.get("resettable")))
         reset.setToolTip("Go back to the value it inherits")
         reset.clicked.connect(lambda _c=False, n=name: self.value_changed.emit(n, None))
-        keep = QPushButton("Make default", self.body)
+        keep = QPushButton("Save to environment", self.body)
         keep.setProperty("variant", "ghost")
         keep.setEnabled(can_set_environment and bool(row.get("text")))
         keep.setToolTip("Make it this environment's value: every configuration of "
                         "it gets this value unless it gives its own.")
         keep.clicked.connect(lambda _c=False, n=name: self.environment_value.emit(
             n, self._read(n)))
-        for column, widget in enumerate((label, kind, editor, source, inherited)):
+        for column, widget in enumerate((label, editor, source, inherited)):
             self.grid.addWidget(widget, line, column)
-        self.grid.addWidget(widgets.row(reset, keep, spacing=2), line, 5)
+        self.grid.addWidget(widgets.row(reset, keep, spacing=2), line, 4)
         line += 1
         if row.get("problem"):
             problem = QLabel(row["problem"], self.body)
             problem.setProperty("role", "error")
             problem.setWordWrap(True)
-            self.grid.addWidget(problem, line, 2, 1, 4)
+            self.grid.addWidget(problem, line, 1, 1, 4)
             line += 1
         return line
 
     def _undefined_row(self, line, row):
-        """A name the address uses that nobody defined: define it here."""
+        """A name the address uses that nothing gives a value: give it one here."""
         name = row["name"]
         label = QLabel(name, self.body)
         label.setProperty("role", "mono")
-        kind = widgets.capped(QComboBox(self.body), 110)
-        for choice in launchvars.TYPES:
-            kind.addItem(choice)
-        kind.setCurrentText("port" if name.lower() == "port" else "string")
         value = QLineEdit(self.body)
         value.setProperty("mono", True)
         value.setPlaceholderText("value")
@@ -161,14 +152,14 @@ class VariablesPanel(widgets.FloatingPanel):
         define = QPushButton("Define", self.body)
         define.setProperty("variant", "primary")
         define.clicked.connect(lambda _c=False: self.define_requested.emit(
-            name, kind.currentText(), value.text().strip(), level.currentData()))
+            name, value.text().strip(), level.currentData()))
         value.returnPressed.connect(define.click)
         self._editors[name] = value
-        note = QLabel("not defined", self.body)
+        note = QLabel("no value", self.body)
         note.setProperty("role", "hint")
-        for column, widget in enumerate((label, kind, value, level, note)):
+        for column, widget in enumerate((label, value, level, note)):
             self.grid.addWidget(widget, line, column)
-        self.grid.addWidget(define, line, 5)
+        self.grid.addWidget(define, line, 4)
         return line + 1
 
     def _editor(self, row):
@@ -188,10 +179,6 @@ class VariablesPanel(widgets.FloatingPanel):
         else:
             editor = QLineEdit(text, self.body)
             editor.setProperty("mono", True)
-            if kind == "port":
-                editor.setValidator(QIntValidator(1, 65535, editor))
-            elif kind == "integer":
-                editor.setValidator(QIntValidator(editor))
             editor.setPlaceholderText("no value")
             editor.editingFinished.connect(
                 lambda n=name, e=editor: self._edited(n, e))

@@ -267,7 +267,7 @@ def test_recording_drops_the_lock_it_would_lock_the_recorder_out_with():
 
 def test_the_command_page_opens_the_environment_address_too(qapp, tmp_path):
     """One rule on both pages: an empty --url takes the environment's address,
-    its variables filled in from what the environment and its project say."""
+    its variables filled in from the environment's own values."""
     from PySide6.QtCore import QSettings
     from cms_gui import core, launchprojectsfile as lpf
     from cms_gui.pages.command import CommandPage
@@ -280,9 +280,8 @@ def test_the_command_page_opens_the_environment_address_too(qapp, tmp_path):
                   "origin": "http://localhost:8069"}]})
 
     def change(projects):
-        lpf.define(projects, lpf.WORKSPACE, "port", "port", 8069)
         row = lpf.environment_row(projects, registry.environments(inventory)[0])
-        row.address, row.variables = "localhost:{{port}}", {"port": 8074}
+        row.address, row.variables["port"] = "localhost:{{port}}", "8074"
     registry.update(change)
     page = CommandPage(settings, registry=registry)
     try:

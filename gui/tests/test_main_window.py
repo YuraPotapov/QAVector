@@ -480,7 +480,7 @@ def test_the_wording_reaches_the_pages_not_just_the_menus(window):
         return "\n".join(l.text() for l in page.findChildren(QLabel))
 
     window.set_developer_mode(True)
-    assert "--flows-dir" in text_of(window.environments)
+    assert "--url" in text_of(window.environments)
     window.set_developer_mode(False)
     assert "--" not in text_of(window.environments)
 
@@ -1763,3 +1763,43 @@ def test_record_on_launch_sessions_records_into_what_it_names(window, monkeypatc
         assert started and started[0]["recorder"] == "shop_order"
     finally:
         window.launch.what.set_current("Open windows")
+
+
+def test_the_run_menu_has_the_three_launches_then_the_last_cycle(window):
+    texts = [a.text() if not a.isSeparator() else "-" for a in window.menu_run.actions()]
+    assert texts == ["In Background", "With Recorder", "Empty Sessions", "-",
+                     "Run &Last Cycle", "&Clarify the running cycle\u2026", "-", "&Stop"]
+
+
+def test_run_last_cycle_runs_the_newest_cycle_still_here(window, monkeypatch):
+    started = []
+    monkeypatch.setattr(window, "start_cycle_run", lambda cycle_id, **k: started.append(cycle_id))
+    window._update_run_menu()
+    if not window.inventory.cycles:
+        assert not window.last_cycle_action.isEnabled()
+        return
+    cycle = window.inventory.cycles[0]
+    window.history.begin(history_mod.CYCLE, {"config": {"cycle": "gone"}})
+    window.history.begin(history_mod.CYCLE, {"config": {"cycle": cycle["id"]}})
+    window._update_run_menu()
+    assert window.last_cycle_action.isEnabled()
+    assert (cycle.get("name") or cycle["id"]) in window.last_cycle_action.text()
+    window.last_cycle_action.trigger()
+    assert started == [cycle["id"]]
+
+
+def test_last_scenario_result_is_saved_before_the_browser_windows_close(window):
+    from cms_gui.splash_easteregg import last_scenario_failed
+
+    window._entry_id = window.history.begin(history_mod.LAUNCH, {})
+    window._on_event({"kind": "flow.end", "session": "tester", "status": "fail"})
+    assert last_scenario_failed(window.history.directory)
+    window._on_event({"kind": "flow.end", "session": "tester", "status": "pass"})
+    assert not last_scenario_failed(window.history.directory)
+    window._stopping = True
+    try:
+        window._on_event({"kind": "flow.end", "session": "tester", "status": "error"})
+        assert not last_scenario_failed(window.history.directory)
+    finally:
+        window._stopping = False
+        window._entry_id = None

@@ -256,9 +256,9 @@ class CommandPage(QWidget):
     def _env_address(self, env):
         """The address of the environment ``--env`` names; "" when it has none.
 
-        Its variables filled in with what the environment and its project say -
-        this page has no configuration or run of its own to give them other
-        values. When they cannot be filled, the launcher's origin applies.
+        Its variables filled in with the environment's own values - this page
+        has no configuration or run of its own to give them other values. When
+        they cannot be filled, the launcher's origin applies.
         """
         if not env:
             return ""
@@ -268,10 +268,8 @@ class CommandPage(QWidget):
         if len(holders) != 1 or not holders[0].address:
             return ""
         holder = holders[0]
-        project = self.registry.project(holder.project_id)
-        result = launchvars.resolve(
-            holder.address, project.definitions() if project else {},
-            [launchvars.Layer("environment", dict(holder.variables))])
+        scope = lpf.scope(holder.variables)
+        result = launchvars.resolve(holder.address, scope.definitions, scope.layers)
         if result.problems:
             return ""
         return launch.normalize_address(result.text)[0]

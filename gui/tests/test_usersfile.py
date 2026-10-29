@@ -188,3 +188,103 @@ def test_the_collision_rule_matches_the_launcher():
         except AssertionError:
             core_refuses = True
         assert bool(usersfile.env_problems(values)) == core_refuses, values
+
+
+# ---------------------------------------------- people and where they sign in
+
+def _people():
+    row = usersfile.UserRow
+    return [row("local", "Agent", "agent", "pw", ["smoke"]),
+            row("stage", "Agent", "agent", "pw", ["tag:access"]),
+            row("local", "Admin", "admin", "pw-local"),
+            row("stage", "Admin", "admin", "pw-stage"),
+            row("", "Tester", "new", "pw")]
+
+
+def test_a_person_is_every_row_with_one_login_password_and_role():
+    rows = _people()
+    people = usersfile.credentials(rows)
+    assert [(p.login, p.role, p.envs(rows)) for p in people] == [
+        ("agent", "Agent", ["local", "stage"]),
+        ("admin", "Admin", ["local"]),
+        ("admin", "Admin", ["stage"]),
+        ("new", "Tester", [])]
+
+
+def test_rows_still_being_typed_are_people_of_their_own():
+    rows = [usersfile.UserRow("", "", "", ""), usersfile.UserRow("", "", "", "")]
+    assert len(usersfile.credentials(rows)) == 2
+
+
+def test_assigning_moves_a_loose_row_in_or_adds_one_for_the_place():
+    rows = _people()
+    usersfile.assign(rows, ("new", "pw", "Tester"), "local")
+    assert (rows[4].env, len(rows)) == ("local", 5)
+    usersfile.assign(rows, ("new", "pw", "Tester"), "stage", ["smoke"])
+    assert (rows[5].env, rows[5].login, rows[5].tests) == ("stage", "new", ["smoke"])
+    assert usersfile.assign(rows, ("new", "pw", "Tester"), "stage") is False
+    assert usersfile.validate(rows) == []
+
+
+def test_one_login_cannot_be_in_a_place_twice():
+    rows = _people()
+    with pytest.raises(usersfile.UsersFileError):
+        usersfile.assign(rows, ("admin", "pw-stage", "Admin"), "local")
+
+
+def test_leaving_the_last_place_keeps_the_person():
+    rows = _people()
+    usersfile.unassign(rows, ("agent", "pw", "Agent"), "stage")
+    assert [(r.env, r.login) for r in rows if r.login == "agent"] == [("local", "agent")]
+    usersfile.unassign(rows, ("agent", "pw", "Agent"), "local")
+    agent = [r for r in rows if r.login == "agent"]
+    assert [(r.env, r.tests) for r in agent] == [("", [])]
+
+
+def test_a_change_to_a_person_reaches_every_row_of_theirs():
+    rows = _people()
+    usersfile.update_credential(rows, ("agent", "pw", "Agent"), password="new-pw")
+    assert {r.password for r in rows if r.login == "agent"} == {"new-pw"}
+    assert [r.password for r in rows if r.login == "admin"] == ["pw-local", "pw-stage"]
+    usersfile.remove_credential(rows, ("agent", "new-pw", "Agent"))
+    assert all(r.login != "agent" for r in rows)
+
+
+def test_scenarios_belong_to_the_person_in_one_place():
+    rows = _people()
+    usersfile.set_tests(rows, "stage", "agent", ["smoke", "tag:x"])
+    assert [r.tests for r in rows if r.login == "agent"] == [["smoke"], ["smoke", "tag:x"]]
+    with pytest.raises(usersfile.UsersFileError):
+        usersfile.set_tests(rows, "stage", "new", ["smoke"])
+
+
+def test_copying_and_dropping_a_place():
+    rows = _people()
+    usersfile.copy_env(rows, "local", "copy")
+    assert [(r.login, r.tests) for _i, r in usersfile.members(rows, "copy")] == [
+        ("agent", ["smoke"]), ("admin", [])]
+    usersfile.drop_env(rows, "local")
+    assert usersfile.members(rows, "local") == []
+    # admin/pw-local was only there: still in the list, without a place.
+    assert [(r.env, r.password) for r in rows if r.login == "admin"] == [
+        ("stage", "pw-stage"), ("copy", "pw-local")]
+    usersfile.drop_env(rows, "copy")
+    assert [(r.env, r.password) for r in rows if r.login == "admin"] == [
+        ("stage", "pw-stage"), ("", "pw-local")]
+    assert usersfile.validate(rows) == []
+
+
+def test_two_without_a_place_with_one_login_are_said_plainly():
+    rows = [usersfile.UserRow("", "A", "same", "1"), usersfile.UserRow("", "B", "same", "2")]
+    assert any("without an environment" in p for p in usersfile.validate(rows))
+
+
+def test_change_reads_applies_and_saves_or_leaves_the_file(tmp_path):
+    path = _write(tmp_path / "users.json", [
+        {"env": "local", "class": "Agent", "login": "agent", "password": "pw"}])
+    usersfile.change(path, lambda rows: usersfile.copy_env(rows, "local", "stage"))
+    assert [r["env"] for r in json.load(open(path))] == ["local", "stage"]
+    before = open(path).read()
+    with pytest.raises(usersfile.UsersFileError):
+        usersfile.change(path, lambda rows: rows.append(rows[0].copy()))
+    assert open(path).read() == before

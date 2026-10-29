@@ -399,8 +399,8 @@ def test_changing_an_environment_from_here_is_announced(page):
     seen = []
     page.environments_changed.connect(lambda: seen.append(True))
     _pick_env(page, LOCAL)
-    page._variable_defined("port", "port", "8069", "environment")
-    assert seen and page.controller.environment().variables == {"port": 8069}
+    page._variable_defined("port", "8069", "environment")
+    assert seen and page.controller.environment().variables == {"port": "8069"}
     assert not page.env_move.isVisibleTo(page)
 
 
@@ -510,7 +510,7 @@ def test_the_start_address_is_under_the_environment_not_in_advanced(page):
 def test_the_box_shows_the_environment_s_address_and_says_so(page):
     _pick_env(page, LOCAL)
     assert page.url_field.text() == "http://localhost:8069"
-    assert page.url_source.text() == "environment"
+    assert page.address_source == "environment"
     assert not page.url_reset.isVisibleTo(page)
     assert _flag(page.argv(), "--url") is None
     assert _flag(page.argv(), "--env") == "localhost:8069"
@@ -522,11 +522,11 @@ def test_an_address_of_its_own_is_this_run_s_until_it_is_saved(page):
     page._url_edited("localhost:8074")
     assert page.state()["advanced"]["url"] == "localhost:8074"
     assert page.url_field.text() == "http://localhost:8074"
-    assert page.url_source.text() == "this run"
+    assert page.address_source == "this run"
     assert page.url_reset.isVisibleTo(page)
     assert _flag(page.argv(), "--url") == "http://localhost:8074"
     page.save_configuration()
-    assert page.url_source.text() == "this configuration"
+    assert page.address_source == "this configuration"
     page.url_reset.click()
     assert page.state()["advanced"]["url"] == ""
     assert page.url_field.text() == "http://localhost:8069"
@@ -536,7 +536,7 @@ def test_committing_the_address_that_applies_anyway_is_not_an_override(page):
     _pick_env(page, LOCAL)
     page._url_edited("http://localhost:8069")
     assert page.state()["advanced"]["url"] == ""
-    assert page.url_source.text() == "environment"
+    assert page.address_source == "environment"
 
 
 def test_a_bad_address_stops_run_before_any_window_opens(page):
@@ -554,7 +554,7 @@ def test_the_environment_s_own_address_is_what_opens(page):
     page.controller.set_environment_address("localhost:8090")
     page.refresh_address()
     assert page.url_field.text() == "http://localhost:8090"
-    assert page.url_source.text() == "environment address"
+    assert page.address_source == "environment address"
     assert _flag(page.argv(), "--url") == "http://localhost:8090"
 
 
@@ -570,7 +570,7 @@ def test_default_folders_are_shown_not_copied_in(page):
 
 def _with_port(page):
     _pick_env(page, LOCAL)
-    page.controller.define("port", "port", 8069)
+    page.controller.set_environment_value("port", "8069")
     page.controller.set_environment_address("http://localhost:{{port}}/web")
     page.refresh_address()
 
@@ -597,13 +597,13 @@ def test_a_variable_s_value_is_blue_in_the_address_and_the_rest_is_not(page):
 def test_a_value_set_for_this_run_changes_where_it_opens(page):
     _with_port(page)
     page._variable_changed("port", "8074")
-    assert page.state()["variables"] == {"port": 8074}
+    assert page.state()["variables"] == {"port": "8074"}
     assert page.url_field.text() == "http://localhost:8074/web"
     assert _flag(page.argv(), "--url") == "http://localhost:8074/web"
     assert _flag(page.argv(), "--env") == "localhost:8069"     # same profiles
     row = _rows(page)["port"]
     assert row["source"] == "this run"
-    assert (row["inherited"], row["inherited_source"]) == ("8069", "project")
+    assert (row["inherited"], row["inherited_source"]) == ("8069", "environment")
     page._variable_changed("port", None)
     assert page.state()["variables"] == {}
     assert page.url_field.text() == "http://localhost:8069/web"
@@ -621,7 +621,7 @@ def test_save_keeps_the_value_with_the_configuration(page):
     _with_port(page)
     page._variable_changed("port", "8074")
     preset = _open_saved(page, "Port 8074")
-    assert page.controller.presets.get(preset.id).variables == {"port": 8074}
+    assert page.controller.presets.get(preset.id).variables == {"port": "8074"}
     assert _rows(page)["port"]["source"] == "configuration"
 
 
@@ -630,7 +630,7 @@ def test_set_as_environment_default_moves_the_value_down(page):
     page._variable_changed("port", "8074")
     page._variable_for_environment("port", "8074")
     assert page.state()["variables"] == {}
-    assert page.controller.environment().variables == {"port": 8074}
+    assert page.controller.environment().variables == {"port": "8074"}
     assert page.url_field.text() == "http://localhost:8074/web"
 
 
@@ -638,18 +638,19 @@ def test_an_unknown_variable_is_defined_from_the_page(page):
     _pick_env(page, LOCAL)
     page._url_edited("localhost:{{port}}")
     assert page.url_define.isVisibleTo(page) and "port" in page.url_define.text()
-    assert any("{{port}} is not defined" in p for p in page.problem_list())
-    page._variable_defined("port", "port", "8075", "run")
+    assert any("{{port}} has no value" in p for p in page.problem_list())
+    page._variable_defined("port", "8075", "run")
     assert not page.url_define.isVisibleTo(page)
     assert page.url_field.text() == "http://localhost:8075"
-    assert page.controller.definitions()["port"].type == "port"
+    assert page.state()["variables"] == {"port": "8075"}
 
 
-def test_a_value_of_the_wrong_type_is_said_with_its_variable(page):
+def test_a_value_the_address_cannot_take_stops_the_run(page):
+    """Values are text: what a port has to be is the address's business."""
     _with_port(page)
     page._variable_changed("port", "99999")
-    assert any(p.startswith("port has to be a port") for p in page.problem_list())
-    assert _rows(page)["port"]["problem"]
+    assert page.problem_list()
+    assert page.url_problem.isVisibleTo(page)
 
 
 # ------------------------------------------------- the rest of the page
@@ -935,7 +936,7 @@ def _with_project(page):
     registry = page.controller.registry
 
     def change(projects):
-        project = lpf.ProjectRow("p-help", "Helpdesk", {}, [
+        project = lpf.ProjectRow("p-help", "Helpdesk", [
             lpf.EnvironmentRow("e-help", "Local helpdesk", "localhost:8069",
                                "http://localhost:8070")])
         projects.append(project)

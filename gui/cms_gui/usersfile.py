@@ -4,12 +4,23 @@ The schema is the launcher's, unchanged: a JSON array of objects with ``env``,
 ``class``, ``login``, ``password`` and an optional ``run-tests``. The GUI is a
 form over that file and nothing more, so the CLI keeps working on it untouched.
 
+The GUI reads it as *people* and *where they sign in*. A person - a
+:class:`Credential` - is every row with the same login, password and class; each
+of their rows puts them in one environment (the row's ``env``, the
+environment's account key) with the scenarios they run there. One with no
+environment yet is a single row whose ``env`` is empty, which the launcher reads
+as an account no ``--env`` selects. The functions below change people and
+places on a list of rows, so the Credentials table (which saves when told to)
+and the Environments page (which saves at once, through :func:`change`) work on
+the file the same way.
+
 Validation deliberately mirrors ``session_launcher.load_users`` /
 ``_parse_tests_field``: the GUI must never write a file the launcher would then
 refuse to read. Saving is atomic (temp file + replace) with a one-slot backup,
 because this file holds the only copy of the passwords.
 """
 
+import collections
 import json
 import os
 import re
@@ -123,7 +134,11 @@ def validate(rows):
                 problems.append("%s: run-tests has %r; the selector is singular - "
                                 "use 'tag:%s'." % (where, test, test[len("tags:"):]))
         key = (row.env, row.login)
-        if row.login and key in seen:
+        if row.login and key in seen and not row.env:
+            problems.append("%s: %s is already in the list, without an environment, "
+                            "in row %d - give one of them an environment, or another "
+                            "login." % (where, row.login, seen[key]))
+        elif row.login and key in seen:
             problems.append("%s: env+login duplicates row %d - that pair names the "
                             "profile folder and must be unique." % (where, seen[key]))
         elif row.login:
@@ -245,3 +260,157 @@ def fingerprint(path):
         return (stat.st_mtime_ns, stat.st_size)
     except OSError:
         return None
+
+
+# -- people and where they sign in --------------------------------------------
+class Credential(collections.namedtuple("Credential", "role login password indices")):
+    """One person: a login, its password and role, and the rows that hold them."""
+
+    @property
+    def key(self):
+        """What tells this person from another on the same list of rows."""
+        return (self.login, self.password, self.role) if self.login \
+            else ("", self.indices[0], "")
+
+    def envs(self, rows):
+        """The account keys of the environments this person is in, in file order."""
+        return [rows[index].env for index in self.indices if rows[index].env]
+
+
+def credentials(rows):
+    """Every person on ``rows``, in the order they first appear.
+
+    Rows with the same login, password and class are one person in several
+    environments. A row with no login yet is a person of its own - it is being
+    typed - rather than one with every other blank row.
+    """
+    found = collections.OrderedDict()
+    for index, row in enumerate(rows):
+        key = (row.login, row.password, row.cls) if row.login else ("", index, "")
+        found.setdefault(key, []).append(index)
+    return [Credential(rows[indices[0]].cls, rows[indices[0]].login,
+                       rows[indices[0]].password, tuple(indices))
+            for indices in found.values()]
+
+
+def credential(rows, key):
+    """The person ``key`` names on ``rows``, or None."""
+    for person in credentials(rows):
+        if person.key == key:
+            return person
+    return None
+
+
+def _person(rows, key):
+    person = credential(rows, key)
+    if person is None:
+        raise UsersFileError("%s is no longer in users.json." % (key[0] or "That user"))
+    return person
+
+
+def members(rows, env):
+    """``[(index, row)]`` of the accounts filed under ``env``, in file order."""
+    return [(index, row) for index, row in enumerate(rows) if env and row.env == env]
+
+
+def assign(rows, key, env, tests=()):
+    """Put a person in ``env``; nothing happens if they are there already.
+
+    A person with no environment takes this one on their row; anyone else gets
+    a row of their own here, last among the accounts of the file, so they open
+    after the ones already there.
+    """
+    person = _person(rows, key)
+    if env in person.envs(rows):
+        return False
+    clash = [row for _index, row in members(rows, env) if row.login == person.login]
+    if clash:
+        raise UsersFileError("%s is already in this environment with another password "
+                             "or role." % person.login)
+    loose = [index for index in person.indices if not rows[index].env]
+    if loose:
+        rows[loose[0]].env = env
+        rows[loose[0]].tests = list(tests)
+        return True
+    row = rows[person.indices[0]].copy()
+    row.env, row.tests = env, list(tests)
+    rows.append(row)
+    return True
+
+
+def unassign(rows, key, env):
+    """Take a person out of ``env``. The last place they were in leaves them
+    in the list without an environment rather than out of it."""
+    person = _person(rows, key)
+    here = [index for index in person.indices if rows[index].env == env]
+    if not here:
+        return False
+    if len(here) == len([index for index in person.indices if rows[index].env]):
+        keep = here.pop(0)
+        rows[keep].env, rows[keep].tests = "", []
+    for index in sorted(here, reverse=True):
+        del rows[index]
+    return True
+
+
+def update_credential(rows, key, role=None, login=None, password=None):
+    """Change a person's role, login or password on every row of theirs."""
+    person = _person(rows, key)
+    for index in person.indices:
+        row = rows[index]
+        if role is not None:
+            row.cls = role
+        if login is not None:
+            row.login = login
+        if password is not None:
+            row.password = password
+    return True
+
+
+def remove_credential(rows, key):
+    """Take a person out of the file, from every environment."""
+    person = _person(rows, key)
+    for index in sorted(person.indices, reverse=True):
+        del rows[index]
+    return True
+
+
+def set_tests(rows, env, login, tests):
+    """The scenarios ``login`` runs in ``env``."""
+    for _index, row in members(rows, env):
+        if row.login == login:
+            row.tests = list(tests)
+            return True
+    raise UsersFileError("%s is not in this environment." % login)
+
+
+def copy_env(rows, source, target):
+    """Everyone in ``source``, with their scenarios, also in ``target``."""
+    for _index, row in members(rows, source):
+        clone = row.copy()
+        clone.env = target
+        rows.append(clone)
+    return True
+
+
+def drop_env(rows, env):
+    """Everyone out of ``env``: whoever was only there stays, without one."""
+    for person in [person for person in credentials(rows) if env in person.envs(rows)]:
+        unassign(rows, person.key, env)
+    return True
+
+
+def change(path, apply):
+    """Read users.json afresh, ``apply(rows)``, and save it if it is still valid.
+
+    Returns what ``apply`` returned. Raises UsersFileError - with the file
+    untouched - when it cannot be read, or the result is one the launcher would
+    refuse.
+    """
+    if not path:
+        raise UsersFileError("There is no users.json to write to: set its path in "
+                             "Settings -> Config.")
+    rows = load(path)
+    result = apply(rows)
+    save(path, rows)
+    return result

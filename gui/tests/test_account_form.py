@@ -107,6 +107,8 @@ def test_the_password_is_masked_until_shown(form):
 def test_the_environment_is_said_not_asked(form):
     from PySide6.QtWidgets import QLabel
     said = " ".join(label.text() for label in form.findChildren(QLabel))
-    assert "Local" in said and "localhost:8069" in said
+    assert "Local" in said
+    # The account key is the GUI's business, never the person's.
+    assert "localhost:8069" not in said
     assert not any(isinstance(w, QLineEdit) and w.text() == "localhost:8069"
                    for w in form.findChildren(QLineEdit))

@@ -48,10 +48,19 @@ class History(QObject):
 
     def __init__(self, directory=None, parent=None):
         super().__init__(parent)
-        self.directory = directory or store.app_data_dir()
+        self._read(directory or store.app_data_dir())
+
+    def _read(self, directory):
+        self.directory = directory
         self._store = store.JsonStore(os.path.join(self.directory, "history.json"),
                                       default=[])
         self._entries = [e for e in self._store.load() if isinstance(e, dict)]
+
+    def set_directory(self, directory):
+        """Another project's record: read it, and say so."""
+        if directory and directory != self.directory:
+            self._read(directory)
+            self.changed.emit()
 
     # -- reading --------------------------------------------------------------
     def entries(self, kind=None):

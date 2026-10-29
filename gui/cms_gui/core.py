@@ -552,6 +552,29 @@ class Core:
         return self._flow_json("--cycle-secret-copy=" + spec,
                                *self.secrets_flag())
 
+    def cycle_secret_export(self, cycle_id):
+        """``{name: value}`` of one cycle's secrets, for Export.
+
+        The core writes them into a file of this process's own, readable by
+        its owner only, and prints only their names; the file is read and
+        removed here at once.
+        """
+        handle, path = tempfile.mkstemp(prefix="cms-secret-export-", suffix=".json")
+        os.close(handle)
+        try:
+            answer = self._flow_json("--cycle-secret-export=" + cycle_id,
+                                     "--from=" + path, *self.secrets_flag())
+            if not answer.get("ok"):
+                raise CoreError("; ".join(str(one) for one in
+                                          answer.get("problems") or ["no answer"]))
+            with open(path, encoding="utf-8") as stream:
+                return dict(json.load(stream).get("secrets") or {})
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     def cycle_secret_delete(self, cycle_id, name=None):
         """Forget one secret, or every secret of one cycle."""
         target = "%s:%s" % (cycle_id, name) if name else cycle_id

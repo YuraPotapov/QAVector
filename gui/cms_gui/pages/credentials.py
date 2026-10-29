@@ -1,35 +1,50 @@
-"""Credentials page: a table editor over users.json.
+"""Credentials page: everyone who signs in.
 
-The file is the launcher's, so this page's job is to keep it *exactly* as valid
-as the CLI expects - every rule in ``usersfile.validate`` is one the launcher
-would otherwise exit on. Passwords are masked by default with a per-row reveal,
-because the whole point of the file is that it holds them in the clear for the
-auto-login extension to seed.
+One row per person - a role (what the window is called), a login and a
+password. Where they sign in is the Environments page's business; here it can
+only be given to several people at once (Add to environment), and nobody types
+an environment's key.
+
+Underneath it is users.json, the launcher's own file, unchanged: a person in
+three environments is three rows of it, one per environment, each with the
+scenarios they run there (:func:`usersfile.credentials`). So this page's job is
+still to keep that file *exactly* as valid as the CLI expects - every rule in
+``usersfile.validate`` is one the launcher would otherwise exit on. Passwords
+are masked by default with a per-row reveal, because the whole point of the
+file is that it holds them in the clear for the auto-login extension to seed.
+Changes stay on screen until Save, which writes the file atomically with a
+backup.
 """
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QLabel, QLineEdit,
-                               QPushButton, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+import re
+
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QLabel, QPushButton,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import search, theme, usersfile, widgets
 
 
 class CredentialsPage(QWidget):
-    """Edit, validate and save the config the launcher reads."""
+    """Edit, validate and save the people in the config the launcher reads."""
 
     saved = Signal()
+    #: File -> Export with the selected users ticked: {"users": [key]}.
+    export_requested = Signal(dict)
 
-    HEADERS = ["env", "class", "login", "password", "run-tests", ""]
-    COL_ENV, COL_CLASS, COL_LOGIN, COL_PASSWORD, COL_TESTS, COL_ACTIONS = range(6)
+    HEADERS = ["Role", "Login", "Password", ""]
+    COL_CLASS, COL_LOGIN, COL_PASSWORD, COL_ACTIONS = range(4)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._path = ""
         self._rows = []
+        self._people = []
         self._revealed = set()
         self._fingerprint = None
         self._loading = False
+        #: ``[(account key, name)]`` of every environment there is, in order.
+        self._environments = []
         # Why the file could not be read; "" when it could. While it is set the
         # table is not the file, so nothing here may be written over it.
         self._unreadable = ""
@@ -43,9 +58,11 @@ class CredentialsPage(QWidget):
         column.setSpacing(6)
 
         title = widgets.heading("Credentials")
-        self.add_button = QPushButton("+ Add row")
+        self.add_button = QPushButton("+ Add user")
         self.add_button.clicked.connect(self.add_row)
         self.duplicate_button = QPushButton("Duplicate")
+        self.duplicate_button.setToolTip("A new user with the same role and password, "
+                                         "a login of its own and no environments yet")
         self.duplicate_button.clicked.connect(self.duplicate_row)
         self.reload_button = QPushButton("Reload")
         self.reload_button.clicked.connect(lambda: self.reload())
@@ -56,12 +73,15 @@ class CredentialsPage(QWidget):
                                      self.duplicate_button, self.reload_button,
                                      self.save_button))
 
-        self.path_label = widgets.mono("")
+        # Shortened in the middle: a project's users.json is deep in its folder,
+        # and a whole path held the window wider than a laptop screen.
+        self.path_label = widgets.elided_mono("")
         column.addWidget(self.path_label)
         column.addWidget(widgets.lede(
-            "Direct editor over the launcher's own config - schema unchanged, saved "
-            "atomically with a one-slot .bak. Passwords stay in this file because the "
-            "auto-login extension seeds them into each profile."))
+            "Everyone who signs in: the role their window is called, a login and a "
+            "password. Where each one signs in is set on the Environments page. Saved "
+            "to the launcher's users.json, with a backup; passwords stay in it because "
+            "the auto-login extension seeds them into each profile."))
         column.addSpacing(12)
 
         panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
@@ -69,18 +89,69 @@ class CredentialsPage(QWidget):
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        widgets.cell_editing(self.table)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.itemSelectionChanged.connect(self._update_buttons)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(self.COL_TESTS, QHeaderView.Stretch)
+        header.setSectionResizeMode(self.COL_LOGIN, QHeaderView.Stretch)
         header.setSectionResizeMode(self.COL_ACTIONS, QHeaderView.Fixed)
         self.table.setColumnWidth(self.COL_ACTIONS, 150)
+        self._empty = widgets.empty_note(
+            self.table, "Nobody here yet - + Add user puts the first account in.")
         panel.layout().addWidget(self.table)
         column.addWidget(panel, 1)
+
+        self.add_to_button = QPushButton("Add to environment…")
+        self.add_to_button.setToolTip("Put the selected users in one environment")
+        self.add_to_button.clicked.connect(self.add_to_environment)
+        self.remove_from_button = QPushButton("Remove from environment…")
+        self.remove_from_button.setProperty("variant", "ghost")
+        self.remove_from_button.setToolTip("Take the selected users out of one "
+                                           "environment; they stay here")
+        self.remove_from_button.clicked.connect(self.remove_from_environment)
+        self.export_button = QPushButton("Export…")
+        self.export_button.setToolTip("The selected users to a file, passwords and "
+                                      "all, with the names of their environments")
+        self.export_button.clicked.connect(lambda: self.export_requested.emit(
+            {"users": [person.key for person in self._selected_people()
+                       if person.login]}))
+        column.addWidget(widgets.row(self.add_to_button, self.remove_from_button, None,
+                                     self.export_button))
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
         column.addWidget(self.status)
+        self._update_buttons()
+
+    # -- environments ---------------------------------------------------------
+    def set_environments(self, environments):
+        """The environments there are (``launchprojectsfile.Environment``), by
+        name - what Add to environment offers and Search says."""
+        found, seen = [], set()
+        for env in environments or ():
+            if env.account_key and env.account_key not in seen:
+                seen.add(env.account_key)
+                found.append((env.account_key, env.name))
+        self._environments = found
+        if not self._loading:
+            self._rebuild()
+
+    def _env_name(self, key):
+        for value, name in self._environments:
+            if value == key:
+                return name
+        return key
+
+    def _env_choices(self):
+        """Every environment to offer, the ones only users.json knows included."""
+        choices = list(self._environments)
+        known = {key for key, _name in choices}
+        for row in self._rows:
+            if row.env and row.env not in known:
+                known.add(row.env)
+                choices.append((row.env, row.env))
+        return choices
 
     # -- loading / saving -----------------------------------------------------
     def load(self, path):
@@ -99,8 +170,7 @@ class CredentialsPage(QWidget):
         self._rebuild()
         editable = not self._unreadable
         self.table.setEnabled(editable)
-        for button in (self.add_button, self.duplicate_button):
-            button.setEnabled(editable)
+        self.add_button.setEnabled(editable)
         self._validate()
 
     def refresh(self, path):
@@ -166,66 +236,74 @@ class CredentialsPage(QWidget):
         self._fingerprint = usersfile.fingerprint(self._path)
         self._changed_on_disk = False
         self._set_dirty(False)
-        self._show_ok("Saved %d row(s) to %s (previous kept as .bak)."
-                      % (len(self._rows), self._path))
+        self._show_ok("Saved %d user(s) to %s (previous kept as .bak)."
+                      % (len(self._people), self._path))
         self.saved.emit()
 
-    # -- rows -----------------------------------------------------------------
-    def add_row(self):
-        # The selected row's environment - the one being looked at - rather than
-        # the last row's, which belongs to whatever happened to be added last.
-        index = self.table.currentRow()
-        env = self._rows[index].env if 0 <= index < len(self._rows) else ""
-        self._rows.append(usersfile.UserRow(env=env, cls="", login="", password=""))
+    # -- people ---------------------------------------------------------------
+    def _changed(self):
+        """The rows changed here: draw them again, mark them unsaved, check them."""
         self._rebuild()
-        self.table.setCurrentCell(len(self._rows) - 1, self.COL_CLASS)
         self._set_dirty(True)
         self._validate()
+
+    def _selected_people(self):
+        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()}) \
+            if self.table.selectionModel() else []
+        return [self._people[row] for row in rows if 0 <= row < len(self._people)]
+
+    def add_row(self):
+        """A new user, in no environment yet: Role is where typing starts."""
+        self._rows.append(usersfile.UserRow(env="", cls="", login="", password=""))
+        self._changed()
+        self.table.setCurrentCell(len(self._people) - 1, self.COL_CLASS)
 
     def duplicate_row(self):
-        index = self.table.currentRow()
-        if index < 0 or index >= len(self._rows):
+        chosen = self._selected_people()
+        if not chosen:
             return
-        clone = self._rows[index].copy()
-        clone.login = ""      # env+login must stay unique - that pair is the folder
-        self._rows.insert(index + 1, clone)
-        self._rebuild()
-        self.table.setCurrentCell(index + 1, self.COL_LOGIN)
-        self._set_dirty(True)
-        self._validate()
+        person = chosen[0]
+        # A login of its own (env+login names the profile folder) and no
+        # environments: where the copy signs in is ticked once it has a login.
+        self._rows.append(usersfile.UserRow(env="", cls=person.role, login="",
+                                            password=person.password))
+        self._changed()
+        self.table.setCurrentCell(len(self._people) - 1, self.COL_LOGIN)
 
     def delete_row(self, index):
-        if not (0 <= index < len(self._rows)):
+        if not (0 <= index < len(self._people)):
             return
-        row = self._rows[index]
+        person = self._people[index]
+        places = [self._env_name(env) for env in person.envs(self._rows)]
         if not widgets.confirm(
-                self, "Delete row",
-                "Remove %s / %s from users.json?"
-                % (row.env or "(no env)", row.login or "(no login)"),
-                "The profile folder it used stays on disk.",
+                self, "Delete user",
+                "Remove %s from users.json?" % (person.login or "this user"),
+                ("It signs in to %s; it leaves all of them. " % ", ".join(places)
+                 if places else "") + "Its browser profiles stay on disk.",
                 agree="Delete", kind="warn"):
             return
-        del self._rows[index]
-        self._revealed.discard(index)
-        self._rebuild()
-        self._set_dirty(True)
-        self._validate()
+        usersfile.remove_credential(self._rows, person.key)
+        self._revealed.clear()
+        self._changed()
 
     def _rebuild(self):
         self._loading = True
-        self.table.setRowCount(len(self._rows))
-        for index, row in enumerate(self._rows):
-            self._set(index, self.COL_ENV, row.env, mono=True)
-            self._set(index, self.COL_CLASS, row.cls)
-            self._set(index, self.COL_LOGIN, row.login, mono=True)
+        self._people = usersfile.credentials(self._rows)
+        self.table.setRowCount(len(self._people))
+        for index, person in enumerate(self._people):
+            self._set(index, self.COL_CLASS, person.role)
+            login = self._set(index, self.COL_LOGIN, person.login, mono=True)
+            places = [self._env_name(env) for env in person.envs(self._rows)]
+            login.setToolTip("Signs in to %s" % ", ".join(places) if places
+                             else "In no environment yet")
             self._set(index, self.COL_PASSWORD,
-                      row.password if index in self._revealed else "•" * 10,
+                      person.password if index in self._revealed else "•" * 10,
                       mono=True, editable=index in self._revealed)
-            self._set(index, self.COL_TESTS, row.tests_text(), mono=True)
             self.table.setCellWidget(index, self.COL_ACTIONS, self._actions(index))
         self.table.resizeColumnsToContents()
         self.table.setColumnWidth(self.COL_ACTIONS, 150)
         self._loading = False
+        self._update_buttons()
 
     def _actions(self, index):
         reveal = QPushButton("Hide" if index in self._revealed else "Reveal")
@@ -243,6 +321,7 @@ class CredentialsPage(QWidget):
         if not editable:
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.table.setItem(row, col, item)
+        return item
 
     def _toggle_reveal(self, index):
         if index in self._revealed:
@@ -255,44 +334,108 @@ class CredentialsPage(QWidget):
         if self._loading:
             return
         index, col = item.row(), item.column()
-        if not (0 <= index < len(self._rows)):
+        if not (0 <= index < len(self._people)):
             return
-        row = self._rows[index]
+        person = self._people[index]
         text = item.text()
-        if col == self.COL_ENV:
-            row.env = text.strip()
-        elif col == self.COL_CLASS:
-            row.cls = text.strip()
+        if col == self.COL_CLASS:
+            usersfile.update_credential(self._rows, person.key, role=text.strip())
         elif col == self.COL_LOGIN:
-            row.login = text.strip()
+            usersfile.update_credential(self._rows, person.key, login=text.strip())
         elif col == self.COL_PASSWORD and index in self._revealed:
-            row.password = text
-        elif col == self.COL_TESTS:
-            try:
-                row.tests = usersfile.parse_tests(text)
-            except usersfile.UsersFileError as exc:
-                self._show_problem(str(exc))
-                return
+            usersfile.update_credential(self._rows, person.key, password=text)
+        else:
+            return
+        people = usersfile.credentials(self._rows)
+        if len(people) == len(self._people):
+            self._people = people
+        else:
+            # Now the same as someone else - one person in both their places.
+            # Drawn again once the edit that did it has finished.
+            self._revealed.clear()
+            QTimer.singleShot(0, self._rebuild)
         self._set_dirty(True)
         self._validate()
 
+    # -- where they sign in ---------------------------------------------------
+    def _pick_environment(self, title, question, keys):
+        choices = [(key, name) for key, name in self._env_choices() if key in keys]
+        if not choices:
+            return None
+        chosen = widgets.ask_item(self, title, question,
+                                  [name for _key, name in choices])
+        if chosen is None:
+            return None
+        return choices[[name for _key, name in choices].index(chosen)][0]
+
+    def add_to_environment(self):
+        people = [person for person in self._selected_people() if person.login]
+        if not people:
+            return
+        env = self._pick_environment(
+            "Add to environment",
+            "Put %s in:" % ", ".join(person.login for person in people),
+            {key for key, _name in self._env_choices()})
+        if env is None:
+            return
+        refused = []
+        for person in people:
+            try:
+                usersfile.assign(self._rows, person.key, env)
+            except usersfile.UsersFileError as exc:
+                refused.append(str(exc))
+        self._changed()
+        if refused:
+            widgets.warn(self, "Add to environment",
+                         "Not everyone was put in %s." % self._env_name(env),
+                         "\n".join(refused))
+
+    def remove_from_environment(self):
+        people = [person for person in self._selected_people() if person.login]
+        places = {env for person in people for env in person.envs(self._rows)}
+        if not places:
+            return
+        env = self._pick_environment(
+            "Remove from environment",
+            "Take %s out of:" % ", ".join(person.login for person in people), places)
+        if env is None:
+            return
+        for person in people:
+            usersfile.unassign(self._rows, person.key, env)
+        self._changed()
+
+    def _update_buttons(self):
+        chosen = self._selected_people() if not self._unreadable else []
+        self.duplicate_button.setEnabled(bool(chosen))
+        self.add_to_button.setEnabled(bool(chosen) and bool(self._env_choices()))
+        self.remove_from_button.setEnabled(any(person.envs(self._rows)
+                                               for person in chosen))
+
     # -- validation -----------------------------------------------------------
+    def _said_by_person(self, problem):
+        """``row 7 (admin): ...`` names a line of the file; here it is a person."""
+        match = re.match(r"row \d+(?: \(([^)]*)\))?: (.*)", problem, re.S)
+        if not match:
+            return problem
+        said = match.group(2).replace("class is required", "role is required")
+        return "%s: %s" % (match.group(1) or "A new user", said)
+
     def _validate(self):
         if self._unreadable:
-            # Never "0 rows, all fine": the table is empty because the file could
+            # Never "0 users, all fine": the table is empty because the file could
             # not be read, and saving it would write an empty list over the only
             # copy of every password - one the launcher then refuses to load.
             self._show_problem("%s\nFix the file, or put its .bak back, and press "
                                "Reload. Saving is off until it reads." % self._unreadable)
             self.save_button.setEnabled(False)
             return False
-        problems = usersfile.validate(self._rows)
+        problems = list(dict.fromkeys(self._said_by_person(problem)
+                                      for problem in usersfile.validate(self._rows)))
         if problems:
             self._show_problem("\n".join(problems[:6]))
         else:
-            self._show_ok("%d row(s) · env+login unique · every row has class, login "
-                          "and password · run-tests uses tag: (not tags:)"
-                          % len(self._rows))
+            self._show_ok("%d user(s) · every user has a role, a login and a password"
+                          % len(self._people))
         if self._changed_on_disk:
             self.status.setText(self.status.text() + "\nusers.json changed on disk "
                                 "since this table was loaded. Save asks before "
@@ -313,21 +456,24 @@ class CredentialsPage(QWidget):
 
     # -- search (Ctrl+K) -------------------------------------------------------
     def search_rows(self):
-        """Every account: its login, role, environment and scenarios.
+        """Every user: their login, role and where they sign in.
 
         Never the password - Search shows what it matched on, and a password
         is not something to find by typing it into a box.
         """
         return [search.hit(
-            row.login or "(no login)",
-            " · ".join(part for part in (row.cls, row.env, ", ".join(row.tests)) if part),
-            target=(row.env, row.login)) for row in self._rows]
+            person.login or "(no login)",
+            " · ".join(part for part in (
+                person.role, ", ".join(self._env_name(env)
+                                       for env in person.envs(self._rows))) if part),
+            target=(person.login, person.role)) for person in self._people]
 
     def show_found(self, target):
-        env, login = target
-        for index, row in enumerate(self._rows):
-            if row.env == env and row.login == login:
+        login, role = target
+        for index, person in enumerate(self._people):
+            if person.login == login and person.role == role:
                 self.table.selectRow(index)
                 self.table.scrollToItem(self.table.item(index, self.COL_LOGIN))
                 return True
         return False
+

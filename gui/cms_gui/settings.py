@@ -6,8 +6,11 @@ flows tree, so the CLI and the GUI never disagree about them.
 """
 
 import json
+import os
 
 from PySide6.QtCore import QSettings
+
+from . import projectsfile
 
 ORG = "qavector"
 APP = "gui"
@@ -17,10 +20,20 @@ LEGACY_ORG = "chrome-multi-session"
 
 
 class Settings:
-    """Thin, typed wrapper so pages never spell a settings key by hand."""
+    """Thin, typed wrapper so pages never spell a settings key by hand.
+
+    It answers for the project in use (:mod:`cms_gui.projectsfile`). For
+    Workspace every path is the setting, as it always was; for any other project
+    every path is in the project's folder and cannot be set here, and the state
+    a page leaves behind - where Launch Sessions was, which sections are open -
+    is kept per project, so one project never opens on another's.
+    """
 
     def __init__(self):
         self._qs = QSettings(ORG, APP)
+        #: The project in use, and its folder ("" for Workspace).
+        self.project_id = projectsfile.WORKSPACE
+        self.project_folder = ""
         # Which core runs is not a setting any more: an installed GUI runs the
         # core installed beside it, and one started from a checkout runs that
         # checkout's (core.autodetect). A path saved by an earlier version won
@@ -30,6 +43,40 @@ class Settings:
         for key in ("core/script", "core/interpreter"):
             if self._qs.contains(key):
                 self._qs.remove(key)
+
+    # -- the project in use ---------------------------------------------------
+    def use_project(self, project):
+        """Answer for ``project`` (a projectsfile.Project) from now on."""
+        self.project_id = project.id if project is not None else projectsfile.WORKSPACE
+        self.project_folder = project.folder if project is not None else ""
+
+    @property
+    def current_project(self):
+        """The id of the project picked last; Workspace before any was."""
+        return self._qs.value("project/current", projectsfile.WORKSPACE, str) \
+            or projectsfile.WORKSPACE
+
+    @current_project.setter
+    def current_project(self, value):
+        self._qs.setValue("project/current", value or projectsfile.WORKSPACE)
+
+    def _project_path(self, field):
+        return getattr(projectsfile.paths(self.project_folder), field)
+
+    def _scoped(self, key):
+        """``key`` for the project in use: Workspace keeps the keys it had."""
+        if not self.project_folder:
+            return key
+        return "projects/%s/%s" % (self.project_id, key)
+
+    def data_dir(self):
+        """Where the GUI keeps its own files of this project: configurations,
+        drafts, run history."""
+        if self.project_folder:
+            os.makedirs(self.project_folder, exist_ok=True)
+            return self.project_folder
+        from . import store
+        return store.app_data_dir()
 
     @property
     def cycle_inactivity_seconds(self):
@@ -42,10 +89,14 @@ class Settings:
     @property
     def config(self):
         """--config value; empty means the core's own default (users.json)."""
+        if self.project_folder:
+            return self._project_path("users")
         return self._qs.value("core/config", "", str)
 
     @config.setter
     def config(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("core/config", value or "")
 
     @property
@@ -56,10 +107,14 @@ class Settings:
         business where it goes - and it has a default worth overriding: a source
         checkout would otherwise put it in the checkout.
         """
+        if self.project_folder:
+            return self._project_path("services")
         return self._qs.value("services/path", "", str)
 
     @services_path.setter
     def services_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("services/path", value or "")
 
     @property
@@ -73,10 +128,14 @@ class Settings:
         same reason, since a source checkout would otherwise put it among the
         code.
         """
+        if self.project_folder:
+            return self._project_path("cycle_projects")
         return self._qs.value("cycles/projects_path", "", str)
 
     @cycle_projects_path.setter
     def cycle_projects_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("cycles/projects_path", value or "")
 
     @property
@@ -90,10 +149,14 @@ class Settings:
         travels to the core on every call (``--cycle-secrets-file``) rather than
         each side guessing - the same bargain ``flows_path`` makes.
         """
+        if self.project_folder:
+            return self._project_path("cycle_secrets")
         return self._qs.value("cycles/secrets_path", "", str)
 
     @cycle_secrets_path.setter
     def cycle_secrets_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("cycles/secrets_path", value or "")
 
     @property
@@ -106,10 +169,14 @@ class Settings:
         ask and the answer being readable is worth more than a confidentiality
         this does not need.
         """
+        if self.project_folder:
+            return self._project_path("cycle_memory")
         return self._qs.value("cycles/memory_path", "", str)
 
     @cycle_memory_path.setter
     def cycle_memory_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("cycles/memory_path", value or "")
 
     @property
@@ -119,10 +186,14 @@ class Settings:
         Empty leaves it to the core: cycle-runs under its data root, which for a
         core run from a source checkout is the checkout itself.
         """
+        if self.project_folder:
+            return self._project_path("cycle_runs")
         return self._qs.value("cycles/runs_path", "", str)
 
     @cycle_runs_path.setter
     def cycle_runs_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("cycles/runs_path", value or "")
 
     @property
@@ -136,10 +207,14 @@ class Settings:
         checkout the core's default is the checkout itself, so everything written
         lands among the code.
         """
+        if self.project_folder:
+            return self._project_path("flows")
         return self._qs.value("flows/path", "", str)
 
     @flows_path.setter
     def flows_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("flows/path", value or "")
 
     @property
@@ -153,10 +228,14 @@ class Settings:
         email into a file that is committed. Pointing this somewhere of their
         own is what keeps the two apart.
         """
+        if self.project_folder:
+            return self._project_path("cycles")
         return self._qs.value("cycles/path", "", str)
 
     @cycles_path.setter
     def cycles_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("cycles/path", value or "")
 
     @property
@@ -168,10 +247,14 @@ class Settings:
         (``--log-sources``). Otherwise the file being edited here and the file a
         run reads come apart, and the page's own Open buttons read the wrong one.
         """
+        if self.project_folder:
+            return self._project_path("log_sources")
         return self._qs.value("logsources/path", "", str)
 
     @log_sources_path.setter
     def log_sources_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("logsources/path", value or "")
 
     # -- window ---------------------------------------------------------------
@@ -236,10 +319,10 @@ class Settings:
         actually chose rather than as what is shut, so a section added in a later
         version arrives at its own default instead of at somebody's old answer.
         """
-        return self._json("folds/" + page, {})
+        return self._json(self._scoped("folds/" + page), {})
 
     def save_folds(self, page, states):
-        self._qs.setValue("folds/" + page, json.dumps(states, sort_keys=True))
+        self._qs.setValue(self._scoped("folds/" + page), json.dumps(states, sort_keys=True))
 
     def splitter(self, key):
         """How one splitter was last left: {"sizes": [...], "open": [...]}.
@@ -313,6 +396,8 @@ class Settings:
         because an env value is often a URL and QSettings reads every "/" in a
         key as a group.
         """
+        if self.project_folder:
+            return {}           # Workspace's, from before projects
         return {key: value for key, value in self._json("env/urls", {}).items()
                 if isinstance(key, str) and isinstance(value, str) and value}
 
@@ -332,6 +417,8 @@ class Settings:
         run opens without anyone having asked for it today. The Environments
         page offers each one to apply or discard.
         """
+        if self.project_folder:
+            return {}           # Workspace's, from before projects
         self._qs.beginGroup("env/override")
         try:
             found = {alias: self._qs.value(alias, "", str)
@@ -347,32 +434,38 @@ class Settings:
     @property
     def artifacts_dir(self):
         """The report folder the Artifacts page should reopen on."""
-        return self._qs.value("observe/artifacts_dir", "", str)
+        return self._qs.value(self._scoped("observe/artifacts_dir"), "", str)
 
     @artifacts_dir.setter
     def artifacts_dir(self, value):
-        self._qs.setValue("observe/artifacts_dir", value or "")
+        self._qs.setValue(self._scoped("observe/artifacts_dir"), value or "")
 
     @property
     def log_source(self):
         """An archived log's path, or "" for the running log."""
-        return self._qs.value("observe/log_source", "", str)
+        return self._qs.value(self._scoped("observe/log_source"), "", str)
 
     @log_source.setter
     def log_source(self, value):
-        self._qs.setValue("observe/log_source", value or "")
+        self._qs.setValue(self._scoped("observe/log_source"), value or "")
 
     def directory(self, name, default=""):
         """Default --flows-dir / --reports-dir / --sessions-dir for runs."""
+        if self.project_folder:
+            field = {"reports": "reports", "sessions": "sessions",
+                     "flows": "flows"}.get(name)
+            return self._project_path(field) if field else default
         return self._qs.value("dirs/" + name, default, str)
 
     def set_directory(self, name, value):
+        if self.project_folder:
+            return              # a project's folders are its own
         self._qs.setValue("dirs/" + name, value or "")
 
     # -- command form ---------------------------------------------------------
     def command_state(self):
         """The last command the user built, as a dict (empty on first run)."""
-        raw = self._qs.value("command/state", "", str)
+        raw = self._qs.value(self._scoped("command/state"), "", str)
         try:
             value = json.loads(raw) if raw else {}
         except ValueError:
@@ -380,7 +473,7 @@ class Settings:
         return value if isinstance(value, dict) else {}
 
     def save_command_state(self, state):
-        self._qs.setValue("command/state", json.dumps(state))
+        self._qs.setValue(self._scoped("command/state"), json.dumps(state))
 
     # -- launch sessions form -------------------------------------------------
     def launch_state(self):
@@ -390,10 +483,10 @@ class Settings:
         directory (see :mod:`cms_gui.store`); this is only the working copy, the
         counterpart of :meth:`command_state`.
         """
-        return self._json("launch/state", {})
+        return self._json(self._scoped("launch/state"), {})
 
     def save_launch_state(self, config):
-        self._qs.setValue("launch/state", json.dumps(config))
+        self._qs.setValue(self._scoped("launch/state"), json.dumps(config))
 
     def launch_context(self):
         """Where Launch Sessions was: ``{"environment": id, "preset": id}``.
@@ -401,26 +494,26 @@ class Settings:
         By id rather than by name: a configuration can be renamed, and two
         projects can each have one called "Smoke".
         """
-        return self._json("launch/context", {})
+        return self._json(self._scoped("launch/context"), {})
 
     def save_launch_context(self, context):
-        self._qs.setValue("launch/context", json.dumps(context, sort_keys=True))
+        self._qs.setValue(self._scoped("launch/context"), json.dumps(context, sort_keys=True))
 
     def launch_last_presets(self):
         """``{environment id: preset id}`` - what was open in each, last time."""
-        return {key: value for key, value in self._json("launch/last", {}).items()
+        return {key: value for key, value in self._json(self._scoped("launch/last"), {}).items()
                 if isinstance(key, str) and isinstance(value, str)}
 
     def save_launch_last_presets(self, last):
-        self._qs.setValue("launch/last", json.dumps(last, sort_keys=True))
+        self._qs.setValue(self._scoped("launch/last"), json.dumps(last, sort_keys=True))
 
     def launch_last_environments(self):
         """``{project id: environment id}`` - where each project was left."""
-        return {key: value for key, value in self._json("launch/last_env", {}).items()
+        return {key: value for key, value in self._json(self._scoped("launch/last_env"), {}).items()
                 if isinstance(key, str) and isinstance(value, str)}
 
     def save_launch_last_environments(self, last):
-        self._qs.setValue("launch/last_env", json.dumps(last, sort_keys=True))
+        self._qs.setValue(self._scoped("launch/last_env"), json.dumps(last, sort_keys=True))
 
     @property
     def launch_projects_path(self):
@@ -430,10 +523,14 @@ class Settings:
         worth overriding for the reason the other two have one: a source
         checkout would otherwise put it among the code.
         """
+        if self.project_folder:
+            return self._project_path("launch_projects")
         return self._qs.value("launch/projects_path", "", str)
 
     @launch_projects_path.setter
     def launch_projects_path(self, value):
+        if self.project_folder:
+            return          # a project's files are its folder's
         self._qs.setValue("launch/projects_path", value or "")
 
     @property

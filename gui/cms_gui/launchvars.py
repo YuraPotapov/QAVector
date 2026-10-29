@@ -5,14 +5,14 @@ another port, another branch of the same application - so it can carry
 placeholders, and each one is filled from the nearest place that says something
 about it. From the furthest to the nearest:
 
-    the project's default  ->  the environment  ->  the saved configuration
-                           ->  this run
+    the environment  ->  the saved configuration  ->  this run
 
-``{{port}}`` and ``{{vars.port}}`` name the same variable. The project decides a
-variable's type (string, integer, port, boolean) and nothing nearer can change
-it; the nearer places only give it values. A place that says nothing about a
-variable *inherits* it - which is not the same as giving it the empty string,
-something only a string can be.
+``{{port}}`` and ``{{vars.port}}`` name the same variable. A variable's
+:class:`Definition` says its type and default; Launch Sessions gives every one
+the type string and no default, as Postman does - a variable is a name and the
+text it stands for (see ``launchprojectsfile.scope``) - while the typed forms
+stay for whoever wants them. A place that says nothing about a variable
+*inherits* it - which is not the same as giving it the empty string.
 
 The syntax is the scenarios' own (``engine.context``), so an address reads like
 a step does, but the rules are stricter because an address is checked before
@@ -244,7 +244,7 @@ def resolve(template, definitions, layers, field="address"):
         definition = definitions.get(name)
         if definition is None:
             problems.append(Problem(field, "unknown",
-                                    "{{%s}} is not defined. Define %s to give it a value."
+                                    "{{%s}} has no value. Give %s one under Variables."
                                     % (name, name)))
             parts.append((text, ""))
             continue

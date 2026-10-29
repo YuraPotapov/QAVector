@@ -16,9 +16,9 @@ of reach; the rules then say what is wrong with it, and "Use with another
 environment" puts it somewhere it can run.
 
 Variables are resolved here too, because the places they come from are the
-context: the project's definitions and defaults, the environment's values, the
-values the saved configuration holds, and this run's (the working copy's)
-changes to them - each value labelled with the place that gave it.
+context: the environment's values, the values the saved configuration holds,
+and this run's (the working copy's) changes to them - each value labelled with
+the place that gave it.
 """
 
 import json
@@ -36,7 +36,7 @@ MISSING_PREFIX = "missing:"
 ALL_ENVIRONMENTS = "all"
 
 #: Where a variable's value came from, as the page labels it.
-SOURCE_ENVIRONMENT = "environment"
+SOURCE_ENVIRONMENT = lpf.ENVIRONMENT
 SOURCE_CONFIGURATION = "configuration"
 SOURCE_RUN = "this run"
 
@@ -57,18 +57,25 @@ class LaunchController(QObject):
         super().__init__(parent)
         self.settings = settings
         self.registry = registry
-        data = store.app_data_dir()
+        self.persistent = True
+        self.inventory = None
+        self._open_stores(presets_path, drafts_path, configs_path)
+
+    def _open_stores(self, presets_path=None, drafts_path=None, configs_path=None):
+        """The configurations and drafts of the project in use, and where it was."""
+        data = self.settings.data_dir()
         self.presets = lps.Presets(presets_path or os.path.join(data, lps.FILE_NAME))
         self._drafts = store.JsonStore(drafts_path or os.path.join(data, DRAFTS_FILE),
                                        default={})
         self._draft_written = {}
-        self.persistent = True
-        self.inventory = None
-        names = lps.migrate_configs(
-            self.presets, configs_path or os.path.join(data, lps.CONFIGS_FILE),
-            lpf.WORKSPACE)
-        self._migrate_settings(names)
-        context = settings.launch_context()
+        if not self.settings.project_folder:
+            # configs.json is Workspace's, from before configurations had ids;
+            # another project starts with none of them.
+            names = lps.migrate_configs(
+                self.presets, configs_path or os.path.join(data, lps.CONFIGS_FILE),
+                lpf.WORKSPACE)
+            self._migrate_settings(names)
+        context = self.settings.launch_context()
         self.project_id = str(context.get("project") or lpf.WORKSPACE)
         self.environment_id = str(context.get("environment") or "")
         self.preset_id = str(context.get("preset") or "")
@@ -77,6 +84,11 @@ class LaunchController(QObject):
         #: The revision of the open configuration when it was opened: a save
         #: finding another one means somebody saved it since.
         self.opened_revision = None
+
+    def repoint(self):
+        """Another project was picked: its configurations, drafts and context."""
+        self.inventory = None
+        self._open_stores()
 
     # -- one-time moves -------------------------------------------------------
     def _migrate_settings(self, names):
@@ -180,8 +192,11 @@ class LaunchController(QObject):
                 continue
             known.add(env_id)
             extra.append(self._stand_in(env_id, preset))
+        # A stand-in only for an environment something here still names: the
+        # open configuration's. One remembered from nothing - a context written
+        # before a project was switched, say - is not offered as a place.
         if self.environment_id and self.environment_id not in known \
-                and self._stand_in_kind(self.environment_id):
+                and self._stand_in_kind(self.environment_id) and self.preset() is not None:
             extra.append(self._stand_in(self.environment_id, None))
         return envs + extra
 
@@ -223,7 +238,11 @@ class LaunchController(QObject):
                            preset.environment_id)
             return env.id if env is not None else MISSING_PREFIX + preset.environment_id
         legacy = preset.legacy or {}
-        return MISSING_PREFIX + (legacy.get("alias") or legacy.get("value") or "?")
+        if not legacy.get("alias") and not legacy.get("value"):
+            # Saved with no environment at all (before that was written down as
+            # "All environments"): that is what it runs as.
+            return ALL_ENVIRONMENTS
+        return MISSING_PREFIX + (legacy.get("alias") or legacy.get("value"))
 
     def presets_here(self, env_id=None):
         """The configurations of an environment (default: the current one), by name."""
@@ -456,6 +475,10 @@ class LaunchController(QObject):
         env = self.environment()
         preset.legacy, preset.all_environments, preset.environment_id = None, False, ""
         if env is None:
+            # No environment picked: the run is every account at the address
+            # typed - what "All environments" is - not an environment gone.
+            preset.all_environments = True
+            preset.project_id = self.project_id or lpf.WORKSPACE
             return
         if env.id == ALL_ENVIRONMENTS:
             preset.all_environments = True
@@ -494,6 +517,10 @@ class LaunchController(QObject):
             self.drop_draft()
         self.preset_id = saved.id
         self.opened_revision = saved.revision
+        if not self.environment_id:
+            # Saved with none picked: it is listed - and shown - under the
+            # environment it was written down as.
+            self.environment_id = self.preset_environment_id(saved)
         self._remember()
         self.changed.emit()
         return saved
@@ -570,8 +597,13 @@ class LaunchController(QObject):
 
     # -- variables ------------------------------------------------------------
     def definitions(self, env=None):
-        project = self.project(env)
-        return project.definitions() if project is not None else {}
+        """The variables the environment gives values to (all text)."""
+        return lpf.scope(self._values(env)).definitions
+
+    def _values(self, env=None):
+        env = env if env is not None else self.environment()
+        return dict(env.variables) if env is not None and not self.is_stand_in(env) \
+            else {}
 
     def scope(self, state):
         """The places this run's variables come from, nearest last.
@@ -581,20 +613,15 @@ class LaunchController(QObject):
         belongs to a configuration not saved yet - this run's, with the saved
         value as what it overrides.
         """
-        env = self.environment()
         preset = self.preset()
         saved = dict(preset.variables) if preset is not None else {}
         draft = dict((state or {}).get("variables") or {})
-        layers = []
-        if env is not None and not self.is_stand_in(env):
-            layers.append(launchvars.Layer(SOURCE_ENVIRONMENT, dict(env.variables)))
-        layers.append(launchvars.Layer(SOURCE_CONFIGURATION,
-                                       {name: saved[name] for name in saved
-                                        if name in draft}))
-        layers.append(launchvars.Layer(SOURCE_RUN,
-                                       {name: value for name, value in draft.items()
-                                        if name not in saved or saved[name] != value}))
-        return launchvars.Scope(self.definitions(env), layers)
+        return lpf.scope(self._values(), [
+            launchvars.Layer(SOURCE_CONFIGURATION,
+                             {name: saved[name] for name in saved if name in draft}),
+            launchvars.Layer(SOURCE_RUN,
+                             {name: value for name, value in draft.items()
+                              if name not in saved or saved[name] != value})])
 
     def env_urls(self, env=None):
         """``{account key: address}`` for the rules - the current environment's."""
@@ -620,17 +647,8 @@ class LaunchController(QObject):
             if value is None:
                 row.variables.pop(name, None)
             else:
-                row.variables[name] = value
+                row.variables[name] = lpf.as_text(value)
         self._env_row_change(apply)
-
-    def define(self, name, kind, default=None):
-        env = self.environment()
-        project_id = env.project_id if env is not None and not self.is_stand_in(env) \
-            else lpf.WORKSPACE
-        self.registry.update(lambda projects: lpf.define(projects, project_id, name,
-                                                         kind, default))
-        self.registry_changed.emit()
-        self.changed.emit()
 
     # -- links ----------------------------------------------------------------
     def link_target(self):

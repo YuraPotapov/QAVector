@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QSizePolicy,
                                QSpinBox, QSplitter, QStackedLayout, QStyle,
-                               QStyleOptionToolButton, QStylePainter,
+                               QStyledItemDelegate, QStyleOptionToolButton, QStylePainter,
                                QTableWidget, QTableWidgetItem, QToolButton,
                                QVBoxLayout, QWidget)
 
@@ -2709,6 +2709,43 @@ class Table(QTableWidget):
         if self._expandable:
             for row in self.data_rows():
                 self.fit_detail(row)
+
+
+class CellEditor(QStyledItemDelegate):
+    """Typing into a table cell: an editor that is the cell, not a form field.
+
+    Qt's default editor is a styled QLineEdit, which in this design is 30px
+    tall with a field's padding - in a 30px row less the item padding it came
+    out taller than the row, shifted right of the text it replaced and hanging
+    over the gridlines. This one takes the cell's rectangle exactly, the
+    cell's font, and puts the text where the cell had it.
+    """
+
+    def createEditor(self, parent, option, index):      # noqa: N802 - Qt's name
+        editor = QLineEdit(parent)
+        editor.setProperty("role", "celledit")
+        font = index.data(Qt.FontRole)
+        if font is not None:
+            editor.setFont(font)
+        return editor
+
+    def updateEditorGeometry(self, editor, option, index):  # noqa: N802
+        editor.setGeometry(option.rect)
+
+    def paint(self, painter, option, index):
+        # The theme styles ::item, and a styled item never paints the
+        # background its model gives it - so a row marked with one (url, a
+        # reserved variable) is painted here, under the text, unless selected.
+        brush = index.data(Qt.BackgroundRole)
+        if brush is not None and not option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, brush)
+        QStyledItemDelegate.paint(self, painter, option, index)
+
+
+def cell_editing(table):
+    """Give ``table`` the :class:`CellEditor`. Returns the table."""
+    table.setItemDelegate(CellEditor(table))
+    return table
 
 
 class SearchRow(QWidget):

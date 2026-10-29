@@ -62,8 +62,22 @@ class CycleLayoutFileError(Exception):
     """The layout file could not be read or written."""
 
 
+#: The project's own layout file, when a project other than Workspace is in
+#: use (see :func:`use_path`); None for Workspace's, beside the GUI's files.
+_project_path = None
+
+
+def use_path(path):
+    """Read and write ``path`` from now on - None goes back to Workspace's."""
+    global _project_path
+    _project_path = path or None
+
+
 def default_path():
-    """Beside the GUI's other files, in the user's own data root."""
+    """Beside the GUI's other files, in the user's own data root - or the
+    project's own, when one is in use."""
+    if _project_path:
+        return _project_path
     from . import servicesfile
     return os.path.join(os.path.dirname(servicesfile.default_path()), FILE_NAME)
 

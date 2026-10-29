@@ -150,6 +150,12 @@ class LaunchSessionsPage(QWidget):
     environments_changed = Signal()
     #: An account was added from here, to users.json: the inventory is stale.
     accounts_changed = Signal()
+    #: The project on show changed (its id) - the window's other pages follow.
+    project_changed = Signal(str)
+    #: The project last announced; class-level so it is there before __init__ fills.
+    _announced_project = None
+    #: What the window's project is called - said in the summary line.
+    project_name = ""
 
     def __init__(self, settings, parent=None, registry=None, controller=None):
         super().__init__(parent)
@@ -271,6 +277,12 @@ class LaunchSessionsPage(QWidget):
         self.config_combo.activated.connect(self._config_picked)
         for combo in (self.project_combo, self.env_combo, self.config_combo):
             combo.setMinimumWidth(200)
+        # The project picker is the window's: it sits in the top bar (put there
+        # by the main window), because a project is what every page shows.
+        # Projects of Launch Sessions' own are folded into the window's (see
+        # projectsfile): kept, hidden, for the configurations that name one.
+        self.project_combo.setParent(self)
+        self.project_combo.hide()
         # Rename, delete, a desktop link, another environment: done to a
         # configuration now and then, never mid-flow - so one unlabelled
         # button, beside the configuration it acts on.
@@ -302,7 +314,6 @@ class LaunchSessionsPage(QWidget):
         self.more_menu.addAction(self.delete_action)
         self.more_button.setMenu(self.more_menu)
         context_row = widgets.row(
-            widgets.field("Project", self.project_combo),
             widgets.field("Environment", self.env_combo),
             widgets.field("Configuration", self.config_combo),
             None, self.more_button, spacing=16)
@@ -317,11 +328,14 @@ class LaunchSessionsPage(QWidget):
         # What the page is about: where the windows open. Marked as such.
         panel.setProperty("emphasis", "primary")
         # The address as it will be opened, in one box: what the environment
-        # supplies until someone writes their own, and a tag saying which.
+        # supplies until someone writes their own. Where it came from is said
+        # in its tooltip, not in a tag beside it (the user found the tag noise).
         self.url_field = widgets.UrlField()
         self.url_field.edited.connect(self._url_edited)
         self.url_field.value_clicked.connect(self._open_variables)
-        self.url_source = widgets.Tag("", "neutral")
+        #: Where the address came from ("environment address", "this
+        #: configuration", "this run", ...), said in the box's tooltip.
+        self.address_source = ""
         self.url_reset = QPushButton("Reset")
         self.url_reset.setProperty("variant", "ghost")
         self.url_reset.setToolTip("Go back to the environment's address")
@@ -331,10 +345,10 @@ class LaunchSessionsPage(QWidget):
         self.variables_button.setToolTip("The values this address's variables take")
         self.variables_button.clicked.connect(lambda: self._open_variables(""))
         box = widgets.field("Start address", self.url_field)
-        # The source and Reset share the label's line, so the address itself
+        # Variables and Reset share the label's line, so the address itself
         # keeps the panel's whole width.
         box.layout().removeWidget(box.label)
-        box.layout().insertWidget(0, widgets.row(box.label, None, self.url_source,
+        box.layout().insertWidget(0, widgets.row(box.label, None,
                                                  self.variables_button, self.url_reset))
         panel.layout().addWidget(box)
         # Under the box it is about, as well as in the footer's list: the
@@ -1098,7 +1112,6 @@ class LaunchSessionsPage(QWidget):
         template = self._template(config)
         self.url_field.set_address(address.parts, template or address.url)
         self.url_field.set_variables(extras["scope"].definitions)
-        self.url_field.setToolTip(address.url)
         self.url_field.set_placeholder(
             "type an address, or choose an environment" if not config["environment"]
             else "this environment has no address - type one")
@@ -1108,8 +1121,9 @@ class LaunchSessionsPage(QWidget):
             saved = (preset.config.get("advanced") or {}).get("url") if preset else None
             if saved != own:
                 source = lc.SOURCE_RUN          # written here, not saved yet
-        self.url_source.setText(source)
-        self.url_source.setVisible(bool(source))
+        self.address_source = source or ""
+        self.url_field.setToolTip("%s\nfrom: %s" % (address.url, source)
+                                  if address.url and source else address.url)
         self.url_reset.setVisible(address.source == launch.SOURCE_CONFIG)
         self.url_problem.setText(address.problem)
         self.url_problem.setVisible(bool(address.problem))
@@ -1223,36 +1237,33 @@ class LaunchSessionsPage(QWidget):
         self._changed()
         self._fill_variables()
 
-    def _variable_defined(self, name, kind, value, level):
-        """Define ``name`` in the project, its value at ``level``."""
-        typed = None
-        if value not in (None, ""):
-            definition = launchvars.Definition(name, kind, None, True, ())
-            typed, error = launchvars.coerce(definition, value)
-            if error:
-                widgets.warn(self, "Variables", "%s %s." % (name, error))
-                return
-        try:
-            self.controller.define(name, kind, typed if level == "project" else None)
-            if level == "environment" and typed is not None:
-                self.controller.set_environment_value(name, typed)
-        except lpf.LaunchProjectsError as exc:
-            widgets.warn(self, "Variables", "Could not define %s." % name, str(exc))
+    def _variable_defined(self, name, value, level):
+        """Give ``name`` its first value: this run's, or the environment's."""
+        if value in (None, ""):
+            widgets.warn(self, "Variables", "Give %s a value first." % name)
             return
-        if level == "run" and typed is not None:
-            self._run_variables[name] = typed
+        if level == "environment":
+            try:
+                self.controller.set_environment_value(name, value)
+            except lpf.LaunchProjectsError as exc:
+                widgets.warn(self, "Variables", "Could not change the environment.",
+                             str(exc))
+                return
+        else:
+            self._run_variables[name] = value
         self._changed()
         self._fill_variables()
 
     def _context_text(self, config, extras):
         """"Project / Environment · where it opens · how many accounts"."""
         env = self.controller.environment()
-        project = self.controller.project(env)
         address = launch.effective_url(config, self.inventory, extras["env_urls"],
                                        extras["scope"]).url
         where = address.split("://", 1)[-1].rstrip("/") if address else "no address"
         logins = launch.selected_logins(config, self.inventory)
-        parts = ["%s / %s" % (project.name if project is not None else "?",
+        # The window's project, by name; Launch Sessions' own grouping is not
+        # one any more (see projectsfile).
+        parts = ["%s / %s" % (self.project_name or lpf.WORKSPACE_NAME,
                               env.name if env is not None else "no environment"),
                  where, "%d account%s" % (len(logins), "" if len(logins) == 1 else "s")]
         return "   ·   ".join(parts)
@@ -1296,6 +1307,32 @@ class LaunchSessionsPage(QWidget):
         if self.project_combo.count():
             self.project_combo.setCurrentIndex(current)
         self.project_combo.blockSignals(False)
+        if self.controller.project_id != self._announced_project:
+            self._announced_project = self.controller.project_id
+            self.project_changed.emit(self.controller.project_id)
+
+    def select_project(self, project_id):
+        """Show ``project_id`` - asked for by another page, or the top bar."""
+        if project_id and project_id != self.controller.project_id:
+            self._open(*self.controller.select_project(project_id, self.state()))
+        else:
+            self._reload_projects()
+
+    def reload_projects(self):
+        """The projects changed elsewhere (added, renamed, deleted)."""
+        self.controller.registry.reload()
+        self._reload_projects()
+
+    def switch_project(self, inventory=None):
+        """Another project was picked: what it had open, from its own files.
+
+        ``inventory`` is what is known of it so far (nothing, until the core
+        has read it) - never the inventory of the project left.
+        """
+        self.controller.repoint()
+        if inventory is not None:
+            self.inventory = inventory
+        self._open(*self.controller.opening())
 
     def _open(self, state, baseline):
         """Show ``state``, measured against ``baseline`` (None: a new one)."""
@@ -1528,6 +1565,7 @@ class LaunchSessionsPage(QWidget):
     def set_developer_mode(self, enabled):
         self._developer = bool(enabled)
         self.preview.setVisible(self._developer)
+        self._update_env_note()
 
     def set_running(self, running):
         self._is_running = bool(running)
@@ -1681,6 +1719,11 @@ class LaunchSessionsPage(QWidget):
                 current = index
         if self.env_combo.count():
             self.env_combo.setCurrentIndex(current)
+        # An empty combo says why it is empty, not just a blank box.
+        self.env_combo.setPlaceholderText("No environments yet")
+        self.env_combo.setToolTip("" if self.env_combo.count() else
+                                  "This project has no environments: add one on "
+                                  "the Environments page.")
         self.env_combo.blockSignals(False)
 
     def _lists_changed(self):
@@ -1705,6 +1748,11 @@ class LaunchSessionsPage(QWidget):
         if not self.inventory:
             self.env_note.setText("")
             return
+        if env is None and not self.controller.environments(self.controller.project_id):
+            self.env_note.setText("No environments in this project yet - add one on the "
+                                  "Environments page, or File -> Import brings them "
+                                  "from another project.")
+            return
         if env is None or env.id == lc.ALL_ENVIRONMENTS:
             self.env_note.setText("%d environments · %d accounts"
                                   % (len(self.inventory.envs),
@@ -1713,12 +1761,16 @@ class LaunchSessionsPage(QWidget):
         value = self._current_env_value()
         for row in self.inventory.envs:
             if row.get("value") == value:
-                # Not the address: that is the box below, which may differ.
-                self.env_note.setText("%s accounts · filed under %s"
-                                      % (row.get("count", "?"), value))
+                # Not the address: that is the box above, which may differ. The
+                # key the accounts are filed under only in developer wording.
+                count = row.get("count", "?")
+                self.env_note.setText(
+                    "%s accounts · --env %s" % (count, value) if self._developer
+                    else "%s user%s" % (count, "" if count == 1 else "s"))
                 return
         if not self.controller.is_stand_in(env):
-            self.env_note.setText("No accounts filed under %s yet" % (value or "?"))
+            self.env_note.setText("No users here yet - add them with + Account, or on "
+                                  "the Environments page")
             return
         # Kept, because it is what the configuration says (see launchcontroller),
         # but users.json no longer has it - so say so rather than leave a blank

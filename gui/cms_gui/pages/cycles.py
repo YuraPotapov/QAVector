@@ -147,6 +147,9 @@ class CyclesPage(QWidget):
     question_requested = Signal(str)
     interaction_requested = Signal(dict)
     saved = Signal()
+    #: File -> Import, asked for from here; File -> Export with this ticked.
+    import_requested = Signal()
+    export_requested = Signal(dict)
     #: The page put the rows a write answered with into its own list - every
     #: row, as it is now - so the window can follow without reading the whole
     #: inventory again. ``saved`` is still said by a core too old to answer so.
@@ -407,7 +410,10 @@ class CyclesPage(QWidget):
         self.explorer.cycle_renamed.connect(self._rename_cycle)
         self.explorer.cycle_reidentified.connect(self._change_cycle_id)
         self.explorer.cycle_deleted.connect(self._delete_cycle)
-        self.explorer.cycle_imported.connect(self._import_cycle)
+        # Import and Export are the window's: a file may hold environments and
+        # users as well as cycles.
+        self.explorer.cycle_imported.connect(self.import_requested.emit)
+        self.explorer.exported.connect(self.export_requested.emit)
         self.explorer.cycle_moved.connect(self._move_cycle)
         self.explorer.project_listed.connect(self._list_project)
         if self.settings is not None:
@@ -2094,6 +2100,10 @@ class CyclesPage(QWidget):
             return {"ok": False, "summary": "No core configured", "argv": []}
         return self.core.cycle_plugin_action(plugin_id, action_key, settings)
 
+    def has_unsaved_draft(self):
+        """A cycle edited here and not saved - which another project would lose."""
+        return self._draft is not None and bool(self._draft.dirty)
+
     def current_id(self):
         return (self._open or {}).get("id", "")
 
@@ -2695,28 +2705,6 @@ class CyclesPage(QWidget):
             self._close()
         # The file is gone: its row goes, and nothing else needs reading.
         self._take_rows(remove=[cycle_id])
-
-    def _import_cycle(self):
-        from PySide6.QtWidgets import QFileDialog
-
-        path, _filter = QFileDialog.getOpenFileName(
-            self, "Import a cycle", "", "Cycle files (*.yaml *.yml)")
-        if not path:
-            return
-        try:
-            answer = self.core.cycle_import(path)
-        except core_mod.CoreError as exc:
-            widgets.warn(self, "Import", str(exc))
-            return
-        if not answer.get("ok"):
-            widgets.note(self, "Import",
-                                    "\n".join(str(one) for one in
-                                               answer.get("problems") or []))
-            return
-        if answer.get("row"):
-            self._take_rows(add=[answer["row"]])
-        else:
-            self.saved.emit()
 
     def _write_cycle(self, cycle_id, document, then_open=False, source="",
                      base=None):

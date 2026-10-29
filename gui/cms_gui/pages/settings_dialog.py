@@ -151,6 +151,34 @@ class SettingsDialog(QDialog):
             "itself - so editing a cycle there changes a file that ships with "
             "the application. Passed to every command as --cycles-dir."))
 
+        # What every run is given unless its configuration says otherwise.
+        # They used to sit under the environments, which they have nothing to
+        # do with: one folder for every environment's reports and profiles.
+        column.addSpacing(10)
+        column.addWidget(widgets.kicker("Run directories"))
+        self.run_dirs = {}
+        self.wording = widgets.Phrasing()
+        for key, plain, flag, hint in (
+                ("reports", "Reports", "Reports (--reports-dir)",
+                 "Where each run writes its report, screenshots and logs."),
+                ("sessions", "Browser profiles", "Browser profiles (--sessions-dir)",
+                 "One folder per user and environment, holding its signed-in "
+                 "browser profile."),
+                ("flows", "Command page scenarios", "Command page --flows-dir",
+                 "Fills --flows-dir on the Command page only. Scenarios above is the "
+                 "folder every other run reads.")):
+            edit = QLineEdit(settings.directory(key))
+            edit.setProperty("mono", True)
+            edit.setPlaceholderText("the launcher's own default")
+            box = widgets.field(plain, widgets.row(
+                edit, self._browse_button(lambda _c=False, e=edit: self._pick_dir(e))),
+                hint)
+            self.wording.text(box.label, plain, flag)
+            column.addWidget(box)
+            self.run_dirs[key] = edit
+        self.wording.apply(developer)
+        column.addSpacing(10)
+
         self.cycle_inactivity = QSpinBox()
         self.cycle_inactivity.setRange(10, 86400)
         self.cycle_inactivity.setSuffix(" s")
@@ -392,6 +420,12 @@ class SettingsDialog(QDialog):
         if path:
             self.flows.setText(path)
 
+    def _pick_dir(self, edit):
+        path = widgets.pick_path(self, "Choose a directory", edit.text() or "~",
+                                 directory=True)
+        if path:
+            edit.setText(path)
+
     def _pick_config(self):
         path = widgets.pick_path(self, "users.json",
                                  os.path.dirname(self.config.text() or "") or "~")
@@ -436,6 +470,12 @@ class SettingsDialog(QDialog):
         if path and not self.flows.text().strip():
             self.flows.setPlaceholderText(path)
 
+    def set_run_dirs(self, dirs):
+        """The folders the core uses by default, for the fields left blank."""
+        for key, edit in self.run_dirs.items():
+            if (dirs or {}).get(key) and not edit.text().strip():
+                edit.setPlaceholderText(dirs[key])
+
     def core(self):
         return core_mod.Core(None, None,
                              self.config.text().strip(),
@@ -457,4 +497,6 @@ class SettingsDialog(QDialog):
         self.settings.log_sources_path = self.log_sources.text().strip()
         self.settings.flows_path = self.flows.text().strip()
         self.settings.cycles_path = self.cycles.text().strip()
+        for key, edit in self.run_dirs.items():
+            self.settings.set_directory(key, edit.text().strip())
         return True

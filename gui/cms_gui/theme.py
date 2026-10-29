@@ -593,7 +593,10 @@ QLineEdit, QComboBox, QSpinBox, QTimeEdit, QPlainTextEdit, QTextEdit {{
     background: {surface}; color: {text};
     border: 1px solid {divider}; border-radius: 0;
     padding: 4px 8px; min-height: 20px;
-    selection-background-color: {a300}; selection-color: {text};
+    /* The selection colours of the rest of the theme, which are set for each
+       mode: a fixed pale blue under dark mode's light ink was unreadable - in
+       a combo box's open list, and in any selected text. */
+    selection-background-color: {select_bg}; selection-color: {select_ink};
 }}
 QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QTimeEdit:hover {{ border-color: {divider_strong}; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTimeEdit:focus,
@@ -625,6 +628,14 @@ QLineEdit[role="search"] {{
     padding: 0 4px; min-height: 0; font-size: 11px;
 }}
 QLineEdit[role="search"]:focus {{ border-color: {accent}; }}
+/* A cell being typed into: the cell's own box exactly (see widgets.CellEditor),
+   its text where the cell's text was - the same 4px as a search box, for the
+   same reason. */
+QLineEdit[role="celledit"] {{
+    background: {bg}; border: 1px solid {accent}; border-radius: 0;
+    padding: 0 4px; min-height: 0; margin: 0;
+    selection-background-color: {select_bg}; selection-color: {select_ink};
+}}
 /* The arrow is a chevron drawn into a small SVG in this theme's ink (see
    _chevron): the border-triangle trick of CSS comes out of Qt as a filled bar,
    and a combo box with rules of its own never asks the style to draw one. */

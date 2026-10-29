@@ -151,7 +151,7 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # field - a value typed into a command line is a value in `ps`.
              "--cycle-secrets-file", "--cycle-secret-set",
              "--cycle-secret-list", "--cycle-secret-delete",
-             "--cycle-secret-copy",
+             "--cycle-secret-copy", "--cycle-secret-export",
              "--cycle-memory-file", "--cycle-memory-list",
              "--cycle-memory-show", "--cycle-memory-forget",
              "--cycle-runs-dir",
