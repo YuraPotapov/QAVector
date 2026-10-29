@@ -190,12 +190,20 @@ class ScenarioRun(CyclePlugin):
 
         if context.flows_dir:
             argv.append("--flows-dir=%s" % context.flows_dir)
+        inherited = getattr(context, "launcher", None) or {}
         for key, flag in (("env", "--env"), ("users", "--filter-users"),
                           ("config", "--config"),
                           ("report_level", "--report-level")):
             value = str(self.setting(step.settings, key) or "").strip()
+            if not value and key == "config":
+                # The step names no users.json: the run's own, not the default.
+                value = inherited.get("config", "")
             if value:
                 argv.append("%s=%s" % (flag, value))
+        for key, flag in (("sessions_dir", "--sessions-dir"),
+                          ("log_sources", "--log-sources")):
+            if inherited.get(key):
+                argv.append("%s=%s" % (flag, inherited[key]))
 
         jobs = self.setting(step.settings, "jobs", 1)
         if jobs not in (None, ""):

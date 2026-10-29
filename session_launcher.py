@@ -940,6 +940,21 @@ def run_secret_command(command, source, secrets_path=None):
             secrets.delete(cycle_id, name or None, secrets_path)
             payload = {"ok": True, "cycle": cycle_id, "name": name,
                        "path": path}
+        elif kind == "export":
+            # For moving a cycle to another machine or project with its
+            # credentials. The values go into the --from file, created
+            # readable by its owner only - never to stdout, which is a pipe
+            # and a log; what is printed is the names.
+            if not source:
+                raise ValueError("--cycle-secret-export needs --from=FILE to "
+                                 "write the values into")
+            values = secrets.load(secrets_path).get(cycle_id, {})
+            descriptor = os.open(source, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump({"secrets": values}, handle, ensure_ascii=False)
+            os.chmod(source, 0o600)
+            payload = {"ok": True, "cycle": cycle_id, "names": sorted(values),
+                       "path": path}
         else:                                   # unreachable; kept honest anyway
             raise ValueError("unknown secret command %r" % kind)
     except Exception as exc:  # noqa: BLE001 - the report IS the error report
@@ -1267,7 +1282,8 @@ def _save_cycle(cycle_id, source, cycles_dir=None):
 def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                    jobs=None, control=False, reports_dir=None,
                    secrets_path=None, memory_path=None, only=None,
-                   start_from="", resume="", reuse_from="", subject=None, action="", mode=None):
+                   start_from="", resume="", reuse_from="", subject=None, action="", mode=None,
+                   launcher=None):
     """Run one cycle to completion. Returns the exit code.
 
     Handled before the Chrome launch loop, because a cycle opens no windows of
@@ -1387,7 +1403,7 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
     try:
         run = executor.run_cycle(
             cycle, workspace, variables_=variables, jobs=jobs,
-            observer=bus.Tee(observers), flows_dir=flows_dir,
+            observer=bus.Tee(observers), flows_dir=flows_dir, launcher=launcher,
             cycles_dir=cycles_dir, run_id=run_id, secrets=values,
             memory_path=memory_path, only=chosen, reuse=reuse, resume=bool(resume),
             subject=subject, action=action, supervised=control, cancel=control_cancel, controlled=control, mode=mode)
@@ -1692,7 +1708,7 @@ def _bad_option_message(arg, config_path):
                "--extensions", "--cycles-dir", "--cycle-run", "--cycle-show",
                "--cycle-save", "--cycle-delete", "--cycle-import",
                "--cycle-secret-list", "--cycle-secret-set",
-               "--cycle-secret-copy",
+               "--cycle-secret-copy", "--cycle-secret-export",
                "--cycle-secret-delete", "--cycle-secrets-file",
                "--cycle-memory-show", "--cycle-memory-forget",
                "--cycle-memory-file", "--cycle-runs-dir", "--cycle-watch",
@@ -3662,6 +3678,10 @@ write a report. The steps that do not depend on each other run at the same time.
                             alone; delete it first to replace it.
   --cycle-secret-delete=ID[:N]
                             Forget one secret, or every secret of one cycle.
+  --cycle-secret-export=ID --from=F
+                            Write a cycle's secret values into file F, as
+                            {"secrets": {NAME: VALUE}}, readable by its owner
+                            only - for Export. Only the names are printed.
   --cycle-secrets-file=PATH Where the encrypted store lives (default: beside
                             the rest of the user data).
 
@@ -4128,6 +4148,8 @@ def main():
             secret_command = ("set", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-secret-copy="):
             secret_command = ("copy", arg.split("=", 1)[1].strip())
+        elif arg.startswith("--cycle-secret-export="):
+            secret_command = ("export", arg.split("=", 1)[1].strip())
         elif arg.startswith("--cycle-secret-delete="):
             secret_command = ("delete", arg.split("=", 1)[1].strip())
         # -- what the project remembers. A plain file, unlike the secrets one:
@@ -4452,7 +4474,16 @@ def main():
                                 subject=({"key": cycle_subject,
                                           "title": cycle_subject_title,
                                           "pin": cycle_subject_pin}
-                                         if cycle_subject else None)))
+                                         if cycle_subject else None),
+                                # What this run was told about accounts,
+                                # profiles and logs, for its scenario steps to
+                                # be told the same - a project's own files.
+                                launcher={key: value for key, value in (
+                                    ("config", config_path if config_path != DEFAULT_CONFIG
+                                     else ""),
+                                    ("sessions_dir", sessions_dir
+                                     if sessions_dir != DEFAULT_SESSIONS_DIR else ""),
+                                    ("log_sources", log_sources_path or "")) if value}))
     if session_prefix and (os.sep in session_prefix or (os.altsep and os.altsep in session_prefix)):
         sys.exit("--user-session must be a single name, no path separators.")
     if overlay_components and run_tests is None:

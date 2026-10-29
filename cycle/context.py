@@ -111,7 +111,7 @@ class RunContext(object):
 
     def __init__(self, run, cycle, workspace, cancel=None, observer=None,
                  flows_dir=None, cycles_dir=None, environment=None,
-                 memory_path=""):
+                 memory_path="", launcher=None):
         self.run = run
         self.cycle = cycle
         self.workspace = workspace
@@ -119,6 +119,11 @@ class RunContext(object):
         self.observer = observer
         self.flows_dir = flows_dir
         self.cycles_dir = cycles_dir
+        #: What the run itself was given for the launcher - ``config``,
+        #: ``sessions_dir``, ``log_sources`` - so a step that starts one passes
+        #: the same files on unless it names its own: a project's accounts,
+        #: profiles and logs, not the defaults beside the checkout.
+        self.launcher = dict(launcher or {})
         #: Where what the project remembers between runs is kept. Carried
         #: rather than looked up, for the reason the secrets path is: the
         #: launcher was told where it is and a plugin should not be guessing

@@ -171,6 +171,32 @@ def test_the_cycle_s_flows_directory_is_handed_down(context, child):
     assert flags(child)["--flows-dir"] == context.flows_dir
 
 
+def test_the_run_s_accounts_profiles_and_logs_are_handed_down(context, child):
+    """A project's cycle runs its scenarios with the project's own users.json,
+    browser profiles and log sources - not the defaults beside the launcher."""
+    child.events = passed()
+    context.launcher = {"config": "/p/users.json", "sessions_dir": "/p/user_sessions",
+                        "log_sources": "/p/logsources.json"}
+    run(context, child)
+    assert flags(child)["--config"] == "/p/users.json"
+    assert flags(child)["--sessions-dir"] == "/p/user_sessions"
+    assert flags(child)["--log-sources"] == "/p/logsources.json"
+
+
+def test_a_step_s_own_users_json_wins_over_the_run_s(context, child):
+    child.events = passed()
+    context.launcher = {"config": "/p/users.json"}
+    run(context, child, config="/elsewhere/users.json")
+    assert flags(child)["--config"] == "/elsewhere/users.json"
+
+
+def test_without_anything_from_the_run_nothing_extra_is_passed(context, child):
+    child.events = passed()
+    run(context, child)
+    for flag in ("--config", "--sessions-dir", "--log-sources"):
+        assert flag not in flags(child)
+
+
 def test_windows_at_once_is_passed_and_defaults_to_one(context, child):
     child.events = passed()
     run(context, child)

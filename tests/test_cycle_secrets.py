@@ -286,3 +286,26 @@ def test_the_copy_command_without_names_still_copies_them_all(store, capsys):
 
     assert _copy_command("from:to", store, capsys)["copied"] == [
         "jira_token", "other"]
+
+
+def test_export_writes_the_values_to_a_private_file_and_prints_names(store, capsys,
+                                                                     tmp_path):
+    import os
+    import session_launcher
+    secrets.set_secret("release", "jira_token", "zq-value-81", store)
+    secrets.set_secret("release", "teams_hook", "https://hooks.example.invalid/x", store)
+    target = tmp_path / "out.json"
+    with pytest.raises(SystemExit):
+        session_launcher.run_secret_command(("export", "release"), str(target), store)
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] and answer["names"] == ["jira_token", "teams_hook"]
+    assert "zq-value-81" not in json.dumps(answer), "never the value on stdout"
+    assert json.loads(target.read_text())["secrets"]["jira_token"] == "zq-value-81"
+    assert os.stat(target).st_mode & 0o777 == 0o600
+
+
+def test_export_without_a_file_is_refused(store, capsys):
+    import session_launcher
+    with pytest.raises(SystemExit):
+        session_launcher.run_secret_command(("export", "release"), None, store)
+    assert json.loads(capsys.readouterr().out)["ok"] is False

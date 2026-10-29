@@ -162,19 +162,19 @@ def run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
               jobs=None, registry=None, flows_dir=None, cycles_dir=None,
               trigger=MANUAL, run_id=None, environment=None, secrets=None,
               memory_path="", only=None, reuse=None, resume=False, subject=None, action="",
-              supervised=False, controlled=False, mode=None):
+              supervised=False, controlled=False, mode=None, launcher=None):
     with checkpoints.lock(workspace):
         return _run_cycle(cycle, workspace, variables_, observer, cancel, jobs,
                           registry, flows_dir, cycles_dir, trigger, run_id,
                           environment, secrets, memory_path, only, reuse, resume,
-                          subject, action, supervised, controlled, mode)
+                          subject, action, supervised, controlled, mode, launcher)
 
 
 def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                jobs=None, registry=None, flows_dir=None, cycles_dir=None,
                trigger=MANUAL, run_id=None, environment=None, secrets=None,
                memory_path="", only=None, reuse=None, resume=False, subject=None, action="",
-               supervised=False, controlled=False, mode=None):
+               supervised=False, controlled=False, mode=None, launcher=None):
     """Run every step of ``cycle`` that should run. Returns a :class:`CycleRun`.
 
     Never raises for anything the run did - a step that fails, a plugin that
@@ -274,7 +274,7 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
     context = RunContext(run, cycle, workspace, cancel=cancel,
                          observer=observer, flows_dir=flows_dir,
                          cycles_dir=cycles_dir, environment=environment,
-                         memory_path=memory_path)
+                         memory_path=memory_path, launcher=launcher)
     context.interactions = interactions
 
     with _live_lock:
