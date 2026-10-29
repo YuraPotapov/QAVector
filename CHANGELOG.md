@@ -16,6 +16,13 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.48] - 2026-10-29
+
+### Changed
+- Each project remembers the cycle that was open on its Cycles page and opens
+  it again, with its last run, when you come back to the project or restart
+  the app. The cycle of the last run is opened only when nothing was open.
+
 ## [0.16.47] - 2026-10-29
 
 ### Fixed
