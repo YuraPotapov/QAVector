@@ -66,19 +66,22 @@ def failed_verification(artwork):
         painter.setBrush(QColor("#fbfaf5"))
         painter.drawRoundedRect(QRectF(32, 201, 39, 39), 3, 3)
 
+        # In the tile's own plane, corner to corner of the box's face - which
+        # on screen reads as an upright cross on the tilted box (chosen over a
+        # flat "x" and over one along the tile's axes).
         red = QColor("#c83e40")
-        painter.save()
-        painter.translate(51.5, 220.5)
-        painter.setTransform(QTransform(.83, -.49, .83, .49, 0, 0).inverted()[0], True)
-        painter.setPen(QPen(red, 3, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(-7, -7), QPointF(7, 7))
-        painter.drawLine(QPointF(-7, 7), QPointF(7, -7))
-        painter.restore()
+        painter.setPen(QPen(red, 3.4, Qt.SolidLine, Qt.RoundCap))
+        centre = QPointF(51.5, 220.5)
+        for one, other in ((QPointF(-8, -8), QPointF(8, 8)),
+                           (QPointF(-8, 8), QPointF(8, -8))):
+            painter.drawLine(centre + one, centre + other)
         font = QFont("DejaVu Sans")
         font.setPixelSize(17)
         painter.setFont(font)
         painter.setPen(QColor("#40474c"))
-        painter.drawText(QPointF(90, 216), "Step 3: Not verify")
+        # On the original caption's line: lower along the tile than the first
+        # attempt, which read as floating above it.
+        painter.drawText(QPointF(90, 223), "Step 3: Not verify")
     finally:
         painter.end()
     return result
