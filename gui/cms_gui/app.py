@@ -8,7 +8,7 @@ from PySide6.QtCore import QEventLoop, Qt, QRect
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from . import icon, migrate, search, theme, widgets
+from . import icon, migrate, search, splash_easteregg, theme, widgets
 from .settings import Settings
 from .main_window import MainWindow
 
@@ -160,9 +160,8 @@ def main(argv=None):
     if splash_path and not auto_launch:
         # The artwork carries its own title, so no version is painted onto it -
         # that used to be drawn here AND shown as a message, printing it twice.
-        pixmap = QPixmap(splash_path).scaled(SPLASH_PX, SPLASH_PX,
-                                             Qt.KeepAspectRatio,
-                                             Qt.SmoothTransformation)
+        pixmap = splash_easteregg.pixmap(splash_path, settings).scaled(
+            SPLASH_PX, SPLASH_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         splash = Splash(pixmap, Qt.WindowStaysOnTopHint)
         splash.showMessage("starting…")
         show_painted(app, splash)

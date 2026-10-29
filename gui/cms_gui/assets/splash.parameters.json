@@ -1,0 +1,50 @@
+{
+  "width": 1024,
+  "height": 1024,
+  "title": "QAVector",
+  "subtitle": "Explore. Build. Verify.",
+  "palette": {
+    "background": "#f8f6ee",
+    "surface": "#fbfaf5",
+    "ink": "#40474c",
+    "muted": "#6d777e",
+    "accent": "#8ca9cd",
+    "side": "#d4d5d2",
+    "grid": "#bdc6c5"
+  },
+  "grid_opacity": 0.35,
+  "active_step": 2,
+  "pass_rate": 95,
+  "cards": {
+    "environments": {
+      "x": 104, "y": 376, "size": 200, "scale": 1,
+      "title": "Environments",
+      "labels": ["Staging", "Production", "Config"]
+    },
+    "logs": {
+      "x": 622, "y": 376, "size": 200, "scale": 1,
+      "title": "Logs",
+      "labels": ["Event Stream", "Error: 404"]
+    },
+    "scenarios": {
+      "x": 309, "y": 532, "size": 260, "scale": 1,
+      "title": "Scenarios",
+      "labels": ["Scenario Name", "Step 1: Setup", "Step 2: Execute", "Step 3: Verify"]
+    },
+    "sessions": {
+      "x": 57, "y": 681, "size": 210, "scale": 1,
+      "title": "Sessions",
+      "labels": ["Active Users", "Isolation"]
+    },
+    "reports": {
+      "x": 622, "y": 686, "size": 210, "scale": 1,
+      "title": "Reports",
+      "labels": ["Test Results", "Pass"]
+    },
+    "services": {
+      "x": 338, "y": 833, "size": 210, "scale": 1,
+      "title": "Services",
+      "labels": ["Backend Services", "Status: Online"]
+    }
+  }
+}
