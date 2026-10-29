@@ -16,6 +16,68 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.46] - 2026-10-29
+
+### Added
+- **Projects hold everything.** The project picked in the top bar decides what
+  every page shows: users, environments, launch configurations, services, log
+  sources, scenarios, cycles with their secrets and memory, run history,
+  reports and browser profiles. A new project (*New…* in the picker, or
+  *+ Project* on Environments) is an empty folder of its own under
+  `~/QAVector/projects`; *Workspace* is everything that was there before, where
+  it was. Switching waits for a run to finish, asks about unsaved edits and
+  running services, and shows nothing of the project left while the next one
+  is read. Rename, Export and Delete project are on the Environments page;
+  deleting takes a project off the list and leaves its folder.
+- **Search (Ctrl+K) covers every project.** A row of another project says which
+  one; opening it switches there and shows the row.
+- **Export and Import** (File menu, and *Export…* on Environments, Credentials
+  and the cycle explorer): one `.qavector.json` file with the projects,
+  environments, users and cycles ticked. A project brings its environments, an
+  environment its users with the scenarios they run there, a cycle project its
+  cycles. Passwords and cycle secret values are in the file as they are; it is
+  written readable by its owner only. Importing says what is new and what is
+  already here, and adds to the existing ones or adds copies.
+- **Run menu:** In Background, With Recorder and Empty Sessions, then *Run Last
+  Cycle* and *Clarify the running cycle*.
+- **`--cycle-secret-export=ID --from=FILE`** writes a cycle's secret values into
+  a file readable by its owner only; only their names are printed.
+
+### Changed
+- **An environment is a name, its variables and its users**, as in Postman.
+  `url` is a reserved variable - where its windows open - and can use the
+  others (`http://localhost:{{port}}/web`); variables are text, without types or
+  project defaults. Users are added from a picker (*Add users…*, with *New
+  user…*), each with the scenarios it runs in that environment. *Duplicate*
+  copies the variables and users into profiles of their own. The account key
+  stays out of sight (developer mode shows it as `--env`); an environment that
+  is renamed or given another address keeps its profiles.
+- **Credentials is one row per person**: role, login, password. Where each one
+  signs in is set on Environments; *Add to environment…* puts several there at
+  once. A change to a person reaches every environment it signs in to.
+- **A cycle's scenario steps use the run's users, profiles and log sources**
+  (`--config`, `--sessions-dir`, `--log-sources`) unless a step names its own
+  users.json.
+- The project picker sits in the top bar; Refresh is an icon beside Settings.
+  The default reports, profiles and Command-page flows folders moved to
+  Settings → Run directories. *Reload/Save users.json* and *Run command* left
+  the menus (Ctrl+R / Ctrl+S still work on Credentials, Ctrl+Return runs).
+- The address box on Launch Sessions no longer carries a source tag; its
+  tooltip says where the address comes from.
+- `launch-projects.json` is version 2; a version-1 file is read as such and
+  kept beside as `launch-projects.json.v1` on the first save.
+
+### Fixed
+- Selected text and the row under the pointer in an open list were unreadable
+  in dark mode.
+- Editing a table cell put an editor taller than the row over the gridlines; it
+  is now the cell itself.
+- A configuration saved without an environment came back as "? (missing)"; it
+  is *All environments*, which is how it runs.
+- Subjects kept reading the old memory and runs after Settings changed.
+- A long users.json path on Credentials held the window wider than a laptop
+  screen.
+
 ## [0.16.45] - 2026-10-28
 
 ### Added
