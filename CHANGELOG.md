@@ -16,6 +16,13 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.47] - 2026-10-29
+
+### Fixed
+- Picking another project no longer reopens the cycle that was open in the
+  previous one and shows "no cycle ... (looked at ...)" as its problem; the
+  Cycles page closes it, and the sessions on the right are the new project's.
+
 ## [0.16.46] - 2026-10-29
 
 ### Added
