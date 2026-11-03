@@ -16,6 +16,14 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.51] - 2026-11-03
+
+### Fixed
+- Auto-login tries again when the login page comes back without an error - a
+  submit the server never answered, for example while a scenario restarts it.
+  Rejected credentials (the page's `.alert-danger`, overridable as the `error`
+  login selector) still stop it at once, and a tab gets at most three submits.
+
 ## [0.16.50] - 2026-11-03
 
 ### Added
