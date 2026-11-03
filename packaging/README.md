@@ -253,7 +253,9 @@ build/runtime-preview/launch-qavector.sh
 The output must be a new directory. Both frozen components include the complete
 offline runtime notices; the builder runs ER-LIC-001 gates and bundled core
 diagnostics. It uses the existing build environment and requires a previously
-built, pinned Bubblewrap distribution. Windows provisioning remains a stub.
+built, pinned Bubblewrap distribution. It also regenerates the managed Python/SDK
+image from the selected build interpreter and reviewed `--busybox` input
+(default `/usr/bin/busybox`). Windows provisioning remains a stub.
 
 ## Offline DEB candidate from a reviewed preview
 
@@ -403,3 +405,35 @@ directly through `accept_runtime_install.py --previous /path/to/previous.deb`.
 The harness never relabels a current package to fabricate an upgrade. Local
 clean-container passes and YAML validation are distinct from actual hosted CI
 run evidence.
+
+
+### Managed plugin Python (development increment)
+
+The Linux `build_deb.sh` build now prepares a separate Python/stdlib/SDK bundle
+using `examples.plugin_contracts.prepare_runtime` and includes its descriptor and
+payload through `QAVECTOR_PLUGIN_RUNTIME`. `/usr/bin/busybox` is a build input.
+Direct core PyInstaller builds may supply the same environment variable, pointing
+to a directory containing `plugin-python.json` and `payload/`. Installed plugin
+workers use that image through Runtime, never the frozen executable as Python.
+Without it, package inspection remains available and execution/install is blocked.
+
+Use `accept_runtime_install.py --require-plugins` for releases carrying managed
+plugins. In addition to the ordinary DEB lifecycle, this gate reads and hashes
+every managed payload file as UID 1000, verifies the fresh built-in/bundled
+catalog and starts the installed GUI on Plugins. Synthetic registry/run-pin
+files are included in the data-preservation check. It does not run plugin code
+inside the install container; `tests/test_plugin_frozen_cycle.py` separately
+checks real import, activation and native Cycle execution through the frozen
+core with no system Python/tools in PATH. Both gates are required by the hosted
+release workflow. Building locally does not dispatch that workflow.
+
+Build inputs can be private, but public shipped runtime files must use 0644/0755
+modes: DEB changes ownership to root. The freezer restores exact input bytes
+and then sets those distribution modes before verifying the descriptor hashes.
+
+See [the installer contract](../docs/qavplug-installer-v1.md) for offline wheels,
+trust/grants, supported schemes and release limitations. Version 0.16.50 passed
+frozen plugin execution and clean Ubuntu 22.04/Debian 12 DEB lifecycle acceptance;
+see [the recorded scope and evidence](../docs/plugin-core-work-plan.md#follow-up-4-linux-release-build-and-installupdate-acceptance).
+The native attribution gate passed. A complete expanded dependency-license
+inventory and broader platform/retention matrix remain separate work.

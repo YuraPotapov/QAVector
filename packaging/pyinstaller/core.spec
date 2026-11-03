@@ -15,7 +15,7 @@ Built by packaging/build_deb.sh, which is also what writes build/VERSION.
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 
@@ -53,6 +53,9 @@ hiddenimports = (
     + collect_submodules("domain")
     + collect_submodules("cycle")
     + collect_submodules("execution_runtime")
+    + collect_submodules("qavector_sdk")
+    + collect_submodules("plugin_host")
+    + collect_submodules("qavector_agent_claude")
     + ["yaml", "playwright", "playwright.sync_api",
        "cryptography.hazmat.primitives.ciphers",
        "cryptography.hazmat.primitives.serialization",
@@ -79,7 +82,28 @@ datas = tracked_datas(ROOT, "flows") + tracked_datas(ROOT, "cycles") + [
      "execution_runtime/backends/linux"),
     (os.path.join(ROOT, "execution_runtime", "backends", "linux", "passt.lock.json"),
      "execution_runtime/backends/linux"),
-] + playwright_driver_datas()
+] + playwright_driver_datas() + collect_data_files("qavector_sdk", includes=["schemas/*.json"]) + collect_data_files("qavector_agent_claude", includes=["schemas/*.json", "manifest.json", "requirements.lock"])
+
+# Source inventory for the bundled backend digest. These are build inputs,
+# shipped alongside the frozen modules so exact run pins remain verifiable.
+for package in ("qavector_sdk", "qavector_agent_claude"):
+    for directory, _dirs, names in os.walk(os.path.join(ROOT, package)):
+        for name in names:
+            if name.endswith(".py"):
+                datas.append((os.path.join(directory, name), os.path.relpath(directory, ROOT)))
+
+# Trusted bootstrap source is mounted in managed worker images.
+datas.append((os.path.join(ROOT, "plugin_host", "managed_bootstrap.py"), "plugin_host"))
+# Release tooling supplies a relocatable Python runtime; never substitute the
+# frozen executable or system site-packages when it is absent.
+plugin_runtime = os.environ.get("QAVECTOR_PLUGIN_RUNTIME", "")
+if plugin_runtime:
+    descriptor = os.path.join(plugin_runtime, "plugin-python.json")
+    if not os.path.isfile(descriptor):
+        raise SystemExit("QAVECTOR_PLUGIN_RUNTIME must contain plugin-python.json")
+    for directory, _dirs, names in os.walk(plugin_runtime):
+        for name in names:
+            datas.append((os.path.join(directory, name), os.path.join("runtime", os.path.relpath(directory, plugin_runtime))))
 
 # The Windows executable's own icon. Without this PyInstaller embeds its
 # default, which is the Python logo - and that is what Windows then shows in the
@@ -129,3 +153,32 @@ COLLECT(
     upx=False,
     name="core",
 )
+
+# Preserve the reviewed worker image byte-for-byte after freezer processing.
+# Its own descriptor, rather than PyInstaller's runtime library set, pins it.
+if plugin_runtime:
+    import hashlib
+    import json
+    import shutil
+    destination_root = os.path.join(DISTPATH, "core", "_internal", "runtime")
+    for directory, _dirs, names in os.walk(plugin_runtime):
+        destination = os.path.join(destination_root, os.path.relpath(directory, plugin_runtime))
+        os.makedirs(destination, exist_ok=True)
+        for name in names:
+            target = os.path.join(destination, name)
+            if os.path.exists(target):
+                os.chmod(target, 0o600)
+            shutil.copy2(os.path.join(directory, name), target)
+            # Build inputs are private (0400/0500). DEB owns shipped files as
+            # root, so preserve executable intent but allow ordinary users to
+            # read the public runtime. Never make it writable by those users.
+            os.chmod(target, 0o755 if os.stat(target).st_mode & 0o111 else 0o644)
+    with open(os.path.join(destination_root, "plugin-python.json"), encoding="utf-8") as source:
+        descriptor = json.load(source)
+    for entry in descriptor["image"]["files"]:
+        relative = entry["source"]
+        if os.path.isabs(relative) or ".." in relative.replace("\\", "/").split("/"):
+            raise SystemExit("Managed Python bundle must use local relative source paths")
+        with open(os.path.join(destination_root, relative), "rb") as source:
+            if hashlib.sha256(source.read()).hexdigest() != entry["sha256"]:
+                raise SystemExit("Managed Python payload changed during freezing")

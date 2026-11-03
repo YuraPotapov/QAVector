@@ -76,6 +76,13 @@ if [ -n "${QAVECTOR_PASST_SOURCE_ARCHIVE:-}" ]; then
 fi
 PATH="$VENV/bin:$PATH" "$VENV/bin/python" "$ROOT/packaging/build_bubblewrap.py" "${NATIVE_ARGS[@]}"
 
+say "Preparing the managed plugin Python runtime"
+[ -x /usr/bin/busybox ] || die "Install the build prerequisite busybox"
+PLUGIN_STAGE="$(mktemp -d "$BUILD/plugin-runtime.XXXXXX")"
+( cd "$ROOT" && "$VENV/bin/python" -m examples.plugin_contracts.prepare_runtime \
+    --output="$PLUGIN_STAGE/runtime" --busybox=/usr/bin/busybox )
+export QAVECTOR_PLUGIN_RUNTIME="$PLUGIN_STAGE/runtime"
+
 # -- 3. freeze ----------------------------------------------------------------
 rm -rf "$BUILD/dist" "$BUILD/pyi"
 for spec in core gui; do
@@ -91,7 +98,8 @@ GUI_BIN="$BUILD/dist/gui/qavector-gui"
 [ -x "$GUI_BIN" ] || die "the GUI bundle was not produced"
 
 # Copy after PyInstaller so it cannot rewrite the ELF/RUNPATH/checksum manifests.
-cp -a "$NATIVE_STAGE/runtime" "$BUILD/dist/core/_internal/runtime"
+mkdir -p "$BUILD/dist/core/_internal/runtime"
+cp -a "$NATIVE_STAGE/runtime/." "$BUILD/dist/core/_internal/runtime/"
 "$VENV/bin/python" "$ROOT/packaging/build_bubblewrap.py" --verify="$BUILD/dist/core/_internal/runtime"
 cp -a "$NATIVE_STAGE/runtime/licenses/." "$BUILD/dist/gui/_internal/licenses/"
 "$VENV/bin/python" "$ROOT/packaging/check_licenses.py" \

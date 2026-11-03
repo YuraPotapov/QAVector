@@ -46,6 +46,46 @@ def test_source_manifest_pins_code_and_excludes_local_secret_stores(modules, sou
     assert not {"users.json", "services.json", "cyclesecrets.json", "cyclesecrets.key", "cycle/local-store.json"} & set(pins)
 
 
+@pytest.mark.parametrize("name", ["plugin_host/runner.py", "qavector_sdk/worker.py",
+    "qavector_sdk/schemas/manifest.json", "qavector_agent_claude/manifest.json",
+    "qavector_agent_claude/requirements.lock"])
+def test_preview_rejects_plugin_changes_during_freeze(modules, source, tmp_path, name):
+    path = source / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("original")
+    builder = modules["build_runtime_preview"]
+    before = builder.source_manifest(source)
+    path.write_text("changed")
+    with pytest.raises(ValueError, match="sources changed"):
+        builder.write_build_info(source, tmp_path / "stage", before)
+
+
+@pytest.mark.parametrize("document", [
+    {"ok": False}, {"ok": True, "result": []},
+    {"ok": True, "result": [{"delivery": "core_node"}]},
+    {"ok": True, "result": [{"delivery": "core_node"},
+        {"delivery": "bundled", "state": "bundled_available"}, {"delivery": "installed"}]},
+])
+def test_incomplete_or_polluted_fresh_plugin_catalog_fails_acceptance(modules, document):
+    with pytest.raises(RuntimeError, match="fresh built-in/bundled"):
+        modules["accept_runtime_install"].verify_plugin_catalog(document)
+
+
+def test_fresh_plugin_catalog_passes_acceptance(modules):
+    modules["accept_runtime_install"].verify_plugin_catalog({"ok": True, "result": [
+        {"delivery": "core_node"}, {"delivery": "bundled", "state": "bundled_available"}]})
+
+
+def test_missing_installed_payload_is_rejected_even_when_existing_files_hash_correctly(modules):
+    verify = modules["accept_runtime_install"].verify_plugin_payload
+    descriptor = {"image": {"files": [{"source": "payload/" + name, "sha256": name}
+                                     for name in ("a" * 64, "b" * 64)]}}
+    checked = "a" * 64 + ": OK\n"
+    with pytest.raises(RuntimeError, match="does not match"):
+        verify(descriptor, checked)
+    verify(descriptor, checked + "b" * 64 + ": OK\n")
+
+
 def test_source_change_during_freeze_blocks_preview_publication(modules, source, tmp_path):
     builder = modules["build_runtime_preview"]
     before = builder.source_manifest(source)

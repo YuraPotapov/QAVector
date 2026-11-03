@@ -25,7 +25,8 @@ installed() {
 }
 snapshot() {
     local file
-    for file in users.json cycles/sentinel.yaml services.json fixture-secret; do
+    for file in users.json cycles/sentinel.yaml services.json fixture-secret \
+        plugins/registry.sqlite3 reports/fixture/.execution/plugin-lock.json; do
         sha256sum "$project/$file"
         stat -c '%a %u %g %n' "$project/$file"
     done
@@ -39,6 +40,19 @@ smoke() {
     local stage=$1
     as_user /usr/bin/qavector --version > "/qa/out/core-version-$stage.txt"
     as_user /usr/bin/qavector --runtime-bundle-info > "/qa/out/runtime-$stage.json"
+    if [ "${QAVECTOR_REQUIRE_PLUGINS:-0}" = 1 ]; then
+        as_user test -r /opt/qavector/core/_internal/runtime/plugin-python.json
+        as_user cat /opt/qavector/core/_internal/runtime/plugin-python.json > "/qa/out/plugin-runtime-$stage.json"
+        as_user /usr/bin/qavector --plugins catalog > "/qa/out/plugins-$stage.json"
+        # Content-addressed public payload must remain readable after dpkg
+        # changes its owner to root. No Python/pip from the target is involved.
+        (
+            cd /opt/qavector/core/_internal/runtime/payload
+            for file in *; do printf '%s  %s\n' "$file" "$file"; done | \
+                as_user sha256sum --check --strict > "/qa/out/plugin-payload-$stage.txt"
+        )
+        event "plugin-payload-$stage" verified-by-user
+    fi
     local component document
     for component in core gui; do
         for document in NOTICE.md AUTHORS COPYING; do
@@ -66,7 +80,9 @@ smoke() {
     fi
     event "libraries-$stage" resolved
     as_user mkdir -p "$XDG_CONFIG_HOME/qavector"
-    printf '[window]\npage=execution_environments\n' > "$XDG_CONFIG_HOME/qavector/gui.conf"
+    local page=execution_environments
+    if [ "${QAVECTOR_REQUIRE_PLUGINS:-0}" = 1 ]; then page=plugins; fi
+    printf '[window]\npage=%s\n' "$page" > "$XDG_CONFIG_HOME/qavector/gui.conf"
     chown 1000:1000 "$XDG_CONFIG_HOME/qavector/gui.conf"
     setpriv --reuid=1000 --regid=1000 --clear-groups -- env \
         QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QTWEBENGINE_DISABLE_SANDBOX=1 \
@@ -93,11 +109,13 @@ event dependencies configured
 
 useradd --uid 1000 --create-home qavector-fixture
 project=/home/qavector-fixture/QAVector
-mkdir -p "$project/cycles"
+mkdir -p "$project/cycles" "$project/plugins" "$project/reports/fixture/.execution"
 printf '{"fixture":true}\n' > "$project/users.json"
 printf 'id: offline-synthetic-sentinel\n' > "$project/cycles/sentinel.yaml"
 printf '{"services":[],"fixture":true}\n' > "$project/services.json"
 printf 'SYNTHETIC-NOT-A-CREDENTIAL\n' > "$project/fixture-secret"
+printf 'INERT-SYNTHETIC-REGISTRY\n' > "$project/plugins/registry.sqlite3"
+printf '{"fixture":"exact-version-pin"}\n' > "$project/reports/fixture/.execution/plugin-lock.json"
 chmod 600 "$project/users.json" "$project/fixture-secret"
 chown -R 1000:1000 "$project"
 snapshot > /qa/out/data-before.txt

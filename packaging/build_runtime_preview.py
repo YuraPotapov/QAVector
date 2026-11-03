@@ -18,10 +18,14 @@ from package_runtime_preview import digest, inventory
 def source_manifest(root):
     """Pin application code and public resources, never local user data."""
     files = {root / name for name in ("pyproject.toml", "MANIFEST.in", "session_launcher.py", "runtime_paths.py", "users.example.json")}
-    for directory in ("execution_runtime", "cycle", "domain", "engine", "adapters", "gui/cms_gui", "extensions", "packaging/pyinstaller"):
+    for directory in ("execution_runtime", "cycle", "domain", "engine", "adapters", "gui/cms_gui", "extensions", "packaging/pyinstaller",
+                      "plugin_host", "qavector_sdk", "qavector_agent_claude"):
         for path in (root / directory).rglob("*"):
             if path.is_file() and path.suffix in (".py", ".js", ".qml", ".spec"):
                 files.add(path)
+    for directory in ("qavector_sdk", "qavector_agent_claude"):
+        files.update(path for path in (root / directory).rglob("*")
+                     if path.is_file() and path.suffix in (".json", ".lock"))
     for directory in ("licenses", "gui/cms_gui/assets"):
         files.update(path for path in (root / directory).rglob("*") if path.is_file() and "__pycache__" not in path.parts)
     files.add(root / "execution_runtime/backends/linux/bubblewrap.lock.json")
@@ -55,6 +59,8 @@ def main():
                         help="Already built, pinned Bubblewrap distribution; no system fallback")
     parser.add_argument("--output", type=Path, required=True, help="New output directory (must not exist)")
     parser.add_argument("--python", type=Path, default=root / "build/venv/bin/python")
+    parser.add_argument("--busybox", type=Path, default=Path("/usr/bin/busybox"),
+                        help="Reviewed build input for the managed Python runtime")
     options = parser.parse_args()
     output = options.output.absolute()
     runtime = options.runtime_distribution.absolute()
@@ -70,8 +76,12 @@ def main():
     # Publish by rename on the output filesystem, including sandbox/CI mounts.
     with tempfile.TemporaryDirectory(prefix="qavector-preview-build-", dir=output.parent) as temporary:
         work = Path(temporary)
+        plugin_runtime = work / "plugin-runtime"
+        subprocess.run([str(options.python.absolute()), "-m", "examples.plugin_contracts.prepare_runtime",
+            "--output", str(plugin_runtime), "--busybox", str(options.busybox.absolute())], cwd=root, check=True)
         for component in ("core", "gui"):
-            env = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(work / (component + "-config")))
+            env = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(work / (component + "-config")),
+                       QAVECTOR_PLUGIN_RUNTIME=str(plugin_runtime))
             subprocess.run([str(options.python.absolute()), "-m", "PyInstaller", "--clean", "--noconfirm",
                 "--distpath", str(work / "dist"), "--workpath", str(work / (component + "-work")),
                 str(root / "packaging/pyinstaller" / (component + ".spec"))], cwd=root, env=env, check=True)
@@ -81,7 +91,7 @@ def main():
             shutil.move(str(work / "dist" / component), stage / component)
             shutil.copytree(runtime / "licenses", stage / component / "_internal/licenses", dirs_exist_ok=True)
         bundled = stage / "core/_internal/runtime"
-        shutil.copytree(runtime, bundled)
+        shutil.copytree(runtime, bundled, dirs_exist_ok=True)
         for component in ("core", "gui"):
             subprocess.run([str(options.python.absolute()), str(root / "packaging/check_licenses.py"),
                 "--runtime", str(bundled), "--licenses", str(stage / component / "_internal/licenses")], check=True)

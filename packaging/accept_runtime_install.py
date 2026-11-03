@@ -40,7 +40,7 @@ def verify_dependencies(directory, provenance):
             raise ValueError("Public dependency archives differ from verified download provenance")
 
 
-def accept(candidate, previous, dependencies, output, image):
+def accept(candidate, previous, dependencies, output, image, *, require_plugins=False):
     if sys.platform != "linux":
         raise ValueError("DEB acceptance targets Linux; Windows runtime remains a stub")
     if output.exists():
@@ -60,6 +60,7 @@ def accept(candidate, previous, dependencies, output, image):
     container = None
     report = {"status": "failed", "image_id": image_id, "network": "none", "privileged": False,
         "host_installation": False, "host_user_data_mounted": False, "provider_requests": "not_sent",
+        "require_plugins": require_plugins,
         "credential_access": "not_read", "dependencies_origin": provenance["origin"],
         "runner_capabilities": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"],
         "runner_script_sha256": digest(ROOT / "packaging/acceptance/install_runner.sh"),
@@ -83,7 +84,9 @@ def accept(candidate, previous, dependencies, output, image):
                 "--mount", "type=bind,src=" + str(payload) + ",dst=/qa/input,readonly",
                 "--mount", "type=bind,src=" + str(output.resolve()) + ",dst=/qa/out",
                 "--env", "QAVECTOR_OWNED_ACCEPTANCE=1", "--env", "QAVECTOR_PREVIOUS_VERSION=" + versions["previous"],
-                "--env", "QAVECTOR_CANDIDATE_VERSION=" + versions["candidate"], "--entrypoint=/bin/bash", image_id, "/qa/input/runner.sh"])
+                "--env", "QAVECTOR_CANDIDATE_VERSION=" + versions["candidate"],
+                "--env", "QAVECTOR_REQUIRE_PLUGINS=" + str(int(require_plugins)),
+                "--entrypoint=/bin/bash", image_id, "/qa/input/runner.sh"])
             result = run_attached(container, output / "install.log", 420)
             report["exit_code"] = int(command(["docker", "inspect", "--format", "{{.State.ExitCode}}", container]))
             events_file = output / "events.tsv"
@@ -93,6 +96,10 @@ def accept(candidate, previous, dependencies, output, image):
             for stage in ("upgrade", "fresh"):
                 if json.loads((output / ("runtime-" + stage + ".json")).read_text()).get("ok") is not True:
                     raise RuntimeError("Installed bundled runtime verification failed")
+                if require_plugins:
+                    verify_plugin_catalog(json.loads((output / ("plugins-" + stage + ".json")).read_text()))
+                    verify_plugin_payload(json.loads((output / ("plugin-runtime-" + stage + ".json")).read_text()),
+                                          (output / ("plugin-payload-" + stage + ".txt")).read_text())
             report["status"] = "passed"
         finally:
             if container:
@@ -107,13 +114,34 @@ def accept(candidate, previous, dependencies, output, image):
     return report
 
 
+def verify_plugin_catalog(document):
+    rows = document.get("result", [])
+    if (document.get("ok") is not True or not rows
+            or not any(row.get("delivery") == "core_node" for row in rows)
+            or not any(row.get("delivery") == "bundled" and row.get("state") == "bundled_available" for row in rows)
+            or any(row.get("delivery") == "installed" for row in rows)):
+        raise RuntimeError("Installed core did not expose a fresh built-in/bundled plugin catalog")
+
+
+def verify_plugin_payload(descriptor, checked):
+    files = descriptor["image"]["files"]
+    if not files or any(item["source"] != "payload/" + item["sha256"] for item in files):
+        raise RuntimeError("Managed runtime must use content-addressed packaged files")
+    expected = {item["sha256"] + ": OK" for item in files}
+    if set(checked.splitlines()) != expected:
+        raise RuntimeError("Installed managed payload does not match its descriptor")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("candidate", "previous", "dependencies", "output"):
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--image", required=True, help="Already cached local base image; never pulled")
+    parser.add_argument("--require-plugins", action="store_true",
+                        help="Require managed payload readability/hash checks and the Plugins GUI/catalog")
     args = parser.parse_args()
-    result = accept(args.candidate, args.previous, args.dependencies, args.output, args.image)
+    result = accept(args.candidate, args.previous, args.dependencies, args.output, args.image,
+                    require_plugins=args.require_plugins)
     print(json.dumps({"status": result["status"], "versions": result["versions"]}))
 
 
