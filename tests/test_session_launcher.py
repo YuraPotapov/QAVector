@@ -1592,6 +1592,18 @@ def local_config(tmp_path):
     ])
 
 
+def test_filter_users_runs_the_sessions_in_the_order_listed(launched, tmp_path):
+    # Launch Sessions lets the order be dragged; the config's own order is only
+    # the default it starts from.
+    config = _config(tmp_path, [
+        {"env": LOCAL, "class": role, "login": login, "password": "pw"}
+        for login, role in (("agent", "Agent"), ("manager", "Manager"), ("admin", "Admin"))])
+    opened = launched(config, "--env=localhost", "--filter-users=admin,agent")
+    profiles = [next(part for part in argv if part.startswith("--user-data-dir="))
+                for argv in opened]
+    assert [path.rsplit("-", 1)[1] for path in profiles] == ["admin", "agent"]
+
+
 def test_server_log_never_opens_a_debug_port(launched, local_config, sources):
     # The reason this feature has no CDP anywhere in it. --remote-debugging-port
     # is unauthenticated: anything on loopback could drive the browser and read

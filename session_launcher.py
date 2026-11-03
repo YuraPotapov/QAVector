@@ -4648,7 +4648,9 @@ def main():
         if selected is not None:
             users = [u for u in users if u.env == selected.value]
         if users_filter is not None:
-            # keep the config's order; error on any requested login that isn't there
+            # In the order they are listed - that is the order the sessions run
+            # in, and Launch Sessions lets it be set. Error on any requested
+            # login that isn't there.
             known = {u.login for u in users}
             missing = [name for name in users_filter if name not in known]
             if missing:
@@ -4656,8 +4658,11 @@ def main():
                          % (", ".join(missing),
                             "--env=%s" % selected.alias if selected else "The config",
                             ", ".join(sorted(known))))
-            wanted = set(users_filter)
-            users = [u for u in users if u.login in wanted]
+            # Sorted, not rebuilt: one login in several environments keeps the
+            # config's order among its own rows.
+            position = {name: index for index, name in reversed(list(enumerate(users_filter)))}
+            users = sorted((u for u in users if u.login in position),
+                           key=lambda u: position[u.login])
         if not users:
             sys.exit("No users selected (--env/--filter-users left nothing to launch).")
         if cli_password is not None:
