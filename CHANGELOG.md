@@ -16,6 +16,43 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.50] - 2026-11-03
+
+### Added
+- Scoped HTTPS routes, credential aliases and supervised commands for installed
+  plugins, with bounded Host API calls and fail-closed uncertain outcomes.
+- Linux Pause/Continue for managed plugin workers and their command jobs;
+  paused time is excluded from active execution deadlines.
+
+### Changed
+- Plugins now uses a searchable catalog with category icons, lifecycle-aware
+  actions, compatibility explanations and responsive light/dark layouts.
+- Rebuilt the managed Python/SDK bundle alongside the core and GUI.
+
+### Fixed
+- Packaged managed runtime files are readable by the ordinary application user
+  after a root-owned DEB installation.
+
+## [0.16.49] - 2026-11-02
+
+### Added
+- Development preview of managed `.qavplug` packages, the Plugins catalog,
+  agent profiles and version-pinned plugin execution through Plugin Host.
+
+### Changed
+- On Linux, a live user Pause holds tracked step process trees in place;
+  Continue resumes them and preserves their remaining step timeout. Native
+  runtime jobs and in-process operations still finish on their own.
+- The cycle graph and cockpit show held steps as Paused, including processes
+  started while the cycle is already paused.
+- Browser windows left open after scenarios finish no longer block a cycle;
+  their launcher stays owned by the GUI and is stopped when it closes.
+
+### Fixed
+- Pause visits every process root started by a step, including multiple roots.
+- Windows launch works when Qt does not expose its process-group API, and the
+  delayed stop timer is destroyed with its released process.
+
 ## [0.16.48] - 2026-10-29
 
 ### Changed
