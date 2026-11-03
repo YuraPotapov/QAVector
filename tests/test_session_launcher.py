@@ -1889,6 +1889,22 @@ def test_a_staged_window_opens_maximized_too(monkeypatch):
     assert "--start-maximized" in opened[0]
 
 
+def test_only_a_scenario_window_hides_the_restore_pages_bubble(monkeypatch):
+    opened = []
+    monkeypatch.setattr(sl, "clear_devtools_port", lambda profile: None)
+    monkeypatch.setattr(sl.subprocess, "Popen",
+                        lambda argv, **kw: opened.append(argv) or _FakeProc(argv))
+    sl.open_window("/usr/bin/chrome", "/tmp/p", "Agent", "a", "http://x", False, {})
+    sl.open_window("/usr/bin/chrome", "/tmp/p", "Agent", "a", "http://x", True, {},
+                   scenario=True)
+    source = sl.WindowSource("/usr/bin/chrome", "http://x", {}, [], stagger_s=0)
+    source.open(("Agent", None, "/tmp/dev-agent", "agent", "http://x", ()))
+    assert "--hide-crash-restore-bubble" not in opened[0]
+    assert "--hide-crash-restore-bubble" in opened[1]
+    assert "--hide-crash-restore-bubble" in opened[2]   # staged = --run-tests
+    assert opened[1][-1] == "http://x"
+
+
 def _placement(tmp_path, **placement):
     default = tmp_path / "Default"
     default.mkdir(parents=True, exist_ok=True)

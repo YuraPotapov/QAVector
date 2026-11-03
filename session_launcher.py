@@ -3243,7 +3243,7 @@ def read_commands(windows_by_session, on_closed=None):
 
 
 def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
-                bind_lifetime=False, maximized=False):
+                bind_lifetime=False, maximized=False, scenario=False):
     """Start one Chrome on one profile and announce it. Returns the Popen.
 
     Split out of the launch loop because a --run-tests run may open a window long
@@ -3255,6 +3255,9 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
     made by the child itself through preexec_fn, so this does nothing there.
 
     ``maximized`` is --maximized.
+
+    ``scenario`` is a --run-tests window: it never shows Chrome's "Restore pages?"
+    bubble, which covers the page the scenario is driving.
     """
     clear_devtools_port(profile)  # so --run-tests cannot attach to a dead/reused port
     log.info("Launching %-8s (login: %s)", cls, login)
@@ -3275,6 +3278,11 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
     ]
     if maximized:
         chrome_args.append("--start-maximized")
+    if scenario:
+        # The exit_type pref set_profile_name writes is not enough on its own: a
+        # Chrome still running on the profile, or killed after that write, brings
+        # the bubble back. The switch hides it whatever the profile says.
+        chrome_args.append("--hide-crash-restore-bubble")
     if debug_port:
         # Flow-execution and recording only: open a CDP endpoint so the engine
         # can attach and drive this window. Port 0 = auto-pick a free port;
@@ -3350,7 +3358,7 @@ class WindowSource:
             proc = open_window(self._chrome, profile, cls, login, self._url,
                                debug_port=True, spawn_kwargs=self._spawn_kwargs,
                                bind_lifetime=self._bind_lifetime,
-                               maximized=self._maximized)
+                               maximized=self._maximized, scenario=True)
             self._procs.append((cls, proc))
             self._names[proc] = cls
             if EXTENSIONS_NEED_CDP:
@@ -4883,7 +4891,7 @@ def main():
                            bool(run_tests or recorder)
                            or bool(EXTENSIONS_NEED_CDP and wanted),
                            spawn_kwargs, bind_lifetime=not detach,
-                           maximized=maximized)
+                           maximized=maximized, scenario=bool(run_tests))
         procs.append((cls, proc))
         if EXTENSIONS_NEED_CDP and wanted:
             _install_extensions_for(profile, wanted)
