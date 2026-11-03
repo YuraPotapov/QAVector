@@ -17,7 +17,7 @@ from PySide6.QtCore import (Property, QEasingCurve, QEvent, QObject, QPoint,
                             QPointF, QPropertyAnimation, QRect, QRectF, QSize,
                             Qt, QTimer, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFontMetricsF, QIcon, QKeySequence,
-                           QPainter, QPen, QShortcut)
+                           QPainter, QPen, QShortcut, QValidator)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QFileDialog, QFrame, QHBoxLayout, QLabel,
@@ -410,6 +410,30 @@ class Segmented(QWidget):
         return self._current
 
 
+class _BoundedSpin(QSpinBox):
+    """A number typed past either end is taken, and brought to that end once the
+    edit is done. The stock box refuses the key instead - a 9 typed where the
+    most is 4 does nothing at all, which reads as a broken field, not a limit."""
+
+    def __init__(self):
+        super().__init__()
+        self.setCorrectionMode(QAbstractSpinBox.CorrectToNearestValue)
+
+    def validate(self, text, pos):
+        typed = text.strip()
+        if typed.isdigit() and not self.minimum() <= int(typed) <= self.maximum():
+            return QValidator.Intermediate, text, pos
+        return super().validate(text, pos)
+
+    def fixup(self, text):
+        # Without this, "nearest" is worked out from a number Qt could not read,
+        # and a 9 where the most is 4 came out as the minimum.
+        typed = text.strip()
+        if typed.isdigit():
+            return str(min(max(int(typed), self.minimum()), self.maximum()))
+        return super().fixup(text)
+
+
 class Stepper(QWidget):
     """A small number with a button on each side: [-][ 4 ][+].
 
@@ -433,7 +457,7 @@ class Stepper(QWidget):
         line.setSpacing(0)
 
         self.down = self._button("minus", "left", -1)
-        self.spin = QSpinBox()
+        self.spin = _BoundedSpin()
         self.spin.setButtonSymbols(QSpinBox.NoButtons)
         self.spin.setAlignment(Qt.AlignCenter)
         self.spin.setRange(minimum, maximum)
@@ -478,6 +502,12 @@ class Stepper(QWidget):
     def setRange(self, minimum, maximum):
         self.spin.setRange(minimum, maximum)
         self._update_limits()
+
+    def minimum(self):
+        return self.spin.minimum()
+
+    def maximum(self):
+        return self.spin.maximum()
 
     def step_by(self, step):
         self.spin.setValue(self.spin.value() + step)

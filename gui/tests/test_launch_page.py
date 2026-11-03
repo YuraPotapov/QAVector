@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtTest import QTest
 
 from cms_gui import core as core_mod
 from cms_gui import launch, launchcontroller as lc, launchprojectsfile as lpf, \
@@ -24,16 +25,29 @@ from cms_gui.pages.launch import SCENARIO_MODES, UNSAVED, LaunchSessionsPage
 from cms_gui.settings import Settings
 
 
+#: Accounts each environment has besides its named one. Many tests edit
+#: "N at a time" as the plainest edit there is, and the number goes no higher
+#: than the sessions there are - so there have to be enough of them.
+CROWD = 24
+
+
+def _crowd(env):
+    return [{"env": env, "login": "user%02d" % n, "class": "User", "tests": [],
+             "has_password": True} for n in range(1, CROWD + 1)]
+
+
 def _inventory():
     return core_mod.Inventory({
         "envs": [{"alias": "claim-dev", "value": "https://claim-dev.example.com/",
-                  "origin": "https://claim-dev.example.com", "count": 1},
+                  "origin": "https://claim-dev.example.com", "count": 1 + CROWD},
                  {"alias": "localhost", "value": "localhost:8069",
-                  "origin": "http://localhost:8069", "count": 1}],
+                  "origin": "http://localhost:8069", "count": 1 + CROWD}],
         "users": [{"env": "https://claim-dev.example.com/", "login": "role_agent",
                    "class": "Agent", "tests": [], "has_password": True},
+                  *_crowd("https://claim-dev.example.com/"),
                   {"env": "localhost:8069", "login": "admin",
-                   "class": "Admin", "tests": [], "has_password": True}],
+                   "class": "Admin", "tests": [], "has_password": True},
+                  *_crowd("localhost:8069")],
         "scenarios": [], "extensions": [], "tags": [],
     })
 
@@ -699,6 +713,65 @@ def test_the_answer_and_the_number_move_together(page):
     assert panel.jobs_all.isChecked(), "a greyed number never changes the answer"
 
 
+def _choose(page, *logins):
+    page.users_mode.set_current("Choose accounts")
+    page.users_list.set_checked(list(logins), notify=True)
+
+
+def test_at_a_time_goes_no_higher_than_the_sessions_chosen(page):
+    """Four accounts: four at a time is all there is, so + stops there."""
+    _pick_env(page, LOCAL)
+    _choose(page, "admin", "user01", "user02", "user03")
+    page.sessions_panel.jobs_some.setChecked(True)
+    page.jobs.setValue(3)
+    assert page.jobs.up.isEnabled()
+    page.jobs.up.click()
+    assert page.jobs.value() == 4 and not page.jobs.up.isEnabled()
+    page.jobs.setValue(9)
+    assert page.jobs.value() == 4
+
+
+def test_a_number_typed_past_the_sessions_comes_down_to_them(page):
+    _pick_env(page, LOCAL)
+    _choose(page, "admin", "user01", "user02", "user03")
+    page.sessions_panel.jobs_some.setChecked(True)
+    spin = page.jobs.spin
+    spin.selectAll()
+    QTest.keyClicks(spin, "9")
+    assert spin.text() == "9", "taken as typed, not refused key by key"
+    QTest.keyClick(spin, Qt.Key_Return)
+    assert page.jobs.value() == 4 and page.state()["sessions"]["jobs"] == 4
+    spin.selectAll()
+    QTest.keyClicks(spin, "0")
+    QTest.keyClick(spin, Qt.Key_Return)
+    assert page.jobs.value() == 1
+
+
+def test_fewer_sessions_bring_the_number_down_with_them(page):
+    _pick_env(page, LOCAL)
+    _choose(page, "admin", "user01", "user02", "user03")
+    page.jobs.setValue(4)
+    _choose(page, "admin", "user01")
+    assert page.jobs.value() == 2 and page.sessions_button.text() == "2 at a time"
+    _choose(page, "admin")
+    assert page.jobs.value() == 1 and page.sessions_panel.jobs_one.isChecked()
+    assert not page.sessions_panel.jobs_some.isEnabled(), "one session has no several"
+
+
+def test_a_saved_number_past_the_sessions_is_not_an_edit(page):
+    """Saved as 8 at a time, shown with four accounts as 4 - and it runs as saved."""
+    _pick_env(page, LOCAL)
+    _choose(page, "admin", "user01", "user02", "user03")
+    config = page.state()
+    config["sessions"] = dict(config["sessions"], jobs=8)
+    page.controller.save_as(config, "Eight")
+    _open_saved(page, "Other")
+    _pick_config(page, "Eight")
+    assert page._current_config_name() == "Eight"
+    assert page.jobs.value() == 4
+    assert not page.is_dirty()
+
+
 def test_a_saved_setting_is_shown_as_its_answer(page):
     panel = page.sessions_panel
     for saved, button in (((1, False, False), panel.jobs_one), ((3, False, False), panel.jobs_some),
@@ -1090,7 +1163,7 @@ def test_the_footer_says_where_this_run_is(page):
     _pick_env(page, LOCAL)
     text = page.context_line.text()
     assert text.startswith("Workspace / localhost") and "localhost:8069" in text
-    assert "1 account" in text
+    assert "%d accounts" % (1 + CROWD) in text
 
 
 # ------------------------------------------------- + Account

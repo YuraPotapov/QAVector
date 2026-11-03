@@ -26,6 +26,10 @@ from .. import theme, widgets
 
 ONE, SOME, ALL, AUTO = "one", "some", "all", "auto"
 
+#: The most "N at a time" goes to with no sessions to count. Once there are,
+#: their number is the most: the runner never starts more than it has.
+MOST = 64
+
 
 def label_for(jobs, all_at_once, auto):
     """What the page's button says is in force."""
@@ -311,7 +315,7 @@ class SessionsPanel(widgets.FloatingPanel):
         column.setContentsMargins(12, 10, 12, 12)
         column.setSpacing(8)
 
-        self.jobs = widgets.Stepper(1, 64)
+        self.jobs = widgets.Stepper(1, MOST)
         self.jobs_one = QRadioButton("One by one")
         self.jobs_some = QRadioButton("")
         self.jobs_some.setAccessibleName("Several at a time")
@@ -392,6 +396,9 @@ class SessionsPanel(widgets.FloatingPanel):
         jobs = max(1, int(jobs or 1))
         self._syncing = True
         try:
+            # Not cut to the last plan's sessions: the page sets the most for
+            # the sessions this setting comes with, once they are known.
+            self.jobs.setRange(1, MOST)
             self.jobs.setValue(jobs)
             if jobs >= 2:
                 self._last_some = jobs
@@ -403,6 +410,21 @@ class SessionsPanel(widgets.FloatingPanel):
     def current(self):
         return choice_of(self.jobs.value(), self.jobs_all.isChecked(), self.jobs_auto.isChecked())
 
+    def set_most(self, sessions):
+        """At most as many at a time as there are sessions: the runner would start
+        no more anyway, and a number past that would promise what never happens.
+        A number above it comes down to it. True when it did.
+
+        None selected is not a most of one: until the accounts have arrived
+        there are none either, and cutting the number then would lose it."""
+        before = self.jobs.value()
+        most = min(int(sessions), MOST) if sessions else MOST
+        self.jobs.setRange(1, most)
+        self.jobs.setToolTip(
+            "At most %d - one for each session chosen; a bigger number would "
+            "start no more." % most if sessions else "")
+        return self.jobs.value() != before
+
     # -- what it will do ----------------------------------------------------------
     def set_plan(self, entries, kept, running, custom=False):
         """The sessions selected, as ``(login, name)`` in the order they run;
@@ -411,6 +433,8 @@ class SessionsPanel(widgets.FloatingPanel):
         their own rather than the accounts'."""
         for button in (self.jobs_one, self.jobs_some, self.jobs_all, self.jobs_auto):
             button.setEnabled(running)
+        # One session has no "several at a time" to be.
+        self.jobs_some.setEnabled(running and self.jobs.maximum() > 1)
         # Greyed with the number it reads with (the page greys the number).
         self.at_a_time.setEnabled(running and self.jobs.isEnabled())
         self.lanes.set_plan(entries, self.current(), self.jobs.value(), kept)

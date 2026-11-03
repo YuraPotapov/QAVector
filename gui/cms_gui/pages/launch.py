@@ -1048,6 +1048,10 @@ class LaunchSessionsPage(QWidget):
         if self._building:
             return
         config = self.state()
+        if self.sessions_panel.set_most(len(self._session_entries(config))):
+            # The number came down to the sessions there are, and that change
+            # has already been through here with it.
+            return
         self.users_list.set_locked(config["users"]["mode"] != launch.USERS_PICK)
         self._show_what(config)
         self.ext_list.setEnabled(config["extensions"]["mode"] == launch.EXT_PICK)
@@ -1844,6 +1848,10 @@ class LaunchSessionsPage(QWidget):
         config = launch.merged(config)
         config.pop("environment", None)
         config.pop("environment_value", None)
+        # A saved "8 at a time" shows as 4 with four sessions, and that is not
+        # an edit: it runs exactly as saved.
+        sessions = config["sessions"]
+        sessions["jobs"] = min(int(sessions["jobs"] or 1), self.jobs.maximum())
 
         def norm(value):
             if isinstance(value, dict):

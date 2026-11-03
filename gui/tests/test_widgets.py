@@ -42,6 +42,20 @@ def test_the_ends_stop_at_the_range(qapp):
     assert stepper.up.isEnabled()
 
 
+def test_a_number_typed_past_an_end_comes_back_to_it(qapp):
+    """Typed, not refused: a key that does nothing reads as a broken field."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    stepper = widgets.Stepper(1, 4, 2)
+    spin = stepper.spin
+    for typed, landed in (("9", 4), ("70", 4), ("0", 1), ("3", 3)):
+        spin.selectAll()
+        QTest.keyClicks(spin, typed)
+        assert spin.text() == typed
+        QTest.keyClick(spin, Qt.Key_Return)
+        assert stepper.value() == landed, typed
+
+
 def test_the_stepper_disables_as_a_whole(qapp):
     """The Launch page greys it out while "All at once" is ticked."""
     stepper = widgets.Stepper(1, 64, 4)
