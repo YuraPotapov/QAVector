@@ -16,6 +16,18 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.55] - 2026-11-03
+
+### Fixed
+- The Sessions at once number was not drawn in 0.16.53 and 0.16.54: they were
+  built on PySide6 6.11.3, which shrinks a styled spin box's text field. That
+  release is excluded.
+
+### Changed
+- "N at a time" goes no higher than the sessions chosen: + greys out there,
+  fewer accounts bring the number down, and a number typed past either end
+  comes back to it when the edit is done.
+
 ## [0.16.54] - 2026-11-03
 
 ### Fixed
