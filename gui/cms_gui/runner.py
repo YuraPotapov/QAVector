@@ -58,6 +58,33 @@ CYCLE_STAGES = 400
 LIVE_STATES = ("launching", "launched", "attached", "running")
 
 
+def launch_kind(argv):
+    """What a launcher was started to do, read off its command line.
+
+    "cycle", "recorder", "flows" (scenarios to run) or "plain" (windows only)
+    - which decides when it has nothing left to do; see holds_only_windows.
+    """
+    flags = {str(arg).split("=", 1)[0] for arg in argv}
+    for flag, kind in (("--cycle-run", "cycle"), ("--recorder", "recorder"),
+                       ("--run-tests", "flows")):
+        if flag in flags:
+            return kind
+    return "plain"
+
+
+def holds_only_windows(kind, state):
+    """Whether a running launcher of ``kind`` has nothing left to execute.
+
+    A plain launch is there once its windows are up; a scenario run once its
+    scenarios are done - the windows then stay open only to be looked at. A
+    recording or a cycle never is: somebody is working in it.
+    """
+    if state.cycle_running:
+        return False
+    return (kind == "flows" and state.flows_finished
+            or kind == "plain" and state.windows_ready)
+
+
 def parse_log_line(line):
     """Split a console line into its parts; unparseable lines stay whole."""
     match = LOG_LINE.match(line)
@@ -81,6 +108,9 @@ class LauncherProcess(QObject):
         self._out_buffer = ""
         self._err_buffer = ""
         self._own_group = False
+        # Launchers let go by release(): (QProcess, own process group). Still
+        # ours to stop, no longer ours to report.
+        self._released = []
 
     # -- lifecycle ------------------------------------------------------------
     def is_running(self):
@@ -126,9 +156,12 @@ class LauncherProcess(QObject):
         """
         if not self.is_running():
             return
-        pid = int(self._proc.processId())
+        self._interrupt(self._proc, self._own_group)
+
+    def _interrupt(self, proc, own_group):
+        pid = int(proc.processId())
         if os.name == "nt":
-            if self._own_group:
+            if own_group:
                 try:
                     import ctypes
                     # CTRL_BREAK_EVENT (1) - CTRL_C cannot be sent to another
@@ -142,13 +175,58 @@ class LauncherProcess(QObject):
             # window, which a console core has none of, so the kill is what
             # actually ends it. The windows go with it - the launcher puts every
             # Chrome it starts in a kill-on-close job owned by that process.
-            self._proc.terminate()
-            QTimer.singleShot(2000, self._kill_if_still_running)
+            proc.terminate()
+            # A released process is deleted when it exits. Parenting the timer
+            # to it cancels this fallback too, instead of calling a dead Qt object.
+            timer = QTimer(proc)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: _kill_if_still_running(proc))
+            timer.start(2000)
             return
         try:
             os.kill(pid, signal.SIGINT)
         except (ProcessLookupError, PermissionError, OSError):
-            self._proc.terminate()
+            proc.terminate()
+
+    def release(self):
+        """Let the running launcher go on by itself, and free this for the next run.
+
+        For a launcher with nothing left to do but hold windows open for
+        somebody to look at: it keeps them until they are closed, while the
+        window starts something else. Its output is still read - a child
+        writing into a pipe nobody empties blocks on it - but no longer
+        reported. stop_released() still reaches it.
+        """
+        if not self.is_running():
+            return False
+        proc, self._proc = self._proc, None
+        for sig in (proc.readyReadStandardOutput, proc.readyReadStandardError,
+                    proc.finished, proc.errorOccurred):
+            sig.disconnect()
+        proc.readyReadStandardOutput.connect(lambda: proc.readAllStandardOutput())
+        proc.readyReadStandardError.connect(lambda: proc.readAllStandardError())
+        proc.finished.connect(lambda *_args: self._forget(proc))
+        self._released.append((proc, self._own_group))
+        self._out_buffer = self._err_buffer = ""
+        return True
+
+    def released(self):
+        """How many let-go launchers are still up."""
+        return sum(1 for proc, _group in self._released if proc.state() != QProcess.NotRunning)
+
+    def stop_released(self, wait_ms=0):
+        """Close what release() let go - its own graceful way, as Stop does."""
+        live = [(proc, group) for proc, group in self._released
+                if proc.state() != QProcess.NotRunning]
+        for proc, group in live:
+            self._interrupt(proc, group)
+        for proc, _group in live:
+            if wait_ms:
+                proc.waitForFinished(wait_ms)
+
+    def _forget(self, proc):
+        self._released = [one for one in self._released if one[0] is not proc]
+        proc.deleteLater()
 
     def send_command(self, **command):
         """Write one JSON command line to the launcher's stdin (--control=-).
@@ -162,11 +240,6 @@ class LauncherProcess(QObject):
         line = json.dumps(command) + "\n"
         self._proc.write(line.encode("utf-8"))
         return True
-
-    def _kill_if_still_running(self):
-        """The second half of a Windows stop, once terminate() has had its go."""
-        if self.is_running():
-            self._proc.kill()
 
     def kill(self):
         if self.is_running():
@@ -225,6 +298,12 @@ class LauncherProcess(QObject):
                              "script in Settings." % (self._proc.program(),))
 
 
+def _kill_if_still_running(proc):
+    """The second half of a Windows stop, once terminate() has had its go."""
+    if proc.state() != QProcess.NotRunning:
+        proc.kill()
+
+
 def _new_process_group(args):
     """QProcess modifier: give the child its own console group (Windows only)."""
     CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -274,6 +353,9 @@ class RunState(QObject):
         # The scenarios are finished, whether or not the launcher has exited:
         # without --close-after it stays up holding the windows open.
         self.flows_finished = False
+        # Every window a plain launch opens is up (windows.ready). Without
+        # scenarios to run, that is all the launcher had to do.
+        self.windows_ready = False
         # Only --jobs=auto reports one: with a fixed number there is nothing to
         # watch, because nothing moves it.
         self.workers = None       # {"limit", "ceiling", "unit", "why"}
@@ -837,6 +919,7 @@ class RunState(QObject):
                         "why": event.get("why") or ""}
 
     def _on_windows_ready(self, _event, _name):
+        self.windows_ready = True
         for session in self.sessions.values():
             if session["state"] == "launching":
                 session["state"] = "launched"

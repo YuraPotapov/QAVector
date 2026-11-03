@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cms_gui import runner as runner_mod
 from cms_gui.runner import (LIVE_STATES, SERVER_LOG_LINES, LauncherProcess,
-                            RunState, parse_log_line)
+                            RunState, holds_only_windows, launch_kind,
+                            parse_log_line)
 
 
 # ------------------------------------------------------------------ log lines
@@ -308,9 +309,106 @@ def test_the_scenarios_finishing_is_not_the_launcher_finishing(qapp):
     assert state.flows_finished is False
 
 
+# ------------------------------------------- a launcher with only windows left
+def test_what_a_launcher_was_started_for_comes_off_its_command_line():
+    assert launch_kind(["py", "launcher.py", "--cycle-run=demo", "--events=-"]) == "cycle"
+    assert launch_kind(["py", "launcher.py", "--recorder=login", "--run-tests=a"]) == "recorder"
+    assert launch_kind(["py", "launcher.py", "--run-tests=smoke", "--events=-"]) == "flows"
+    assert launch_kind(["py", "launcher.py", "--env=dev", "--events=-"]) == "plain"
+
+
+def test_a_scenario_run_holds_only_windows_once_its_scenarios_are_done():
+    # Windows left open for inspection are no reason to keep a cycle waiting;
+    # a scenario still executing is.
+    state = RunState()
+    _feed(state, {"kind": "windows.ready", "count": 1})
+    assert not holds_only_windows("flows", state)
+    _feed(state, {"kind": "run.finished", "exit_code": 0})
+    assert holds_only_windows("flows", state)
+    state.reset()
+    assert not holds_only_windows("flows", state)
+
+
+def test_a_plain_launch_holds_only_windows_once_they_are_up():
+    state = RunState()
+    assert not holds_only_windows("plain", state)
+    _feed(state, {"kind": "windows.ready", "count": 2})
+    assert holds_only_windows("plain", state)
+
+
+def test_a_recording_or_a_cycle_is_never_only_windows():
+    state = RunState()
+    _feed(state, {"kind": "windows.ready", "count": 1},
+          {"kind": "run.finished", "exit_code": 0})
+    assert not holds_only_windows("recorder", state)
+    assert not holds_only_windows("cycle", state)
+    _feed(state, {"kind": "cycle.run.start", "run_id": "r", "graph": {}})
+    assert not holds_only_windows("flows", state)
+
+
+def _until(qapp, done, seconds=15):
+    import time
+    deadline = time.time() + seconds
+    while not done() and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    return done()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGINT is how the stop arrives")
+def test_a_released_launcher_keeps_running_unreported_and_stops_at_close(qapp, tmp_path):
+    """release() frees the window for a cycle while the windows stay up.
+
+    What the let-go launcher says afterwards reaches nobody - but it is still
+    read: a child writing into a pipe nobody empties would block on it.
+    """
+    go, done = tmp_path / "go", tmp_path / "done"
+    script = tmp_path / "linger.py"
+    script.write_text(
+        "import pathlib, signal, sys, time\n"
+        "signal.signal(signal.SIGINT, lambda *a: sys.exit(0))\n"
+        "print('{\"kind\": \"launcher.start\"}', flush=True)\n"
+        "go, done = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+        "while not go.exists():\n    time.sleep(0.02)\n"
+        "print('{\"kind\": \"window.exited\"}', flush=True)\n"
+        "sys.stdout.write('x' * 300000 + '\\n'); sys.stdout.flush()\n"
+        "sys.stderr.write('y' * 300000 + '\\n'); sys.stderr.flush()\n"
+        "done.write_text('ok')\n"
+        "while True:\n    time.sleep(0.05)\n", encoding="utf-8")
+    launcher = LauncherProcess()
+    events, finished = [], []
+    launcher.event.connect(events.append)
+    launcher.finished.connect(finished.append)
+    launcher.start([sys.executable, str(script), str(go), str(done)])
+    assert _until(qapp, lambda: events)
+
+    assert launcher.release() is True
+    assert not launcher.is_running() and launcher.released() == 1
+    go.write_text("go")
+    assert _until(qapp, done.exists)
+    assert [one["kind"] for one in events] == ["launcher.start"]
+
+    # Free for the next run while the first one is still up.
+    quiet = tmp_path / "quiet.py"
+    quiet.write_text("print('{}')", encoding="utf-8")
+    assert launcher.start([sys.executable, str(quiet)]) is True
+    assert _until(qapp, lambda: finished)
+    assert finished == [0]
+
+    launcher.stop_released(15000)
+    assert _until(qapp, lambda: launcher.released() == 0 and not launcher._released)
+    assert finished == [0]
+
+
+def test_nothing_to_release_when_nothing_runs(qapp):
+    launcher = LauncherProcess()
+    assert launcher.release() is False
+    assert launcher.released() == 0
+
+
 # ------------------------------------------------------------------- starting
 
-def test_a_run_starts_even_where_qt_lacks_the_process_group_api(qapp, tmp_path):
+def test_a_run_starts_even_where_qt_lacks_the_process_group_api(qapp, tmp_path, monkeypatch):
     """PySide6 does not bind QProcess.setCreateProcessArgumentsModifier.
 
     Calling it unconditionally raised AttributeError inside start(), before the
@@ -320,12 +418,44 @@ def test_a_run_starts_even_where_qt_lacks_the_process_group_api(qapp, tmp_path):
     """
     launcher = LauncherProcess()
     assert not hasattr(launcher._proc or object(), "setCreateProcessArgumentsModifier")
+    from types import SimpleNamespace
+    # Exercise the Windows branch even on the Linux test runner.
+    monkeypatch.setattr(runner_mod, "os", SimpleNamespace(name="nt"))
 
     script = tmp_path / "quiet.py"
     script.write_text("print('{}')", encoding="utf-8")
     assert launcher.start([sys.executable, str(script)]) is True
     assert launcher._proc is not None
     launcher._proc.waitForFinished(15000)
+
+
+def test_windows_stop_timer_dies_with_a_released_process(qapp, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QCoreApplication, QEvent, QTimer
+    from shiboken6 import isValid
+
+    script = tmp_path / "waiting.py"
+    script.write_text("import time\nprint('{}', flush=True)\ntime.sleep(30)\n")
+    launcher = LauncherProcess()
+    events = []
+    launcher.event.connect(events.append)
+    launcher.start([sys.executable, str(script)])
+    proc = launcher._proc
+    try:
+        assert _until(qapp, lambda: events)
+        launcher.release()
+        monkeypatch.setattr(runner_mod, "os", SimpleNamespace(name="nt"))
+        launcher.stop_released()
+        timers = proc.findChildren(QTimer)
+        assert len(timers) == 1
+        assert proc.waitForFinished(5000)
+        QCoreApplication.sendPostedEvents(proc, QEvent.DeferredDelete)
+        assert not isValid(timers[0])
+        assert not launcher._released
+    finally:
+        if isValid(proc):
+            proc.kill()
+            proc.waitForFinished(5000)
 
 
 def test_the_process_group_flag_records_whether_it_was_applied(qapp, tmp_path):

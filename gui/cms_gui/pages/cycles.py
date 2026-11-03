@@ -166,6 +166,11 @@ class CyclesPage(QWidget):
         self.core = None
         self.inventory = None
         self.run_state = None
+        # The window has one launcher process. While a scenario executes in
+        # it, a cycle cannot start - so Run is not offered, rather than taken
+        # and dropped. Windows merely left open do not count: the window lets
+        # that launcher go when a cycle starts.
+        self._launcher_busy = False
         self._cycles = []                # rows from --describe
         self._projects = []              # cycleprojectsfile.ProjectRow
         self._projects_path = ""
@@ -604,6 +609,16 @@ class CyclesPage(QWidget):
         if row is None:
             return True
         return not row.get("digest") or row.get("digest") != self._open.get("digest")
+
+    def set_launcher_busy(self, busy):
+        """The window's launcher is executing something - a cycle, or a scenario."""
+        if bool(busy) != self._launcher_busy:
+            self._launcher_busy = bool(busy)
+            self._update_buttons()
+
+    def _launcher_blocks(self):
+        """A scenario session, not a cycle, is what holds the launcher."""
+        return self._launcher_busy and not (self.run_state and self.run_state.cycle_running)
 
     def set_run_state(self, run_state):
         """Follow a live run. Connected once; the window owns the model."""
@@ -1510,7 +1525,8 @@ class CyclesPage(QWidget):
                          "the last run if none is.")
         for action in (only, after):
             # A step run now would run the file, not what is on screen.
-            action.setEnabled(not running and not (self._draft and self._draft.dirty))
+            action.setEnabled(not running and not self._launcher_busy
+                              and not (self._draft and self._draft.dirty))
         menu.exec(where)
 
     # -- restrictions --------------------------------------------------------------
@@ -2929,7 +2945,7 @@ class CyclesPage(QWidget):
         "only" for the selected step, and "from" for that step and its descendants.
         """
         cycle_id = self.current_id()
-        if not cycle_id:
+        if not cycle_id or self._launcher_busy:
             return
         if how == "resume":
             state = (self.run_state.cycle or {}) if self.run_state else {}
@@ -3435,14 +3451,18 @@ class CyclesPage(QWidget):
         # finished long before.
         running = bool(self.run_state and self.run_state.cycle_running)
         has_cycle = bool(self.current_id())
-        self.run_button.setEnabled(has_cycle and not running)
-        self.hard_run_action.setEnabled(has_cycle and not running)
+        blocked = running or self._launcher_busy
+        self.run_button.setEnabled(has_cycle and not blocked)
+        self.hard_run_action.setEnabled(has_cycle and not blocked)
         resume = self._resume_available()
         self.run_button.setText("Resume" if resume else "Run")
         # Said on the button, not in a line under the header: a line that came
         # and went with Resume moved everything below it, and in a window not
         # tall enough to spare it, resized the window.
         self.run_button.setToolTip(
+            "A scenario run is still going.\n"
+            "A cycle can start once its scenarios finish, or Stop it."
+            if self._launcher_blocks() else
             "Resume continues this run: what succeeded is kept, failed or\n"
             "unfinished steps are done again - and may call paid services again.\n"
             "%s, in the menu, is a new run from the first step." % START_OVER
@@ -3453,7 +3473,7 @@ class CyclesPage(QWidget):
         self.intro.setVisible(not has_cycle)
         self.stop_button.setEnabled(running)
         self._sync_run_control()
-        self.subjects.set_busy(running)
+        self.subjects.set_busy(blocked)
         drawn = bool(self.canvas.node_ids())
         self.properties_button.setEnabled(bool(self.current_id()))
         self._sync_restrictions_button()

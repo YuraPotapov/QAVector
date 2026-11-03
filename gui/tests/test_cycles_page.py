@@ -913,6 +913,26 @@ def test_a_scenario_run_does_not_make_the_cycle_look_live(opened):
     assert opened.output.stages.titles() == ["thought about it"]
 
 
+def test_a_running_scenario_blocks_a_cycle_run(opened):
+    """A scenario executing holds the one launcher process. Run used to be
+    offered anyway: the page cleared, and nothing started."""
+    state = RunState()
+    opened.set_run_state(state)
+    requests = []
+    opened.run_requested.connect(lambda *args: requests.append(args))
+
+    opened.set_launcher_busy(True)
+    assert not opened.run_button.isEnabled()
+    assert not opened.hard_run_action.isEnabled()
+    assert "scenario run" in opened.run_button.toolTip()
+    opened._run()
+    assert requests == []
+
+    opened.set_launcher_busy(False)
+    assert opened.run_button.isEnabled()
+    assert "scenario run" not in opened.run_button.toolTip()
+
+
 def test_stopping_says_so(opened):
     asked = []
     opened.stop_requested.connect(lambda: asked.append(True))

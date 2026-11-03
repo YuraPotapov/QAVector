@@ -37,7 +37,7 @@ from .cycleschedule import PlanScheduler
 from .loader import LoaderThread
 from .hotkeys import ActionRegistry, ActionSpec, bind_tooltip
 from . import version as gui_version
-from .runner import LauncherProcess, RunState
+from .runner import LauncherProcess, RunState, holds_only_windows, launch_kind
 from .servicebridge import ServiceBridge
 from .settings import Settings
 from .thirdparty import AboutDialog
@@ -186,6 +186,9 @@ class MainWindow(QMainWindow):
         self.inventory = core_mod.Inventory()
         self.run_state = RunState(self)
         self.process = LauncherProcess(self)
+        # What the running launcher was started to do - see runner.launch_kind.
+        self._launch_kind = ""
+        self._cycle_was_blocked = False
         self.history = history_mod.History(self.settings.data_dir(), parent=self)
         self._project_name_at_start = self._project(self.settings.project_id).name
         #: Called once the inventory of a project just switched to has loaded.
@@ -868,6 +871,9 @@ class MainWindow(QMainWindow):
         # What a run is doing decides what an open subject offers to do next,
         # and a run that moved has changed where its subject stands.
         self.run_state.changed.connect(self._subjects_follow)
+        # A scenario that finished stops holding cycles back while its windows
+        # stay open - see _cycle_blocked.
+        self.run_state.changed.connect(self._sync_cycle_block)
         self.run_state.cycle_subject_changed.connect(self._subjects_follow)
         self.run_state.cycle_step_changed.connect(lambda _step: self._subjects_follow())
 
@@ -1389,7 +1395,7 @@ class MainWindow(QMainWindow):
         # What the project comes back to - see _restore_last_cycle.
         self.settings.save_open_cycle(cycle_id)
         state = self.run_state
-        if (self.process.is_running() or state.cycle_running
+        if (self._cycle_blocked() or state.cycle_running
                 or (state.cycle or {}).get("cycle") == cycle_id):
             return
         where = cyclereplay.last_run_dir(self.history, cycle_id)
@@ -1399,7 +1405,7 @@ class MainWindow(QMainWindow):
     def _replay(self, run_dir, then=None):
         """Read ``run_dir``'s events off the GUI thread, then feed them in."""
         def done(events, error):
-            if error is not None or self.process.is_running() or self.run_state.cycle_running:
+            if error is not None or self._cycle_blocked() or self.run_state.cycle_running:
                 self.cycles.show_loading(False)
                 return
             restored = cyclereplay.restore(run_dir, self.run_state, events=events or [])
@@ -1420,7 +1426,7 @@ class MainWindow(QMainWindow):
         hold the run before the canvas asks. The canvas and the output show
         their skeletons while the run is read. ``then`` runs once it is drawn.
         """
-        if self.process.is_running() or not run_dir:
+        if self._cycle_blocked() or not run_dir:
             return
         self.cycles.show_loading(True)
 
@@ -1440,7 +1446,7 @@ class MainWindow(QMainWindow):
             return
         cycle = self.run_state.cycle or {}
         live = cycle.get("run_id", "") if self.run_state.cycle_running else ""
-        page.set_live(live, self.process.is_running())
+        page.set_live(live, self._cycle_blocked())
         page.refresh_soon()
         self._park_if_ready()
 
@@ -1460,7 +1466,7 @@ class MainWindow(QMainWindow):
             if self.cycles.current_id() != cycle_id:
                 self.cycles.open(cycle_id)
             return
-        if self.process.is_running():
+        if self._cycle_blocked():
             widgets.note(self._asked_from(), "Subjects",
                          "A run is going in this window. Another run can be opened once "
                          "it has finished, or after you park or stop it.")
@@ -1481,7 +1487,7 @@ class MainWindow(QMainWindow):
             self.show_page("cycles")
             self.cycles.show_step(step_id)
             return
-        if self.process.is_running():
+        if self._cycle_blocked():
             widgets.note(self._asked_from(), "Subjects",
                          "A run is going in this window. Another run can be opened once "
                          "it has finished, or after you park or stop it.")
@@ -1507,7 +1513,7 @@ class MainWindow(QMainWindow):
         """
         if not (cycle_id and run_dir and run_id):
             return
-        if self.process.is_running():
+        if self._cycle_blocked():
             widgets.note(self._asked_from(), "Subjects",
                          "A run is going in this window. Park or stop it, then resume this one.")
             return
@@ -1537,7 +1543,7 @@ class MainWindow(QMainWindow):
         if not key:
             return
         asked_from = self._asked_from()
-        if self.process.is_running():
+        if self._cycle_blocked():
             widgets.note(asked_from, "Subjects", "A run is going in this window. Park or stop "
                                                  "it, then start another one.")
             return
@@ -2019,7 +2025,7 @@ class MainWindow(QMainWindow):
     def _start_planned(self, item):
         """Start work on a task that was put on the plan - or, for an approval
         nobody answered, resume the run that stopped at it."""
-        if self.process.is_running():
+        if self._cycle_blocked():
             return
         if item.get("kind") == "approval":
             try:
@@ -2069,7 +2075,7 @@ class MainWindow(QMainWindow):
     def _start_due(self):
         if not self._due or self._offering or getattr(self, "_closing", False):
             return
-        if self.process.is_running():
+        if self._cycle_blocked():
             return                              # _on_finished asks again
         from . import cycleschedule
         from .cyclesubjects import planned_title
@@ -2103,7 +2109,7 @@ class MainWindow(QMainWindow):
         again; Not now leaves it to be offered at the trigger's next check."""
         if self._offering or getattr(self, "_closing", False):
             return
-        if self.process.is_running():
+        if self._cycle_blocked():
             return                              # _on_finished asks again
         offer = self.listener.next_offer()
         if offer is None:
@@ -2253,11 +2259,11 @@ class MainWindow(QMainWindow):
         self._update_background_action()
         cycle_id, name = self._last_cycle()
         self.last_cycle_action.setText("Run &Last Cycle%s" % (" (%s)" % name if name else ""))
-        self.last_cycle_action.setEnabled(bool(cycle_id) and not self.process.is_running())
+        self.last_cycle_action.setEnabled(bool(cycle_id) and not self._cycle_blocked())
 
     def run_last_cycle(self):
         cycle_id, _name = self._last_cycle()
-        if not cycle_id or self.process.is_running():
+        if not cycle_id or self._cycle_blocked():
             return
         self.show_page("cycles")
         self.cycles.explorer.select(cycle_id)
@@ -2570,6 +2576,40 @@ class MainWindow(QMainWindow):
             mode = None
         self.start_cycle_run(cycle_id, how, step, execution_mode=mode)
 
+    def _launcher_idle(self):
+        """The launcher is up only to hold windows open - see holds_only_windows."""
+        return self.process.is_running() and holds_only_windows(self._launch_kind, self.run_state)
+
+    def _cycle_blocked(self):
+        """Whether a cycle cannot start now: the launcher is doing something."""
+        return self.process.is_running() and not self._launcher_idle()
+
+    def _sync_cycle_block(self):
+        blocked = self._cycle_blocked()
+        self.cycles.set_launcher_busy(blocked)
+        if self._cycle_was_blocked and not blocked:
+            # What _on_finished would have asked again, had the launcher exited.
+            QTimer.singleShot(0, self._offer_next)
+            QTimer.singleShot(0, self._start_due)
+        self._cycle_was_blocked = blocked
+
+    def _release_launcher(self):
+        """Leave an idle launcher holding its windows, and free the window.
+
+        The session is over as far as this window is concerned - recorded and
+        settled now, as though it had exited. Its windows stay until somebody
+        closes them; closing the app closes them too (closeEvent).
+        """
+        if not self._launcher_idle():
+            return
+        code = self.run_state.exit_code if self._launch_kind == "flows" else 0
+        self.service_bridge.cancel_all()
+        self.ask_bridge.cancel_all()
+        self.process.release()
+        self._set_running(False)
+        self.run.run_finished(code or 0)
+        self._close_entry(history_mod.status_for(code), exit_code=code)
+
     def start_cycle_run(self, cycle_id, how="", step="", variables=None, subject=None, execution_mode=None):
         """Run one cycle. Modelled on start_run, and deliberately separate.
 
@@ -2588,7 +2628,7 @@ class MainWindow(QMainWindow):
         produced is still in scope. How that is spelled on a command line is
         settled here, because this is where every other flag is spelled too.
         """
-        if not cycle_id or self.process.is_running():
+        if not cycle_id or self._cycle_blocked():
             return
         if not self.core.is_configured():
             widgets.note(self, "Run", "The core was not found. Reinstall QAVector, or start "
@@ -2627,6 +2667,7 @@ class MainWindow(QMainWindow):
             widgets.warn(self, "Run", str(exc))
             return
 
+        self._release_launcher()
         self.run_state.reset()
         # The cycle record has its own lifetime - a scenario run no longer
         # clears it - so the one place that starts a cycle says so.
@@ -2702,6 +2743,7 @@ class MainWindow(QMainWindow):
             self.status_right.setText("The launcher is no longer accepting approval answers.")
 
     def _on_started(self, argv):
+        self._launch_kind = launch_kind(argv)
         self._set_running(True)
         self.log.append({"ts": "", "level": "INFO", "session": "",
                          "text": "$ " + " ".join(argv)})
@@ -2817,6 +2859,7 @@ class MainWindow(QMainWindow):
         self._update_background_action()
         self.command.set_running(running)
         self.launch.set_running(running)
+        self._sync_cycle_block()
         self.status_state.setText("state: running" if running else "state: idle")
         self._update_workers()   # the count is a live fact; it goes when the run does
         self._subjects_follow()
@@ -3125,6 +3168,20 @@ class MainWindow(QMainWindow):
                 # SIGTERMs every window and gives Chrome up to 15 s each to flush
                 # its cookies. Cutting that short is what loses a login.
                 self.process._proc.waitForFinished(CLOSE_WAIT_MS)
+            finally:
+                QApplication.restoreOverrideCursor()
+        if self.process.released():
+            # Sessions let go for a cycle: nothing runs in them, but their
+            # windows are this app's children and close with it - gracefully,
+            # or their logins go unflushed.
+            if not widgets.confirm(self, "Windows are open", "Browser windows are still open.",
+                                   "Closing closes them gracefully, so each keeps its login. "
+                                   "This can take a few seconds.", agree="Close all", kind="warn"):
+                event.ignore()
+                return
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.process.stop_released(CLOSE_WAIT_MS)
             finally:
                 QApplication.restoreOverrideCursor()
         # Asked before the services question: losing an edit is the one thing

@@ -102,6 +102,29 @@ def test_cycle_resume_passes_the_exact_displayed_run_id(window, monkeypatch):
     assert not any(arg.startswith("--cycle-from=") for arg in sent[0])
 
 
+def test_a_cycle_waits_for_a_running_scenario_but_not_for_windows_left_open(window, monkeypatch):
+    """A finished scenario's windows held the one launcher process, so a cycle
+    sat waiting until they were closed. The session is let go instead."""
+    sent, released, running = [], [], [True]
+    monkeypatch.setattr(window.process, "is_running", lambda: running[0])
+    monkeypatch.setattr(window.process, "release",
+                        lambda: released.append(True) or running.__setitem__(0, False) or True)
+    monkeypatch.setattr(window.process, "start", lambda argv, **kw: sent.append(argv))
+    monkeypatch.setattr(window.core, "is_configured", lambda: True)
+    monkeypatch.setattr(window.core, "argv", lambda *args: list(args))
+    window._on_started(["py", "launcher.py", "--run-tests=smoke", "--events=-"])
+    window.run_state.handle({"kind": "windows.ready", "count": 1})
+    assert window.cycles._launcher_busy
+    window.start_cycle_run("demo")
+    assert sent == [] and released == []
+
+    window.run_state.handle({"kind": "run.finished", "exit_code": 0})
+    assert not window.cycles._launcher_busy
+    window.start_cycle_run("demo")
+    assert released == [True]
+    assert "--cycle-run=demo" in sent[0]
+
+
 @pytest.mark.parametrize("step_events", [True, False])
 def test_prepared_outcome_survives_process_finished_and_replay(window, tmp_path, step_events):
     import json
