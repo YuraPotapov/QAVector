@@ -16,6 +16,13 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.53] - 2026-11-03
+
+### Fixed
+- Windows opened for `--run-tests` no longer show Chrome's "Restore pages?"
+  bubble over the page a scenario drives; they start with
+  `--hide-crash-restore-bubble`. A plain launch is unchanged.
+
 ## [0.16.52] - 2026-11-03
 
 ### Changed
