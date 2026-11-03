@@ -3257,7 +3257,7 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
     ``maximized`` is --maximized.
 
     ``scenario`` is a --run-tests window: it never shows Chrome's "Restore pages?"
-    bubble, which covers the page the scenario is driving.
+    bubble or its offer to translate, which cover the page the scenario is driving.
     """
     clear_devtools_port(profile)  # so --run-tests cannot attach to a dead/reused port
     log.info("Launching %-8s (login: %s)", cls, login)
@@ -3283,6 +3283,11 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
         # Chrome still running on the profile, or killed after that write, brings
         # the bubble back. The switch hides it whatever the profile says.
         chrome_args.append("--hide-crash-restore-bubble")
+        # Nor its offer to translate the page: the app may render in a language
+        # Chrome's UI is not in, and the popup covers what the scenario clicks.
+        # Chrome reads only the last --disable-features, so add any other
+        # feature to this one rather than as a second switch.
+        chrome_args.append("--disable-features=Translate")
     if debug_port:
         # Flow-execution and recording only: open a CDP endpoint so the engine
         # can attach and drive this window. Port 0 = auto-pick a free port;

@@ -1889,7 +1889,7 @@ def test_a_staged_window_opens_maximized_too(monkeypatch):
     assert "--start-maximized" in opened[0]
 
 
-def test_only_a_scenario_window_hides_the_restore_pages_bubble(monkeypatch):
+def test_only_a_scenario_window_hides_the_restore_and_translate_popups(monkeypatch):
     opened = []
     monkeypatch.setattr(sl, "clear_devtools_port", lambda profile: None)
     monkeypatch.setattr(sl.subprocess, "Popen",
@@ -1902,6 +1902,12 @@ def test_only_a_scenario_window_hides_the_restore_pages_bubble(monkeypatch):
     assert "--hide-crash-restore-bubble" not in opened[0]
     assert "--hide-crash-restore-bubble" in opened[1]
     assert "--hide-crash-restore-bubble" in opened[2]   # staged = --run-tests
+    assert "--disable-features=Translate" not in opened[0]
+    assert "--disable-features=Translate" in opened[1]
+    assert "--disable-features=Translate" in opened[2]
+    # Chrome honours only the last one, so there must never be two.
+    assert all(sum(a.startswith("--disable-features") for a in argv) <= 1
+               for argv in opened)
     assert opened[1][-1] == "http://x"
 
 
