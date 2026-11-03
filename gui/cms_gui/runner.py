@@ -685,6 +685,7 @@ class RunState(QObject):
         if not self._interaction_run(event):
             return
         was_paused = self.cycle.get("paused", False)
+        was_held = set(self.cycle.get("held_steps") or ())
         self.cycle["status"] = event.get("status", self.cycle.get("status"))
         self.cycle.pop("control_error", None)
         cycleresult.update(self.cycle, event)
@@ -696,6 +697,10 @@ class RunState(QObject):
                 # Continue starts a new live interpolation interval. The last
                 # receipt's clocks include the pause and cannot be reused.
                 step["_timing_received"], step["_timing_wall"] = received, wall
+        # A step held by Pause, or let go by Continue, looks different on its
+        # node although nothing about the step itself was reported.
+        for step_id in sorted(was_held ^ set(self.cycle.get("held_steps") or ())):
+            self.cycle_step_changed.emit(step_id)
         self.cycle_subject_changed.emit()
         self.cycle_timing_changed.emit()
 

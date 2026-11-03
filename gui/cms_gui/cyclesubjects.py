@@ -192,7 +192,7 @@ def status_word(session):
     if session.get("paused") or session.get("execution_status") == "paused":
         return "Paused · " + (session.get("next_action") or "Resume to continue")
     if session.get("pause_requested"):
-        return "Pausing · waiting for active operations"
+        return "Pausing"
     if session.get("execution_status") == "waiting_for_node_approval":
         return "waiting for node approval"
     if session.get("running"):

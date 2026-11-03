@@ -40,7 +40,7 @@ import sys
 
 import runtime_paths
 
-from cycle import registry
+from cycle import freeze, registry
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
 from domain.cycle import Artifact
 
@@ -141,11 +141,13 @@ class ScenarioRun(CyclePlugin):
         log_path = os.path.join(context.step_dir(step.id), "launcher.log")
         with open(log_path, "wb") as log_file:
             try:
-                process = subprocess.Popen(
+                # Registered with this step, so a Pause holds the launcher
+                # and its windows where they stand.
+                process = freeze.track(subprocess.Popen(
                     argv, stdout=subprocess.DEVNULL, stderr=log_file,
                     cwd=runtime_paths.app_root(),
                     env=runtime_paths.clean_subprocess_env(),
-                    start_new_session=(os.name != "nt"))
+                    start_new_session=(os.name != "nt")))
             except OSError as exc:
                 return registry.failed("cannot run the launcher: %s" % exc)
             progress = _Progress(events_path, context, step.id)

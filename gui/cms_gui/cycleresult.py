@@ -8,7 +8,7 @@ imports: the desktop package still runs with PySide6 alone.
 FIELDS = ("execution_status", "scope", "coverage", "outcome", "current_phase")
 DETAIL_FIELDS = ("action_id", "task_brief", "phase_definition", "phase_receipts", "last_completed_phase",
                  "pause_reason", "pause_requested", "paused", "next_action", "control_history", "phase_actions",
-                 "initial_execution_mode", "execution_mode", "execution_policy_version", "node_approvals", "policy_changes")
+                 "held_steps", "initial_execution_mode", "execution_mode", "execution_policy_version", "node_approvals", "policy_changes")
 
 
 def update(cycle, event=None):

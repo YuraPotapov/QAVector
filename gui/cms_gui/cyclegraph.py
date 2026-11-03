@@ -135,6 +135,8 @@ STATUS_LOOK = {
     # and this step is still its business. Dimmer, because the difference worth
     # seeing at a glance is working against parked.
     "waiting": ("running", "ACCENT400"),
+    # Held by Pause where it stands: neither working nor done.
+    "paused": ("pause", "WARN"),
     "skipped": ("pending", "NEUTRAL500"),
     "cancelled": ("pending", "NEUTRAL500"),
     "pending": ("pending", "NEUTRAL400"),
@@ -146,7 +148,7 @@ RESTRICTION_WIDTH = 64
 
 STATUS_WORD = {
     "success": "passed", "failed": "failed", "timeout": "timed out",
-    "running": "running", "waiting": "waiting", "skipped": "skipped",
+    "running": "running", "waiting": "waiting", "paused": "paused", "skipped": "skipped",
     "cancelled": "stopped", "pending": "",
 }
 
@@ -386,7 +388,7 @@ GROUP_PREFIX = "group:"
 #: What a folded phase's box says it is doing, from what its steps are doing.
 #: Earlier entries win: a phase with one step running and one failed is
 #: failed, because that is the thing somebody watching has to act on.
-_PHASE_ORDER = ("failed", "timeout", "running", "waiting", "cancelled")
+_PHASE_ORDER = ("failed", "timeout", "running", "paused", "waiting", "cancelled")
 
 
 def groups_of(nodes):
@@ -2087,7 +2089,7 @@ class CycleCanvas(QGraphicsView):
         """The phases the run is in now: a step of theirs running or waiting."""
         found = []
         for name, members in self._phases.items():
-            if any((self._statuses.get(one) or ("",))[0] in ("running", "waiting")
+            if any((self._statuses.get(one) or ("",))[0] in ("running", "paused", "waiting")
                    for one in members):
                 found.append(name)
         return found
@@ -2117,7 +2119,7 @@ class CycleCanvas(QGraphicsView):
             states = [(self._statuses.get(one) or ("",))[0]
                       for one in self._phases.get(name, [])]
             frame.set_state(phase_status(states),
-                            any(one in ("running", "waiting") for one in states))
+                            any(one in ("running", "paused", "waiting") for one in states))
             summary, detail = self._phase_causes(name)
             frame._say()
             if summary:

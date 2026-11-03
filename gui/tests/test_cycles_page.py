@@ -933,6 +933,27 @@ def test_a_running_scenario_blocks_a_cycle_run(opened):
     assert "scenario run" not in opened.run_button.toolTip()
 
 
+def test_a_step_held_by_pause_shows_paused_and_goes_back_to_running(opened):
+    """Pause holds a running step where it stands; its node says so."""
+    state = RunState()
+    opened.set_run_state(state)
+    state.handle({"kind": "cycle.run.start", "run_id": "r", "cycle": "demo", "graph": DIAMOND})
+    state.handle({"kind": "cycle.step.start", "run_id": "r", "step": "a"})
+    settled()
+    assert opened.canvas.node("a").status == "running"
+
+    state.handle({"kind": "cycle.run.state", "run_id": "r", "status": "waiting", "action": "paused",
+                  "paused": True, "pause_requested": True, "held_steps": ["a"]})
+    settled()
+    assert opened.canvas.node("a").status == "paused"
+
+    state.handle({"kind": "cycle.run.state", "run_id": "r", "status": "running", "action": "continue",
+                  "paused": False, "pause_requested": False, "held_steps": []})
+    settled()
+    assert opened.canvas.node("a").status == "running"
+    state.cycle_interrupted()
+
+
 def test_stopping_says_so(opened):
     asked = []
     opened.stop_requested.connect(lambda: asked.append(True))

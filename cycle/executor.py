@@ -60,7 +60,7 @@ from cycle import ask, checkpoints, conditions, model, registry as default_regis
 from cycle import interactions as interactions_mod
 from cycle.bus import NullObserver
 from cycle.context import CancelToken, Cancelled, RunContext
-from cycle import outcomes, revisions, sessions, timing, phases, execution_policy, admission, restrict
+from cycle import outcomes, revisions, sessions, timing, phases, execution_policy, admission, restrict, freeze
 from domain.cycle import (CANCELLED, CONTINUE, FAILED, MANUAL, PENDING, RUNNING,
                           SKIPPED, SUCCESS, TERMINAL, TIMEOUT, WAITING, CycleRun,
                           StepRun)
@@ -347,6 +347,7 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
         run.ended_at = None if scheduler.export_paused else time.time()
         run.duration_ms = prior_duration + (time.monotonic() - started) * 1000.0
         run.status = WAITING if scheduler.export_paused else _verdict(run)
+        run.held_steps = []                   # released when the loop ended
         if not scheduler.export_paused:
             run.paused, run.pause_requested = False, False
         if checkpoint_failed or run.message.startswith("Cannot save execution state"):
@@ -666,6 +667,9 @@ class _Scheduler(object):
         self.control = phases.Control(lambda: self.done.put(_WAKE))
         self.phases = phases.Phases(self)
         self.inflight = {}                    # step id -> (token, deadline)
+        #: The processes each step in flight started, so Pause can hold them
+        #: where they stand rather than wait for them - see cycle.freeze.
+        self.freezer = freeze.Steps()
         #: Steps that asked to be come back to: step id -> monotonic seconds.
         #: Not in flight and not finished - the third thing a step can be.
         self.waiting = {}
@@ -714,18 +718,27 @@ class _Scheduler(object):
                 self._apply_approval_answers()
                 self._apply_requests()
                 if self.stopping.is_set():
+                    # Held, a step could not hear that it is being stopped.
+                    self.freezer.release()
                     self.run.paused, self.run.pause_requested = False, False
                     self.control.requested = False
                 else:
                     self.phases.before_submit()
                     if self.control.requested and not self.run.pause_requested:
                         self.pause_at("user_request", "Continue run")
-                    if self.run.pause_requested and not self.inflight and not self.run.paused:
-                        if any(step.status not in TERMINAL or step.status in (FAILED, TIMEOUT) for step in self.run.steps.values()):
-                            self._enter_pause()
-                        else:
-                            self.run.pause_requested = self.control.requested = False
+                    if self.run.pause_requested and not self.run.paused:
+                        if not self.inflight:
+                            if any(step.status not in TERMINAL or step.status in (FAILED, TIMEOUT) for step in self.run.steps.values()):
+                                self._enter_pause()
+                            else:
+                                self.run.pause_requested = self.control.requested = False
+                        elif self._pauses_in_place():
+                            self._enter_pause(self.freezer.hold())
                 if self.run.paused:
+                    held = [name for name in self.freezer.held_steps() if name in self.inflight]
+                    if held != self.run.held_steps:
+                        self.run.held_steps = held
+                        self._state("paused")
                     if not self.controlled:
                         self.export_paused = True
                         break
@@ -772,6 +785,8 @@ class _Scheduler(object):
             # is only the fallback for the ordinary case where nothing was
             # wrong and the last step simply finished.
             self.stopping.set()
+            # Before the drain: a held step would sit through it unable to stop.
+            self.freezer.release()
             # Before the drain, not after: a step still finishing now is on
             # its way down, and a message it had not read is not going to be.
             try:
@@ -805,9 +820,24 @@ class _Scheduler(object):
         self.run.control_history.append({"action": "pause", "reason": reason, "at": time.time()})
         self._state("pausing")
 
-    def _enter_pause(self):
+    def _pauses_in_place(self):
+        """Whether Pause holds the steps in flight rather than waiting for them.
+
+        Only a person's Pause, and only where a person can say Continue: a
+        phase boundary is reached when its steps are done by definition, and a
+        run nobody controls ends on pausing - with its steps still held.
+        """
+        return (freeze.SUPPORTED and self.controlled
+                and self.run.pause_reason == "user_request")
+
+    def _enter_pause(self, held=()):
         self._timing()
         self.phases.refresh()
+        self.run.held_steps = list(held)
+        for step_id in held:
+            self.context.stage(step_id, {
+                "kind": "phase", "status": "done", "title": "Paused here",
+                "detail": "Held where it stands; Continue lets it go on from the same point."})
         self.run.paused, self.run.status = True, WAITING
         self.paused_at = time.monotonic()
         self.clock.tick()
@@ -821,6 +851,15 @@ class _Scheduler(object):
             for name, value in list(mapping.items()):
                 if value is not None:
                     mapping[name] = value + delay
+        # A held step's deadline moves with the rest: the pause is not its time.
+        for name, (token, deadline) in list(self.inflight.items()):
+            if deadline is not None:
+                self.inflight[name] = (token, deadline + delay)
+        for step_id in self.run.held_steps:
+            self.context.stage(step_id, {"kind": "phase", "status": "done", "title": "Continued",
+                                         "detail": "Paused for %s." % _span(delay)})
+        self.run.held_steps = []
+        self.freezer.release()
         with self.control.lock:
             self.run.paused, self.run.pause_requested = False, False
             self.run.status = RUNNING
@@ -1414,6 +1453,7 @@ class _Scheduler(object):
         # _StepView forwards assignments to shared context; deadlines are local.
         context.__dict__["runtime_deadline"] = self.deadlines[step.id]
         held = restrict.enter(restriction)
+        holding = freeze.enter(self.freezer, step.id)
         try:
             if refused is not None:
                 raise refused
@@ -1475,6 +1515,7 @@ class _Scheduler(object):
         except Exception as exc:              # noqa: BLE001 - prepare, or the pool
             result, error = None, exc
         finally:
+            freeze.leave(holding)
             restrict.leave(held)
             if semaphore is not None:
                 semaphore.release()
@@ -1491,6 +1532,7 @@ class _Scheduler(object):
     def _record(self, step, result, error, attempts, duration_ms, token):
         self._timing()
         self.inflight.pop(step.id, None)
+        self.freezer.forget(step.id)
         asked = self.overdue.pop(step.id, None)
         if asked is not None:
             # Finished while somebody was being asked about it. The question is

@@ -10,6 +10,17 @@ ACTIVE = ("running", "waiting")
 FAILED = ("failed", "timeout", "interrupted")
 
 
+def held(cycle, step_id):
+    """Whether Pause holds this step where it stands (its processes stopped)."""
+    return bool(cycle.get("paused")) and step_id in (cycle.get("held_steps") or ())
+
+
+def shown_status(cycle, step_id):
+    """A step's status as a node shows it: a held step is paused, not running."""
+    status = ((cycle.get("steps") or {}).get(step_id) or {}).get("status")
+    return "paused" if status == "running" and held(cycle, step_id) else status
+
+
 def duration(milliseconds):
     if milliseconds is None:
         return "time unavailable"
@@ -144,7 +155,8 @@ def header(cycle, live=False, plugins=None):
         extra = len(active(cycle)) - 1
         return "%s %s, %s%s" % (
             label(cycle, name, plugins), duration(elapsed(step, live)),
-            "Pausing" if cycle.get("pause_requested") else status(step, cycle.get("_stopping", False)),
+            "Paused" if held(cycle, name) else "Pausing" if cycle.get("pause_requested")
+            else status(step, cycle.get("_stopping", False)),
             " · +%d parallel" % extra if extra else "")
     raw = cycle.get("status")
     if raw == "success":

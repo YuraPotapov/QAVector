@@ -10,7 +10,8 @@ from domain.cycle import (FAILED, PENDING, RUNNING, SKIPPED,
 
 FIELDS = ("execution_status", "scope", "coverage", "outcome", "current_phase")
 DETAIL_FIELDS = ("action_id", "task_brief", "phase_definition", "phase_receipts", "last_completed_phase",
-                 "pause_reason", "pause_requested", "paused", "next_action", "control_history", "phase_actions")
+                 "pause_reason", "pause_requested", "paused", "next_action", "control_history", "phase_actions",
+                 "held_steps")
 POLICY_FIELDS = ("initial_execution_mode", "execution_mode", "execution_policy_version", "node_approvals", "policy_changes")
 
 

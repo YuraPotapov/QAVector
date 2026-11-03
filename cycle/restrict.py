@@ -29,6 +29,8 @@ import subprocess
 import threading
 from contextlib import contextmanager
 
+from cycle import freeze
+
 #: Plugins that run inside the restrictions. Everything else is a system step.
 RESTRICTABLE = frozenset((
     "command.shell", "git.checkout", "git.commit", "git.prepare_branch",
@@ -222,12 +224,13 @@ def _argv(command, shell):
 def popen(command, cwd=None, env=None, shell=False, folders=(), **kwargs):
     """``subprocess.Popen`` for a step: inside its restrictions when it has any."""
     restriction = current()
+    # Registered with the step that started it, so a Pause can hold it there.
     if restriction is None:
-        return subprocess.Popen(command, cwd=cwd, env=env, shell=shell, **kwargs)
+        return freeze.track(subprocess.Popen(command, cwd=cwd, env=env, shell=shell, **kwargs))
     prepared = restriction.prepare(_argv(command, shell), cwd, dict(os.environ if env is None else env), folders)
     try:
-        return subprocess.Popen(prepared.argv, cwd=prepared.cwd, env=prepared.env,
-                                pass_fds=prepared.pass_fds, **kwargs)
+        return freeze.track(subprocess.Popen(prepared.argv, cwd=prepared.cwd, env=prepared.env,
+                                             pass_fds=prepared.pass_fds, **kwargs))
     finally:
         prepared.close()
 

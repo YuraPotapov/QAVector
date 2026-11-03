@@ -403,6 +403,7 @@ class Store:
             # continuation. An interrupted in-phase bound is still active.
             run.execution_bound = {}
         run.paused, run.pause_requested, run.pause_reason, run.next_action = False, False, "", ""
+        run.held_steps = []
         run.control_history.append({"action": "resume", "at": time.time()})
         #: What the steps about to run again did last time, before it is
         #: cleared below - see RunContext.earlier.

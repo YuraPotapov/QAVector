@@ -938,7 +938,7 @@ class CyclesPage(QWidget):
             self.canvas.clear_status()
             return
         for step_id, step in (state.get("steps") or {}).items():
-            self.canvas.set_status(step_id, step.get("status"),
+            self.canvas.set_status(step_id, cycleactivity.shown_status(state, step_id),
                                    step.get("duration_ms"), step.get("attempt"))
         self.canvas.set_run_evidence(state.get("steps") or {})
 
@@ -1143,7 +1143,8 @@ class CyclesPage(QWidget):
         if running:
             self.run_button.setText(label)
             self.run_button.setEnabled(bool(action))
-            self.run_button.setToolTip({"pause": "Let active operations finish safely and keep pending work for continuation.",
+            self.run_button.setToolTip({"pause": "Pause now: running steps are held where they stand and go on\n"
+                                                 "from the same point on Continue. Nothing is done twice.",
                                        "continue": "Continue this live run without starting a new execution.",
                                        "retry_phase": "Retry unfinished work in this phase and keep successful results.",
                                        "run_phase": "Run the next phase and pause before the following one."}.get(action, label))
@@ -3148,7 +3149,7 @@ class CyclesPage(QWidget):
             return
         # One node, one repaint - this is already cheap enough to do per event.
         if not self._statuses_hidden():
-            self.canvas.set_status(step_id, step.get("status"),
+            self.canvas.set_status(step_id, cycleactivity.shown_status(state, step_id),
                                    step.get("duration_ms"), step.get("attempt"))
             self.canvas.set_run_evidence(state.get("steps") or {})
         if self._open and self.canvas.phases():

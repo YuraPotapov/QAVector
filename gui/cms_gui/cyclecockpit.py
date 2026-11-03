@@ -338,7 +338,8 @@ class CurrentNode(QFrame):
             variant = "warn"
         elif name:
             title = activity.label(cycle, name, plugins)
-            state = "Stopping" if activity.stopping(cycle) else "Pausing" if cycle.get("pause_requested") else activity.status(step)
+            state = ("Stopping" if activity.stopping(cycle) else "Paused" if activity.held(cycle, name)
+                     else "Pausing" if cycle.get("pause_requested") else activity.status(step))
             self.elapsed.setText(activity.duration(activity.elapsed(step, live)))
             current, total = progress.get("current"), progress.get("total")
             count = "%s / %s %s · " % (current, total, progress.get("unit", "")) if current is not None and total is not None else ""
@@ -349,7 +350,7 @@ class CurrentNode(QFrame):
                     and math.isfinite(current) and math.isfinite(total) and current >= 0 and total > 0):
                 self.progress.setValue(round(min(1, current / total) * 1000))
                 determinate = True
-            variant = "warn" if "Waiting" in state or "Pausing" in state or "Stopping" in state else "outline"
+            variant = "warn" if any(word in state for word in ("Waiting", "Pausing", "Paused", "Stopping")) else "outline"
         else:
             title = activity.header(cycle, live, plugins)
             raw = cycle.get("status")

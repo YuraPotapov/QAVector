@@ -372,6 +372,8 @@ class CycleRun:
     next_action: str = ""
     control_history: list = field(default_factory=list)
     phase_actions: dict = field(default_factory=dict)
+    # Steps a person's Pause holds where they stand (cycle.freeze), until Continue.
+    held_steps: list = field(default_factory=list)
     phase_retry_count: int = 0
     # A live Run/Retry phase is bounded even when the process must Resume.
     # Cleared only when its boundary is durably reached or a person continues.
