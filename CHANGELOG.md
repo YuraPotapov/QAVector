@@ -16,6 +16,12 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.54] - 2026-11-03
+
+### Fixed
+- Windows opened for `--run-tests` no longer offer to translate the page; they
+  start with `--disable-features=Translate`. A plain launch is unchanged.
+
 ## [0.16.53] - 2026-11-03
 
 ### Fixed
