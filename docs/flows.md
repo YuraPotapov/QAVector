@@ -193,7 +193,7 @@ selected needs a page, the entry is greyed out and its tooltip names the scenari
 page steps it takes; the launcher refuses such a run the same way, before it starts.
 
 Nothing else about the run changes. Each selected account is a session, as always; how
-many run at once, *All at once* and *Auto* — with the load governor raising and lowering
+many run at once, *All together* and *Auto* — with the load governor raising and lowering
 it as the run goes — work exactly as they do with windows, and so do Stop, stopping one
 session, and the Run page. There are simply no windows: nothing to keep open, so the
 launcher exits when the run ends, and nothing to photograph, so a report is `result.json`

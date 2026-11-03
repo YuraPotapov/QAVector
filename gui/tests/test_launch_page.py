@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 
 from cms_gui import core as core_mod
 from cms_gui import launch, launchcontroller as lc, launchprojectsfile as lpf, \
@@ -655,7 +655,7 @@ def test_a_value_the_address_cannot_take_stops_the_run(page):
 
 # ------------------------------------------------- the rest of the page
 
-def test_auto_and_all_at_once_are_not_both_on(page):
+def test_auto_and_all_together_are_not_both_on(page):
     page.jobs_all.setChecked(True)
     page.jobs_auto.setChecked(True)
     assert not page.jobs_all.isChecked()
@@ -667,19 +667,141 @@ def test_the_number_is_greyed_out_when_it_is_not_deciding(page):
     assert page.jobs.isEnabled()
     page.jobs_auto.setChecked(True)
     assert not page.jobs.isEnabled()
-    page.jobs_auto.setChecked(False)
+    page.sessions_panel.jobs_one.setChecked(True)
     assert page.jobs.isEnabled()
 
 
 def test_the_sessions_button_says_what_is_in_force(page):
     page.jobs.setValue(1)
-    assert page.sessions_button.text() == "One at a time"
+    assert page.sessions_button.text() == "One by one"
     page.jobs.setValue(3)
     assert page.sessions_button.text() == "3 at a time"
     page.jobs_all.setChecked(True)
-    assert page.sessions_button.text() == "All at once"
+    assert page.sessions_button.text() == "All together"
     page.jobs_auto.setChecked(True)
     assert page.sessions_button.text() == "Auto"
+
+
+def test_the_answer_and_the_number_move_together(page):
+    """One number underneath, as saved: "One by one" is 1."""
+    panel = page.sessions_panel
+    panel.jobs_some.setChecked(True)
+    assert page.jobs.value() == 2 and page.state()["sessions"]["jobs"] == 2
+    page.jobs.setValue(4)
+    panel.jobs_one.setChecked(True)
+    assert page.state()["sessions"]["jobs"] == 1
+    panel.jobs_some.setChecked(True)
+    assert page.jobs.value() == 4, "the last number taken comes back"
+    page.jobs.setValue(1)
+    assert panel.jobs_one.isChecked()
+    panel.jobs_all.setChecked(True)
+    page.jobs.setValue(5)
+    assert panel.jobs_all.isChecked(), "a greyed number never changes the answer"
+
+
+def test_a_saved_setting_is_shown_as_its_answer(page):
+    panel = page.sessions_panel
+    for saved, button in (((1, False, False), panel.jobs_one), ((3, False, False), panel.jobs_some),
+                          ((3, True, False), panel.jobs_all), ((1, False, True), panel.jobs_auto)):
+        panel.set_choice(*saved)
+        assert button.isChecked() and page.jobs.value() == saved[0]
+
+
+def test_the_lanes_draw_the_order_the_sessions_work_in(page):
+    from cms_gui.pages.launchsessions import ALL, ONE, SOME, SessionLanes
+
+    lanes = SessionLanes()
+    names = [(name.lower(), name) for name in ("Agent", "Manager", "VRR Admin", "Admin")]
+    lanes.set_plan(names, ONE, 1, True)
+    assert lanes.turns() == ([(0, 1), (1, 1), (2, 1), (3, 1)], 4)
+    lanes.set_plan(names, SOME, 2, True)
+    assert lanes.turns() == ([(0, 1), (0, 1), (1, 1), (1, 1)], 2)
+    lanes.set_plan(names, ALL, 1, False)
+    assert lanes.turns() == ([(0, 1)] * 4, 1)
+
+
+def test_a_lane_dragged_is_the_order_the_sessions_run_in(page):
+    from cms_gui.pages.launchsessions import ALL, ONE, SessionLanes
+
+    lanes = SessionLanes()
+    entries = [("agent", "Agent"), ("manager", "Manager"), ("admin", "Admin")]
+    lanes.set_plan(entries, ONE, 1, True)
+    assert lanes.draggable()
+    assert lanes.moved(2, 0) == ["admin", "agent", "manager"]
+    assert lanes.moved(0, 2) == ["manager", "agent", "admin"]
+    assert lanes.moved(1, 1) is None and lanes.moved(1, 2) is None, "dropped where it was"
+    lanes.set_plan(entries, ALL, 1, True)
+    assert not lanes.draggable(), "together, the order decides nothing"
+
+
+def test_the_whole_lane_follows_the_mouse_and_the_others_make_room(qapp):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    from cms_gui.pages.launchsessions import ONE, SessionLanes
+
+    lanes = SessionLanes()
+    lanes.set_plan([("agent", "Agent"), ("manager", "Manager"), ("admin", "Admin")], ONE, 1, True)
+    lanes.resize(400, lanes.sizeHint().height())
+    dropped = []
+    lanes.reordered.connect(dropped.append)
+    pitch = lanes.LANE + lanes.GAP
+    QTest.mousePress(lanes, Qt.LeftButton, Qt.NoModifier, QPoint(40, 2 * pitch + 4))
+    QTest.mouseMove(lanes, QPoint(40, 4))
+    # Mid-drag: Admin is in hand at the top, the others have stepped down - and
+    # the bars already say who would run first.
+    assert lanes._preview() == [2, 0, 1]
+    assert lanes._lift == 0.0
+    QTest.mouseRelease(lanes, Qt.LeftButton, Qt.NoModifier, QPoint(40, 4))
+    assert dropped == [["admin", "agent", "manager"]]
+    QTest.mousePress(lanes, Qt.LeftButton, Qt.NoModifier, QPoint(40, 4))
+    QTest.mouseRelease(lanes, Qt.LeftButton, Qt.NoModifier, QPoint(40, 4))
+    assert len(dropped) == 1, "put back where it was: nothing to say"
+
+
+def test_dragging_in_the_panel_reorders_the_run_and_reset_undoes_it(place):
+    page = place.page(core_mod.Inventory({
+        "envs": [{"alias": "localhost", "value": "localhost:8069",
+                  "origin": "http://localhost:8069", "count": 3}],
+        "users": [{"env": "localhost:8069", "login": login, "class": login.title(),
+                   "tests": [], "has_password": True} for login in ("agent", "manager", "admin")],
+        "scenarios": [], "extensions": [], "tags": [],
+    }))
+    try:
+        page.what.set_current("Run scenarios")
+        page.users_mode.set_current("All accounts")
+        panel = page.sessions_panel
+        panel.jobs_one.setChecked(True)
+        assert panel.lanes.logins() == ["agent", "manager", "admin"]
+        assert panel.reset.isHidden()
+        panel.lanes.reordered.emit(["admin", "agent", "manager"])
+        assert panel.lanes.logins() == ["admin", "agent", "manager"]
+        assert page.state()["sessions"]["order"] == ["admin", "agent", "manager"]
+        assert not panel.reset.isHidden() and page.is_dirty()
+        assert "--filter-users=admin,agent,manager" in page.argv()
+        panel.reset_requested.emit()
+        assert panel.lanes.logins() == ["agent", "manager", "admin"]
+        assert panel.reset.isHidden()
+    finally:
+        page.close()
+
+
+def test_the_panel_says_how_the_windows_are_set_and_links_there(page):
+    page.what.set_current("Run scenarios")
+    panel = page.sessions_panel
+    page.keep_open.setChecked(True)
+    assert "kept open after the run" in panel.windows.text()
+    page.keep_open.setChecked(False)
+    assert "closes when it is done" in panel.windows.text()
+    panel.advanced_requested.emit()
+    assert page.advanced.is_expanded() and not panel.isVisible()
+
+
+def test_opening_windows_only_leaves_the_choice_idle(page):
+    page.what.set_current("Open windows")
+    panel = page.sessions_panel
+    assert not panel.jobs_one.isEnabled() and not panel.idle.isHidden()
+    assert panel.lanes.isHidden()
 
 
 def test_the_number_and_the_load_live_in_the_panel_not_the_page(page):
@@ -868,7 +990,9 @@ def test_open_windows_shows_only_what_opening_uses(page):
     assert not page.scenario_list.isVisibleTo(page)
     assert not page.reports_box.isEnabled()
     assert not page.reports_note.isHidden()
-    assert not page.keep_open.isVisibleTo(page)
+    # In Advanced beside the other window settings: greyed, not hidden.
+    assert not page.keep_open.isEnabled()
+    assert page.advanced.isAncestorOf(page.keep_open)
     assert page.what_hint.isVisibleTo(page)
     assert page.sessions_box.isVisibleTo(page)
 

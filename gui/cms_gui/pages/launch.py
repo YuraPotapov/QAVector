@@ -458,27 +458,26 @@ class LaunchSessionsPage(QWidget):
         self.sessions_panel = SessionsPanel(self)
         self.jobs = self.sessions_panel.jobs
         self.jobs.valueChanged.connect(self._changed)
+        # One of four answers; whichever is left or taken, these two say so.
         self.jobs_all = self.sessions_panel.jobs_all
-        self.jobs_all.toggled.connect(self._jobs_all_toggled)
+        self.jobs_all.toggled.connect(self._changed)
         self.jobs_auto = self.sessions_panel.jobs_auto
-        self.jobs_auto.toggled.connect(self._jobs_auto_toggled)
+        self.jobs_auto.toggled.connect(self._changed)
+        self.sessions_panel.advanced_requested.connect(self._show_window_settings)
+        self.sessions_panel.reordered.connect(self._sessions_reordered)
+        self.sessions_panel.reset_requested.connect(lambda: self._sessions_reordered([]))
+        # The order the sessions run in, as dragged; empty is the accounts' own.
+        self._order = []
         self.metrics_warning = self.sessions_panel.metrics
         self.sessions_button = QPushButton("")
         self.sessions_button.setProperty("variant", "ghost")
         icons.button(self.sessions_button, "unfold")
         self.sessions_button.setLayoutDirection(Qt.RightToLeft)    # chevron after
-        self.sessions_button.setToolTip("How many windows run at once")
+        self.sessions_button.setToolTip("How many sessions work at once")
         self.sessions_button.clicked.connect(
             lambda: self.sessions_panel.open_below(self.sessions_button))
         sessions_label = QLabel("Sessions at once")
-        # And on the same line, what becomes of the windows: two settings of
-        # one line each, not two lines taken from the list above.
-        self.keep_open = QCheckBox("Keep windows open")
-        self.keep_open.setToolTip("Leave the windows open when the run finishes")
-        self.keep_open.setChecked(True)
-        self.keep_open.toggled.connect(self._changed)
-        self.sessions_box = widgets.row(sessions_label, self.sessions_button, None,
-                                        self.keep_open)
+        self.sessions_box = widgets.row(sessions_label, self.sessions_button, None)
         body.addWidget(self.sessions_box)
         # Memory pressure is worth seeing without opening the panel.
         self.load_warning = QLabel("")
@@ -692,7 +691,7 @@ class LaunchSessionsPage(QWidget):
             note = ("Memory is under pressure. More sessions than the machine can hold "
                     "will be opened a few at a time.")
         else:
-            note = "System load: CPU %s | RAM %s" % (
+            note = "System load: CPU %s · RAM %s" % (
                 "--" if load.cpu_percent is None else "%.0f%%" % load.cpu_percent,
                 "--" if used is None else "%.0f%%" % used)
         self.metrics_warning.setProperty("role", "error-bold" if strained else "hint")
@@ -729,6 +728,20 @@ class LaunchSessionsPage(QWidget):
         profiles.addWidget(line)
 
         windows = self._advanced_section(inner, "Windows and launcher")
+        # Here rather than beside Sessions at once: it reads as a detail of the
+        # end of a run, and it also decides whether windows open one at a time
+        # at all. The Sessions at once panel says how it is set and links here.
+        self.keep_open = QCheckBox("Keep the windows open after the scenarios finish")
+        self.keep_open.setToolTip(
+            "On: every window opens at the start and stays open after the run, to\n"
+            "look at; Stop or quitting QAVector closes them. Sessions at once then\n"
+            "decides only how many work at once.\n"
+            "Off: each window opens when its turn comes and closes when it is\n"
+            "done, so one by one means one window at a time.\n"
+            "Only when running scenarios.")
+        self.keep_open.setChecked(True)
+        self.keep_open.toggled.connect(self._changed)
+        windows.addWidget(self.keep_open)
         self.maximized = QCheckBox("Open the windows full screen (maximized)")
         self.maximized.toggled.connect(self._changed)
         windows.addWidget(self.maximized)
@@ -869,7 +882,8 @@ class LaunchSessionsPage(QWidget):
                          "detach": self.detach.isChecked(),
                          "maximized": self.maximized.isChecked(),
                          "no_password_prompts": self.no_password_prompts.isChecked(),
-                         "lock_windows": self.lock_windows.isChecked()},
+                         "lock_windows": self.lock_windows.isChecked(),
+                         "order": list(self._order)},
             "extensions": {"mode": self._ext_mode_value(),
                            "names": self.ext_list.checked(),
                            "autologin": self.autologin.isChecked()},
@@ -913,14 +927,14 @@ class LaunchSessionsPage(QWidget):
             self._populate_users(users["logins"])
 
             sessions = config["sessions"]
-            self.jobs.setValue(max(1, int(sessions["jobs"] or 1)))
-            self.jobs_all.setChecked(bool(sessions["all_at_once"]))
-            self.jobs_auto.setChecked(bool(sessions["auto_jobs"]))
+            self.sessions_panel.set_choice(sessions["jobs"], bool(sessions["all_at_once"]),
+                                           bool(sessions["auto_jobs"]))
             self.keep_open.setChecked(bool(sessions["keep_open"]))
             self.detach.setChecked(bool(sessions["detach"]))
             self.maximized.setChecked(bool(sessions["maximized"]))
             self.no_password_prompts.setChecked(bool(sessions["no_password_prompts"]))
             self.lock_windows.setChecked(bool(sessions["lock_windows"]))
+            self._order = list(sessions.get("order") or [])
 
             extensions = config["extensions"]
             self.ext_mode.set_current({launch.EXT_NONE: "None",
@@ -1013,7 +1027,7 @@ class LaunchSessionsPage(QWidget):
         config = self.state()
         return " · ".join([launch.users_label(config, self.inventory),
                            launch.scenarios_label(config),
-                           launch.sessions_label(config, background)])
+                           launch.sessions_label(config, background, self.inventory)])
 
     def describe_line(self, background=False):
         return launch.describe_line(self.state(), self.inventory, background)
@@ -1057,6 +1071,9 @@ class LaunchSessionsPage(QWidget):
         self.sessions_button.setText(sessions_label_for(
             config["sessions"]["jobs"], config["sessions"]["all_at_once"],
             config["sessions"]["auto_jobs"]))
+        self.sessions_panel.set_plan(self._session_entries(config), config["sessions"]["keep_open"],
+                                     self._what_value() == WHAT_RUN,
+                                     launch.custom_order(config, self.inventory))
 
         extras = self._extras(config)
         address_extras = (extras["env_urls"], extras["scope"])
@@ -1453,7 +1470,8 @@ class LaunchSessionsPage(QWidget):
         running = what == WHAT_RUN
         self.scenario_row.setVisible(running)
         self.scenario_list.setVisible(running)
-        self.keep_open.setVisible(running)
+        # Greyed rather than hidden, like the reports: Advanced keeps its height.
+        self.keep_open.setEnabled(running)
         self.sessions_box.setVisible(what != WHAT_RECORD)
         self.load_warning.setVisible(what != WHAT_RECORD
                                      and bool(self.load_warning.text()))
@@ -1485,15 +1503,30 @@ class LaunchSessionsPage(QWidget):
         self.settings.launch_summary_expanded = expanded
         self._changed()
 
-    def _jobs_all_toggled(self, checked):
-        if checked and not self._building:
-            self.jobs_auto.setChecked(False)   # a fixed all-at-once is not auto
+    def _session_entries(self, config):
+        """The ticked accounts as ``(login, name)``, in the order they run.
+
+        Named the way the accounts table names them: role, or login if none.
+        """
+        names = {}
+        for index, row in enumerate(self.users_list.rows()):
+            login = row.get("login", "")
+            if login not in names and self.users_list.is_checked(index):
+                names[login] = row.get("role") or login
+        return [(login, names[login])
+                for login in launch.in_order(list(names), config["sessions"]["order"])]
+
+    def _sessions_reordered(self, logins):
+        """A lane was dragged (or the order reset): that is the order now."""
+        self._order = list(logins)
         self._changed()
 
-    def _jobs_auto_toggled(self, checked):
-        if checked and not self._building:
-            self.jobs_all.setChecked(False)
-        self._changed()
+    def _show_window_settings(self):
+        """The Sessions at once panel's "change in Advanced": open it, on the setting."""
+        self.sessions_panel.hide()
+        self.advanced.set_expanded(True)
+        QTimer.singleShot(0, lambda: self.scrollArea.ensureWidgetVisible(self.keep_open, 0, 40))
+        self.keep_open.setFocus(Qt.OtherFocusReason)
 
     def _overlay_toggled(self, checked):
         if not self._building and checked and not self.overlay_list.checked():

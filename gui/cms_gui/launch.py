@@ -73,7 +73,10 @@ DEFAULTS = {
     "sessions": {"jobs": 1, "all_at_once": False, "auto_jobs": False,
                  "keep_open": True, "detach": False, "maximized": False,
                  "no_password_prompts": False,
-                 "lock_windows": False},
+                 "lock_windows": False,
+                 # Logins in the order their sessions run, as dragged in the
+                 # Sessions at once panel; empty is the accounts' own order.
+                 "order": []},
     # autologin: the launcher's own sign-in extension, in every profile and
     # outside the list - on unless a configuration turns it off.
     "extensions": {"mode": EXT_ALL, "names": [], "autologin": True},
@@ -267,8 +270,7 @@ def to_command_state(config, inventory=None, env_urls=None, dirs=None, scope=Non
 
     state = {
         "--env": environment_value(config, inventory),
-        "--filter-users": (",".join(users["logins"])
-                           if users["mode"] == USERS_PICK else ""),
+        "--filter-users": _filter_users(config, inventory),
         "--user": "",
         "--password": "",
         # Only when it is not what --env supplies anyway: the core derives the
@@ -588,6 +590,39 @@ def background_blockers(run_tests, inventory, logins=None):
     return blockers
 
 
+def in_order(logins, order):
+    """``logins`` with the ones ``order`` names first, in its order; the rest
+    after them as they were. Names in ``order`` that are not in ``logins`` are
+    left out - an account no longer chosen, or no longer there."""
+    logins = list(logins)
+    wanted = set(logins)
+    first = [login for login in dict.fromkeys(order or ()) if login in wanted]
+    placed = set(first)
+    return first + [login for login in logins if login not in placed]
+
+
+def custom_order(config, inventory=None):
+    """Whether the sessions run in an order of their own, not the accounts'."""
+    config = merged(config)
+    chosen = selected_logins(config, inventory)
+    return bool(chosen) and in_order(chosen, config["sessions"]["order"]) != chosen
+
+
+def _filter_users(config, inventory):
+    """--filter-users: the chosen logins, in the order their sessions run.
+
+    "All accounts" says nothing - the core takes everyone in the accounts' own
+    order - unless an order of its own is set, which only a list can carry.
+    """
+    users = config["users"]
+    if users["mode"] == USERS_PICK:
+        return ",".join(in_order(users["logins"], config["sessions"]["order"]))
+    if custom_order(config, inventory):
+        return ",".join(in_order(selected_logins(config, inventory),
+                                 config["sessions"]["order"]))
+    return ""
+
+
 def selected_logins(config, inventory=None):
     """The logins this configuration would actually launch, in order.
 
@@ -672,7 +707,7 @@ def scenarios_label(config):
     return "%d scenarios" % len(chosen)
 
 
-def sessions_label(config, background=False):
+def sessions_label(config, background=False, inventory=None):
     """How many run at once, and what becomes of the windows.
 
     ``background`` is RUN's menu -> In Background: the sessions are the same, but there
@@ -681,11 +716,13 @@ def sessions_label(config, background=False):
     config = merged(config)
     sessions = config["sessions"]
     at_once = ("as many as the machine allows" if sessions["auto_jobs"] else
-               "all at once" if sessions["all_at_once"] else
-               "one at a time" if int(sessions["jobs"] or 1) == 1
+               "all together" if sessions["all_at_once"] else
+               "one by one" if int(sessions["jobs"] or 1) == 1
                else "%d at a time" % int(sessions["jobs"]))
     after = ("in the background" if background else
              "windows stay open" if sessions["keep_open"] else "windows close after")
+    if custom_order(config, inventory) and not (sessions["auto_jobs"] or sessions["all_at_once"]):
+        at_once += ", custom order"
     return "%s, %s" % (at_once, after)
 
 
@@ -724,7 +761,7 @@ def summarise(config, inventory=None, env_urls=None, scope=None):
     config = merged(config)
     rows = [("Environment", env_label(config, inventory)),
             ("Users", users_label(config, inventory)),
-            ("Sessions", sessions_label(config)),
+            ("Sessions", sessions_label(config, inventory=inventory)),
             ("Extensions", extensions_label(config)),
             ("Scenarios", scenarios_label(config))]
     windows = windows_label(config)
@@ -758,7 +795,7 @@ def describe_line(config, inventory=None, background=False):
     """One line for a history row."""
     config = merged(config)
     parts = [env_label(config, inventory), users_label(config, inventory),
-             scenarios_label(config), sessions_label(config, background)]
+             scenarios_label(config), sessions_label(config, background, inventory)]
     return " · ".join(p for p in parts if p)
 
 

@@ -71,6 +71,30 @@ def test_choosing_accounts_filters_them_and_choosing_all_does_not():
     assert _flag(launch.argv(launch.DEFAULTS), "--filter-users") is None
 
 
+def test_the_sessions_run_in_the_order_dragged():
+    picked = _config(users={"mode": launch.USERS_PICK, "logins": ["agent", "manager", "admin"]},
+                     sessions={"order": ["admin", "gone", "agent"]})
+    # Named first in that order; an unknown name is dropped, the rest follow.
+    assert _flag(launch.argv(picked), "--filter-users") == "admin,agent,manager"
+    assert launch.custom_order(picked)
+    assert "custom order" in launch.sessions_label(picked)
+
+
+def test_all_accounts_says_nothing_until_an_order_of_its_own_is_set():
+    inventory = core.Inventory({"users": [{"login": "agent"}, {"login": "admin"}]})
+    everyone = _config(sessions={"order": ["agent", "admin"]})
+    assert _flag(launch.argv(everyone, inventory), "--filter-users") is None
+    assert not launch.custom_order(everyone, inventory)
+    turned = _config(sessions={"order": ["admin"]})
+    assert _flag(launch.argv(turned, inventory), "--filter-users") == "admin,agent"
+
+
+def test_in_order_keeps_the_rest_where_they_were():
+    assert launch.in_order(["a", "b", "c", "d"], ["c", "a"]) == ["c", "a", "b", "d"]
+    assert launch.in_order(["a", "b"], []) == ["a", "b"]
+    assert launch.in_order(["a", "b"], ["b", "b", "x"]) == ["b", "a"]
+
+
 def test_extensions_all_passes_no_flag_but_none_has_to_say_so():
     # "all" is the core's default set, so silence is the right way to ask for it;
     # "none" is an instruction and has to be spoken.
