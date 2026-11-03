@@ -2650,6 +2650,22 @@ def test_autologin_switched_back_on_signs_in_again(tmp_path):
     assert '"enabled": true' in config and '"password": "p"' in config
 
 
+def test_autologin_tells_a_rejected_password_from_a_submit_never_answered(tmp_path):
+    """Four windows signed in while a scenario restarted the server: the submits
+    that met the restart got the login page back and were never tried again. Only
+    the app's own rejection stops it now; a clean login page gets another try."""
+    assert sl.DEFAULT_LOGIN_SELECTORS["error"] == ".alert-danger"
+    out = tmp_path / "ext"
+    sl.write_autologin_extension(str(out), "http://x", "u", "p")
+    config = json.loads((out / "config.js").read_text(encoding="utf-8")[len("var AUTOLOGIN = "):].rstrip().rstrip(";"))
+    assert config["selectors"]["error"] == ".alert-danger"
+    source = open(os.path.join(sl.AUTOLOGIN_SRC, "content.js"), encoding="utf-8").read()
+    assert "document.querySelector(SEL.error)" in source
+    assert "var MAX_TRIES = 3;" in source
+    # A rejection is decided before anything is filled in, and remembered.
+    assert source.index("state.rejected") < source.index("l.value = LOGIN")
+
+
 def test_the_content_script_stands_down_when_switched_off():
     source = open(os.path.join(sl.AUTOLOGIN_SRC, "content.js"), encoding="utf-8").read()
     assert "AUTOLOGIN.enabled === false" in source

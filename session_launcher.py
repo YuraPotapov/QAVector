@@ -2465,6 +2465,10 @@ DEFAULT_LOGIN_SELECTORS = {
     "login": 'input[name="login"]',
     "password": 'input[name="password"]',
     "submit": 'button[type="submit"]',
+    # What a login page shows when it rejected the credentials. The extension stops
+    # on it; a login page that comes back without it was never answered (the server
+    # restarted mid-submit) and is tried again.
+    "error": ".alert-danger",
 }
 
 # The auto-login extension's SOURCE. Underscore-prefixed so local_extensions()
