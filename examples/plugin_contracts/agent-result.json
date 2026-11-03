@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "attempt_id": "attempt-1",
+  "backend_ref": "example.agent.review",
+  "plugin_version": "1.0.0",
+  "status": "completed",
+  "summary": "Changes required.",
+  "output": {
+    "verdict": "changes_required"
+  },
+  "artifact_refs": [],
+  "session_ref": null,
+  "usage": null,
+  "error": null
+}

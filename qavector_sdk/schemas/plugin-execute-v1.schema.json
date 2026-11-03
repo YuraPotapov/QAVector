@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:plugin-execute:1",
+  "type": "object",
+  "properties": {
+    "request": {
+      "oneOf": [
+        {
+          "$ref": "urn:qavector:schema:node-request:1"
+        },
+        {
+          "$ref": "urn:qavector:schema:agent-request:1"
+        }
+      ]
+    },
+    "context": {
+      "$ref": "urn:qavector:schema:execution-context:1"
+    },
+    "profile": {
+      "anyOf": [
+        {
+          "$ref": "urn:qavector:schema:agent-profile:1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requirements": {
+      "$ref": "urn:qavector:schema:agent-requirements:1"
+    }
+  },
+  "required": [
+    "request",
+    "context"
+  ],
+  "additionalProperties": false
+}

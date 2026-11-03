@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0.0",
+  "workspace_access": "read",
+  "structured_output": "validated_text",
+  "schema_dialects": [
+    "https://json-schema.org/draft/2020-12/schema"
+  ],
+  "streaming": true,
+  "tool_events": "none",
+  "tool_binding": [],
+  "session_resume": false,
+  "interactive_input": false,
+  "cancellation": "confirmed",
+  "limits": {
+    "wall_time_seconds": "hard",
+    "tokens": "best_effort"
+  },
+  "content_types": [
+    "text"
+  ]
+}

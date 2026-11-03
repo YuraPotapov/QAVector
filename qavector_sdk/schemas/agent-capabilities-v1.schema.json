@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:agent-capabilities:1",
+  "title": "AgentCapabilities v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "workspace_access": {
+      "enum": [
+        "none",
+        "read",
+        "write"
+      ]
+    },
+    "structured_output": {
+      "enum": [
+        "native",
+        "validated_text",
+        "unsupported"
+      ]
+    },
+    "schema_dialects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "streaming": {
+      "type": "boolean"
+    },
+    "tool_events": {
+      "enum": [
+        "none",
+        "partial",
+        "full"
+      ]
+    },
+    "tool_binding": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "session_resume": {
+      "type": "boolean"
+    },
+    "interactive_input": {
+      "type": "boolean"
+    },
+    "cancellation": {
+      "enum": [
+        "none",
+        "request",
+        "confirmed"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "wall_time_seconds": {
+          "enum": [
+            "hard",
+            "best_effort",
+            "unsupported"
+          ]
+        },
+        "turns": {
+          "enum": [
+            "hard",
+            "best_effort",
+            "unsupported"
+          ]
+        },
+        "tokens": {
+          "enum": [
+            "hard",
+            "best_effort",
+            "unsupported"
+          ]
+        },
+        "cost_usd": {
+          "enum": [
+            "hard",
+            "best_effort",
+            "unsupported"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "content_types": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "workspace_access",
+    "structured_output",
+    "schema_dialects",
+    "streaming",
+    "tool_events",
+    "tool_binding",
+    "session_resume",
+    "interactive_input",
+    "cancellation",
+    "limits",
+    "content_types"
+  ],
+  "additionalProperties": false
+}

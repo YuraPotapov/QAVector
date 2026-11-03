@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:plugin-input-response:1",
+  "type": "object",
+  "properties": {
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "response": {}
+  },
+  "required": [
+    "attempt_id",
+    "request_id",
+    "response"
+  ],
+  "additionalProperties": false
+}

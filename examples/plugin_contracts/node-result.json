@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0.0",
+  "attempt_id": "attempt-1",
+  "plugin_version": "1.0.0",
+  "status": "completed",
+  "summary": "Counted 2 values above the threshold.",
+  "output": {
+    "count": 2
+  },
+  "artifact_refs": [],
+  "error": null,
+  "contribution_ref": "example.metrics.count"
+}

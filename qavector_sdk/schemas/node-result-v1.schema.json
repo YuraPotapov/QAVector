@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:node-result:1",
+  "title": "NodeResult v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plugin_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "unknown"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "output": {},
+    "artifact_refs": {
+      "$ref": "urn:qavector:schema:plugin-common:1#/$defs/refs"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "urn:qavector:schema:plugin-error:1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "contribution_ref": {
+      "$ref": "urn:qavector:schema:plugin-common:1#/$defs/contribution_id"
+    }
+  },
+  "required": [
+    "schema_version",
+    "attempt_id",
+    "plugin_version",
+    "status",
+    "summary",
+    "output",
+    "artifact_refs",
+    "error",
+    "contribution_ref"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error": {
+            "$ref": "urn:qavector:schema:plugin-error:1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "unknown"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "const": "EXECUTION_STATE_UNKNOWN"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

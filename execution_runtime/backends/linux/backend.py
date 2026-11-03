@@ -44,6 +44,7 @@ def _read(path):
 
 
 class LinuxBackend(RuntimeBackend):
+    stdio_protocol = True
     provider = "linux-isolated"
     platform = "linux"
     launcher_source = "bundled"
@@ -526,7 +527,7 @@ class LinuxBackend(RuntimeBackend):
             script = 'printf "%s\\n" "$$" > ' + shlex.quote(str(job.group.path / "cgroup.procs")) + ' || exit 125; exec "$@"'
             command = ["/bin/sh", "-c", script, "qavector-bootstrap"] + command
         try:
-            job.process = subprocess.Popen(command, stdin=subprocess.PIPE if job.gateway is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
+            job.process = subprocess.Popen(command, stdin=subprocess.PIPE if job.gateway is not None or job.request.channel is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env={"PATH": "/usr/bin:/bin", "LANG": "C"}, cwd="/",
                 start_new_session=True, close_fds=True,
                 pass_fds=tuple(job.fds + [job.seccomp.fileno(), status_fd, job.lease_fd]))
@@ -548,6 +549,8 @@ class LinuxBackend(RuntimeBackend):
             if job.gateway is not None:
                 from .gateway import GatewayOutput
                 stdout = GatewayOutput(job.process, job.gateway)
+            elif job.request.channel is not None:
+                stdout = job.request.channel.attach(job.process.stdin, job.process.stdout)
             job.captures = [LogCapture(stdout, job.directory / "stdout.log", redactions),
                             LogCapture(job.process.stderr, job.directory / "stderr.log", redactions)]
             job.secret_redactions = ()
@@ -627,7 +630,8 @@ class LinuxBackend(RuntimeBackend):
                     and (job.init_pidfd is None or select.select([job.init_pidfd], [], [], 0)[0])):
                 return
             job.reason = job.reason or reason
-            self._signal_payload(job)
+            if job.frozen is None:
+                self._signal_payload(job)
             try:
                 job.process.wait(timeout=max(0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
@@ -644,13 +648,17 @@ class LinuxBackend(RuntimeBackend):
             job.process.wait(timeout=3)
 
     def _watch(self, job):
-        deadline = None if job.request.timeout_seconds is None else time.monotonic() + job.request.timeout_seconds
+        deadline = None if job.request.timeout_seconds is None else job.clock.now() + job.request.timeout_seconds
         try:
             while job.process.poll() is None:
-                job.sample()
-                if deadline is not None and time.monotonic() >= deadline:
-                    self._terminate(job, time.monotonic(), "timeout")
+                if job.request.channel is not None and job.request.channel.problem:
+                    self._terminate(job, time.monotonic(), job.request.channel.problem)
                     break
+                job.sample()
+                with job.stopping:
+                    if deadline is not None and job.clock.now() >= deadline:
+                        self._terminate(job, time.monotonic(), "timeout")
+                        break
                 time.sleep(0.05)
             if job.status_thread is not None and job.status_thread.ident is not None:
                 job.status_thread.join(3)
@@ -682,6 +690,13 @@ class LinuxBackend(RuntimeBackend):
             except (OSError, RuntimePolicyError, subprocess.TimeoutExpired):
                 job.reason = "termination_unconfirmed"
         finally:
+            with job.stopping:
+                if job.frozen is not None:
+                    job.frozen.close()
+                    job.frozen = None
+                job.clock.resume()
+            if job.request.channel is not None:
+                job.request.channel.close_input()
             if job.gateway is not None:
                 job.gateway.close()
                 if job.process.stdin is not None:
@@ -704,6 +719,43 @@ class LinuxBackend(RuntimeBackend):
         if not job.done.wait(10):
             raise RuntimePolicyError("termination_timeout", "Native execution has not completed cleanup.")
 
+    def pause(self, handle):
+        from .paused import FrozenTree
+        job = self._get(handle)
+        with job.stopping:
+            if job.state in ('exited', 'failed', 'cleaned') or job.frozen is not None:
+                return
+            if job.state == 'prepared' or job.gateway is not None:
+                raise RuntimePolicyError('pause_unsupported', 'Pause requires a started job without a provider bridge.')
+            until = time.monotonic() + 2
+            while job.init_pidfd is None and not job.done.is_set() and job.process.poll() is None:
+                if time.monotonic() >= until:
+                    raise RuntimePolicyError('pause_unconfirmed', 'Native namespace identity is unavailable.')
+                time.sleep(0.005)
+            if job.init_pidfd is None or select.select([job.init_pidfd], [], [], 0)[0]:
+                return
+            tree = FrozenTree(job.init_pid, job.init_pidfd, self._pin_child)
+            job.clock.pause()
+            try:
+                tree.hold()
+                job.frozen = tree
+                self._persist(job)
+            except BaseException:
+                if tree.fds:
+                    tree.release()
+                job.frozen = None
+                job.clock.resume()
+                raise
+
+    def resume(self, handle):
+        job = self._get(handle)
+        with job.stopping:
+            if job.frozen is not None:
+                job.frozen.release()
+                job.frozen = None
+                job.clock.resume()
+                self._persist(job)
+
     def wait(self, handle):
         job = self._get(handle)
         if job.state == "prepared":
@@ -716,6 +768,7 @@ class LinuxBackend(RuntimeBackend):
         return {"instance_id": job.token.instance_id, "provider": self.provider,
                 "policy_digest": job.token.policy_digest, "runtime_root_identity": self.image.identity,
                 "state": job.state, "exit_code": job.exit_code, "reason": job.reason,
+                "paused": job.frozen is not None,
                 "created_at": job.created_at, "started_at": job.started_at, "ended_at": job.ended_at,
                 "stdout_tail": job.captures[0].tail.decode("utf-8", "replace") if job.captures else "",
                 "stderr_tail": job.captures[1].tail.decode("utf-8", "replace") if job.captures else "",

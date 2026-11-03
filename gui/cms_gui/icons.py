@@ -361,6 +361,23 @@ def _more(painter, ink):
         painter.drawRect(QRectF(10.5, y, 3, 3))
 
 
+def _plugins(painter, ink):
+    """A puzzle piece: an extension that fits into the application."""
+    _stroke(painter, ink)
+    path = QPainterPath(QPointF(4, 7))
+    path.lineTo(9, 7)
+    path.cubicTo(8, 1, 16, 1, 15, 7)
+    path.lineTo(19, 7)
+    path.lineTo(19, 11)
+    path.cubicTo(24, 10, 24, 18, 19, 17)
+    path.lineTo(19, 21)
+    path.lineTo(4, 21)
+    path.lineTo(4, 16)
+    path.cubicTo(10, 17, 10, 10, 4, 11)
+    path.closeSubpath()
+    painter.drawPath(path)
+
+
 def _services(painter, ink):
     """Stacked lines with a play mark: the log page's rows, now startable.
 
@@ -622,6 +639,7 @@ DRAWINGS = {
     "developer": _developer,
     "log": _log,
     "services": _services,
+    "plugins": _plugins,
     "dot": _dot,
     "artifacts": _artifacts,
     "pass": _pass,

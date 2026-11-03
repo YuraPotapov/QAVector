@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:node-event:1",
+  "title": "NodeEvent v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "enum": [
+        "started",
+        "message.delta",
+        "input.required",
+        "artifact.created",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "attempt_id",
+    "sequence",
+    "timestamp",
+    "type",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "execution_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "execution_id"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message.delta"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "input.required"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "request_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "response_schema": {
+                "$ref": "urn:qavector:schema:plugin-common:1#/$defs/json_schema"
+              },
+              "timeout_seconds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            },
+            "required": [
+              "request_id",
+              "prompt",
+              "response_schema",
+              "timeout_seconds"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "artifact.created"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "artifact_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "artifact_ref"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "allOf": [
+                  {
+                    "$ref": "urn:qavector:schema:node-result:1"
+                  },
+                  {
+                    "properties": {
+                      "status": {
+                        "const": "completed"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "allOf": [
+                  {
+                    "$ref": "urn:qavector:schema:node-result:1"
+                  },
+                  {
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "failed",
+                          "timed_out",
+                          "unknown"
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "cancelled"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "allOf": [
+                  {
+                    "$ref": "urn:qavector:schema:node-result:1"
+                  },
+                  {
+                    "properties": {
+                      "status": {
+                        "const": "cancelled"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ]
+}

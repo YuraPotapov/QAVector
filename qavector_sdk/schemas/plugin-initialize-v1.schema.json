@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:plugin-initialize:1",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": "1.0.0"
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "contribution": {
+          "$ref": "urn:qavector:schema:plugin-contribution:1"
+        }
+      },
+      "required": [
+        "plugin_id",
+        "version",
+        "digest",
+        "contribution"
+      ],
+      "additionalProperties": false
+    },
+    "schemas": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": [
+            "object",
+            "boolean"
+          ]
+        },
+        "input": {
+          "type": [
+            "object",
+            "boolean"
+          ]
+        },
+        "output": {
+          "type": [
+            "object",
+            "boolean"
+          ]
+        }
+      },
+      "required": [
+        "config",
+        "input",
+        "output"
+      ],
+      "additionalProperties": false
+    },
+    "execution_scope": {
+      "enum": [
+        "local_process",
+        "remote_job"
+      ]
+    }
+  },
+  "required": [
+    "protocol_version",
+    "identity",
+    "schemas",
+    "execution_scope"
+  ],
+  "additionalProperties": false
+}

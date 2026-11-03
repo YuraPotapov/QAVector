@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qavplug-starter"
+dynamic = ["version"]
+description = "Offline examples of a QAVector node provider and agent backend"
+requires-python = ">=3.10,<3.11"
+license = {text = "MIT"}
+dependencies = ["qavector-sdk>=1.0.0,<2.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "qavplug_starter.__version__"}

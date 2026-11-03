@@ -409,7 +409,7 @@ def test_a_heading_goes_with_the_last_item_under_it(window):
 
 def test_the_last_item_on_the_rail_cannot_be_taken_off(window):
     """A rail with nothing in it is a window with no way off the page it is on."""
-    for key, _label, _mark in main_window_mod.CONFIGURE + main_window_mod.OBSERVE:
+    for key, _label, _mark in main_window_mod.NAVIGATION:
         if key != "launch":
             window.set_nav_item_visible(key, False)
 
@@ -436,7 +436,7 @@ def test_the_per_item_switch_and_developer_mode_do_not_undo_each_other(window):
 def test_leaving_developer_mode_gives_the_rail_back_rather_than_emptying_it(window):
     """Everything switched off but Command, and then Command goes away too."""
     window.set_developer_mode(True)
-    for key, _label, _mark in main_window_mod.CONFIGURE + main_window_mod.OBSERVE:
+    for key, _label, _mark in main_window_mod.NAVIGATION:
         if key != "commands":
             window.set_nav_item_visible(key, False)
 

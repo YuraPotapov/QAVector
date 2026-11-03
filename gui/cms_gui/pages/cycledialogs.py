@@ -31,13 +31,14 @@ written with a pointer to the YAML tab - never quietly reshaped.
 """
 
 import copy
+import json
 import os
 import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QHeaderView, QLabel,
-                               QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
+                               QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QInputDialog,
                                QTableWidget, QVBoxLayout, QWidget)
 
 from .. import icons, theme, widgets
@@ -144,7 +145,8 @@ class NodeDialog(_Editor):
 
     def __init__(self, step, plugin, parent=None, writable=True, live=None,
                  ask_plugin=None, trigger=None, groups=(), apply_label="",
-                 read_only_note="", phases=(), restrictions=None, core=None):
+                 read_only_note="", phases=(), restrictions=None, core=None,
+                 agent_profiles=()):
         super().__init__(step.get("label") or step.get("id", "Step"), parent,
                          writable)
         if apply_label:
@@ -155,6 +157,7 @@ class NodeDialog(_Editor):
             self.note.setText(read_only_note)
         self._step = dict(step)
         self._plugin = dict(plugin or {})
+        self._agent_profiles = sorted(name for name in agent_profiles if isinstance(name, str))
         #: {"folder", "cycle"} when the cycle has a project folder - the step
         #: then shows what it is held to - or None, and nothing changes.
         self._restriction_context = restrictions
@@ -273,6 +276,8 @@ class NodeDialog(_Editor):
             return
         self.body_layout.addWidget(widgets.kicker("Settings"))
         for spec in fields:
+            if self._plugin.get("id") == "agent" and spec.get("key") == "agent_profile":
+                spec = dict(spec, options=[""] + self._agent_profiles)
             key = "with." + spec.get("key", "")
             value = settings.get(spec.get("key"))
             if value is None:
@@ -281,6 +286,10 @@ class NodeDialog(_Editor):
             if spec.get("required"):
                 label += " *"
             self._by_kind(key, label, spec, value)
+            if self._plugin.get("id") == "agent" and key == "with.agent_profile":
+                widget = self._widgets[key]
+                if isinstance(widget, QComboBox):
+                    widget.setItemText(0, "Select a profile")
         if undeclared:
             # Kept, not dropped: a typo the core reports is still the author's
             # to fix, and a dialog that deleted it would fix it by losing it.
@@ -321,6 +330,8 @@ class NodeDialog(_Editor):
             self._choice(key, label, _text(value), options, hint)
         elif kind == "multiline":
             self._multiline(key, label, _text(value), hint)
+        elif kind == 'json':
+            self._multiline(key, label, json.dumps(value, indent=2, ensure_ascii=False) if value is not None else '', hint)
         elif kind == "env":
             self._multiline(key, label, _pairs(value),
                             (hint + " " if hint else "")
@@ -614,6 +625,13 @@ class NodeDialog(_Editor):
             if kind == "check":
                 found[key] = bool(raw)
                 continue
+            if kind == 'json':
+                if str(raw).strip():
+                    try:
+                        found[key] = json.loads(str(raw))
+                    except ValueError:
+                        found[key] = str(raw)  # _save reports invalid JSON without losing the edit.
+                continue
             if kind == "env":
                 pairs = _unpairs(raw)
                 if pairs:
@@ -696,6 +714,13 @@ class NodeDialog(_Editor):
 
         for spec in self._plugin.get("inputs") or []:
             key = "with." + spec.get("key", "")
+            if spec.get('kind') == 'json' and key not in self._as_text and key not in self._kept:
+                raw = str(self._value(key)).strip()
+                if raw:
+                    try:
+                        json.loads(raw)
+                    except ValueError as exc:
+                        problems.append('%s: invalid JSON (%s).' % (spec.get('label', key), exc))
             if (spec.get("kind") == "args" and key not in self._as_text
                     and self._touched(key)
                     and _split_args(str(self._value(key))) is None):
@@ -977,10 +1002,11 @@ class CycleDialog(_Editor):
     """A cycle's own properties: what it is called, whose it is, its variables."""
 
     def __init__(self, document, projects=(), parent=None, writable=True,
-                 stored_secrets=(), core=None):
+                 stored_secrets=(), core=None, agent_backends=()):
         super().__init__(document.get("name") or document.get("id", "Cycle"),
                          parent, writable)
         self._document = dict(document)
+        self._agent_backends = list(agent_backends)
         self.saved = None
         #: Values the caller has to put in the secrets store, and names to take
         #: out of it. Kept apart from ``saved`` because they go somewhere else
@@ -1043,8 +1069,38 @@ class CycleDialog(_Editor):
             "the cycle file - that file is committed and shipped - but "
             "encrypted beside your own data (Settings -> Cycle secrets). A "
             "path is ordinary text that the row will help you find."))
+        self.agent_profiles = QPlainTextEdit(json.dumps(document.get('agent_profiles') or {}, indent=2, ensure_ascii=False))
+        self.agent_profiles.setReadOnly(not writable)
+        self.body_layout.addWidget(widgets.field('Agent roles (JSON)', self.agent_profiles,
+            'Each role has a backend_ref, backend_version, instructions, limits and backend_options.'))
+        add_role = QPushButton('Add agent role…')
+        add_role.setEnabled(writable)
+        add_role.clicked.connect(self._add_role)
+        self.body_layout.addWidget(add_role)
         self.body_layout.addStretch(1)
         self._sync_restrictions()
+
+    def _add_role(self):
+        try:
+            profiles = json.loads(self.agent_profiles.toPlainText())
+            if not isinstance(profiles, dict):
+                raise ValueError('Expected an object')
+        except ValueError as exc:
+            self._complain(['Agent roles: ' + str(exc)])
+            return
+        name, ok = QInputDialog.getText(self, 'Agent role', 'Role ID, e.g. agent.developer')
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in profiles:
+            self._complain(['This role already exists. Edit its JSON definition.'])
+            return
+        backends = sorted(set(['qavector.agent.claude_cli'] + self._agent_backends))
+        backend, ok = QInputDialog.getItem(self, 'Agent backend', 'Installed backend', backends, 0, False)
+        if ok:
+            profiles[name] = {'backend_ref': backend, 'backend_version': '>=1.0.0,<2.0.0',
+                              'instructions': '', 'backend_options': {}}
+            self.agent_profiles.setPlainText(json.dumps(profiles, indent=2, ensure_ascii=False))
 
     def _folder(self):
         """The folder as written and, when it can be, resolved for a probe."""
@@ -1087,6 +1143,13 @@ class CycleDialog(_Editor):
 
     def _save(self):
         variables, values = {}, {}
+        try:
+            profiles = json.loads(self.agent_profiles.toPlainText())
+            if not isinstance(profiles, dict):
+                raise ValueError('Expected an object')
+        except ValueError as exc:
+            self._complain(['Agent roles: ' + str(exc)])
+            return
         for row in self.variables.rows():
             if row["secret"]:
                 # The name goes in the file, the value goes to the store, and
@@ -1109,6 +1172,8 @@ class CycleDialog(_Editor):
                       "description": self.description.text().strip(),
                       "project": self.project.currentData() or "",
                       "variables": variables}
+        if profiles or 'agent_profiles' in self._document:
+            self.saved['agent_profiles'] = profiles
         # Empty values are taken out of the file by the caller.
         self.saved["project_folder"] = self.project_folder.text().strip()
         self.saved["restrictions"] = copy.deepcopy(self._restrictions) if self.saved["project_folder"] else {}
@@ -1153,6 +1218,8 @@ def _fits(kind, value):
     """Whether a widget of ``kind`` can show ``value`` and give it back whole."""
     if kind == "check":
         return isinstance(value, bool)
+    if kind == 'json':
+        return not (isinstance(value, str) and _WHOLE_REFERENCE.match(value))
     if kind == "env":
         return isinstance(value, dict) and all(
             isinstance(one, _SCALARS) and "=" not in str(key) and "\n" not in str(key)

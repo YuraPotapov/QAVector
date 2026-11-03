@@ -62,6 +62,8 @@ cyclememory.json
 build/
 /runtime/
 /execution-deployments/
+# Installed plugin archives, consent, registry and runtime state are user data.
+/plugins
 dist/
 *.egg-info/
 

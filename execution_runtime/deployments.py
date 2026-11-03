@@ -29,11 +29,14 @@ class RuntimeDeployment(Snapshot):
         profile_name(meta["name"])
         if not isinstance(meta.get("description", ""), str) or len(meta.get("description", "")) > 4096:
             raise RuntimePolicyError("invalid_description", "Deployment description must be bounded text.")
-        object_fields(spec, ("provider", "policy", "bindings", "backend_options", "working_directory", "environment", "shell", "workers", "provider_gateways"),
+        object_fields(spec, ("provider", "policy", "bindings", "backend_options", "working_directory", "environment", "shell", "workers", "provider_gateways", "plugin_services"),
                       "spec", ("provider", "policy", "bindings", "backend_options", "working_directory"))
         if spec["provider"] not in ("auto", "linux-isolated", "linux-system-isolated", "windows-isolated"):
             raise RuntimePolicyError("unknown_provider", "Unknown deployment provider.")
         PolicyPatch(spec["policy"])
+        if 'plugin_services' in spec:
+            from plugin_host.service_policy import validate_services
+            validate_services(spec['plugin_services'])
         if not isinstance(spec["bindings"], list) or not isinstance(spec["backend_options"], dict):
             raise RuntimePolicyError("invalid_deployment", "Expected trusted bindings and namespaced backend options.")
         if not isinstance(spec["working_directory"], str) or not spec["working_directory"] or "\0" in spec["working_directory"]:

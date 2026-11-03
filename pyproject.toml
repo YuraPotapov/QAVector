@@ -25,6 +25,9 @@ classifiers = [
 # from now should fail loudly at install time rather than mysteriously at runtime.
 dependencies = [
     "cryptography>=3.4,<50",
+    "packaging>=23,<27",
+    "jsonschema>=4.18,<5",
+    "referencing>=0.28.4,<1",
 ]
 
 [project.optional-dependencies]
@@ -45,10 +48,12 @@ qavector = "session_launcher:main"
 py-modules = ["session_launcher", "runtime_paths", "system_load"]
 
 [tool.setuptools.packages.find]
-include = ["engine*", "adapters*", "domain*", "cycle*", "execution_runtime*"]
+include = ["engine*", "adapters*", "domain*", "cycle*", "execution_runtime*", "qavector_sdk*", "plugin_host*", "qavector_agent_claude*"]
 
 [tool.setuptools.package-data]
 engine = ["hud.js", "recorder.js"]
+qavector_sdk = ["schemas/*.json"]
+qavector_agent_claude = ["schemas/*.json", "manifest.json", "requirements.lock"]
 "execution_runtime.backends.linux" = ["bubblewrap.lock.json", "passt.lock.json"]
 
 [tool.setuptools.data-files]

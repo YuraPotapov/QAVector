@@ -418,6 +418,27 @@ class Core:
             raise CoreError(payload["error"])
         return payload
 
+    def plugins(self, *args):
+        """Plugin CLI has its own parser; project/flow flags do not belong here."""
+        try:
+            process = subprocess.run(list(self.prefix) + ['--plugins'] + list(args),
+                capture_output=True, text=True, timeout=120, cwd=self.spawn_dir(),
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            payload = json.loads(process.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise CoreError('Plugin manager did not return a valid response: %s' % exc) from exc
+        return payload
+
+    def plugin_import(self, archive, approval):
+        handle = tempfile.NamedTemporaryFile('w', encoding='utf-8', suffix='.json', delete=False)
+        try:
+            with handle:
+                json.dump(approval, handle)
+            # Import is always inactive; activation is a separate user action.
+            return self.plugins('import', archive, '--approval', handle.name)
+        finally:
+            os.unlink(handle.name)
+
     # -- scenario files -------------------------------------------------------
     # The GUI has no YAML of its own - PySide6 is its only dependency - so the
     # scenario format stays entirely in the core and these four go through it.

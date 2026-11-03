@@ -45,7 +45,7 @@ STEP_KEYS = frozenset((
 #: Keys a cycle may carry.
 CYCLE_KEYS = frozenset(("id", "name", "description", "project", "version",
                         "variables", "subject", "triggers", "actions", "phases", "execution", "steps",
-                        "project_folder", "restrictions"))
+                        "project_folder", "restrictions", "agent_profiles"))
 
 #: Keys of the ``subject:`` mapping - see :class:`~domain.cycle.Subject`.
 SUBJECT_KEYS = frozenset(("kind", "key", "title", "memory", "pin"))
@@ -109,6 +109,7 @@ def parse_cycle(raw, cycle_id, source=None):
                  execution=_parse_execution(raw.get("execution", {})),
                  project_folder=_text_or_raise(raw.get("project_folder"), "project_folder"),
                  restrictions=_mapping_or_raise(raw.get("restrictions"), "restrictions"),
+                 agent_profiles=_mapping_or_raise(raw.get("agent_profiles"), "agent_profiles"),
                  name=str(raw.get("name") or "").strip(),
                  description=str(raw.get("description") or "").strip(),
                  project=str(raw.get("project") or "").strip(),
@@ -319,6 +320,8 @@ def problems(cycle, registry=None, raw=None):
     found.extend(_key_problems(raw))
     found.extend(_subject_problems(cycle))
     found.extend(_execution_problems(cycle))
+    from cycle import agent_profiles
+    found.extend(agent_profiles.problems(cycle))
     found.extend(action_problems(cycle))
     from cycle import phases
     found.extend(phases.problems(cycle))
@@ -878,6 +881,8 @@ def to_document(cycle):
         document["project_folder"] = cycle.project_folder
     if cycle.restrictions:
         document["restrictions"] = copy.deepcopy(cycle.restrictions)
+    if cycle.agent_profiles:
+        document["agent_profiles"] = copy.deepcopy(cycle.agent_profiles)
     if cycle.phases:
         from cycle import phases
         document["phases"] = [phases.document(phase) for phase in cycle.phases]
@@ -976,6 +981,7 @@ def to_graph(cycle):
         **({"execution": copy.deepcopy(cycle.execution)} if cycle.execution else {}),
         **({"project_folder": cycle.project_folder} if cycle.project_folder else {}),
         **({"restrictions": copy.deepcopy(cycle.restrictions)} if cycle.restrictions else {}),
+        **({"agent_profiles": copy.deepcopy(cycle.agent_profiles)} if cycle.agent_profiles else {}),
         **({"phases": [phases.document(phase) for phase in cycle.phases]} if cycle.phases else {}),
         "variables": dict(cycle.variables),
         "secrets": list(cycle.secrets),

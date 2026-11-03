@@ -77,10 +77,12 @@ _ADDED_LATER = {"retry_backoff": FIXED, "phase": "", "important": False, "runtim
                 "importance_reason": "", "restrictions": {}, "system": False}
 
 
-def signatures(cycle, overrides, registry, runtime_bindings=None):
+def signatures(cycle, overrides, registry, runtime_bindings=None, plugin_bindings=None):
+    from cycle.agent_profiles import binding as profile_binding
     values = dict(cycle.variables, **(overrides or {}))
     result = {}
     for step in cycle.steps:
+        agent_profile = profile_binding(cycle, step)
         definition = asdict(step)
         for key in _PRESENTATION:
             definition.pop(key, None)
@@ -98,6 +100,8 @@ def signatures(cycle, overrides, registry, runtime_bindings=None):
             used |= {ref.split(".")[1] for ref in variables.REFERENCE.findall(cycle.project_folder)
                      if ref.startswith("vars.")}
         result[step.id] = digest({
+            **({"plugin": plugin_bindings[step.id]} if plugin_bindings and step.id in plugin_bindings else {}),
+            **({"agent_profile": agent_profile} if agent_profile else {}),
             **({"runtime": runtime_bindings[step.id]} if runtime_bindings and step.id in runtime_bindings else {}),
             **({"restricted_by": held} if held else {}),
             "step": definition,
@@ -137,6 +141,7 @@ class Store:
         self.definitions = {}
         self.earlier = {}
         self.runtime_bindings = {}
+        self.plugin_bindings = {}
 
     def write(self, path, data):
         try:
@@ -145,10 +150,11 @@ class Store:
             raise CheckpointError("Cannot save execution state: %s" % exc) from exc
 
     def begin(self, run, cycle, registry):
-        self.definitions = signatures(cycle, run.variables, registry, self.runtime_bindings)
+        self.definitions = signatures(cycle, run.variables, registry, self.runtime_bindings, self.plugin_bindings)
         self.write(os.path.join(self.directory, "manifest.json"), {
             "schema": 1, "cycle": cycle.id,
             "steps": self.definitions,
+            **({"plugins": self.plugin_bindings} if self.plugin_bindings else {}),
             **({"runtime": self.runtime_bindings} if self.runtime_bindings else {}),
             **({"execution": {"initial_mode": run.initial_execution_mode,
                               "policy_version": run.execution_policy_version}}
@@ -291,7 +297,7 @@ class Store:
         declared_phases = [phases.document(phase) for phase in cycle.phases]
         if manifest.get("phases", []) != declared_phases:
             raise CheckpointError("The phase contract changed. Restore it or start a new run.")
-        current = signatures(cycle, previous.variables, registry, self.runtime_bindings)
+        current = signatures(cycle, previous.variables, registry, self.runtime_bindings, self.plugin_bindings)
         if set(current) != set(previous.steps):
             raise CheckpointError("The cycle's steps changed. Resume requires the same graph.")
         uncertain = []

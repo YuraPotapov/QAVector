@@ -1006,6 +1006,82 @@ def test_native_source_replacement_after_prepare_uses_the_pinned_directory(nativ
     assert result["stdout_tail"] == "approved"
 
 
+def test_native_stdio_protocol_is_bidirectional_and_not_copied_to_logs(native):
+    from execution_runtime.channel import StdioChannel
+    backend, _ = native
+    channel = StdioChannel()
+    runtime = ExecutionRuntime(backend)
+    request = ExecutionRequest(policy(backend), ("/bin/busybox", "sh", "-c",
+        'IFS= read -r line; printf "%s\\n" "$line"'), "/", timeout_seconds=5, channel=channel)
+    handle = runtime.start(runtime.prepare(request))
+    try:
+        frame = b'{"private_protocol":"hello"}\n'
+        channel.send(frame)
+        assert channel.receive(timeout=3) == frame
+        result = runtime.wait(handle)
+        assert result["exit_code"] == 0 and result["stdout_tail"] == "", result
+        assert Path(result["artifacts"][1]).read_bytes() == b""
+    finally:
+        runtime.stop(handle, 0)
+        runtime.cleanup(handle)
+
+
+def test_native_generic_plugin_worker_runs_without_network_or_host_imports(native, git_workload_image, tmp_path):
+    from runtime_plugin_image import plugin_image
+    from plugin_host.attempts import AttemptStore
+    from plugin_host.runner import run_plugin
+    base, worker = git_workload_image
+    image, argv = plugin_image(tmp_path, base, worker["argv"][0])
+    parent = native[0]
+    backend = LinuxBackend(image, tmp_path / "plugin-state", launcher=parent.launcher,
+                           bundle_directory=parent._bundle.directory)
+    examples = Path(__file__).parents[1] / "examples/plugin_contracts"
+    initialization = json.loads((examples / "plugin-initialize.json").read_text())
+    params = json.loads((examples / "plugin-execute.json").read_text())
+    request = ExecutionRequest(policy(backend), argv, "/", timeout_seconds=20)
+    store = AttemptStore(tmp_path / "attempts.db")
+    try:
+        result = run_plugin(ExecutionRuntime(backend), request, initialization, params, store)
+        assert result["status"] == "completed" and result["output"] == {"count": 2}, result
+        assert all(job.state == "cleaned" for job in backend._jobs.values())
+    finally:
+        store.close()
+        backend.shutdown(time.monotonic() + 2)
+
+
+def test_native_claude_backend_runs_within_worker_os_boundary(native, git_workload_image, tmp_path):
+    from claude_backend_fixture import configure, fake_cli
+    from runtime_plugin_image import plugin_image
+    from plugin_host.attempts import AttemptStore
+    from plugin_host.runner import run_plugin
+    base, worker = git_workload_image
+    image, argv = plugin_image(tmp_path, base, worker["argv"][0])
+    binary = fake_cli(tmp_path / "fake-claude", worker["argv"][0], body=(
+        "import importlib.util, socket\n"
+        "assert importlib.util.find_spec('cycle') is None\n"
+        "try:\n    socket.socket()\nexcept OSError:\n    pass\n"
+        "else:\n    raise AssertionError('Network unexpectedly available')\n"
+        "print(json.dumps({'type': 'result', 'result': '{\"verdict\":\"approved\"}'}))\n"))
+    image = RuntimeImage.from_files([(f.source, f.target, f.executable) for f in image.files]
+                                  + [(binary, "/qavector/fake-claude", True)])
+    parent = native[0]
+    backend = LinuxBackend(image, tmp_path / "claude-state", launcher=parent.launcher,
+                           bundle_directory=parent._bundle.directory)
+    examples = Path(__file__).parents[1] / "examples/plugin_contracts"
+    initialization = json.loads((examples / "plugin-initialize.json").read_text())
+    params = json.loads((examples / "plugin-execute.json").read_text())
+    configure(initialization, params, "/qavector/fake-claude")
+    request = ExecutionRequest(policy(backend), argv, "/", timeout_seconds=20)
+    store = AttemptStore(tmp_path / "claude-attempts.db")
+    try:
+        result = run_plugin(ExecutionRuntime(backend), request, initialization, params, store)
+        assert result["status"] == "completed" and result["output"] == {"verdict": "approved"}, result
+        assert all(job.state == "cleaned" for job in backend._jobs.values())
+    finally:
+        store.close()
+        backend.shutdown(time.monotonic() + 2)
+
+
 def test_native_timeout_stops_a_waiting_workload(native):
     started = time.monotonic()
     result = run(native, ("/bin/busybox", "sleep", "30"), timeout=0.15)

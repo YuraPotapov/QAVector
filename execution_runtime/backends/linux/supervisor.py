@@ -109,6 +109,9 @@ class Instance:
         self.status_thread = None
         self.done = threading.Event()
         self.stopping = threading.RLock()
+        from ...pause import ActiveClock
+        self.clock = ActiveClock()
+        self.frozen = None
         self.reason = ""
         self.exit_code = None
         self.state = "prepared"

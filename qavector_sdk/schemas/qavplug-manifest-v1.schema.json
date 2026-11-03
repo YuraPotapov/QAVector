@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:qavplug-manifest:1",
+  "title": "QavplugManifest v1",
+  "type": "object",
+  "properties": {
+    "format_version": {
+      "const": 1
+    },
+    "plugin_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "plugin_api": {
+          "type": "string",
+          "pattern": "^(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:,(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))*$"
+        },
+        "agent_api": {
+          "type": "string",
+          "pattern": "^(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:,(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))*$"
+        },
+        "host_api": {
+          "type": "string",
+          "pattern": "^(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:,(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))*$"
+        },
+        "qavector": {
+          "type": "string",
+          "pattern": "^(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:,(?:==|>=|<=|>|<)(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))*$",
+          "description": "Required QAVector release range for installation and execution; missing legacy declarations are incompatible."
+        }
+      },
+      "required": [
+        "plugin_api",
+        "host_api"
+      ],
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "python_worker"
+        },
+        "distribution": {
+          "type": "string",
+          "minLength": 1
+        },
+        "python": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]+-[a-z0-9_]+-cp[0-9]+$"
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "kind",
+        "distribution",
+        "python",
+        "targets"
+      ],
+      "additionalProperties": false
+    },
+    "contributions": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:qavector:schema:plugin-contribution:1"
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "permissions_requested": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "enum": [
+            "none",
+            "read",
+            "write"
+          ]
+        },
+        "process": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "network": {
+          "enum": [
+            "none",
+            "policy_controlled"
+          ]
+        },
+        "credentials": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "workspace",
+        "process",
+        "network",
+        "credentials"
+      ],
+      "additionalProperties": false
+    },
+    "external_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "const": "executable"
+          },
+          "default_command": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "default_command"
+        ],
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    "dependencies": {
+      "type": "object",
+      "properties": {
+        "python_lock": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*[\\\\:])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+        },
+        "plugins": {
+          "type": "array",
+          "maxItems": 0
+        }
+      },
+      "required": [
+        "python_lock",
+        "plugins"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "format_version",
+    "plugin_id",
+    "name",
+    "version",
+    "publisher",
+    "description",
+    "license",
+    "compatibility",
+    "runtime",
+    "contributions",
+    "permissions_requested",
+    "external_requirements",
+    "dependencies"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "contributions": {
+            "contains": {
+              "properties": {
+                "kind": {
+                  "const": "agent_backend"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "compatibility": {
+            "required": [
+              "agent_api"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

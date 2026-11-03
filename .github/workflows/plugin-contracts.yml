@@ -1,0 +1,68 @@
+name: Portable plugin contracts
+
+on:
+  pull_request:
+    paths:
+      - 'qavector_sdk/**'
+      - 'qavector_agent_claude/**'
+      - 'cycle/**'
+      - 'domain/cycle.py'
+      - 'plugin_host/**'
+      - 'execution_runtime/**'
+      - 'examples/plugin_contracts/**'
+      - 'tests/test_plugin_*.py'
+      - 'tests/test_agent_claude_backend.py'
+      - 'tests/test_cycle_agent_profiles.py'
+      - 'tests/test_cycle_plugin_plan.py'
+      - 'tests/conftest.py'
+      - 'tests/claude_backend_fixture.py'
+      - 'tests/fixtures/plugin_providers.py'
+      - 'pyproject.toml'
+      - '.github/workflows/plugin-contracts.yml'
+  push:
+    paths:
+      - 'qavector_sdk/**'
+      - 'qavector_agent_claude/**'
+      - 'cycle/**'
+      - 'domain/cycle.py'
+      - 'plugin_host/**'
+      - 'execution_runtime/**'
+      - 'examples/plugin_contracts/**'
+      - 'tests/test_plugin_*.py'
+      - 'tests/test_agent_claude_backend.py'
+      - 'tests/test_cycle_agent_profiles.py'
+      - 'tests/test_cycle_plugin_plan.py'
+      - 'tests/conftest.py'
+      - 'tests/claude_backend_fixture.py'
+      - 'tests/fixtures/plugin_providers.py'
+      - 'pyproject.toml'
+      - '.github/workflows/plugin-contracts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.13']
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install . "pytest>=7,<10" "pyyaml>=6,<7"
+      - run: python -m pytest tests/test_plugin_contracts.py tests/test_plugin_registry.py tests/test_plugin_installer.py tests/test_plugin_worker.py tests/test_agent_claude_backend.py tests/test_cycle_agent_profiles.py tests/test_cycle_plugin_plan.py -q
+      - name: Schemas are present in the installed distribution
+        run: python -I -c "from qavector_sdk import load_schema; from qavector_sdk.validation import SCHEMAS; from jsonschema import Draft202012Validator; [Draft202012Validator.check_schema(load_schema(name)) for name in SCHEMAS]"
+      - name: Claude backend schema is present in the installed distribution
+        run: python -I -c "from qavector_agent_claude.backend import config_schema; from qavector_sdk import validate_schema; validate_schema(config_schema())"
+      - name: Bundled backend has a complete content inventory
+        run: python -I -c "from plugin_host.bundled import claude_binding; assert len(claude_binding()['digest']) == 64"

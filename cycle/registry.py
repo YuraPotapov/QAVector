@@ -104,7 +104,7 @@ Accepts = namedtuple("Accepts", "kind label when")
 
 #: Field kinds a front-end is expected to know how to draw.
 KINDS = ("text", "multiline", "number", "check", "args", "env", "file", "dir",
-         "choice", "scenario", "service")
+         "choice", "scenario", "service", "json")
 
 #: Categories, for grouping in a UI. They organise; they constrain nothing.
 ACTION = "action"
@@ -472,6 +472,10 @@ def _table():
             _loaded[plugin.metadata.id] = plugin
     combined = dict(_loaded)
     combined.update(_registered)
+    from plugin_host.catalog import selected
+    from cycle.plugins.installed import InstalledNode
+    for identifier, item in selected('node_provider').items():
+        combined.setdefault(identifier, InstalledNode(item))
     return combined
 
 
@@ -482,12 +486,19 @@ def get(plugin_id):
 
 def all_plugins():
     """Every plugin, built-in and registered, sorted by id."""
-    return [_table()[key] for key in sorted(_table())]
+    table = _table()
+    return [table[key] for key in sorted(table)]
 
 
 def describe():
     """Every plugin's metadata as plain data, for ``--describe``."""
-    return [plugin.metadata.to_dict() for plugin in all_plugins()]
+    return [dict(plugin.metadata.to_dict(), **({'installed': plugin.catalog}
+            if hasattr(plugin, 'catalog') else {})) for plugin in all_plugins()]
+
+
+def builtin_descriptions():
+    """Descriptions of core-owned nodes, without consulting installed packages."""
+    return [plugin.metadata.to_dict() for plugin in _builtins()]
 
 
 def register(plugin, replace=False):

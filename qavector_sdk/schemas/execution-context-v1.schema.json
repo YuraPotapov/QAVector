@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:execution-context:1",
+  "title": "ExecutionContext v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "execution_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_handle": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tools_handle": {
+      "$ref": "urn:qavector:schema:plugin-common:1#/$defs/nullable_ref"
+    },
+    "credentials_handle": {
+      "$ref": "urn:qavector:schema:plugin-common:1#/$defs/nullable_ref"
+    },
+    "cancellation_handle": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "execution_id",
+    "runtime_handle",
+    "tools_handle",
+    "credentials_handle",
+    "cancellation_handle"
+  ],
+  "additionalProperties": false
+}

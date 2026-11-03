@@ -1,0 +1,59 @@
+{
+  "protocol_version": "1.0.0",
+  "identity": {
+    "plugin_id": "example.metrics",
+    "version": "1.0.0",
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "contribution": {
+      "kind": "node_provider",
+      "id": "example.metrics.count",
+      "entrypoint": "count_provider:CountProvider",
+      "config_schema": "schemas/count-config.json",
+      "input_schema": "schemas/count-input.json",
+      "output_schema": "schemas/count-output.json"
+    }
+  },
+  "schemas": {
+    "config": {
+      "type": "object",
+      "properties": {
+        "threshold": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "threshold"
+      ],
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "execution_scope": "local_process"
+}

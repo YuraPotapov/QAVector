@@ -1,0 +1,54 @@
+{
+  "format_version": 1,
+  "plugin_id": "qavector.agent.claude_cli",
+  "name": "Claude Code backend",
+  "version": "1.0.2",
+  "publisher": "QAVector",
+  "description": "Bundled Claude AgentBackend. Runtime and SDK are supplied by the core distribution.",
+  "license": "Bundled with QAVector; no separate license grant",
+  "compatibility": {
+    "plugin_api": ">=1.0.0,<2.0.0",
+    "agent_api": ">=1.0.0,<2.0.0",
+    "host_api": ">=1.0.0,<2.0.0",
+    "qavector": ">=0.16.48,<0.17.0"
+  },
+  "runtime": {
+    "kind": "python_worker",
+    "distribution": "qavector",
+    "python": ">=3.9",
+    "targets": [
+      "linux-x86_64-cp39",
+      "linux-x86_64-cp310",
+      "linux-x86_64-cp313"
+    ]
+  },
+  "contributions": [
+    {
+      "kind": "agent_backend",
+      "id": "qavector.agent.claude_cli",
+      "entrypoint": "qavector_agent_claude:ClaudeCliBackend",
+      "config_schema": "schemas/config.json"
+    }
+  ],
+  "permissions_requested": {
+    "workspace": "write",
+    "process": [
+      "claude"
+    ],
+    "network": "policy_controlled",
+    "credentials": [
+      "claude_login"
+    ]
+  },
+  "external_requirements": [
+    {
+      "id": "claude",
+      "kind": "executable",
+      "default_command": "claude"
+    }
+  ],
+  "dependencies": {
+    "python_lock": "requirements.lock",
+    "plugins": []
+  }
+}

@@ -117,18 +117,8 @@ SCRIPT_DIR = runtime_paths.app_root()
 
 
 def version():
-    """The installed version, or "dev" when running from a source checkout.
-
-    pyproject.toml holds the only copy; this reads it back rather than keeping a
-    second one here to drift out of step. A frozen build has no installed
-    distribution to look up, so it falls back to the VERSION file the build script
-    writes into the bundle from that same pyproject.toml.
-    """
-    try:
-        from importlib.metadata import PackageNotFoundError, version as _version
-        return _version("qavector")
-    except Exception:
-        return runtime_paths.bundled_version() or "dev (not installed)"
+    """The same release identity used for package compatibility."""
+    return runtime_paths.application_version() or "dev (version unavailable)"
 
 
 DEFAULT_SESSIONS_DIR = runtime_paths.sessions_dir()
@@ -667,6 +657,7 @@ def describe(config_path, flows_dir=None, sessions_dir=None, reports_dir=None,
         # list. Both degrade to empty when the engine extra is not installed.
         "cycles": cycle_inventory(cycles_dir),
         "cycle_plugins": cycle_plugins(),
+        "plugin_contributions": plugin_contributions(),
         "overlay_components": list(_OVERLAY_COMPONENTS),
         "report_artifacts": list(_REPORT_ARTIFACTS),
         "report_screen_modes": list(_REPORT_SCREEN_MODES),
@@ -716,6 +707,11 @@ def flow_actions():
         # accepted by wait_for; anything else is Playwright's default
         "states": ["visible", "attached", "hidden", "detached"],
     }
+
+
+def plugin_contributions():
+    from plugin_host.catalog import contributions
+    return contributions()
 
 
 def cycle_plugins():
@@ -3627,6 +3623,9 @@ Execution Runtime - profile management and diagnostics as JSON; no workload laun
   --runtime-preflight      Check required guarantees from --from=FILE;
                             unavailable enforcement returns exit code 1.
   --runtime-profiles-dir=D Override the control-plane profile store.
+  --plugins COMMAND [OPTIONS]
+      Inspect/import .qavplug packages and manage installed versions (JSON).
+      Use --plugins --help for trust, grants, runtime and lifecycle commands.
   --runtime-deployment-list
                             List approved, content-pinned execution deployments.
   --runtime-deployment-show=NAME
@@ -3880,6 +3879,9 @@ Example:
 
 
 def main():
+    if sys.argv[1:2] == ["--plugins"]:
+        from plugin_host.cli import main as plugin_main
+        sys.exit(plugin_main(sys.argv[2:]))
     if sys.argv[1:2] == ["--cycle-step-worker"]:
         # A restricted Jira or Teams step, started by a cycle run inside its
         # sandbox: first, before anything here touches the user's data folder.

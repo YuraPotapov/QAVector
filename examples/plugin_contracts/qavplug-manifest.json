@@ -1,0 +1,42 @@
+{
+  "format_version": 1,
+  "plugin_id": "example.agent.review",
+  "name": "Example Review Backend",
+  "version": "1.0.0",
+  "publisher": "Example",
+  "description": "Metadata fixture; no executable payload is shipped.",
+  "license": "MIT",
+  "compatibility": {
+    "plugin_api": ">=1.0.0,<2.0.0",
+    "agent_api": ">=1.0.0,<2.0.0",
+    "host_api": ">=1.0.0,<2.0.0",
+    "qavector": ">=0.16.48,<0.17.0"
+  },
+  "runtime": {
+    "kind": "python_worker",
+    "distribution": "example-review",
+    "python": ">=3.10,<3.11",
+    "targets": [
+      "linux-x86_64-cp310"
+    ]
+  },
+  "contributions": [
+    {
+      "kind": "agent_backend",
+      "id": "example.agent.review",
+      "entrypoint": "example_review.backend:ReviewBackend",
+      "config_schema": "schemas/config.json"
+    }
+  ],
+  "permissions_requested": {
+    "workspace": "read",
+    "process": [],
+    "network": "none",
+    "credentials": []
+  },
+  "external_requirements": [],
+  "dependencies": {
+    "python_lock": "requirements.lock",
+    "plugins": []
+  }
+}

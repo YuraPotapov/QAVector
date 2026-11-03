@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "enum": [
+        "agent_backend",
+        "node_provider"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$"
+    },
+    "entrypoint": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+    },
+    "config_schema": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*[\\\\:])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    },
+    "ui_schema": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*[\\\\:])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    },
+    "input_schema": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*[\\\\:])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    },
+    "output_schema": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*[\\\\:])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    }
+  },
+  "required": [
+    "kind",
+    "id",
+    "entrypoint",
+    "config_schema"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "node_provider"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "input_schema",
+          "output_schema"
+        ]
+      }
+    }
+  ],
+  "$id": "urn:qavector:schema:plugin-contribution:1",
+  "title": "PluginContribution v1"
+}

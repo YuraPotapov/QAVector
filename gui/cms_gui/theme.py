@@ -771,6 +771,15 @@ QFrame[role="section"] QWidget[seethrough="true"] {{ background: transparent; }}
    shade off the page in either mode, so the distinction survives dark mode
    instead of inverting into a lighter block that reads as the highlighted one. */
 QFrame[role="panel-fixed"] {{ background: {surface}; border: 1px solid {divider}; }}
+/* Plugin details scroll independently of their always-visible actions. */
+QFrame#pluginDetailBody {{ background: {surface}; border: none; }}
+QWidget#pluginDetailActions {{ background: {surface}; border-top: 1px solid {divider}; }}
+QSplitter#pluginSplitter::handle {{ background: transparent; }}
+QSplitter#pluginSplitter::handle:hover {{ background: {divider}; }}
+QLabel#pluginProblem {{
+    background: {bad_tint}; color: {bad_ink}; padding: 10px;
+    border-left: 2px solid {bad_ink};
+}}
 /* Nothing configured yet: its own ground, so the page says "empty" rather than
    looking like it failed to draw. */
 QFrame[role="emptyzone"] {{

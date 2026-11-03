@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "threshold": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "threshold"
+  ],
+  "additionalProperties": false
+}

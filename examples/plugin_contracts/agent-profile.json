@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0.0",
+  "id": "reviewer",
+  "revision": "1",
+  "backend_ref": "example.agent.review",
+  "backend_version": ">=1.0.0,<2.0.0",
+  "model": null,
+  "instructions": "Review the supplied evidence.",
+  "credentials_ref": null,
+  "limits": {
+    "wall_time_seconds": 60
+  },
+  "backend_options": {}
+}

@@ -222,6 +222,13 @@ The GUI's **Cycles** page draws the whole cycle - every step and every connectio
 - and the same drawing is the run view: the nodes take on their status as it
 goes. Writing one: **[docs/cycles.md](docs/cycles.md)**.
 
+### Plugins
+
+`.qavplug` packages extend QAVector with ordinary Cycle nodes and agent backends.
+The **Plugins** page manages import, permission review and active versions.
+To build your own package, follow the **[step-by-step authoring guide](docs/qavplug-authoring.md)**
+and its **[installable starter project](examples/qavplug_starter/README.md)**.
+
 ### Restrictions
 
 A services project or a cycle can hold the programs it starts to its **project

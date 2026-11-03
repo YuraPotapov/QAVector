@@ -1,0 +1,43 @@
+{
+  "format_version": 1,
+  "plugin_id": "example.metrics",
+  "name": "Metrics Nodes",
+  "version": "1.0.0",
+  "publisher": "Example",
+  "description": "Ordinary data processing nodes, with no agent dependency.",
+  "license": "MIT",
+  "compatibility": {
+    "plugin_api": ">=1.0.0,<2.0.0",
+    "host_api": ">=1.0.0,<2.0.0",
+    "qavector": ">=0.16.48,<0.17.0"
+  },
+  "runtime": {
+    "kind": "python_worker",
+    "distribution": "example-metrics",
+    "python": ">=3.10,<3.11",
+    "targets": [
+      "linux-x86_64-cp310"
+    ]
+  },
+  "contributions": [
+    {
+      "kind": "node_provider",
+      "id": "example.metrics.count",
+      "entrypoint": "count_provider:CountProvider",
+      "config_schema": "schemas/count-config.json",
+      "input_schema": "schemas/count-input.json",
+      "output_schema": "schemas/count-output.json"
+    }
+  ],
+  "permissions_requested": {
+    "workspace": "none",
+    "process": [],
+    "network": "none",
+    "credentials": []
+  },
+  "external_requirements": [],
+  "dependencies": {
+    "python_lock": "requirements.lock",
+    "plugins": []
+  }
+}

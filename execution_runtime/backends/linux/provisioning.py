@@ -29,7 +29,7 @@ def draft(request):
         spec["shell"] = request["shell"]
     if "claude" in request:
         from ...gateway import ProviderGateway, STREAM_CONTRACT
-        from ...workers import claude_artifact
+        from ...workers import claude_artifact, claude_resource_identities
         from .filesystem import RuntimeFile, RuntimeImage, target_path
         config = request["claude"]
         object_fields(config, ("interpreter", "executable", "gateway"), "claude", ("interpreter", "executable", "gateway"))
@@ -53,8 +53,9 @@ def draft(request):
             raise RuntimePolicyError("runtime_image_mismatch", "Deployment image identity differs from its approved files.")
         pinned = {one["target"]:one for one in image["files"]}
         if (any(path not in pinned or pinned[path].get("executable") is not True for path in (interpreter, executable)) or
-                pinned.get(entrypoint, {}).get("sha256") != claude_artifact("linux")[1]):
-            raise RuntimePolicyError("claude_image_incomplete", "Pin executable interpreter/CLI targets and this core's Claude worker in the reviewed image.")
+                pinned.get(entrypoint, {}).get("sha256") != claude_artifact("linux")[1] or
+                any(pinned.get(path, {}).get("sha256") != digest for path, digest in claude_resource_identities().items())):
+            raise RuntimePolicyError("claude_image_incomplete", "Pin executable interpreter/CLI targets and this core's Claude worker, backend and SDK in the reviewed image.")
         reference = route.to_document()["credential"]
         spec["policy"].update(network={"mode":"restricted", "endpoints":[route.endpoint]}, secrets=[reference],
                               resources={"scratch_bytes":134217728})

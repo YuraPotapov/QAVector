@@ -89,8 +89,10 @@ def claude_request(provisioning_request, tmp_path):
     from execution_runtime.workers import claude_artifact
     source, _ = claude_artifact("linux")
     tool = tmp_path / "reviewed-tool"
+    from execution_runtime.workers.claude_image import package_files
     image = RuntimeImage.from_files([(str(tool),"/approved/python",True),(str(tool),"/approved/claude",True),
-        (str(source),"/qavector/workers/claude_review_linux.py",False)])
+        (str(source),"/qavector/workers/claude_review_linux.py",False)] +
+        [(str(source), target, False) for source, target in package_files()])
     provisioning_request["image"] = {"identity":image.identity,"files":[vars(one) for one in image.files]}
     provisioning_request["claude"] = {"interpreter":"/approved/python","executable":"/approved/claude",
         "gateway":{"contract":"qavector.provider-egress/v2","provider":"claude_cli","authentication":"claude-oauth-token",
@@ -116,7 +118,7 @@ def test_claude_draft_never_reads_auth_contacts_provider_or_changes_existing_con
     assert not (tmp_path / "control" / "cycles").exists()
 
 
-@pytest.mark.parametrize("change", ["write","shell","missing-cli","old-contract","wrong-artifact","malformed-image","unapproved-ip"])
+@pytest.mark.parametrize("change", ["write","shell","missing-cli","old-contract","wrong-artifact","missing-backend","malformed-image","unapproved-ip"])
 def test_claude_draft_fails_closed_for_incomplete_or_unapproved_input(tmp_path, claude_request, change):
     if change == "write":
         claude_request["project_access"] = "read_write"
@@ -128,6 +130,12 @@ def test_claude_draft_fails_closed_for_incomplete_or_unapproved_input(tmp_path, 
         claude_request["claude"]["gateway"]["contract"] = "qavector.provider-egress/v1"
     elif change == "wrong-artifact":
         claude_request["image"]["files"][-1]["sha256"] = "0" * 64
+    elif change == "missing-backend":
+        from execution_runtime.backends.linux.filesystem import RuntimeFile, RuntimeImage
+        image = claude_request["image"]
+        image["files"] = [one for one in image["files"]
+                          if one["target"] != "/qavector/site/qavector_agent_claude/backend.py"]
+        image["identity"] = RuntimeImage(tuple(RuntimeFile(**one) for one in image["files"])).identity
     elif change == "malformed-image":
         claude_request["image"] = None
     else:

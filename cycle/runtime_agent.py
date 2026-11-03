@@ -66,7 +66,7 @@ class AgentReviewWorker(CommandWorker):
         settings = step.settings
         object_fields(settings, ("framework", "model", "task", "repository", "inputs", "files", "assess", "scope", "verdict",
                                 "claude", "python", "model_client", "model_options", "api_key_env", "effort", "min_effort", "max_iterations"), "agent.review", ("model", "task"))
-        bridge = config.get("transport") == "claude_cli"
+        bridge = self.bridge = config.get("transport") == "claude_cli"
         if settings.get("framework", "claude_cli") not in (("runtime", "claude_cli") if bridge else ("runtime",)):
             raise RuntimePolicyError("review_framework_unsupported", "Isolated review requires framework runtime and a deployment-owned JSON provider; host CLI/framework discovery is unavailable.")
         if any(settings.get(key) not in (None, "", {}) for key in ("claude", "python", "model_client", "model_options", "api_key_env", "effort", "min_effort", "max_iterations")):
@@ -124,8 +124,26 @@ class AgentReviewWorker(CommandWorker):
             prompt = _claude_cli_prompt(settings["task"], inputs, [], repository, data["assess"] == "complexity", data["scope"], data["verdict"])
             prompt = prompt.replace("\n# Answer with", "\n{{QAVECTOR_NATIVE_EVIDENCE}}\n# Answer with", 1)
             prompt = with_clarifications(prompt, self.snapshot)
-            payload = canonical(dict(contract=self.contract, claude=config["claude"], cwd=cwd, model=settings["model"],
-                prompt=prompt, files=data["files"], capability=channel.capability,
+            from plugin_host.bundled import claude_binding
+            from qavector_sdk import validate_contract
+            binding = claude_binding()
+            self.info["agent_backend"] = binding
+            self.agent_identity = (binding["plugin_id"], binding["version"])
+            profile = {"schema_version": "1.0.0", "id": "gateway.review", "revision": deployment.digest,
+                "backend_ref": binding["plugin_id"], "backend_version": "==" + binding["version"],
+                "model": settings["model"], "instructions": "", "credentials_ref": None, "limits": {},
+                "backend_options": {"binary": config["claude"], "tools": ["Read", "Grep", "Glob"]}}
+            request = {"schema_version": "1.0.0", "run_id": context.run.id, "node_id": step.id,
+                "attempt_id": self.agent_attempt, "task": prompt, "instructions": "",
+                "workspace_ref": "gateway.workspace", "context_refs": [], "artifact_refs": [],
+                "output_schema": {"type": "object"}, "limits": {}, "session_ref": None}
+            execution = {"schema_version": "1.0.0", "execution_id": self.agent_attempt,
+                "runtime_handle": "gateway.runtime", "tools_handle": None,
+                "credentials_handle": None, "cancellation_handle": "gateway.cancel"}
+            for name, value in (("agent-profile", profile), ("agent-request", request), ("execution-context", execution)):
+                validate_contract(name, value)
+            payload = canonical(dict(contract=self.contract, claude=config["claude"], cwd=cwd,
+                profile=profile, request=request, context=execution, files=data["files"], capability=channel.capability,
                 max_requests=route.to_document().get("max_requests", 4), request_bytes=route.to_document().get("request_bytes", 524288)))
         else:
             payload = canonical(dict(contract=self.contract, provider=config["provider_argv"], cwd=cwd, request=data))
@@ -157,7 +175,10 @@ class AgentReviewWorker(CommandWorker):
             exc.runtime = copy.deepcopy(self.info if "instance_id" in self.info else self.previous_runtime or self.info)
             raise
         inbox.bind(self.snapshot, context.relative(operation.directory))
-        self.review = None
+        self.review = self.agent_result = None
+        self.provider_result_received = False
+        self.bridge = False
+        self.agent_attempt = checkpoints.digest([context.run.id, step.id, context.relative(operation.directory), operation.epoch])
         result = super().execute(context, step)
         if self.review is not None:
             from .plugins.agent import counts
@@ -168,12 +189,18 @@ class AgentReviewWorker(CommandWorker):
             result.outputs = dict(self.review, **counts(self.review), out_of_scope_count=len(self.review.get("out_of_scope", [])),
                                   effort="", report_path=relative)
             result.artifacts.append(Artifact(path=relative, type="json", producer=step.id, name="review", bytes=report.stat().st_size))
+        if self.agent_result is not None:
+            result.outputs["agent_result"] = self.agent_result
         not_started = result.runtime.get("reason") == "not_started" and result.runtime.get("cleanup_confirmed")
         if result.runtime.get("gateway", {}).get("calls") == 0 and result.runtime.get("cleanup_confirmed"):
             not_started = True
-        if self.review is not None or not_started:
-            delivered = self.review is not None
-            operation.complete({"result": result_document(result), "input_delivered": delivered}, result.ok, input_delivered=delivered)
+        if self.review is not None or self.provider_result_received or not_started:
+            delivered = self.review is not None or self.provider_result_received
+            # A completed provider answer is reusable even if domain validation fails.
+            paid_answer = self.agent_result is not None and (
+                self.agent_result["status"] == "completed" or self.provider_result_received and
+                (self.agent_result["error"] or {}).get("code") == "OUTPUT_SCHEMA_INVALID")
+            operation.complete({"result": result_document(result), "input_delivered": delivered}, result.ok or paid_answer, input_delivered=delivered)
             if delivered:
                 inbox.delivered(self.snapshot, context.relative(operation.directory))
             else:
@@ -190,6 +217,8 @@ class AgentReviewWorker(CommandWorker):
                 if len(raw) > 65536:
                     raise RuntimePolicyError("review_packet_too_large", "Review result exceeds its protocol bound.")
                 value = parse_document(raw)
+                if self.bridge:
+                    value = self._agent_response(value)
                 object_fields(value, ("contract", "review", "code"), "review_result", ("contract", "review", "code"))
                 if value["contract"] != self.contract or not isinstance(value["code"], str) or value["code"] and not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["code"]):
                     raise RuntimePolicyError("invalid_review_result", "Review worker returned invalid protocol data.")
@@ -207,3 +236,28 @@ class AgentReviewWorker(CommandWorker):
                 message = "Review result unavailable: %s" % (exc.code if isinstance(exc, RuntimePolicyError) else "invalid_review")
         return PluginResult(SUCCESS if self.review is not None else FAILED, artifacts=artifacts,
                             message=message or "isolated review did not start", runtime=copy.deepcopy(self.info))
+
+    def _agent_response(self, value):
+        from qavector_sdk import validate_contract
+        fields = ("contract", "agent_result", "provider_result_received", "code")
+        object_fields(value, fields, "agent_result", fields)
+        if (value["contract"] != self.contract or type(value["provider_result_received"]) is not bool
+                or not isinstance(value["code"], str)
+                or value["code"] and not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["code"])):
+            raise ValueError("Invalid gateway envelope")
+        agent = value["agent_result"]
+        if agent is None:
+            if value["provider_result_received"] or not value["code"]:
+                raise ValueError("Missing agent result")
+            return dict(contract=self.contract, review=None, code=value["code"])
+        validate_contract("agent-result", agent)
+        if ((agent["backend_ref"], agent["plugin_version"]) != self.agent_identity
+                or agent["attempt_id"] != self.agent_attempt or agent["artifact_refs"]
+                or agent["session_ref"] is not None or value["code"]
+                or agent["status"] == "completed" and not value["provider_result_received"]):
+            raise ValueError("Agent result does not match the approved attempt")
+        self.agent_result = agent
+        self.provider_result_received = (value["provider_result_received"] and
+                                         agent["status"] in ("completed", "failed"))
+        return dict(contract=self.contract, review=agent["output"],
+                    code="" if agent["status"] == "completed" else "agent_" + agent["status"])

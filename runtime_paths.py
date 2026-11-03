@@ -344,6 +344,33 @@ def bundled_version():
         return ""
 
 
+def application_version():
+    """One release identity for the launcher and plugin compatibility checks.
+
+    A checkout reads its own pyproject, a frozen build its own VERSION, and an
+    installed wheel its distribution metadata. Never guess compatibility from
+    a dev label or a host Python installation beside a frozen executable.
+    """
+    if FROZEN:
+        return bundled_version()
+    from pathlib import Path
+    source = Path(__file__).resolve().parent / "pyproject.toml"
+    if source.is_file():
+        import re
+        try:
+            text = source.read_text(encoding="utf-8")
+            project = re.search(r"(?ms)^\[project\][^\n]*\n(.*?)(?=^\[|\Z)", text)
+            match = re.search(r"(?m)^version\s*=\s*[\"']([^\"']+)[\"']\s*(?:#.*)?$", project[1]) if project else None
+            return match[1] if match else ""
+        except OSError:
+            return ""
+    try:
+        from importlib.metadata import version
+        return version("qavector")
+    except Exception:
+        return ""
+
+
 # -- first run ----------------------------------------------------------------
 def ensure_user_data_root(example_config=None):
     """Create the user's directories, and seed users.json if it is missing.

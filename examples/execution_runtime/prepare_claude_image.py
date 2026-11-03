@@ -47,11 +47,14 @@ def prepare(directory, claude, busybox):
         targets[str(landmark)] = (str(landmark),str(landmark),False)
     native = list(selected)
     extensions = Path(sysconfig.get_config_var("DESTSHARED"))
-    for name in ("_posixsubprocess","_ctypes","_struct","select","math","_random","_sha512","zlib","fcntl", "_socket","_ssl","array",
-            "_opcode","_json","binascii","_sha2","_sha1","_blake2","_md5","_sha256","_sha3","grp","pwd","_datetime","_uuid","_heapq","_bisect"):
-        for path in extensions.glob(name + ".*.so"):
-            targets[str(path)] = (str(path),str(path),False)
-            native.append(path)
+    for path in extensions.glob("*.so"):
+        targets[str(path)] = (str(path), str(path), False)
+        native.append(path)
+    from execution_runtime.workers.claude_image import package_files
+    for source, target in package_files():
+        targets[target] = (str(source), target, False)
+        if source.suffix == ".so":
+            native.append(source)
     for path in native:
         result = subprocess.run(["/usr/bin/ldd",str(path)],env={"PATH":"/usr/bin:/bin","LANG":"C"},
             capture_output=True,text=True,timeout=10)

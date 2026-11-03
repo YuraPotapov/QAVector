@@ -239,6 +239,10 @@ class Cycle:
     #: Network, files and limits for the steps that run on the project folder.
     restrictions: dict = field(default_factory=dict)
 
+    #: Reusable agent roles. Raw declarations survive editor round trips;
+    #: normalization and runtime validation belong to cycle.agent_profiles.
+    agent_profiles: dict = field(default_factory=dict)
+
     def step(self, step_id):
         """The step with this id, or None. Never raises - callers are checking."""
         for step in self.steps:

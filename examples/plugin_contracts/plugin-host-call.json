@@ -1,0 +1,9 @@
+{
+  "execution_id": "execution-1",
+  "attempt_id": "attempt-1",
+  "handle": "tools-scope-1",
+  "operation": "artifacts.describe",
+  "arguments": {
+    "artifact_ref": "artifact-1"
+  }
+}

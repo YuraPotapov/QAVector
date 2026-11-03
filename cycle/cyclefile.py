@@ -40,7 +40,7 @@ _SAFE_ID = re.compile(r"[^A-Za-z0-9_-]+")
 #: The order keys are written in. Not alphabetical - this is the order somebody
 #: reads a cycle in: what it is, then what it takes, then what it does.
 _CYCLE_KEY_ORDER = ("id", "name", "description", "project", "project_folder", "version",
-                    "variables", "subject", "triggers", "actions", "execution", "restrictions", "phases", "steps")
+                    "variables", "subject", "triggers", "actions", "execution", "restrictions", "agent_profiles", "phases", "steps")
 _TRIGGER_KEY_ORDER = ("id", "watch", "every", "pin", "enabled")
 #: The order a subject reads in: what kind of thing, which one, then the rest.
 _SUBJECT_KEY_ORDER = ("kind", "key", "title", "memory", "pin")

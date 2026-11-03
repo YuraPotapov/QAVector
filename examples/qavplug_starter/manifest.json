@@ -1,0 +1,48 @@
+{
+  "format_version": 1,
+  "plugin_id": "example.starter",
+  "name": "QAVplug Starter",
+  "version": "1.0.0",
+  "publisher": "Example",
+  "description": "Offline count node and deterministic AgentBackend contract example.",
+  "license": "MIT",
+  "compatibility": {
+    "qavector": "==0.16.50",
+    "plugin_api": ">=1.0.0,<2.0.0",
+    "host_api": ">=1.0.0,<2.0.0",
+    "agent_api": ">=1.0.0,<2.0.0"
+  },
+  "runtime": {
+    "kind": "python_worker",
+    "distribution": "qavplug-starter",
+    "python": ">=3.10,<3.11",
+    "targets": ["linux-x86_64-cp310"]
+  },
+  "contributions": [
+    {
+      "kind": "node_provider",
+      "id": "example.starter.count",
+      "entrypoint": "qavplug_starter.count:CountProvider",
+      "config_schema": "schemas/count-config.json",
+      "input_schema": "schemas/count-input.json",
+      "output_schema": "schemas/count-output.json"
+    },
+    {
+      "kind": "agent_backend",
+      "id": "example.starter.echo",
+      "entrypoint": "qavplug_starter.echo:EchoBackend",
+      "config_schema": "schemas/echo-config.json"
+    }
+  ],
+  "permissions_requested": {
+    "workspace": "none",
+    "process": [],
+    "network": "none",
+    "credentials": []
+  },
+  "external_requirements": [],
+  "dependencies": {
+    "python_lock": "requirements.lock",
+    "plugins": []
+  }
+}

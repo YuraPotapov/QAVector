@@ -25,6 +25,7 @@ from cycle.plugins.agent import AgentReview
 from cycle.plugins.agent_edit import AgentEdit
 from cycle.plugins.agent_implement import AgentImplement
 from cycle.plugins.agent_merge import AgentMerge
+from cycle.plugins.profile_agent import ProfileAgent
 from cycle.plugins.report import ReportHtml, ReportJson
 from cycle.plugins.scenario import ScenarioRun
 from cycle.plugins.wait import Wait
@@ -63,6 +64,7 @@ BUILTIN = (
     AgentEdit(),
     AgentImplement(),
     AgentMerge(),
+    ProfileAgent(),
     ReportJson(),
     ReportHtml(),
     TaskBrief(),

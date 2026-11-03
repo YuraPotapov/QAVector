@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:plugin-error:1",
+  "title": "PluginError v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "code": {
+      "enum": [
+        "PACKAGE_INVALID",
+        "PACKAGE_INTEGRITY_FAILED",
+        "PACKAGE_VERSION_CONFLICT",
+        "QAVECTOR_VERSION_INCOMPATIBLE",
+        "PLUGIN_API_INCOMPATIBLE",
+        "PLUGIN_TARGET_UNSUPPORTED",
+        "PLUGIN_DEPENDENCY_MISSING",
+        "PLUGIN_NOT_AVAILABLE",
+        "AGENT_PREREQUISITE_MISSING",
+        "CAPABILITY_UNSUPPORTED",
+        "POLICY_UNSATISFIED",
+        "OUTPUT_SCHEMA_INVALID",
+        "WORKER_PROTOCOL_ERROR",
+        "WORKER_CRASHED",
+        "EXECUTION_TIMEOUT",
+        "EXECUTION_STATE_UNKNOWN",
+        "CONTRACT_INVALID",
+        "CONFIG_INVALID",
+        "EXECUTION_CANCELLED",
+        "AGENT_EXECUTION_FAILED"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "side_effects": {
+      "enum": [
+        "none",
+        "possible",
+        "confirmed",
+        "unknown"
+      ]
+    },
+    "details": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "code",
+    "message",
+    "retryable",
+    "side_effects",
+    "details"
+  ],
+  "additionalProperties": false
+}

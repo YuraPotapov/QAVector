@@ -1,0 +1,3 @@
+# No backend-specific third-party dependencies.
+# The SDK and its dependencies are supplied by the trusted QAVector distribution.
+# This bundled catalog entry is not a standalone installable .qavplug archive.

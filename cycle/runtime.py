@@ -64,11 +64,12 @@ def problems(cycle):
 class CycleRuntime:
     """A pinned policy plan, built before Resume/reuse/approvals are evaluated."""
 
-    def __init__(self, cycle, registry, workspace, deployments=None, profiles=None, backend_factory=None):
+    def __init__(self, cycle, registry, workspace, deployments=None, profiles=None, backend_factory=None, plugin_plan=None):
         self.cycle, self.workspace = cycle, os.path.abspath(workspace)
         self.deployments = deployments or DeploymentRegistry()
         self.profiles = profiles or EnvironmentRegistry()
         self.backend_factory = backend_factory
+        self.plugin_plan = plugin_plan
         self.bindings, self.workers = {}, {}
         errors = problems(cycle)
         if errors:
@@ -88,6 +89,15 @@ class CycleRuntime:
                           str(runtime_paths.user_data_root()))
         for step in cycle.steps:
             if step.disabled:
+                continue
+            if plugin_plan is not None and step.id in plugin_plan.specs:
+                from .runtime_plugin import ManagedPluginWorker
+                from qavector_sdk import ContractError
+                try:
+                    worker = ManagedPluginWorker(self, step, registry.get(step.plugin).metadata)
+                except (RuntimePolicyError, ContractError) as exc:
+                    raise checkpoints.CheckpointError('%s runtime: %s' % (step.id, exc)) from exc
+                self.bindings[step.id], self.workers[step.id] = worker.binding, worker
                 continue
             worker_type = worker_types.get(type(registry.get(step.plugin)))
             if worker_type is None:

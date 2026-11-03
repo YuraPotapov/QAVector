@@ -1,0 +1,69 @@
+id: agent-roles
+name: Agent roles
+description: Three reusable profiles using the same Claude backend.
+
+# Profiles are static. Set a working directory on each node for repository work.
+# Permissions/isolation are governed by the cycle's execution restrictions.
+agent_profiles:
+  agent.business.analyst:
+    backend_ref: qavector.agent.claude_cli
+    model: sonnet
+    instructions: |
+      Analyze business requirements and write clear acceptance criteria.
+      Explain unresolved questions explicitly.
+    backend_options:
+      binary: claude
+      tools: [Read, Glob, Grep]
+    limits:
+      turns: 5
+      wall_time_seconds: 300
+  agent.developer:
+    backend_ref: qavector.agent.claude_cli
+    model: sonnet
+    instructions: |
+      Design an implementation from the acceptance criteria.
+      Identify affected components and compatibility requirements.
+    backend_options:
+      binary: claude
+      tools: [Read, Glob, Grep]
+    limits:
+      turns: 5
+      wall_time_seconds: 300
+  agent.tester:
+    backend_ref: qavector.agent.claude_cli
+    model: sonnet
+    instructions: |
+      Design tests for the proposed implementation, including edge cases.
+      Distinguish test proposals from tests that were actually run.
+    backend_options:
+      binary: claude
+      tools: [Read, Glob, Grep]
+    limits:
+      turns: 5
+      wall_time_seconds: 300
+
+variables:
+  task: Describe the feature to analyze.
+
+steps:
+  - id: analyze
+    plugin: agent
+    with:
+      agent_profile: agent.business.analyst
+      task: "${vars.task}"
+  - id: design
+    plugin: agent
+    needs: [analyze]
+    with:
+      agent_profile: agent.developer
+      task: Propose an implementation for these acceptance criteria.
+      inputs:
+        requirements: "${steps.analyze.outputs.output}"
+  - id: test_plan
+    plugin: agent
+    needs: [design]
+    with:
+      agent_profile: agent.tester
+      task: Produce a test plan for this implementation proposal.
+      inputs:
+        proposal: "${steps.design.outputs.output}"

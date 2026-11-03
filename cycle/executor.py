@@ -206,9 +206,6 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
         raise checkpoints.CheckpointError("; ".join(phase_problems))
 
     store = checkpoints.Store(workspace)
-    from .runtime import CycleRuntime
-    runtime_plan = CycleRuntime(cycle, registry, workspace)
-    store.runtime_bindings = runtime_plan.bindings
     action_steps = None
     if action:
         if only or reuse or resume:
@@ -217,15 +214,20 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
             action_steps = model.action_selection(cycle, action)
         except model.CycleError as exc:
             raise checkpoints.CheckpointError(str(exc)) from exc
+    if resume and (only or reuse or variables_):
+        raise checkpoints.CheckpointError("Resume cannot be combined with selection or variable overrides.")
+    if not resume and os.path.exists(os.path.join(workspace, "metadata.json")):
+        raise checkpoints.CheckpointError("This execution already exists. Resume it or use a new run directory.")
+    from .plugin_plan import CyclePluginPlan
+    plugin_plan = CyclePluginPlan(cycle, registry, store, resume=resume)
+    store.plugin_bindings = plugin_plan.bindings
+    from .runtime import CycleRuntime
+    runtime_plan = CycleRuntime(cycle, registry, workspace, plugin_plan=plugin_plan)
+    store.runtime_bindings = runtime_plan.bindings
     if resume:
-        if only or reuse or variables_:
-            raise checkpoints.CheckpointError("Resume cannot be combined with selection or variable overrides.")
         run, kept = store.resume(cycle, registry)
         borrowed = [run.steps[name] for name in kept]
     else:
-        if os.path.exists(os.path.join(workspace, "metadata.json")):
-            raise checkpoints.CheckpointError(
-                "This execution already exists. Resume it or use a new run directory.")
         run = CycleRun(id=run_id or os.path.basename(workspace),
                    cycle_id=cycle.id, cycle_name=cycle.title, trigger=trigger,
                    status=RUNNING, started_at=time.time(), workspace=workspace,
@@ -250,7 +252,7 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                     step_run.ended_at = time.time()
             borrowed = [s for s in run.steps.values() if s.status == SKIPPED]
         else:
-            borrowed = _borrow(run, cycle, only, reuse, registry, runtime_plan.bindings)
+            borrowed = _borrow(run, cycle, only, reuse, registry, runtime_plan.bindings, plugin_plan.bindings)
         run.selected_steps = [name for name, step_run in run.steps.items()
                               if step_run.status == PENDING]
 
@@ -286,6 +288,7 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
     context.secrets = dict(secrets or {})
     context.checkpoints = store
     context.runtime_plan = runtime_plan
+    context.plugin_plan = plugin_plan
     context.restored = {one.step_id for one in borrowed} if resume else set()
     if resume:
         context.earlier = dict(store.earlier)
@@ -443,7 +446,7 @@ def _must_run(cycle, registry):
     return model.downstream(cycle, fresh) if fresh else set()
 
 
-def _borrow(run, cycle, only, reuse, registry=None, runtime_bindings=None):
+def _borrow(run, cycle, only, reuse, registry=None, runtime_bindings=None, plugin_bindings=None):
     """Fill in the steps this run is not going to do. Returns what was filled.
 
     A step taken from an earlier run keeps that run's outputs and is marked
@@ -467,7 +470,7 @@ def _borrow(run, cycle, only, reuse, registry=None, runtime_bindings=None):
     wanted = {one for one in only if run.steps.get(one) is not None}
     earlier = (reuse.steps if reuse is not None else {}) or {}
     fresh = _must_run(cycle, registry)
-    current_definitions = checkpoints.signatures(cycle, run.variables, registry, runtime_bindings)
+    current_definitions = checkpoints.signatures(cycle, run.variables, registry, runtime_bindings, plugin_bindings)
     # What the selection actually reads. Anything else is borrowed only so the
     # record shows the last known state of the whole cycle.
     feeding = model.upstream(cycle, wanted)

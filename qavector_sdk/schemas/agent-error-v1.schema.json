@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "urn:qavector:schema:plugin-error:1",
+  "$id": "urn:qavector:schema:agent-error:1",
+  "title": "AgentError v1"
+}

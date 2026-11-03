@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "execution_id": "execution-1",
+  "runtime_handle": "runtime-scope-1",
+  "tools_handle": null,
+  "credentials_handle": null,
+  "cancellation_handle": "cancel-1"
+}

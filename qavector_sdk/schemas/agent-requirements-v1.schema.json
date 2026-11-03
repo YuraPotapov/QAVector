@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qavector:schema:agent-requirements:1",
+  "title": "AgentRequirements v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "workspace_access": {
+      "enum": [
+        "none",
+        "read",
+        "write"
+      ]
+    },
+    "streaming": {
+      "type": "boolean"
+    },
+    "session_resume": {
+      "type": "boolean"
+    },
+    "interactive_input": {
+      "type": "boolean"
+    },
+    "confirmed_cancellation": {
+      "type": "boolean"
+    },
+    "tool_events": {
+      "enum": [
+        "none",
+        "partial",
+        "full"
+      ]
+    },
+    "tool_binding": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "content_types": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "hard_limits": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "wall_time_seconds",
+          "turns",
+          "tokens",
+          "cost_usd"
+        ]
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "additionalProperties": false
+}

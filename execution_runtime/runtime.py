@@ -60,6 +60,8 @@ class ExecutionRuntime:
         return self.backend.preflight(policy)
 
     def prepare(self, request):
+        if request.channel is not None and not self.backend.stdio_protocol:
+            raise RuntimePolicyError("protocol_transport_unsupported", "This runtime has no supported stdio protocol transport.")
         self._event("runtime.prepare", policy=request.policy)
         prepared = self._call("prepare", lambda: self.backend.prepare(request), policy=request.policy)
         try:
@@ -87,6 +89,16 @@ class ExecutionRuntime:
             raise RuntimePolicyError("invalid_deadline", "Stop grace must be a finite duration between 0 and 60 seconds.")
         result = self._call("stop", lambda: self.backend.stop(handle, time.monotonic() + grace_seconds), handle=handle)
         self._event("runtime.stopped", handle=handle)
+        return result
+
+    def pause(self, handle):
+        result = self._call('pause', lambda: self.backend.pause(handle), handle=handle)
+        self._event('runtime.paused', handle=handle)
+        return result
+
+    def resume(self, handle):
+        result = self._call('resume', lambda: self.backend.resume(handle), handle=handle)
+        self._event('runtime.continued', handle=handle)
         return result
 
     def wait(self, handle):

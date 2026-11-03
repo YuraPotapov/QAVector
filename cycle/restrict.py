@@ -34,7 +34,7 @@ from cycle import freeze
 #: Plugins that run inside the restrictions. Everything else is a system step.
 RESTRICTABLE = frozenset((
     "command.shell", "git.checkout", "git.commit", "git.prepare_branch",
-    "agent.review", "agent.edit", "agent.implement", "agent.merge", "task.brief",
+    "agent", "agent.review", "agent.edit", "agent.implement", "agent.merge", "task.brief",
     "jira.issues", "jira.transition", "teams.message",
 ))
 #: Of those, the ones that run inside QAVector: restricted, they run as a
@@ -42,6 +42,7 @@ RESTRICTABLE = frozenset((
 IN_SANDBOX = frozenset(("jira.issues", "jira.transition", "teams.message"))
 #: Why a step cannot do without the network, for the refusal when it is off.
 NEEDS_NETWORK = {
+    "agent": "an agent cannot reach its model without it",
     "agent.review": "an agent cannot reach its model without it",
     "agent.edit": "an agent cannot reach its model without it",
     "agent.implement": "an agent cannot reach its model without it",

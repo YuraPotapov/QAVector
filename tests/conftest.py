@@ -13,6 +13,12 @@ its own too, with nothing in it.
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def own_plugin_catalog(tmp_path, monkeypatch):
+    from plugin_host import bundled
+    monkeypatch.setattr(bundled, "registry_path", lambda: str(tmp_path / "plugin-registry.sqlite3"))
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_memory_default: a test of where the "
                             "default memory store is, which must see the real one")

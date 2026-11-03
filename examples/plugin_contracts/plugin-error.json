@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "code": "EXECUTION_STATE_UNKNOWN",
+  "message": "Remote execution needs reconciliation.",
+  "retryable": false,
+  "side_effects": "unknown",
+  "details": {}
+}

@@ -2003,6 +2003,7 @@ class CyclesPage(QWidget):
             groups=Draft("", document).phases(),
             restrictions=self._step_restrictions_context(document),
             core=self.core,
+            agent_profiles=document.get("agent_profiles") or {},
             **({"phases": document["phases"]} if document.get("phases") else {}),
             apply_label="Add" if adding else "Apply",
             read_only_note=("This is the step as the run on screen has it. "
@@ -2053,7 +2054,10 @@ class CyclesPage(QWidget):
         cycle_id = self.current_id()
         dialog = CycleDialog(document, cpf.names(self._projects), self,
                              bool((self._open or {}).get("writable")),
-                             stored_secrets=self._stored_secrets(cycle_id), core=self.core)
+                             stored_secrets=self._stored_secrets(cycle_id), core=self.core,
+                             agent_backends=[item['contribution']['id'] for item in
+                                 getattr(self.inventory, 'payload', {}).get('plugin_contributions', [])
+                                 if item['contribution']['kind'] == 'agent_backend'])
         if dialog.exec() != QDialog.Accepted or dialog.saved is None:
             return
         changed = dict(document)

@@ -84,6 +84,7 @@ class ExecutionRequest:
     timeout_seconds: float = None
     secret_values: SecretValues = field(default_factory=SecretValues, repr=False)
     gateway: object = field(default=None, repr=False, compare=False)
+    channel: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         from ..policy import EffectivePolicy
@@ -110,6 +111,10 @@ class ExecutionRequest:
             from ..gateway_session import GatewaySession
             if not isinstance(self.gateway, GatewaySession) or self.gateway.policy.digest != self.policy.digest or self.secret_values.names:
                 raise RuntimePolicyError("invalid_gateway_session", "The native channel must match the exact operation policy and own its credential delivery.")
+        if self.channel is not None:
+            from ..channel import StdioChannel
+            if type(self.channel) is not StdioChannel or self.gateway is not None:
+                raise RuntimePolicyError("invalid_channel", "Use one runtime-owned stdio channel; gateway transport cannot share it.")
         if (self.timeout_seconds is not None and (type(self.timeout_seconds) not in (int, float)
                 or not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0)):
             raise RuntimePolicyError("invalid_timeout", "Timeout must be a finite positive duration.")
@@ -133,6 +138,7 @@ class RuntimeBackend(ABC):
     provider = ""
     platform = ""
     contract_version = CONTRACT_VERSION
+    stdio_protocol = False
 
     def gateway_preflight(self, policy, route):
         raise RuntimePolicyError("gateway_channel_unavailable", "This OS backend has no native provider channel yet.")
@@ -163,9 +169,15 @@ class RuntimeBackend(ABC):
 
     def execution_scope(self, kind, key):
         """Reserve one workload identity using the provider's durable ownership mechanism."""
-        if kind not in ("cycle",):
+        if kind not in ("cycle", "plugin-tool"):
             raise RuntimePolicyError("unsupported_execution_scope", "Unknown execution scope.")
         return self.service_scope(kind + "\0" + key)
+
+    def pause(self, handle):
+        raise RuntimePolicyError('pause_unsupported', 'This provider cannot pause native execution.')
+
+    def resume(self, handle):
+        raise RuntimePolicyError('pause_unsupported', 'This provider cannot continue native execution.')
 
     def bundle_info(self):
         raise RuntimePolicyError("bundle_target_unsupported", "This provider has no supported bundled native runtime.")

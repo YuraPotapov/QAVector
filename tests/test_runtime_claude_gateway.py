@@ -125,6 +125,8 @@ def cli_deployment(native, git_workload_image, tls_gateway, tmp_path, monkeypatc
     raw_route = route_profile(raw_route)
     base_image, git_worker = git_workload_image
     interpreter = git_worker["argv"][0]
+    from tests.runtime_plugin_image import plugin_image
+    base_image, _ = plugin_image(tmp_path, base_image, interpreter)
     fixture = tmp_path / "cli.py"
     fixture.write_text('''import http.client,json,os,socket,sys
 from urllib.parse import urlsplit
@@ -151,7 +153,7 @@ c.request('POST','/v1/messages',json.dumps({'model':'local-fixture','stream':Tru
 r=c.getresponse();assert r.status==200
 data=r.read().decode();c.close()
 review=json.loads(data)
-print(json.dumps({'type':'result','is_error':False,'result':json.dumps(review)}))
+print(json.dumps({'type':'result','is_error':False,'result':json.dumps(review),'usage':{'input_tokens':17,'output_tokens':9},'num_turns':1}))
 ''')
     fixture.write_text(fixture.read_text().replace("assert 'approved evidence' in prompt", """sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM);sock.settimeout(.2)
 try: sock.connect(('127.0.0.1',%d))
@@ -211,6 +213,15 @@ def test_native_cli_bridge_keeps_credentials_on_core_and_records_review(cli_depl
     step = run.steps["review"]
     assert step.status == "success", (step.message, step.runtime)
     assert step.outputs["summary"] == "[redacted] reviewed"
+    from qavector_sdk import validate_contract
+    from qavector_agent_claude.backend import VERSION
+    agent = step.outputs["agent_result"]
+    validate_contract("agent-result", agent)
+    assert agent["status"] == "completed" and agent["plugin_version"] == VERSION
+    assert agent["output"]["risk"] == "low"
+    assert {m["name"]: m["value"] for m in agent["usage"]["metrics"]} == {
+        "turns": 1, "input_tokens": 17, "output_tokens": 9}
+    assert step.runtime["agent_backend"]["version"] == VERSION
     assert step.runtime["gateway"]["calls"] == 1 and step.runtime["cleanup_confirmed"]
     assert state["calls"][0][1]["Authorization"] == "Bearer synthetic-token"
     for path in (tmp_path / "run").rglob("*"):
@@ -361,3 +372,23 @@ def test_frozen_local_readiness_never_contacts_provider(cli_deployment, tmp_path
     assert result["ready"] and result["account_acceptance"] == "not_verified"
     assert result["credential_access"] == "not_read" and result["provider_request"] == "not_sent"
     assert not state["calls"]
+
+
+@pytest.mark.parametrize("answer", [b'{"summary":"review with missing risk"}', b'[]'])
+def test_native_invalid_review_reuses_paid_answer_on_resume(cli_deployment, tmp_path, answer):
+    from cycle import executor, model
+    document, _, state, _, _, _, _, _ = cli_deployment
+    state["body"] = answer
+    document["steps"][0]["retry"] = {"attempts": 2}
+    cycle = model.parse_cycle(document, "claude-review")
+    for resume in (False, True):
+        run = executor.run_cycle(cycle, str(tmp_path / "run"),
+            secrets={"CLAUDE_TOKEN": "synthetic-token"}, resume=resume)
+        step = run.steps["review"]
+        assert step.status == "failed"
+        assert step.outputs["agent_result"]["status"] == ("failed" if answer == b"[]" else "completed")
+        assert len(state["calls"]) == 1
+    receipts = list((tmp_path / "run").rglob("receipt.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["state"] == "complete" and receipt["ok"] and receipt["input_delivered"]

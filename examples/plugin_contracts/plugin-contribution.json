@@ -1,0 +1,6 @@
+{
+  "kind": "agent_backend",
+  "id": "example.agent.review",
+  "entrypoint": "example_review.backend:ReviewBackend",
+  "config_schema": "schemas/config.json"
+}

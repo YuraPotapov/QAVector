@@ -45,6 +45,7 @@ from .pages.artifacts import ArtifactsPage
 from .pages.command import CommandPage
 from .pages.credentials import CredentialsPage
 from .pages.cycles import CyclesPage
+from .pages.plugins import PluginsPage
 from .pages.services import ServicesPage
 from .pages.environments import EnvironmentsPage
 from .pages.history import HistoryPage
@@ -69,6 +70,8 @@ CONFIGURE = [("environments", "Environments", "environments"),
 OBSERVE = [("run", "Run", "run"), ("subjects", "Subjects", "subjects"),
            ("log", "Log", "log"), ("artifacts", "Artifacts", "artifacts"),
            ("history", "History", "history")]
+APPLICATION = [("plugins", "Plugins", "plugins")]
+NAVIGATION = CONFIGURE + OBSERVE + APPLICATION
 
 # Pages only a developer needs. Launch Sessions is never in here: it is the
 # primary interface in one mode and still available in the other.
@@ -201,7 +204,7 @@ class MainWindow(QMainWindow):
         self._nav_actions = {}       # nav key -> its View > Sidebar items entry
         self._nav_headings = []      # (heading widget, the keys under it)
         self._nav_labels = {key: label
-                            for key, label, _mark in CONFIGURE + OBSERVE}
+                            for key, label, _mark in NAVIGATION}
         # Which page is on screen, as opposed to which one was last remembered.
         # They differ while a hidden page is being moved off.
         self._page_key = self.settings.page
@@ -479,7 +482,7 @@ class MainWindow(QMainWindow):
         # rather than something to go and find.
         items_menu = view_menu.addMenu("Sidebar &items")
         hidden = set(self.settings.hidden_nav_items())
-        for key, label, _mark in CONFIGURE + OBSERVE:
+        for key, label, _mark in NAVIGATION:
             # Doubled for the same reason as the rail's buttons: a menu entry
             # parses a single ampersand as its mnemonic.
             action = QAction(label.replace("&", "&&"), self)
@@ -690,7 +693,9 @@ class MainWindow(QMainWindow):
         # collapsed width is measured the same way, from an icon-only button,
         # when the rail is first collapsed.
         widest = 0
-        for title, entries in (("Configure", CONFIGURE), ("Observe", OBSERVE)):
+        for title, entries in (("Configure", CONFIGURE), ("Observe", OBSERVE), ("QAVector", APPLICATION)):
+            if entries is APPLICATION:
+                rail_layout.addStretch(1)
             heading = widgets.kicker(title)
             heading.setContentsMargins(RAIL_PADDING, 8, RAIL_PADDING, 6)
             widest = max(widest, heading.sizeHint().width() - HEADING_TRIM)
@@ -728,7 +733,6 @@ class MainWindow(QMainWindow):
                 widest = max(widest, button.sizeHint().width())
                 rail_layout.addWidget(button)
             rail_layout.addSpacing(10)
-        rail_layout.addStretch(1)
         self._rail = rail
         self._rail_width = max(RAIL_MIN_WIDTH, widest + RAIL_SLACK)
         rail.setFixedWidth(self._rail_width)
@@ -750,6 +754,9 @@ class MainWindow(QMainWindow):
         self.services.set_core(self.core)
         self.scenarios = ScenariosPage(self.settings)
         self.cycles = CyclesPage(self.settings)
+        self.plugins = PluginsPage()
+        self.plugins.set_core(self.core)
+        self.plugins.changed.connect(self.refresh_inventory)
         self.cycles.set_run_state(self.run_state)
         self.cycles.interaction_requested.connect(self._send_cycle_interaction)
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
@@ -778,6 +785,7 @@ class MainWindow(QMainWindow):
                        "logsources": self.services,
                        "scenarios": self.scenarios,
                        "cycles": self.cycles,
+                       "plugins": self.plugins,
                        "commands": self.command, "launch": self.launch,
                        "run": self.run, "log": self.log,
                        "artifacts": self.artifacts, "history": self.history_page,
@@ -793,7 +801,7 @@ class MainWindow(QMainWindow):
         bind_tooltip(self.reload_users_action, self.credentials.reload_button, "Reload users.json")
         bind_tooltip(self.save_users_action, self.credentials.save_button, "Save users.json")
         self._page_actions = {}
-        for key, label, _mark in CONFIGURE + OBSERVE:
+        for key, label, _mark in NAVIGATION:
             action = QAction("Go to " + label, self)
             action.triggered.connect(lambda _checked=False, k=key: self.show_page(k))
             self.addAction(action)
@@ -946,7 +954,7 @@ class MainWindow(QMainWindow):
         return key not in DEVELOPER_ONLY or self.settings.developer_mode
 
     def _first_offered(self):
-        for key, _label, _mark in CONFIGURE + OBSERVE:
+        for key, _label, _mark in NAVIGATION:
             if self._offered(key):
                 return key
         return None
@@ -959,7 +967,7 @@ class MainWindow(QMainWindow):
             hidden.discard(key)
         else:
             hidden.add(key)
-        if not any(self._offered(k, hidden) for k, _l, _m in CONFIGURE + OBSERVE):
+        if not any(self._offered(k, hidden) for k, _l, _m in NAVIGATION):
             # A rail with nothing in it is a window with no way out of the page
             # it happens to be on. Refuse the last one and say so by putting the
             # tick back.
@@ -980,7 +988,7 @@ class MainWindow(QMainWindow):
         neither can undo the other by writing straight to a button.
         """
         hidden = set(self.settings.hidden_nav_items())
-        if not any(self._offered(k, hidden) for k, _l, _m in CONFIGURE + OBSERVE):
+        if not any(self._offered(k, hidden) for k, _l, _m in NAVIGATION):
             # Reachable by leaving developer mode with nothing but developer
             # pages left switched on. Give Launch Sessions back rather than
             # stranding the window.
@@ -1240,6 +1248,7 @@ class MainWindow(QMainWindow):
         # Scenarios reads and writes files through the core too, not just runs it.
         self.scenarios.set_core(self.core)
         self.cycles.set_core(self.core)
+        self.plugins.set_core(self.core)
         self.services.set_core(self.core)
         
         def _splash_msg(text):
@@ -2439,7 +2448,7 @@ class MainWindow(QMainWindow):
         if self._search is None:
             self._search = search.SearchPopup(
                 self.search_hits,
-                [(key, label) for key, label, _mark in CONFIGURE + OBSERVE], self,
+                [(key, label) for key, label, _mark in NAVIGATION], self,
                 documents=self.search_documents)
             self._search.opened.connect(self.open_hit)
         self._search.open_over(QApplication.activeWindow() or self)
@@ -2447,7 +2456,7 @@ class MainWindow(QMainWindow):
     def search_documents(self):
         """``(page key, folders)`` for every page whose files Search reads."""
         found = []
-        for key, _label, _mark in CONFIGURE + OBSERVE:
+        for key, _label, _mark in NAVIGATION:
             folders = getattr(self._pages.get(key), "search_documents", None)
             if folders is None or not self._offered(key):
                 continue
@@ -2460,7 +2469,7 @@ class MainWindow(QMainWindow):
     def search_hits(self):
         """What every page on the rail lists, filed under that page."""
         hits = []
-        for key, _label, _mark in CONFIGURE + OBSERVE:
+        for key, _label, _mark in NAVIGATION:
             page = self._pages.get(key)
             rows = getattr(page, "search_rows", None)
             if rows is None or not self._offered(key):
@@ -2473,7 +2482,7 @@ class MainWindow(QMainWindow):
             hits.extend(one._replace(section=key) for one in found)
         # The other projects, from their own files: a row of any of them is
         # found, and opening it picks that project.
-        offered = {key for key, _label, _mark in CONFIGURE + OBSERVE if self._offered(key)}
+        offered = {key for key, _label, _mark in NAVIGATION if self._offered(key)}
         try:
             hits.extend(one for one in projectsearch.other_projects(
                 self.settings.project_id, self._workspace_paths())

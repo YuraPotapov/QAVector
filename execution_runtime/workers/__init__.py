@@ -22,6 +22,15 @@ def claude_artifact(platform):
     return artifact(platform, "claude_review_linux.py")
 
 
+def claude_resource_identities():
+    """Backend and SDK sources must match the trusted core, including schemas."""
+    from importlib import resources
+    from plugin_host.bundled import _payload
+    return {"/qavector/site/" + name: hashlib.sha256(data).hexdigest()
+            for package in ("qavector_agent_claude", "qavector_sdk")
+            for name, data in _payload(resources.files(package), package)}
+
+
 def artifact(platform, name):
     if platform != "linux":
         raise RuntimePolicyError("worker_platform_unsupported", "No native workload worker artifact is available for this platform yet.")
@@ -77,6 +86,10 @@ def validate_agent_worker(deployment, backend):
         backend.runtime_file_identity(path)
     if backend.runtime_file_identity(config["entrypoint"]) != (claude_artifact if bridge else agent_artifact)(backend.platform)[1]:
         raise RuntimePolicyError("worker_artifact_mismatch", "The approved image does not contain this core's versioned agent review artifact.")
+    if bridge:
+        for path, expected in claude_resource_identities().items():
+            if backend.runtime_file_identity(path) != expected:
+                raise RuntimePolicyError("worker_artifact_mismatch", "The approved image's Claude backend/SDK differs from this core build; prepare and approve a new image.")
     if config.get("credentials") and not bridge:
         backend.secret_file_locations(config["credentials"].values())
     return config

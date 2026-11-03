@@ -1,4 +1,6 @@
 cryptography>=3.4
+jsonschema>=4.18,<5
+referencing>=0.28.4,<1
 
 # Flow-execution engine (only imported when --run-tests is used):
 #   playwright  - drives the launched Chrome via connect_over_cdp (no bundled
@@ -6,3 +8,6 @@ cryptography>=3.4
 #   pyyaml      - reads the declarative flow/scenario definitions under flows/.
 playwright>=1.40
 pyyaml>=6.0
+
+# Offline wheel metadata, tags and Python version constraints.
+packaging>=23,<27

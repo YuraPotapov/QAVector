@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "event-1",
+  "attempt_id": "attempt-1",
+  "sequence": 0,
+  "timestamp": "2026-10-30T12:00:00Z",
+  "type": "started",
+  "payload": {
+    "execution_id": "execution-1"
+  }
+}

@@ -56,6 +56,38 @@ def step(**extra):
     return base
 
 
+def test_agent_profile_choices_come_from_cycle_and_keep_unknown_selection(qapp, dispose):
+    plugin = {"id": "agent", "inputs": [{"key": "agent_profile", "label": "Agent profile",
+                "kind": "choice", "required": True, "options": []}]}
+    original = {"id": "analyze", "plugin": "agent", "with": {"agent_profile": "agent.old"}}
+    dialog = NodeDialog(original, plugin, agent_profiles={
+        "agent.developer": {}, "agent.business.analyst": {}})
+    try:
+        combo = dialog._widgets["with.agent_profile"]
+        assert [combo.itemData(i) for i in range(combo.count())] == [
+            "", "agent.business.analyst", "agent.developer", "agent.old"]
+        assert combo.currentData() == "agent.old"
+        combo.setCurrentIndex(combo.findData("agent.developer"))
+        dialog._save()
+        assert dialog.saved["with"]["agent_profile"] == "agent.developer"
+        assert original["with"]["agent_profile"] == "agent.old"
+    finally:
+        dispose(dialog)
+
+
+def test_new_agent_node_does_not_implicitly_select_first_profile(qapp, dispose):
+    plugin = {"id": "agent", "inputs": [{"key": "agent_profile", "label": "Agent profile",
+                "kind": "choice", "required": True, "options": []}]}
+    dialog = NodeDialog({"id": "agent1", "plugin": "agent"}, plugin,
+                        agent_profiles=["agent.developer"])
+    try:
+        assert dialog._widgets["with.agent_profile"].currentData() == ""
+        dialog._save()
+        assert "agent_profile" not in dialog.saved.get("with", {})
+    finally:
+        dispose(dialog)
+
+
 @pytest.fixture
 def node(qapp, dispose):
     made = []

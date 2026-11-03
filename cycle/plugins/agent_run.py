@@ -29,6 +29,7 @@ from cycle.operations import (Operation, recorded, result_document,
 
 from cycle.plugins import agent_stream
 from cycle.plugins._process import run_process
+from qavector_agent_claude.command import command as _argv, tool_list as _tool_list
 
 log = logging.getLogger("cycle.agent_run")
 
@@ -113,11 +114,12 @@ class Reply(object):
     and reads ``text`` would be quoting a refusal as an answer.
     """
 
-    def __init__(self, result, written, answer=None, problem=""):
+    def __init__(self, result, written, answer=None, problem="", agent_result=None):
         self.result = result            # the PluginResult from run_process
         self.written = written          # paths, once each, relative to `where`
         self.answer = answer or {}      # the CLI's final result object
         self.problem = problem
+        self.agent_result = agent_result  # absent in receipts from older versions
 
     @property
     def ok(self):
@@ -157,7 +159,8 @@ def _keep_prompt(directory, prompt):
 
 def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
                max_turns=None, add_dir="", name="agent", effort="",
-               clarify=False, last=False, disallowed=()):
+               clarify=False, last=False, disallowed=(), agent_profile=None,
+               output_schema=None):
     """Run the CLI on ``prompt`` in ``cwd``. Returns a :class:`Reply`.
 
     ``binary`` is the resolved path from ``agent_cli.auth_status`` - resolving
@@ -190,19 +193,34 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     """
     options = dict(tools=tools, mode=mode, model=model, max_turns=max_turns,
                    add_dir=add_dir, effort=effort, disallowed=disallowed)
+    plan = getattr(context, "plugin_plan", None)
+    binding = plan.verify(step.id) if plan is not None else None
+
+    def complete_prompt(task):
+        instructions = agent_profile["instructions"] if agent_profile is not None else ""
+        return instructions + "\n\n" + task if instructions else task
+
+    def identity(task):
+        value = {"argv": _argv(binary, complete_prompt(task), **options), "cwd": cwd}
+        if agent_profile is not None:
+            value["agent_profile"] = agent_profile
+        if output_schema is not None:
+            value["output_schema"] = output_schema
+        return value
+
     inbox, snapshot = None, None
     if clarify:
         inbox = context.inbox(step.id)
         # A call already made with the plain prompt - by a version from
         # before messages were recorded - read nothing, and reading something
         # now would turn its saved answer into a second paid request.
-        reached = recorded(context, step, name,
-                           {"argv": _argv(binary, prompt, **options), "cwd": cwd})
+        reached = recorded(context, step, name, identity(prompt))
         snapshot = inbox.take(name, last=last, reached=reached)
         prompt = with_clarifications(prompt, snapshot)
-    argv = _argv(binary, prompt, **options)
+    request_identity = identity(prompt)
+    argv = request_identity["argv"]
 
-    operation = Operation(context, step, name, {"argv": argv, "cwd": cwd})
+    operation = Operation(context, step, name, request_identity)
     cached = operation.cached()
     if cached is not None:
         result = result_from_document(cached["result"])
@@ -213,44 +231,47 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
                 # The call ran with these messages; only its confirmation may
                 # have been lost before Resume.
                 inbox.delivered(snapshot, context.relative(operation.directory))
-        return Reply(result, cached["written"], cached["answer"], cached["problem"])
+        return Reply(result, cached["written"], cached["answer"], cached["problem"],
+                     cached.get("agent_result"))
     if operation.uncertain:
         # Raise before binding: a replay must not overwrite an uncertain
         # delivery with a claim that another call is about to start.
         operation.begin()
-    if snapshot:
-        inbox.bind(snapshot, context.relative(operation.directory))
-    operation.begin()
-    _keep_prompt(operation.directory, prompt)
+    from cycle.claude_backend import run_legacy_claude
+
     written = []
-    result = run_process(operation.process_context(), step, argv, cwd, name,
-                         env={"CLAUDE_CODE_SIMPLE": None},
-                         on_stdout=_reader(context, step, written))
-    # Collected whether or not the run went well. A pass that failed halfway
-    # has still edited whatever it edited, and leaving that out of the record
-    # would be the worst possible answer.
-    # Against cwd, where the edits are made: add_dir may be a directory the
-    # agent only reads, and a write there is exactly what should stand out.
+
+    def process(backend_argv, backend_cwd):
+        # Identity must remain identical for receipts created before migration.
+        if backend_argv != argv or backend_cwd != cwd:
+            raise ValueError("Claude backend changed the recorded request")
+        if snapshot:
+            inbox.bind(snapshot, context.relative(operation.directory))
+        operation.begin()
+        _keep_prompt(operation.directory, complete_prompt(prompt))
+        return run_process(operation.process_context(), step, backend_argv,
+                           backend_cwd, name, env={"CLAUDE_CODE_SIMPLE": None},
+                           on_stdout=_reader(context, step, written))
+
+    result, answer, agent_result, profile = run_legacy_claude(
+        run_id=context.run.id, node_id=step.id,
+        operation_id=os.path.basename(operation.directory), epoch=operation.epoch,
+        prompt=prompt, cwd=cwd, binary=binary, options=options, process=process,
+        read_stdout=lambda result: _read_stdout(result, operation.directory),
+        agent_profile=agent_profile, output_schema=output_schema)
+    # A failed pass can still have edited files. Keep the original live reader
+    # and normalize paths relative to the write workspace, not additional dirs.
     changed = distinct(written, cwd)
-    answer = agent_stream.last_result(_read_stdout(result,
-                                                   operation.directory))
-    if not result.ok:
-        reply = Reply(result, changed, answer, problem=result.message)
-    elif answer is None:
-        reply = Reply(result, changed, problem=(
-            "Claude Code ended without a result. Its output is in %s"
-            % result.outputs.get("stdout_path", "the step log")))
-    elif answer.get("is_error"):
-        reply = Reply(result, changed, answer, problem=(
-            "Claude Code refused: %s" % str(answer.get("result")
-                                            or answer.get("subtype") or "")[:200]))
-    else:
-        reply = Reply(result, changed, answer)
+    reply = Reply(result, changed, answer,
+                  problem="" if agent_result["status"] == "completed" else agent_result["summary"],
+                  agent_result=agent_result)
     # An exit code alone cannot say whether a remote request was billed. Only
     # a provider result (or failure before the process started) settles it.
     if answer is not None or result.outputs.get("started") is False:
         operation.complete({"result": result_document(result), "written": changed,
-                            "answer": reply.answer, "problem": reply.problem},
+                            "answer": reply.answer, "problem": reply.problem,
+                            "agent_result": agent_result, "agent_profile": profile,
+                            **({"backend_binding": binding} if binding else {})},
                            bool(answer is not None and not answer.get("is_error")),
                            input_delivered=result.outputs.get("started") is not False)
     if snapshot:
@@ -260,49 +281,6 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
         elif answer is not None:
             inbox.delivered(snapshot, context.relative(operation.directory))
     return reply
-
-
-def _argv(binary, prompt, tools, mode="", model="", max_turns=None, add_dir="",
-          effort="", disallowed=()):
-    """The command line for one call. Built in one place, because the prompt
-    with and without a person's messages must differ in nothing else.
-
-    A rule with a space in it - ``Bash(git merge:*)`` - is its own argument:
-    joined into one string with the others, the CLI splits it at the space.
-    Tools without one are still joined, so the command line a step recorded
-    before rules existed is the one it is asked about on Resume.
-    """
-    argv = [binary, "-p", prompt,
-            # stream-json rather than json: the same answer arrives at the end,
-            # but every turn is announced as it happens, so the step can show
-            # what it is doing instead of going quiet and then printing a wall
-            # of JSON. --verbose is what makes the CLI emit the turns at all.
-            "--output-format", "stream-json", "--verbose"]
-    argv += _tool_list("--allowedTools", tools)
-    if disallowed:
-        argv += _tool_list("--disallowedTools", disallowed)
-    if max_turns not in (None, ""):
-        argv += ["--max-turns", str(int(max_turns))]
-    if mode:
-        argv += ["--permission-mode", mode]
-    model = str(model or "").strip()
-    if model:
-        argv += ["--model", model]
-    effort = str(effort or "").strip()
-    if effort:
-        argv += ["--effort", effort]
-    if add_dir:
-        argv += ["--add-dir", add_dir]
-    return argv
-
-
-def _tool_list(flag, tools):
-    tools = list(tools)
-    if any(" " in one for one in tools):
-        return [flag] + tools
-    return [flag, " ".join(tools)]
-
-
 #: The heading of the section a person's messages are given under. One place,
 #: so a test and a reader of a saved prompt can find it.
 CLARIFICATIONS = "# Clarifications from the person running this"
