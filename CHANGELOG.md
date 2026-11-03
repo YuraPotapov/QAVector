@@ -16,6 +16,18 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.52] - 2026-11-03
+
+### Changed
+- Sessions at once is one choice of four - One by one, N at a time, All
+  together, Auto - over lanes of the selected sessions showing when each one
+  works and when its window only waits.
+- The order sessions run in can be set by dragging their lanes; it is saved
+  with the configuration, and Reset order goes back to the accounts' own.
+- `--filter-users` runs the sessions in the order the logins are listed.
+- Keep the windows open after the scenarios finish moved to Advanced, with an
+  explanation of what it changes about how windows open.
+
 ## [0.16.51] - 2026-11-03
 
 ### Fixed
