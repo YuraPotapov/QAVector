@@ -33,6 +33,7 @@ from . import (background, commands, core as core_mod, cycleinteractions, cycler
 from .askbridge import AskBridge
 from .cyclecockpit import ActiveStrip
 from .cyclewatch import Listener
+from .cycleauto import AutoStarts, ScheduledRuns, trigger_value
 from .cycleschedule import PlanScheduler
 from .loader import LoaderThread
 from .hotkeys import ActionRegistry, ActionSpec, bind_tooltip
@@ -290,6 +291,18 @@ class MainWindow(QMainWindow):
         self.listener = Listener(self.core, self)
         self.listener.offers_changed.connect(self._offer_next)
         self._offering = False
+        # Cycles that start on a schedule, in every project whichever is on
+        # screen. Each runs in a process of its own with its own project's
+        # core, never through this window's run - see cycleauto.
+        self.auto_starts = AutoStarts(self)
+        self.scheduled = ScheduledRuns(self, self)
+        self.auto_starts.run_due.connect(self.scheduled.due)
+        self.scheduled.finished.connect(self._scheduled_finished)
+        self._schedules_loading = False
+        self._schedules_read = False
+        self._schedules_timer = QTimer(self)
+        self._schedules_timer.timeout.connect(self._load_other_schedules)
+        self._schedules_timer.start(self.OTHER_SCHEDULES_MS)
         # Search, Ctrl+K from any window. No button and no menu entry: the key
         # is the way in - an action on the window and in no menu. Text fields
         # let the key through to it (search.KeyCatcher, attached at startup).
@@ -1303,6 +1316,10 @@ class MainWindow(QMainWindow):
             self.cycles.inventory_loading(False)
             self.listener.set_core(self.core)
             self.listener.set_inventory(self.inventory)
+            self._schedule_from_inventory()
+            if not self._schedules_read:
+                self._schedules_read = True
+                self._load_other_schedules()
             
             _splash_msg("Loading credentials...")
             self.credentials.set_environments(
@@ -1393,6 +1410,7 @@ class MainWindow(QMainWindow):
             return
         self.inventory.payload["cycles"] = list(rows)
         self.listener.set_inventory(self.inventory)
+        self._schedule_from_inventory()
 
     def _restore_selected_cycle(self, cycle_id):
         """The cycle's last run, read back when the cycle is opened.
@@ -2026,6 +2044,12 @@ class MainWindow(QMainWindow):
     # -- new tasks ------------------------------------------------------------
     def _update_listening(self):
         line, detail, trouble = self.listener.status()
+        auto_line, auto_detail = self.auto_starts.status(self.settings.project_id)
+        running = self.scheduled.status()
+        if running:
+            auto_line = "%s - %s" % (auto_line or "Scheduled", running)
+        line = "  \u00B7  ".join(part for part in (line, auto_line) if part)
+        detail = "\n".join(part for part in (detail, auto_detail) if part)
         self.listen_label.setText(line)
         self.listen_label.setToolTip(detail)
         self.listen_label.setStyleSheet("padding: 0 10px;%s" % (
@@ -2106,6 +2130,111 @@ class MainWindow(QMainWindow):
                 return
         self.show_page("cycles")
         self._start_planned(item)
+
+    # -- cycles that start on a schedule ----------------------------------------
+    #: How often the other projects' cycle folders are read again for their
+    #: auto triggers. The project on screen is read with its inventory.
+    OTHER_SCHEDULES_MS = 10 * 60 * 1000
+
+    def _schedule_from_inventory(self):
+        project = self._project(self.settings.project_id)
+        self.auto_starts.set_project(project.id, project.name,
+                                     self.inventory.cycles if self.inventory else [])
+        self.cycles.set_scheduled(self.auto_starts.cycles_of(project.id))
+
+    def _project_context(self, project_id):
+        """``(core, data folder, sessions folder)`` of ``project_id``: its own
+        files, whichever project is on screen. The sessions folder is "" where
+        a run takes the default, as start_cycle_run does. A project no longer
+        on the list raises CoreError: its run is nobody else's."""
+        if project_id == self.settings.project_id:
+            return (self.core, self.settings.data_dir(),
+                    self.settings.directory("sessions") if self.settings.project_folder
+                    else "")
+        project = projectsfile.find(self._projects(), project_id)
+        if project is None:
+            raise core_mod.CoreError("The project %s is no longer on the list." % project_id)
+        here = projectsfile.Project(self.settings.project_id, "",
+                                    self.settings.project_folder)
+        self.settings.use_project(project)
+        try:
+            core = self._new_core()
+            core.log_sources, _target = lsf.resolve_path(
+                self.settings.log_sources_path,
+                "" if self.settings.project_folder else core.legacy_log_sources)
+            return (core, self.settings.data_dir(),
+                    self.settings.directory("sessions") if self.settings.project_folder
+                    else "")
+        finally:
+            self.settings.use_project(here)
+
+    def _load_other_schedules(self):
+        """Read every other project's cycles for their auto triggers, off the
+        GUI thread. A project taken off the list is forgotten."""
+        if self._closing or self._schedules_loading:
+            return
+        try:
+            projects = projectsfile.load()
+        except projectsfile.ProjectsFileError:
+            return                      # nothing forgotten; read again later
+        self.auto_starts.keep_projects([project.id for project in projects])
+        known = {project.id for project in projects}
+        for entry in list(self.scheduled.waiting):
+            if entry["project"] not in known:
+                self.scheduled.forget_project(entry["project"])
+        others = [(project, self._project_context(project.id)[0]) for project in projects
+                  if project.id != self.settings.project_id]   # all on the list
+        if not others:
+            return
+
+        def work():
+            found = []
+            for project, core in others:
+                try:
+                    found.append((project, core.cycle_list().get("cycles") or []))
+                except core_mod.CoreError:
+                    pass                # kept as it was; asked again next time
+            return found
+
+        def done(result, _error):
+            self._schedules_loading = False
+            for project, rows in result or []:
+                # The one on screen came from its inventory, which is newer.
+                if project.id != self.settings.project_id:
+                    self.auto_starts.set_project(project.id, project.name, rows)
+
+        self._schedules_loading = True
+        background.run(work, done, owner=self)
+
+    def scheduled_command(self, entry):
+        """ScheduledRuns: the run of ``entry``, with its own project's core."""
+        core, _data, sessions = self._project_context(entry["project"])
+        if not core.is_configured():
+            raise core_mod.CoreError("The core was not found.")
+        args = (["--cycle-run=" + entry["cycle"], "--cycle-trigger=" + trigger_value(entry),
+                 "--events=-"] + core.secrets_flag() + core.memory_flag()
+                + (["--sessions-dir=" + sessions] if sessions else []))
+        return core.argv(*args), core.display_argv(*args), core.spawn_dir()
+
+    def scheduled_history(self, project_id):
+        """ScheduledRuns: the run history of ``project_id``. The one on screen
+        is the window's own, so History shows the entry at once; another's is
+        read fresh, so writing it keeps what is there. CoreError for a project
+        no longer on the list."""
+        if project_id == self.settings.project_id:
+            return self.history
+        return history_mod.History(self._project_context(project_id)[1])
+
+    def scheduled_blocked(self, entry):
+        """ScheduledRuns: whether the window is running that very cycle."""
+        return (entry["project"] == self.settings.project_id
+                and self.run_state.cycle_running and self.process.is_running()
+                and (self.run_state.cycle or {}).get("cycle") == entry["cycle"])
+
+    def _scheduled_finished(self, entry, _code):
+        if entry["project"] == self.settings.project_id:
+            # Its run is in the project's records now: the lists show it.
+            self.cycles.refresh_sessions()
 
     def _ask_about(self, offer):
         """The "new task" window - see cyclewatch.ask_about."""
@@ -2600,6 +2729,10 @@ class MainWindow(QMainWindow):
             # What _on_finished would have asked again, had the launcher exited.
             QTimer.singleShot(0, self._offer_next)
             QTimer.singleShot(0, self._start_due)
+        scheduled = getattr(self, "scheduled", None)
+        if scheduled is not None and not self.run_state.cycle_running:
+            # A scheduled run of the cycle that was running waited for it.
+            QTimer.singleShot(0, scheduled.start_next)
         self._cycle_was_blocked = blocked
 
     def _release_launcher(self):
@@ -2812,6 +2945,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._offer_next)
         # And so was a start somebody scheduled for while it ran.
         QTimer.singleShot(0, self._start_due)
+        QTimer.singleShot(0, self.scheduled.start_next)
         self.run.run_finished(code)
         self.status_right.setText("finished (exit %d)" % code)
         if self.run_state.run_dir:
@@ -3223,6 +3357,9 @@ class MainWindow(QMainWindow):
         # back.
         self.cycles.shut_stages_window()
         self.listener.shutdown()
+        self.auto_starts.set_enabled(False)
+        self._schedules_timer.stop()
+        self.scheduled.shutdown()
         self._listen_timer.stop()
         self._metrics_timer.stop()
         self.settings.save_geometry(self.saveGeometry())

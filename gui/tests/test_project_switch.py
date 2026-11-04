@@ -237,3 +237,51 @@ def test_each_project_comes_back_to_the_cycle_it_had_open(window, qapp):
     window.switch_project(second.id)
     _wait(qapp, window)
     assert _open_now(qapp, window, "beta") == "beta"
+
+
+def test_a_scheduled_cycle_runs_in_its_own_project_while_another_is_open(
+        window, qapp, tmp_path):
+    """The health check of one project runs with that project's files - its
+    cycles, runs and history - while somebody works in another."""
+    import json
+    import time
+
+    from cms_gui import background, history as history_mod
+
+    project = pf.add("Alpha", root=str(tmp_path / "projects"))
+    paths = pf.paths(project.folder)
+    with open(os.path.join(paths.cycles, "health.yaml"), "w", encoding="utf-8") as handle:
+        handle.write("id: health\nname: Health\n"
+                     "triggers:\n  - id: hourly\n    start: auto\n    every: 60\n"
+                     "steps:\n  - id: ping\n    plugin: command.shell\n"
+                     "    with:\n      command: echo checked\n")
+    assert window.settings.project_id == pf.WORKSPACE
+    window._load_other_schedules()
+    end = time.monotonic() + 60
+    while (background.busy() or window._schedules_loading) and time.monotonic() < end:
+        qapp.processEvents()
+        time.sleep(0.02)
+    key = (project.id, "health", "hourly")
+    assert key in window.auto_starts.triggers
+    assert window.auto_starts.cycles_of(pf.WORKSPACE) == set()
+
+    window.auto_starts.last[key] -= 61
+    window.auto_starts.tick()
+    assert window.scheduled.current is not None
+    end = time.monotonic() + 120
+    while window.scheduled.current is not None and time.monotonic() < end:
+        qapp.processEvents()
+        time.sleep(0.05)
+
+    assert window.settings.project_id == pf.WORKSPACE, "nothing switched"
+    assert not window.process.is_running(), "not the window's own run"
+    runs = [os.path.join(paths.cycle_runs, name) for name in os.listdir(paths.cycle_runs)
+            if os.path.isfile(os.path.join(paths.cycle_runs, name, "metadata.json"))]
+    assert len(runs) == 1
+    with open(os.path.join(runs[0], "metadata.json"), encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert (record["trigger"], record["status"]) == ("schedule:hourly", "success")
+    recorded = history_mod.History(project.folder).entries()
+    assert [(one["config"]["cycle"], one["status"]) for one in recorded] == [
+        ("health", history_mod.OK)]
+    assert not any((one.get("config") or {}).get("trigger") for one in window.history.entries())
