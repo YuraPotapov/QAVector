@@ -836,58 +836,6 @@ because the network is down.
 From a terminal: `--cycle-watch=CYCLE[:TRIGGER]` prints what is new (it starts
 nothing), and `--cycle-watch-seen=CYCLE[:TRIGGER]:KEY` marks one task seen.
 
-### Starting on a schedule
-
-Some cycles should simply run every so often, with nobody asked - a health
-check that requests a site, checks the answer and says so only when it fails. A
-trigger with `start: auto` does that:
-
-```yaml
-triggers:
-  - id: hourly
-    start: auto        # the default is ask: the listener above
-    every: 3600        # seconds; 60 at the least
-```
-
-It has no `watch` and no `pin` - the validator refuses either - because nothing
-is offered: when it falls due, the cycle is run as a whole, as an ordinary run
-with its record, its logs and an entry in the project's run history. The run's
-record says `trigger: schedule:hourly`, so it can be told from one somebody
-started; from a terminal that is `--cycle-trigger=schedule:hourly` beside
-`--cycle-run`, refused unless the cycle has that trigger turned on.
-
-**Only a cycle safe to repeat unattended.** A cycle with an `important` step,
-an `agent.*` step, or a step that asks a person (`approval.gate`, `user.input`,
-`user.choice`) cannot have an auto trigger: nobody is there to look, the spend
-of an agent has no ceiling, and a question nobody answers fails the run.
-Disabled steps do not count.
-
-**Every project, whichever is open.** The application keeps the auto triggers
-of every project, not only the one on screen: the project on screen is read
-with its cycles, the others from their own cycle folders every ten minutes.
-Each scheduled run starts in a launcher process of its own, with its own
-project's files - its cycles, secrets, memory, runs and browser profiles - and
-not through the window's run: it does not take over the page somebody is
-looking at, and Run stays free while it goes. Its run history entry goes to its
-own project.
-
-**When, and what waits.**
-
-- Only while the application is open. Runs missed while it was closed, or the
-  machine asleep, are not caught up.
-- The first run comes `every` seconds after the trigger is first seen, not at
-  once - a restart of the window does not start a run of every scheduled cycle.
-- One scheduled run goes at a time; the rest wait in order. A trigger has at
-  most one waiting, so a long run cannot pile up five hourly checks behind it.
-- A cycle the window is running right now is not started again beside it: its
-  scheduled run waits until that one ends.
-- `enabled: false` keeps the trigger without running it.
-
-While anything is scheduled, the status bar says so - *Scheduled: 1 cycle -
-next run 42:10* - with each cycle's own schedule in its tooltip (another
-project's cycle is named with its project), and *running Health check* while
-one goes. Search marks such a cycle *Scheduled*.
-
 ### Starting something on the plan later
 
 Double-click an entry on the plan - a planned task, or an approval nobody
@@ -2222,8 +2170,7 @@ and the step it got to - which is what the sessions are grouped from.
 ## Tags, and what is not here yet
 
 Deliberately absent for now, so nobody looks for them: event sources other
-than a watched step or a schedule (see *Starting when a new task appears* and
-*Starting on a schedule*), analytics
+than a watched step (see *Starting when a new task appears*), analytics
 plugins, nested cycles, loops in the graph, and a plan that changes itself
 during a run - see [the adaptive cycle design](cycle-adaptive-design.md) for
 where that is going.
