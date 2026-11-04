@@ -1894,10 +1894,6 @@ class CyclesPage(QWidget):
         """The task listener, so Search can say which cycles are listening."""
         self._listener = listener
 
-    def set_scheduled(self, cycle_ids):
-        """The cycles that start on a schedule, so Search can say so."""
-        self._scheduled = set(cycle_ids)
-
     def search_rows(self):
         """Every cycle with its state; its runs and the plan, as the list has them."""
         from ..cyclesubjects import (plan_id, planned_detail, planned_title,
@@ -1919,8 +1915,6 @@ class CyclesPage(QWidget):
                     word, tone, live = "Listener problem", "warn", True
                 elif keys:
                     word, tone, live = "Listening", "outline", True
-            if not word and cycle_id in getattr(self, "_scheduled", ()):
-                word, tone, live = "Scheduled", "outline", True
             found.append(search.hit(
                 row.get("name") or cycle_id,
                 " · ".join(part for part in (row.get("project") or "", cycle_id) if part),

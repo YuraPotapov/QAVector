@@ -17,9 +17,6 @@ Checks run on a :class:`QThread`, because a source that is slow to answer
 would otherwise freeze the window for as long as it takes. Only one check is in
 flight at a time; triggers that fall due meanwhile are asked right after it.
 
-A trigger with ``start: auto`` is not listened to here: it asks nothing and
-starts its cycle on a schedule, which ``cycleauto`` does.
-
 A check that fails - the source down, a secret not set - is kept as the trigger's
 last problem and tried again on schedule. It is not an offer and is not shown
 as a dialog: an unattended listener must not interrupt somebody every few
@@ -122,8 +119,6 @@ class Listener(QObject):
             for one in row.get("triggers") or []:
                 if one.get("enabled") is False:
                     continue                # turned off in the step's settings
-                if one.get("start") == "auto":
-                    continue                # nothing to ask: see cycleauto
                 found[(row["id"], one["id"])] = {
                     "every": int(one["every"]),
                     "pin": one.get("pin") or "",

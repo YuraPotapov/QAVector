@@ -139,8 +139,6 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # What a run started from a listener's offer or the plan is about:
              # the page passes the offer it was started from, nobody types it.
              "--cycle-subject", "--cycle-subject-title", "--cycle-subject-pin",
-             # What started a scheduled run: its trigger says, nobody types it.
-             "--cycle-trigger",
              # Where the cycles tree is, for the reason --flows-dir is here: the
              # page edits it and a run reads it, so two places to say it would
              # mean editing one tree while a run read another.
