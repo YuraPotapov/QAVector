@@ -59,10 +59,12 @@ FIXED = "fixed"
 EXPONENTIAL = "exponential"
 BACKOFF = (FIXED, EXPONENTIAL)
 
-#: How a run was started. Only MANUAL exists today; the field is here because a
-#: run's account of itself is worth nothing later if it cannot say what started
-#: it, and adding the field afterwards means every old run answers "unknown".
+#: How a run was started: MANUAL by somebody, or SCHEDULE by an auto trigger -
+#: written ``schedule:<trigger id>``. The field is here because a run's account
+#: of itself is worth nothing later if it cannot say what started it, and adding
+#: the field afterwards means every old run answers "unknown".
 MANUAL = "manual"
+SCHEDULE = "schedule"
 
 #: Core policies governing implicit approval immediately before node submit.
 EXECUTION_MODES = ("auto", "important", "approve")
@@ -158,16 +160,28 @@ WATCH_EVERY = 300
 #: open copy of the application is somebody else's outage.
 WATCH_EVERY_MIN = 60
 
+#: ``start:`` of a trigger. ASK offers what a watched step finds to a person;
+#: AUTO starts the cycle on a schedule with nobody asked.
+START_ASK = "ask"
+START_AUTO = "auto"
+TRIGGER_STARTS = (START_ASK, START_AUTO)
+
 
 @dataclass
 class Trigger:
     """Something that offers to start the cycle on its own.
 
-    One kind so far: ``watch`` names a ``jira.issues`` step, and while the
-    application is open the query that step runs is repeated every ``every``
-    seconds. An issue it has not seen before is offered to a person - "start
-    work on it?" - and, if they agree, the cycle runs with ``pin`` set to that
-    issue's key. Nothing starts without the question being answered.
+    Two kinds, told apart by ``start``. With ``ask`` (the default) ``watch``
+    names a watchable step, and while the application is open the query that
+    step runs is repeated every ``every`` seconds. An item it has not seen
+    before is offered to a person - "start work on it?" - and, if they agree,
+    the cycle runs with ``pin`` set to that item's key. Nothing starts without
+    the question being answered.
+
+    With ``auto`` there is no ``watch`` and no ``pin``: the cycle itself is
+    started every ``every`` seconds while the application is open, with nobody
+    asked. Only a cycle that is safe to repeat unattended may have one - no
+    important step and no agent - which the validator holds to.
     """
 
     id: str
@@ -177,6 +191,7 @@ class Trigger:
     #: Off keeps the trigger - its step and its schedule - without listening,
     #: so turning it back on does not mean writing it again.
     enabled: bool = True
+    start: str = START_ASK  # START_ASK or START_AUTO
 
 
 @dataclass

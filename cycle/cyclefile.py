@@ -41,7 +41,7 @@ _SAFE_ID = re.compile(r"[^A-Za-z0-9_-]+")
 #: reads a cycle in: what it is, then what it takes, then what it does.
 _CYCLE_KEY_ORDER = ("id", "name", "description", "project", "project_folder", "version",
                     "variables", "subject", "triggers", "actions", "execution", "restrictions", "agent_profiles", "phases", "steps")
-_TRIGGER_KEY_ORDER = ("id", "watch", "every", "pin", "enabled")
+_TRIGGER_KEY_ORDER = ("id", "start", "watch", "every", "pin", "enabled")
 #: The order a subject reads in: what kind of thing, which one, then the rest.
 _SUBJECT_KEY_ORDER = ("kind", "key", "title", "memory", "pin")
 _STEP_KEY_ORDER = ("id", "plugin", "label", "group", "phase", "important", "importance_reason", "runtime",
@@ -145,7 +145,7 @@ def list_row(cycle_id, path, cycles_dir=None, registry=None):
     row["steps"] = len(parsed.steps)
     # So a front-end knows which cycles to listen for without opening each.
     row["triggers"] = [dict(id=one.id, watch=one.watch, every=one.every,
-                            pin=model.trigger_pin(parsed, one),
+                            pin=model.trigger_pin(parsed, one), start=one.start,
                             enabled=one.enabled)
                        for one in parsed.triggers]
     # What it works on, and the variable a run started on one subject takes it

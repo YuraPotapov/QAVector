@@ -43,6 +43,7 @@ import time
 
 from cycle import memory, model, registry as default_registry, secrets as secret_store
 from cycle import variables
+from domain.cycle import START_AUTO
 
 
 class WatchError(Exception):
@@ -65,6 +66,17 @@ def trigger_of(cycle, trigger_id=""):
         if one.id == trigger_id:
             return one
     raise WatchError("%s has no trigger %r" % (cycle.id, trigger_id))
+
+
+def listened_trigger(cycle, trigger_id=""):
+    """:func:`trigger_of`, refusing one that starts the cycle on a schedule:
+    it watches nothing, so there is nothing to ask, see or plan."""
+    trigger = trigger_of(cycle, trigger_id)
+    if trigger.start == START_AUTO:
+        raise WatchError("trigger %s of %s has start: auto: it starts the cycle "
+                         "every %d seconds and watches nothing"
+                         % (trigger.id, cycle.id, trigger.every))
+    return trigger
 
 
 def plugin_for(cycle, trigger, registry=None):
@@ -147,7 +159,7 @@ def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
     read the pin, ``new`` holds at most one offer: everything the step returned,
     with ``whole`` true and the items under ``items``.
     """
-    trigger = trigger_of(cycle, trigger_id)
+    trigger = listened_trigger(cycle, trigger_id)
     _step, plugin = plugin_for(cycle, trigger, registry)
     settings = settings_for(cycle, trigger, secrets_path, env, registry)
     each = each_on_its_own(cycle, trigger)
@@ -178,7 +190,7 @@ def mark_seen(cycle, key, trigger_id="", memory_path=None):
     """Remember ``key`` as seen, so it is not offered again - and take it off
     the plan, since seen is what starting or removing a planned item means.
     A whole-answer key sees each of its items. Returns how many are seen."""
-    trigger = trigger_of(cycle, trigger_id)
+    trigger = listened_trigger(cycle, trigger_id)
     record = record_key(cycle.id, trigger.id)
     fields = memory.recall(record, memory_path)
     seen = set(fields.get("seen") or [])
@@ -198,7 +210,7 @@ def plan(cycle, key, title="", url="", trigger_id="", memory_path=None, when=Non
     offer planned is everything the step returned, and it replaces whatever
     was planned before: the latest answer is what a run would take.
     """
-    trigger = trigger_of(cycle, trigger_id)
+    trigger = listened_trigger(cycle, trigger_id)
     record = record_key(cycle.id, trigger.id)
     planned = list(memory.recall(record, memory_path).get("planned") or [])
     entry = {"key": str(key), "title": str(title or ""),
