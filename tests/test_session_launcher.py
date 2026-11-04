@@ -2432,37 +2432,6 @@ def test_a_cycle_that_will_not_run_is_refused_before_anything_starts(
         (tmp_path / "data" / "cycle-runs").iterdir())
 
 
-def test_a_scheduled_run_says_so_in_its_record(monkeypatch, capsys, cycle_tree, tmp_path):
-    """--cycle-trigger=schedule:ID: history tells a scheduled run from a manual one."""
-    path = pathlib.Path(cycle_tree) / "demo.yaml"
-    path.write_text(path.read_text(encoding="utf-8").replace(
-        "steps:\n", "triggers:\n  - id: hourly\n    start: auto\n    every: 3600\nsteps:\n", 1),
-        encoding="utf-8")
-    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
-    monkeypatch.setattr("sys.argv", ["session_launcher.py", "--cycle-run=demo",
-                                     "--cycle-trigger=schedule:hourly",
-                                     "--cycles-dir=" + cycle_tree])
-    with pytest.raises(SystemExit) as exc:
-        sl.main()
-    assert exc.value.code == 0
-    written = sorted(one for one in (tmp_path / "data" / "cycle-runs").iterdir()
-                     if one.is_dir())[0]
-    assert json.loads((written / "metadata.json").read_text())["trigger"] == "schedule:hourly"
-
-
-def test_a_run_is_not_said_to_be_scheduled_by_a_trigger_the_cycle_lacks(
-        monkeypatch, capsys, cycle_tree, tmp_path, caplog):
-    monkeypatch.setenv(sl.runtime_paths.HOME_ENV, str(tmp_path / "data"))
-    monkeypatch.setattr("sys.argv", ["session_launcher.py", "--cycle-run=demo",
-                                     "--cycle-trigger=schedule:hourly",
-                                     "--cycles-dir=" + cycle_tree])
-    with caplog.at_level("ERROR"):
-        with pytest.raises(SystemExit) as exc:
-            sl.main()
-    assert exc.value.code == 2
-    assert "no start: auto trigger 'hourly'" in caplog.text
-
-
 def test_a_cycle_var_without_a_value_is_refused_with_an_explanation(monkeypatch,
                                                                     cycle_tree):
     monkeypatch.setattr("sys.argv", ["session_launcher.py", "--cycle-run=demo",

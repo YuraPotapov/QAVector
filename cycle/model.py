@@ -26,8 +26,8 @@ import copy
 import re
 
 from domain.cycle import (BACKOFF, EXECUTION_MODES, EXPONENTIAL, FIXED, Cycle, CycleStep,
-                          ON_FAILURE, START_ASK, START_AUTO, STOP, Subject,
-                          Trigger, TRIGGER_STARTS, WATCH_EVERY, WATCH_EVERY_MIN)
+                          ON_FAILURE, STOP, Subject, Trigger, WATCH_EVERY,
+                          WATCH_EVERY_MIN)
 
 #: A step id has to survive being a dict key, a path segment under the run
 #: workspace (``steps/<id>/``), and a reference inside ``${steps.<id>....}``.
@@ -49,7 +49,7 @@ CYCLE_KEYS = frozenset(("id", "name", "description", "project", "version",
 
 #: Keys of the ``subject:`` mapping - see :class:`~domain.cycle.Subject`.
 SUBJECT_KEYS = frozenset(("kind", "key", "title", "memory", "pin"))
-TRIGGER_KEYS = frozenset(("id", "start", "watch", "every", "pin", "enabled"))
+TRIGGER_KEYS = frozenset(("id", "watch", "every", "pin", "enabled"))
 
 #: The subject fields that are ``${...}`` expressions, resolved during a run.
 SUBJECT_EXPRESSIONS = ("key", "title", "memory")
@@ -440,30 +440,8 @@ def _parse_triggers(raw):
             watch=str(entry.get("watch") or "").strip(),
             every=_int_or(entry.get("every"), WATCH_EVERY),
             pin=str(entry.get("pin") or "").strip(),
-            enabled=entry.get("enabled", True) is not False,
-            start=str(entry.get("start") or START_ASK).strip()))
+            enabled=entry.get("enabled", True) is not False))
     return tuple(found)
-
-
-def unattended_problems(cycle):
-    """Why ``cycle`` may not be started with nobody asked; [] when it may.
-
-    An important step wants somebody's attention, an agent can spend without
-    limit, and a step that asks a person fails when nobody is there to answer -
-    none of that is to be repeated every hour by itself.
-    """
-    from cycle.subjects import PERSON_PLUGINS
-    found = []
-    for step in cycle.steps:
-        if step.disabled:
-            continue
-        if step.important is True:
-            found.append("%s is important" % step.id)
-        elif step.plugin.startswith("agent."):
-            found.append("%s runs an agent (%s)" % (step.id, step.plugin))
-        elif step.plugin in PERSON_PLUGINS:
-            found.append("%s asks a person (%s)" % (step.id, step.plugin))
-    return found
 
 
 def trigger_pin(cycle, trigger):
@@ -489,28 +467,6 @@ def _trigger_problems(cycle, raw, registry=None):
         if trigger.id in seen:
             found.append("%s is named twice" % where)
         seen.add(trigger.id)
-        if trigger.every < WATCH_EVERY_MIN:
-            found.append("%s: every is %d seconds; the least is %d, so a "
-                         "trigger does not hammer what it asks or runs"
-                         % (where, trigger.every, WATCH_EVERY_MIN))
-        if trigger.start not in TRIGGER_STARTS:
-            found.append("%s: start is %r; it is %s" % (
-                where, trigger.start, " or ".join(TRIGGER_STARTS)))
-            continue
-        if trigger.start == START_AUTO:
-            if trigger.watch:
-                found.append("%s: start: auto runs the cycle on a schedule and "
-                             "watches nothing; remove watch, or use start: ask"
-                             % where)
-            if trigger.pin:
-                found.append("%s: start: auto runs with nothing offered, so "
-                             "there is nothing to pin; remove pin" % where)
-            reasons = unattended_problems(cycle)
-            if reasons:
-                found.append("%s: start: auto runs with nobody asked, so the "
-                             "cycle must be safe to repeat unattended: %s"
-                             % (where, "; ".join(reasons)))
-            continue
         step = cycle.step(trigger.watch)
         if not trigger.watch:
             found.append("%s: watch is empty; name the step it listens to"
@@ -523,6 +479,10 @@ def _trigger_problems(cycle, raw, registry=None):
             found.append("%s: watch names %r, a %s step, which cannot be watched; "
                          "its plugin does not say it can be" % (where, trigger.watch,
                                                                step.plugin))
+        if trigger.every < WATCH_EVERY_MIN:
+            found.append("%s: every is %d seconds; the least is %d, so a "
+                         "listener does not hammer Jira"
+                         % (where, trigger.every, WATCH_EVERY_MIN))
         pin = trigger_pin(cycle, trigger)
         if not pin:
             found.append("%s: nothing to run an offered issue with; set pin, or "
@@ -932,11 +892,7 @@ def to_document(cycle):
 
 
 def _trigger_document(trigger):
-    entry = {"id": trigger.id}
-    if trigger.start != START_ASK:
-        entry["start"] = trigger.start
-    if trigger.watch or trigger.start == START_ASK:
-        entry["watch"] = trigger.watch
+    entry = {"id": trigger.id, "watch": trigger.watch}
     if trigger.every != WATCH_EVERY:
         entry["every"] = trigger.every
     if trigger.pin:
@@ -1038,8 +994,7 @@ def to_graph(cycle):
                     if cycle.subject is not None else None),
         # What may offer to start it: the GUI listens for these while open.
         "triggers": [dict(id=one.id, watch=one.watch, every=one.every,
-                          pin=trigger_pin(cycle, one), enabled=one.enabled,
-                          start=one.start)
+                          pin=trigger_pin(cycle, one), enabled=one.enabled)
                      for one in cycle.triggers],
         "nodes": [{"id": step.id,
                    "label": step.title,

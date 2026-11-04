@@ -186,8 +186,7 @@ def test_a_trigger_round_trips_through_the_cycle_file():
     assert document["triggers"] == [{"id": "new_task", "watch": "todo", "every": 600}]
     graph = model.to_graph(cycle)
     assert graph["triggers"] == [{"id": "new_task", "watch": "todo", "every": 600,
-                                  "pin": "task_key", "enabled": True,
-                                  "start": "ask"}]
+                                  "pin": "task_key", "enabled": True}]
 
 
 def test_a_trigger_turned_off_keeps_its_schedule():
@@ -224,20 +223,6 @@ def test_only_a_step_whose_plugin_says_so_can_be_watched():
            "steps": [{"id": "sh", "plugin": "command.shell"}]}
     found = model.problems(model.parse_cycle(raw, "dev"), registry=registry, raw=raw)
     assert any("cannot be watched" in one for one in found), found
-
-
-def test_a_trigger_that_starts_on_a_schedule_watches_nothing(tmp_path):
-    """An auto trigger is not listened to: there is nothing to ask, see or plan."""
-    raw = {"id": "health", "triggers": [{"id": "hourly", "start": "auto", "every": 3600}],
-           "steps": [{"id": "ping", "plugin": "command.shell"}]}
-    cycle = model.parse_cycle(raw, "health")
-    for call in (lambda: watch.check(cycle, "hourly", memory_path=str(tmp_path / "m.json")),
-                 lambda: watch.mark_seen(cycle, "QA-1", "hourly",
-                                         memory_path=str(tmp_path / "m.json")),
-                 lambda: watch.plan(cycle, "QA-1", trigger_id="hourly",
-                                    memory_path=str(tmp_path / "m.json"))):
-        with pytest.raises(watch.WatchError, match="start: auto"):
-            call()
 
 
 # ------------------------------------------------- the engine knows no queue

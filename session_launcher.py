@@ -1279,7 +1279,7 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                    jobs=None, control=False, reports_dir=None,
                    secrets_path=None, memory_path=None, only=None,
                    start_from="", resume="", reuse_from="", subject=None, action="", mode=None,
-                   launcher=None, trigger=""):
+                   launcher=None):
     """Run one cycle to completion. Returns the exit code.
 
     Handled before the Chrome launch loop, because a cycle opens no windows of
@@ -1329,15 +1329,6 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                 model.action_selection(cycle, action)
             except model.CycleError as exc:
                 refusal = str(exc)
-    if trigger and (only or start_from or resume or action or reuse_from):
-        refusal = "--cycle-trigger starts a whole run; it cannot be combined with selection, Resume or an action."
-    elif trigger:
-        named = trigger.split(":", 1)[1]
-        if not any(one.id == named and one.start == "auto" and one.enabled
-                   for one in cycle.triggers):
-            refusal = ("%s has no start: auto trigger %r turned on; a run is said "
-                       "to be scheduled only when the cycle schedules it."
-                       % (cycle.id, named))
     if resume and (only or start_from or variables or reuse_from):
         refusal = "Resume cannot be combined with partial selection or variable overrides."
     if resume and (workspace_mod.safe_id(resume) != resume or resume in (".", "..")):
@@ -1411,8 +1402,7 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
             observer=bus.Tee(observers), flows_dir=flows_dir, launcher=launcher,
             cycles_dir=cycles_dir, run_id=run_id, secrets=values,
             memory_path=memory_path, only=chosen, reuse=reuse, resume=bool(resume),
-            subject=subject, action=action, supervised=control, cancel=control_cancel, controlled=control, mode=mode,
-            **({"trigger": trigger} if trigger else {}))
+            subject=subject, action=action, supervised=control, cancel=control_cancel, controlled=control, mode=mode)
     except checkpoints.CheckpointError as exc:
         log.error("%s", exc)
         _emit("cycle.run.end", cycle=cycle_id, status="error", message=str(exc), exit_code=2)
@@ -1704,9 +1694,6 @@ def _bad_option_message(arg, config_path):
         return "--cycle-jobs needs a number: how many steps may run at once."
     if arg == "--cycle-mode":
         return "--cycle-mode needs auto, important or approve."
-    if arg == "--cycle-trigger":
-        return ("--cycle-trigger needs schedule:TRIGGER, the start: auto trigger "
-                "the run was started by.")
     if arg in ("--cycle-sessions-limit", "--cycle-sessions-offset",
                "--cycle-subject-list-limit", "--cycle-subject-list-offset",
                "--cycle-subject-history-limit"):
@@ -3800,10 +3787,6 @@ Running a cycle:
   --cycle-action=ID         Run a declared bounded action, such as prepare_task.
   --cycle-mode=MODE         auto, important or approve. Defaults to the cycle's
                             policy; Resume keeps the saved mode unless supplied.
-  --cycle-trigger=schedule:TRIGGER
-                            The run was started by the cycle's start: auto
-                            trigger TRIGGER, not by somebody: its record says
-                            so. Refused unless the cycle has that trigger.
                             No borrowed results; Resume stays inside the action.
   --cycle-var=NAME=VALUE    Override one of the cycle's variables. Repeatable.
   --cycle-subject=KEY       What the run was started on - the key of the task (or
@@ -3948,7 +3931,6 @@ def main():
     cycle_only = []       # --cycle-only: run just these, reuse the rest
     cycle_action = ""     # named, bounded action; no borrowing
     cycle_mode = None     # None preserves the cycle default / saved run policy
-    cycle_trigger = ""    # --cycle-trigger=schedule:ID: started by an auto trigger
     cycle_from = ""       # --cycle-from: run this one and everything after
     cycle_resume = ""     # --cycle-resume: exact saved execution, not the latest
     cycle_reuse = ""      # --cycle-reuse: exact source for a partial execution
@@ -4289,10 +4271,6 @@ def main():
             cycle_action = arg.split("=", 1)[1].strip()
             if not cycle_action:
                 bad_option = "--cycle-action"
-        elif arg.startswith("--cycle-trigger="):
-            cycle_trigger = arg.split("=", 1)[1].strip()
-            if not cycle_trigger.startswith("schedule:") or not cycle_trigger[9:]:
-                bad_option = "--cycle-trigger"
         elif arg.startswith("--cycle-mode="):
             cycle_mode = arg.split("=", 1)[1].strip()
             if cycle_mode not in ("auto", "important", "approve"):
@@ -4512,7 +4490,6 @@ def main():
                                 memory_path=memory_file,
                                 only=cycle_only, start_from=cycle_from, action=cycle_action,
                                 resume=cycle_resume, reuse_from=cycle_reuse, mode=cycle_mode,
-                                trigger=cycle_trigger,
                                 subject=({"key": cycle_subject,
                                           "title": cycle_subject_title,
                                           "pin": cycle_subject_pin}
