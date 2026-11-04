@@ -16,23 +16,6 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
-## [0.16.56] - 2026-11-04
-
-### Added
-- Cycles that start on a schedule: a trigger with `start: auto` and `every:`
-  runs its cycle every so often while the application is open, with nobody
-  asked. Only a cycle safe to repeat unattended may have one - no important
-  step, no agent, no step that asks a person. The first run comes a full
-  `every` after the application opens, missed runs are not caught up, and a
-  trigger never has more than one run waiting.
-- Scheduled runs work in every project, whichever is open: each starts in a
-  launcher of its own with its own project's cycles, secrets, memory, runs and
-  history, and never takes over the window's run. The status bar shows the
-  next one (*Scheduled: 1 cycle - next run 42:10*) and Search marks such a
-  cycle *Scheduled*.
-- `--cycle-trigger=schedule:ID` beside `--cycle-run`: the run's record says it
-  was started by that schedule, not by somebody.
-
 ## [0.16.55] - 2026-11-03
 
 ### Fixed
