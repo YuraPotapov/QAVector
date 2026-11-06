@@ -16,6 +16,18 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.57] - 2026-11-04
+
+### Added
+- Shell Command nodes now offer Listen. Listening executes that node with its
+  existing settings through the normal executor, then the nodes that wait on
+  it, so a node with `if:` can react to a failure; failures appear in the
+  listening status. Jira listeners retain their existing task-offer behavior.
+
+### Fixed
+- Turning listening off or closing the application cancels the active check
+  and lets the command stop its child processes.
+
 ## [0.16.55] - 2026-11-03
 
 ### Fixed
