@@ -43,3 +43,15 @@ def own_doc_labels(tmp_path, monkeypatch):
     path = str(tmp_path / "doc_labels.json")
     monkeypatch.setattr(runtime_paths, "doc_labels_path", lambda: path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def own_integrations_store(tmp_path, monkeypatch):
+    """A test that names no connections file gets one of its own, never the
+    one beside the checkout - which is where the default points in a source
+    tree, and where a person's real connections would be."""
+    from integrations import store
+
+    path = str(tmp_path / "default-integrations.json")
+    monkeypatch.setattr(store, "default_path", lambda: path)
+    return path

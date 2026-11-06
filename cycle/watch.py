@@ -47,6 +47,7 @@ from tempfile import TemporaryDirectory
 
 from cycle import memory, model, registry as default_registry, secrets as secret_store
 from cycle import variables
+from cycle import connections as connections_mod
 
 # Bound unattended commands, including ones without a node timeout. The GUI
 # gives the core additional time to stop the command's process group cleanly.
@@ -89,14 +90,17 @@ def plugin_for(cycle, trigger, registry=None):
     return step, plugin
 
 
-def settings_for(cycle, trigger, secrets_path=None, env=None, registry=None):
+def settings_for(cycle, trigger, secrets_path=None, env=None, registry=None,
+                 connections=None):
     """The watched step's settings, resolved as a run would resolve them.
 
     Only variables, secrets and the environment are available - no step has
     run - which is what a queue query reads anyway. A reference to another
-    step's outputs is refused rather than left as text in the query.
+    step's outputs is refused rather than left as text in the query. A step
+    naming a connection gets that connection's site and account, from
+    ``connections`` (``cycle.connections.load``), as a run's step would.
     """
-    step, _plugin = plugin_for(cycle, trigger, registry)
+    step, plugin = plugin_for(cycle, trigger, registry)
     for path in variables.references(step.settings):
         if path.startswith("steps."):
             raise WatchError("%s reads %s, which a listener cannot know before a "
@@ -117,7 +121,11 @@ def settings_for(cycle, trigger, secrets_path=None, env=None, registry=None):
                          % (cycle.id, ", ".join(unset)))
     scope = variables.scope(None, cycle, {}, env=env or {},
                             secrets={k: v for k, v in values.items() if v is not None})
-    return variables.resolve(step.settings, scope)
+    settings = variables.resolve(step.settings, scope)
+    try:
+        return connections_mod.expand(plugin, settings, connections)
+    except connections_mod.BindingError as exc:
+        raise WatchError("%s: %s Nothing was asked until then." % (step.id, exc))
 
 
 def each_on_its_own(cycle, trigger):
@@ -147,7 +155,7 @@ def whole(found):
 
 
 def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
-          registry=None, cancel=None):
+          registry=None, cancel=None, connections=None):
     """``{"trigger", "first", "new": [{key, title, ...}], "pin"}``.
 
     ``first`` is true on a trigger's very first check, when everything found is
@@ -159,8 +167,8 @@ def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
     step, plugin = plugin_for(cycle, trigger, registry)
     if plugin.metadata.watch_execution:
         return _execute_node(cycle, trigger, step, secrets_path, memory_path,
-                             env, registry, cancel)
-    settings = settings_for(cycle, trigger, secrets_path, env, registry)
+                             env, registry, cancel, connections)
+    settings = settings_for(cycle, trigger, secrets_path, env, registry, connections)
     each = each_on_its_own(cycle, trigger)
     try:
         found = [one for one in plugin.peek(settings, each=each) if one.get("key")]
@@ -185,7 +193,8 @@ def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
             "new": new}
 
 
-def _execute_node(cycle, trigger, step, secrets_path, memory_path, env, registry, cancel):
+def _execute_node(cycle, trigger, step, secrets_path, memory_path, env, registry, cancel,
+                  connections=None):
     """Run the listened node and the nodes that wait on it, never its peers.
 
     This is a check, not a queue of new work. There is no baseline suppression,
@@ -197,7 +206,7 @@ def _execute_node(cycle, trigger, step, secrets_path, memory_path, env, registry
     if problems:
         raise WatchError("; ".join(problems))
     # Reuse the listener's missing-secret and cross-node reference checks.
-    settings_for(cycle, trigger, secrets_path, env, registry)
+    settings_for(cycle, trigger, secrets_path, env, registry, connections)
     secrets = {name: secret_store.get(cycle.id, name, secrets_path)
                for name in cycle.secrets}
     # Downstream nodes that also wait on something outside the set are left out.
@@ -218,7 +227,8 @@ def _execute_node(cycle, trigger, step, secrets_path, memory_path, env, registry
     with TemporaryDirectory(prefix="qavector-listen-") as workspace:
         run = executor.run_cycle(isolated, workspace, registry=registry,
                                  environment=env, secrets=secrets,
-                                 memory_path=memory_path or "", cancel=cancel)
+                                 memory_path=memory_path or "", cancel=cancel,
+                                 connections=connections)
         result = run.steps[step.id]
         if result.status not in ("success", "skipped"):
             raise WatchError("%s: %s" % (step.title, result.message or result.status))

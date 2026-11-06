@@ -7,10 +7,9 @@ not one. There is no create, no transition, no edit: a cycle step that reads is
 a step you can point at a production instance without thinking, and everything
 this returns is an input to whatever comes next.
 
-**No dependency.** ``urllib.request`` from the standard library, the way
-``engine/assertions.py`` already reaches an HTTP server. Adding a client library
-to the core so a step can make two GET requests would be the wrong trade in a
-project whose runtime dependency list is one line long.
+**One client, shared.** The session, the JQL and the document format live in
+``integrations/jira/`` - the Integrations page asks Jira through the same code,
+so the half that explains why a 401 happened cannot drift between the two.
 
 **The token never belongs in the cycle file.** Cycle files are committed and
 ship inside the build. Declare the token as a secret variable and reference it::
@@ -39,36 +38,20 @@ import base64
 import json
 import os
 import re
-import ssl
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from cycle import jira_report, registry
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
 from domain.cycle import Artifact
-
-#: Which product this is talking to. They differ in the search endpoint and in
-#: how a comment's body comes back, and nothing about a URL says which is which.
-CLOUD, SERVER = "cloud", "server"
-
-#: Which side of an issue the person is on. ``any`` is the union, which is the
-#: honest default for "what is on their plate" - work is often reported by one
-#: person and carried by another. ``everyone`` asks about nobody in particular:
-#: a column of the board - Ready for prod, whoever carries it - rather than one
-#: person's plate.
-EVERYONE = "everyone"
-ROLES = ("assignee", "reporter", "creator", "mentioned", "watcher", "any",
-         EVERYONE)
-
-#: The union ``any`` expands to. Not ``watcher`` or ``mentioned``: both are far
-#: wider than "their work" and would bury the answer.
-ANY_ROLES = ("assignee", "reporter", "creator")
-
-#: How issues come back when the step does not say. Newest first is right for
-#: "what is going on" - the question somebody reading a list is usually asking.
-#: A cycle that takes one task per run usually wants the opposite and says so.
-DEFAULT_ORDER = "updated DESC"
+from cycle import connections as binding
+from integrations.jira import query
+from integrations.jira.adf import flatten as _flatten, to_text as _body  # noqa: F401
+from integrations.jira.client import (CLOUD, REQUEST_TIMEOUT, SERVER,  # noqa: F401
+                                      JiraError, Session, _why)
+from integrations.jira.client import same_site as _same_site  # noqa: F401
+from integrations.jira.query import (ANY_ROLES, DEFAULT_ORDER, EVERYONE,  # noqa: F401
+                                     PAGE, ROLES, jql_for, projects_clause,
+                                     statuses_clause)
+from integrations.jira.query import escape as _escape, ordering as _ordering  # noqa: F401
 
 #: The fields worth asking for. Asking for everything makes the response many
 #: times larger and slower for facts nothing reads.
@@ -104,20 +87,8 @@ IMAGE_PREFIX = "image/"
 #: listed; it is only not embedded.
 INLINE_BYTES = 4000000
 
-#: One page. Jira caps this itself; asking for more simply gets fewer.
-PAGE = 50
-
-#: How long any single request may take. A step's own ``timeout`` governs the
-#: whole thing; this is so one hung connection cannot sit there forever.
-REQUEST_TIMEOUT = 30
-
-
 #: What an issue key looks like: a project key, a dash, a number.
 ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-[0-9]+$")
-
-
-class JiraError(Exception):
-    """Jira refused, or could not be reached. Carries a readable reason."""
 
 
 class JiraIssues(CyclePlugin):
@@ -128,9 +99,14 @@ class JiraIssues(CyclePlugin):
         # A cycle's trigger may listen to this step: see peek().
         watchable=True,
         inputs=(
-            field("site", "Site", required=True,
+            field("connection", "Connection", "connection", options=("jira",),
+                  hint="A Jira connection of this project, by its id - set "
+                       "once in Integrations -> Jira -> Connections, with its "
+                       "token. When set, leave Site, Product, Authentication, "
+                       "Account email, API token and Verify empty."),
+            field("site", "Site",
                   hint="https://yourcompany.atlassian.net, or your Jira "
-                       "Server's base URL."),
+                       "Server's base URL. Not used with a connection."),
             field("flavour", "Product", "choice", default=CLOUD,
                   options=(CLOUD, SERVER),
                   hint="Cloud and Server differ in their search endpoint and "
@@ -142,10 +118,10 @@ class JiraIssues(CyclePlugin):
                        "is a Server or Data Center personal access token."),
             field("email", "Account email",
                   hint="Only for basic. The account the API token belongs to."),
-            field("token", "API token", required=True,
+            field("token", "API token",
                   hint="Reference a secret variable - ${vars.jira_token} - so "
                        "the value stays out of this file. Cycle files are "
-                       "committed and shipped."),
+                       "committed and shipped. Not used with a connection."),
             field("user", "Whose issues",
                   hint="An account id on Cloud, a username on Server, or "
                        "currentUser() for whoever the token belongs to. Not "
@@ -213,6 +189,9 @@ class JiraIssues(CyclePlugin):
             field("verify_tls", "Verify the certificate", "check", default=True,
                   hint="Off only for a Server with a self-signed certificate "
                        "on a network you trust."),
+            field("api", "API address",
+                  hint="Filled in by a connection signed in with Atlassian, whose "
+                       "requests go through Atlassian's API gateway. Leave empty."),
         ),
         outputs=(
             output("issues", "list",
@@ -276,6 +255,10 @@ class JiraIssues(CyclePlugin):
                     "status"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
+        connected, wrong = binding.problems(settings)
+        found.extend(wrong)
+        if not connected:
+            found.extend(_account_problems(settings))
 
         pinned = isinstance(issue, str) and issue.strip()
         if settings.get("role", "any") == EVERYONE:
@@ -290,15 +273,6 @@ class JiraIssues(CyclePlugin):
         elif not pinned and not str(settings.get("user") or "").strip():
             found.append("Whose issues is required.")
 
-        site = str(settings.get("site") or "")
-        if site and "${" not in site and not site.startswith(("http://", "https://")):
-            found.append("Site must start with http:// or https://.")
-        if (settings.get("auth", "basic") == "basic"
-                and not str(settings.get("email") or "").strip()):
-            # Basic auth against Jira is the email, not a username, and an
-            # empty one fails with a 401 that says nothing about which half is
-            # missing.
-            found.append("Basic authentication needs the account email.")
         for key, ceiling in (("limit", 1000), ("comment_limit", 200)):
             count = settings.get(key, 50)
             if isinstance(count, str) and "${" in count:
@@ -341,7 +315,9 @@ class JiraIssues(CyclePlugin):
             auth=self.setting(step.settings, "auth", "basic"),
             email=str(self.setting(step.settings, "email", "") or ""),
             token=str(self.setting(step.settings, "token")),
-            verify=bool(self.setting(step.settings, "verify_tls", True)))
+            verify=bool(self.setting(step.settings, "verify_tls", True)),
+            api=str(self.setting(step.settings, "api", "") or "") or None,
+            find_gateway=self.setting(step.settings, "flavour", CLOUD) == CLOUD)
         flavour = self.setting(step.settings, "flavour", CLOUD)
         limit = int(self.setting(step.settings, "limit", 50))
 
@@ -440,6 +416,27 @@ class JiraIssues(CyclePlugin):
                 if downloaded else ""))
 
 
+def _account_problems(settings):
+    """What is wrong with a step that says where and who itself.
+
+    Shared with ``jira.transition``: a step without a connection needs the
+    same three things whether it reads or writes.
+    """
+    found = []
+    for key, label in (("site", "Site"), ("token", "API token")):
+        if not str(settings.get(key) or "").strip():
+            found.append("%s is required." % label)
+    site = str(settings.get("site") or "")
+    if site and "${" not in site and not site.startswith(("http://", "https://")):
+        found.append("Site must start with http:// or https://.")
+    if (settings.get("auth", "basic") == "basic"
+            and not str(settings.get("email") or "").strip()):
+        # Basic auth against Jira is the email, not a username, and an empty
+        # one fails with a 401 that says nothing about which half is missing.
+        found.append("Basic authentication needs the account email.")
+    return found
+
+
 # -- the query ----------------------------------------------------------------
 def _peek(settings, limit=20):
     """The issues a ``jira.issues`` step with these settings would take now.
@@ -459,7 +456,9 @@ def _peek(settings, limit=20):
                   auth=settings.get("auth", "basic"),
                   email=str(settings.get("email") or ""),
                   token=str(settings.get("token") or ""),
-                  verify=bool(settings.get("verify_tls", True)))
+                  verify=bool(settings.get("verify_tls", True)),
+                  api=str(settings.get("api") or "") or None,
+                  find_gateway=settings.get("flavour", CLOUD) == CLOUD)
     flavour = settings.get("flavour", CLOUD)
     query = jql_for(str(settings.get("user") or ""), settings.get("role", "any"),
                     str(settings.get("jql") or ""), str(settings.get("project") or ""),
@@ -474,257 +473,14 @@ def _peek(settings, limit=20):
     return found
 
 
-def jql_for(user, role, extra="", project="", order="", status=""):
-    """The JQL for "this person's issues", in the order the step asked for.
-
-    Quoted, with the quotes in the names escaped. A user string and a project
-    key both reach this from a cycle file or a variable, and JQL has the same
-    injection problem every query language has: an unescaped quote ends the
-    literal and whatever follows is read as query.
-
-    ``order`` is the ORDER BY without those words. It is a field of its own
-    rather than something written into ``extra`` because ``extra`` is bracketed
-    - and an ORDER BY inside brackets is a syntax error, not an ordering. It
-    matters more than it looks: a cycle that takes one task per run is choosing
-    which task here.
-
-    ``everyone`` leaves the person out altogether - a column of the board,
-    whoever carries it - and the clauses that are left are joined as they are.
-    """
-    who = (user or "").strip()
-    literal = who if who.endswith("()") else '"%s"' % _escape(who)
-    if role == EVERYONE:
-        clauses = []
-    elif role == "any":
-        clauses = ["(%s)" % " OR ".join("%s = %s" % (one, literal)
-                                        for one in ANY_ROLES)]
-    elif role == "mentioned":
-        clauses = ["text ~ %s" % literal]   # the only way Jira expresses it
-    else:
-        clauses = ["%s = %s" % (role, literal)]
-
-    for where in (projects_clause(project), statuses_clause(status)):
-        if where:
-            clauses.append(where)
-    extra = (extra or "").strip()
-    if extra:
-        # Bracketed, because an OR inside it would otherwise swallow
-        # everything to its left.
-        clauses.append("(%s)" % extra)
-    return ("%s ORDER BY %s" % (" AND ".join(clauses), _ordering(order))
-            ).lstrip()
-
-
-def _ordering(order):
-    """The ORDER BY tail, with those words stripped if somebody wrote them.
-
-    Written both ways by people who have typed JQL before, and both readings
-    are obvious - so accepting one and producing a syntax error for the other
-    would be a gratuitous way to fail.
-    """
-    order = (order or "").strip()
-    if not order:
-        return DEFAULT_ORDER
-    without = order.lstrip()
-    if without[:8].upper() == "ORDER BY":
-        without = without[8:].strip()
-    return without or DEFAULT_ORDER
-
-
-def projects_clause(project):
-    """``project = "QA"`` or ``project in ("QA", "WEB")``, or nothing at all.
-
-    Blank means every project the account can see, which is the right default
-    for "what is on this person's plate" - work crosses projects. It is not
-    the right answer for every account, though: with a small ``limit`` and
-    ``ORDER BY updated DESC``, one busy project can take the whole page and a
-    quiet one never appears, which is a wrong answer nobody notices.
-    """
-    keys = [one.strip() for one in str(project or "").split(",")]
-    keys = ['"%s"' % _escape(one) for one in keys if one]
-    if not keys:
-        return ""
-    if len(keys) == 1:
-        return "project = %s" % keys[0]
-    return "project in (%s)" % ", ".join(keys)
-
-
-def statuses_clause(status):
-    """``status = "In Progress"`` or ``status in (...)``, or nothing at all.
-
-    The same shape as :func:`projects_clause`, and escaped for the same reason:
-    a status name comes from a cycle file or a variable. The names are the
-    workflow's own - nothing here knows what a project calls its columns.
-    """
-    names = [one.strip() for one in str(status or "").split(",")]
-    names = ['"%s"' % _escape(one) for one in names if one]
-    if not names:
-        return ""
-    if len(names) == 1:
-        return "status = %s" % names[0]
-    return "status in (%s)" % ", ".join(names)
-
-
-def _escape(text):
-    return text.replace("\\", "\\\\").replace('"', '\\"')
-
-
-# -- talking to it ------------------------------------------------------------
-class Session(object):
-    """The site, the credentials, and one way of asking it something.
-
-    Shared with ``jira_transition.py`` rather than written twice: the
-    authentication, the two flavours' base paths and the business of turning
-    an HTTP failure into something worth reading are the same question whether
-    a step is reading or writing, and two copies would drift on the half that
-    says why a 401 happened.
-    """
-
-    def __init__(self, site, auth, email, token, verify=True):
-        self.site = site
-        self._verify = verify
-        if auth == "bearer":
-            self._header = "Bearer " + token
-        else:
-            pair = ("%s:%s" % (email, token)).encode("utf-8")
-            self._header = "Basic " + base64.b64encode(pair).decode("ascii")
-
-    def __call__(self, path, params=None, body=None):
-        """GET, or POST when ``body`` is given. Returns the parsed JSON."""
-        url = self.site + path
-        if params:
-            url += "?" + urllib.parse.urlencode(params)
-        data = None
-        request = urllib.request.Request(url)
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            request = urllib.request.Request(url, data=data, method="POST")
-            request.add_header("Content-Type", "application/json")
-        request.add_header("Authorization", self._header)
-        request.add_header("Accept", "application/json")
-        context = None if self._verify else ssl._create_unverified_context()
-        try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT,
-                                        context=context) as answer:
-                raw = answer.read().decode("utf-8", "replace").strip()
-            # A write answers 204 with nothing in it, which is a success and
-            # not a malformed reply. Reading a body that is not there was fine
-            # while only the reading plugin used this.
-            return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as exc:
-            raise JiraError(_why(exc, url))
-        except (urllib.error.URLError, OSError) as exc:
-            raise JiraError("Cannot reach %s: %s" % (self.site, exc))
-        except ValueError as exc:
-            raise JiraError("%s did not answer with JSON: %s" % (url, exc))
-
-    def fetch(self, url):
-        """One attachment's bytes. Separate from ``__call__``, deliberately.
-
-        That one parses JSON and asks for it in the Accept header; this wants
-        whatever the file is. They also differ in what a URL means: an
-        attachment's ``content`` is absolute and may point at a media host that
-        is not the site itself, so it is used as given rather than appended -
-        after checking it is the site's, because following an absolute URL out
-        of a payload would send this account's credentials wherever the payload
-        said to.
-        """
-        target = url if "://" in url else self.site + url
-        if not _same_site(target, self.site):
-            raise JiraError("%s is not on %s; not sending credentials there."
-                            % (target, self.site))
-        request = urllib.request.Request(target)
-        request.add_header("Authorization", self._header)
-        context = None if self._verify else ssl._create_unverified_context()
-        try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT,
-                                        context=context) as answer:
-                return answer.read()
-        except urllib.error.HTTPError as exc:
-            raise JiraError(_why(exc, target))
-        except (urllib.error.URLError, OSError) as exc:
-            raise JiraError("Cannot reach %s: %s" % (target, exc))
-
-
-def _same_site(url, site):
-    """Whether ``url`` is on the same host and scheme as the configured site."""
-    one, other = urllib.parse.urlsplit(url), urllib.parse.urlsplit(site)
-    return (one.scheme, one.netloc) == (other.scheme, other.netloc)
-
-
-def _why(exc, url):
-    """An HTTP failure as something worth reading.
-
-    Jira puts the real reason in the body - "the JQL names a field that does
-    not exist", "this account cannot browse that project" - and the status line
-    alone sends somebody looking in the wrong place.
-    """
-    detail = ""
-    try:
-        payload = json.loads(exc.read().decode("utf-8", "replace"))
-        if isinstance(payload, dict):
-            messages = payload.get("errorMessages") or []
-            errors = payload.get("errors") or {}
-            detail = "; ".join([str(one) for one in messages]
-                               + ["%s: %s" % pair for pair in errors.items()])
-    except Exception:                       # noqa: BLE001 - best effort only
-        detail = ""
-    if exc.code == 401:
-        detail = detail or ("the credentials were refused. On Cloud this is "
-                            "your email plus an API token, not your password.")
-    elif exc.code == 403:
-        detail = detail or "the account may not do that."
-    elif exc.code in (404, 410):
-        detail = detail or ("no such endpoint. Check Product: Cloud and Server "
-                            "do not share one.")
-    return "Jira answered %s for %s%s" % (exc.code, url,
-                                          " - " + detail if detail else "")
-
-
-def _search(get, flavour, query, limit, cancel):
-    """Every issue the query finds, up to ``limit``, newest first.
-
-    Paged, because Jira caps a page well below what a step may ask for, and
-    silently returning the first fifty of two hundred would be the kind of
-    wrong answer nobody notices.
-    """
-    found, token, start = [], None, 0
-    while len(found) < limit:
-        cancel.raise_if_set()
-        want = min(PAGE, limit - len(found))
-        if flavour == CLOUD:
-            # The older /search endpoints are gone from Cloud; this one pages
-            # by an opaque token rather than by offset.
-            body = {"jql": query, "maxResults": want, "fields": list(FIELDS)}
-            if token:
-                body["nextPageToken"] = token
-            page = get("/rest/api/3/search/jql", body=body)
-            token = page.get("nextPageToken")
-        else:
-            page = get("/rest/api/2/search",
-                       {"jql": query, "maxResults": want, "startAt": start,
-                        "fields": ",".join(FIELDS)})
-            start += want
-        issues = page.get("issues") or []
-        found.extend(issues)
-        if not issues or (flavour == CLOUD and (page.get("isLast") or not token)):
-            break
-        if flavour == SERVER and start >= int(page.get("total") or 0):
-            break
-    if not found:
-        _signed_in(get, flavour)
-    return found[:limit]
+def _search(get, flavour, query_, limit, cancel):
+    """Every issue the query finds, up to ``limit``, with the step's fields."""
+    return query.search(get, flavour, query_, limit, cancel, FIELDS)
 
 
 def _signed_in(get, flavour):
-    """Raises :class:`JiraError` when the credentials are refused.
-
-    Cloud answers a search with refused Basic credentials as an anonymous one:
-    200 and no issues, since ``currentUser()`` is nobody and nobody can browse
-    the project. An expired token would read as an empty queue, so an empty
-    answer is checked against the one endpoint that does say 401.
-    """
-    get("/rest/api/%s/myself" % ("3" if flavour == CLOUD else "2"))
+    """Raises :class:`JiraError` when the credentials are refused."""
+    query.signed_in(get, flavour)
 
 
 def _add_subtasks(get, flavour, issues, description_limit, cancel):
@@ -1012,103 +768,6 @@ def _person(value):
     return value.get("displayName") or value.get("name") or ""
 
 
-def _body(value, flavour):
-    """A comment's text.
-
-    Server sends a string. Cloud sends Atlassian Document Format - a tree of
-    nodes where the words are in the leaves - so the leaves are gathered and
-    the structure is dropped. That loses formatting, which is the right thing
-    to lose: what reads this is a report or an agent, and neither wants a
-    document tree.
-    """
-    if isinstance(value, str):
-        return value.strip()
-    if flavour == CLOUD and isinstance(value, dict):
-        return _flatten(value).strip()
-    return "" if value is None else str(value)
-
-
-def _flatten(node):
-    """The words out of an ADF tree, with enough of its shape to still read.
-
-    Not a renderer: what reads this is an agent or a report, and neither wants
-    a document tree. But some structure *is* the content, and dropping it
-    changes what the text says rather than only how it looks:
-
-    * a **table** whose cells run together is a wall of words - the rows and
-      the columns are what made it a table;
-    * a **list** is a set of separate things, and a paragraph of them joined
-      end to end reads as one thing;
-    * a **link's** address is often the whole point of the sentence, and ADF
-      keeps it in a mark rather than in the words.
-
-    So those three keep a plain-text equivalent, and everything else is still
-    reduced to its words.
-    """
-    if not isinstance(node, dict):
-        return ""
-    kind = node.get("type")
-
-    if kind == "text":
-        return _linked(node)
-    if kind == "hardBreak":
-        return "\n"
-    if kind == "mention":
-        return str((node.get("attrs") or {}).get("text") or "")
-    if kind == "emoji":
-        return str((node.get("attrs") or {}).get("text") or "")
-    if kind == "inlineCard":
-        return str((node.get("attrs") or {}).get("url") or "")
-    if kind == "rule":
-        return "---\n"
-    if kind in ("media", "mediaInline"):
-        # A media node has no words in it, so the generic branch below reduced
-        # it to nothing at all: a bug report whose whole specification was a
-        # screenshot arrived as a description that did not mention one. It says
-        # so now, and the file itself is in the step's `attachments`.
-        return _media(node)
-
-    children = node.get("content") or []
-    if kind in ("bulletList", "orderedList"):
-        ordered = kind == "orderedList"
-        rows = []
-        for index, one in enumerate(children, 1):
-            text = _flatten(one).strip()
-            if text:
-                mark = "%d. " % index if ordered else "- "
-                rows.append(mark + text.replace("\n", "\n  "))
-        return "\n".join(rows) + "\n" if rows else ""
-    if kind in ("tableCell", "tableHeader"):
-        # One cell, on one line: a cell that kept its paragraph breaks would
-        # put the rest of its row on the next line and the table would stop
-        # lining up at the first cell that had two sentences in it.
-        return " ".join(
-            " ".join(_flatten(one).split()) for one in children).strip()
-    if kind == "tableRow":
-        return "| " + " | ".join(_flatten(one) for one in children) + " |\n"
-
-    inner = "".join(_flatten(one) for one in children)
-    if kind in ("paragraph", "heading", "listItem", "blockquote", "codeBlock",
-                "table", "mediaSingle", "mediaGroup"):
-        return inner + "\n"
-    return inner
-
-
-def _media(node):
-    """A picture or a file in the body, as the line of text it stands for.
-
-    What can be said about it is thin - ADF keeps the file under a media id
-    that is not the attachment id the REST API uses, so the two cannot be
-    matched up reliably - but *that there is one* is the part whose absence
-    changed the meaning of the description. The alt text is used when the
-    node carries one, because a person who wrote alt text wrote the caption.
-    """
-    attrs = node.get("attrs") or {}
-    kind = "image" if str(attrs.get("type") or "") != "link" else "link"
-    name = str(attrs.get("alt") or "").strip() or str(attrs.get("url") or "").strip()
-    return "[%s: %s]" % (kind, name) if name else "[%s]" % kind
-
-
 def _cut(text, limit):
     """``text``, shortened to ``limit`` characters and saying that it was.
 
@@ -1120,19 +779,3 @@ def _cut(text, limit):
     if not limit or len(text) <= limit:
         return text
     return text[:limit] + "\n\n[... cut at %d characters; the rest is in Jira]" % limit
-
-
-def _linked(node):
-    """One text leaf, with its link's address kept beside the words.
-
-    ADF puts the address in a mark rather than in the text, so flattening the
-    leaves alone silently drops every URL in the document - and in a Jira
-    description the address is often the whole point of the sentence.
-    """
-    text = str(node.get("text") or "")
-    for mark in node.get("marks") or []:
-        if isinstance(mark, dict) and mark.get("type") == "link":
-            href = str((mark.get("attrs") or {}).get("href") or "")
-            if href and href != text:
-                return "%s (%s)" % (text, href)
-    return text

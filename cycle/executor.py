@@ -61,6 +61,7 @@ from cycle import interactions as interactions_mod
 from cycle.bus import NullObserver
 from cycle.context import CancelToken, Cancelled, RunContext
 from cycle import outcomes, revisions, sessions, timing, phases, execution_policy, admission, restrict, freeze
+from cycle import connections as connections_mod
 from domain.cycle import (CANCELLED, CONTINUE, FAILED, MANUAL, PENDING, RUNNING,
                           SKIPPED, SUCCESS, TERMINAL, TIMEOUT, WAITING, CycleRun,
                           StepRun)
@@ -162,19 +163,22 @@ def run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
               jobs=None, registry=None, flows_dir=None, cycles_dir=None,
               trigger=MANUAL, run_id=None, environment=None, secrets=None,
               memory_path="", only=None, reuse=None, resume=False, subject=None, action="",
-              supervised=False, controlled=False, mode=None, launcher=None):
+              supervised=False, controlled=False, mode=None, launcher=None,
+              connections=None):
     with checkpoints.lock(workspace):
         return _run_cycle(cycle, workspace, variables_, observer, cancel, jobs,
                           registry, flows_dir, cycles_dir, trigger, run_id,
                           environment, secrets, memory_path, only, reuse, resume,
-                          subject, action, supervised, controlled, mode, launcher)
+                          subject, action, supervised, controlled, mode, launcher,
+                          connections)
 
 
 def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
                jobs=None, registry=None, flows_dir=None, cycles_dir=None,
                trigger=MANUAL, run_id=None, environment=None, secrets=None,
                memory_path="", only=None, reuse=None, resume=False, subject=None, action="",
-               supervised=False, controlled=False, mode=None, launcher=None):
+               supervised=False, controlled=False, mode=None, launcher=None,
+               connections=None):
     """Run every step of ``cycle`` that should run. Returns a :class:`CycleRun`.
 
     Never raises for anything the run did - a step that fails, a plugin that
@@ -286,6 +290,11 @@ def _run_cycle(cycle, workspace, variables_=None, observer=None, cancel=None,
     # ${vars.x} would open the file dozens of times in a run, and a secret that
     # changed halfway through a run would make its steps disagree.
     context.secrets = dict(secrets or {})
+    # The project's connections a step names, with their tokens - read once, for
+    # the reason secrets are. Each token joins the values a preview redacts,
+    # under a key no variable can have.
+    context.connections = dict(connections or {})
+    context.secrets.update(connections_mod.redactions(context.connections))
     context.checkpoints = store
     context.runtime_plan = runtime_plan
     context.plugin_plan = plugin_plan
@@ -690,6 +699,7 @@ class _Scheduler(object):
         self.overdue = {}
         self.extended = {}                    # step id -> times given more
         self.prepared = {}                    # step id -> plugin, for cleanup
+        self.bound = {}                       # step id -> the connection it named
         # Shared with _cleanup, which runs after this object is finished with.
         self.context._prepared = self.prepared
         #: What a person has said to the run. Only this loop judges and
@@ -1460,6 +1470,13 @@ class _Scheduler(object):
         try:
             if refused is not None:
                 raise refused
+            if isinstance(settings, dict) and settings.get("connection"):
+                # Here and nowhere earlier: after the approval preview, which
+                # names the connection and never its token, and before a
+                # sandbox, which cannot read the project's files.
+                self.bound[step.id] = str(settings["connection"])
+                settings = connections_mod.expand(plugin, settings,
+                                                  getattr(self.context, "connections", {}))
             plugin = self.context.runtime_plan.workers.get(step.id, plugin)
             if restriction is not None and step.plugin in restrict.IN_SANDBOX:
                 # Jira and Teams run inside QAVector, where no sandbox reaches;
@@ -1630,6 +1647,11 @@ class _Scheduler(object):
 
         self.context.checkpoints.step(self.run, step_run)
         self.interactions.finish(step.id, step_run.status, reason=self._stopped())
+        if step.id in self.bound:
+            # A change made through a connection goes into the integration's
+            # own log, saying which cycle made it - see cycle/connections.py.
+            connections_mod.record(self.context.connections, self.bound[step.id], step,
+                                   step_run, self.cycle.id, self.run.id)
         self.observer.step_end(step_run)
         if step_run.status == SUCCESS:
             self.learn_subject(step.id)

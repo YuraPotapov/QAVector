@@ -155,6 +155,11 @@ def list_row(cycle_id, path, cycles_dir=None, registry=None):
     subject = parsed.subject
     if subject is not None:
         row["subject"] = {"kind": subject.kind, "pin": subject.pin or ""}
+    # The project connections its steps name, as the cycle's own variables
+    # resolve them - so Integrations can count a connection's cycles and offer
+    # the ones that read it, without opening each file.
+    from cycle import connections as connections_mod
+    row["connections"] = connections_mod.named_by(parsed, env={})[0]
     row["problems"] = model.problems(parsed, registry=registry, raw=raw)
     return row
 

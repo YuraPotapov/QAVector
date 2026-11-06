@@ -39,7 +39,9 @@ deserves to be asked for by name.
 """
 
 from cycle import registry
-from cycle.plugins.jira import CLOUD, SERVER, JiraError, Session
+from cycle.plugins.jira import (CLOUD, SERVER, JiraError, Session,
+                                _account_problems)
+from cycle import connections as binding
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
 
 
@@ -50,9 +52,14 @@ class JiraTransition(CyclePlugin):
                 "only this.",
         permissions=("network",),
         inputs=(
-            field("site", "Site", required=True,
+            field("connection", "Connection", "connection", options=("jira",),
+                  hint="A Jira connection of this project, by its id - set "
+                       "once in Integrations -> Jira -> Connections, with its "
+                       "token. When set, leave Site, Product, Authentication, "
+                       "Account email and API token empty."),
+            field("site", "Site",
                   hint="https://yourcompany.atlassian.net, or your Jira "
-                       "Server's base URL."),
+                       "Server's base URL. Not used with a connection."),
             field("flavour", "Product", "choice", default=CLOUD,
                   options=(CLOUD, SERVER),
                   hint="Cloud and Server differ in their API path and in how a "
@@ -64,9 +71,10 @@ class JiraTransition(CyclePlugin):
                        "is a Server or Data Center personal access token."),
             field("email", "Account email",
                   hint="Only for basic. The account the API token belongs to."),
-            field("token", "API token", required=True,
+            field("token", "API token",
                   hint="Reference a secret variable - ${vars.jira_token} - so "
-                       "the value stays out of this file."),
+                       "the value stays out of this file. Not used with a "
+                       "connection."),
             field("issue", "Issue",
                   hint="The key, such as QA-7, or the numeric id. Or Issues, "
                        "not both."),
@@ -98,6 +106,12 @@ class JiraTransition(CyclePlugin):
                   hint="Only the ones the transition screen requires, such as "
                        "a resolution. Editing anything else belongs in a step "
                        "that says it edits."),
+            field("verify_tls", "Verify the certificate", "check", default=True,
+                  hint="Off only for a Server with a self-signed certificate "
+                       "on a network you trust."),
+            field("api", "API address",
+                  hint="Filled in by a connection signed in with Atlassian, whose "
+                       "requests go through Atlassian's API gateway. Leave empty."),
         ),
         outputs=(
             output("key", "text", "The issue that was moved. With Issues, "
@@ -138,12 +152,10 @@ class JiraTransition(CyclePlugin):
             found.append("Give Issue or Issues, not both.")
         elif not has_one and "issues" not in settings:
             found.append("Issue or Issues is required.")
-        site = str(settings.get("site") or "")
-        if site and "${" not in site and not site.startswith(("http://", "https://")):
-            found.append("Site must start with http:// or https://.")
-        if (settings.get("auth", "basic") == "basic"
-                and not str(settings.get("email") or "").strip()):
-            found.append("Basic authentication needs the account email.")
+        connected, wrong = binding.problems(settings)
+        found.extend(wrong)
+        if not connected:
+            found.extend(_account_problems(settings))
         return found
 
     def execute(self, context, step):
@@ -157,7 +169,9 @@ class JiraTransition(CyclePlugin):
             auth=self.setting(step.settings, "auth", "basic"),
             email=str(self.setting(step.settings, "email", "") or ""),
             token=str(self.setting(step.settings, "token")),
-            verify=True)
+            verify=bool(self.setting(step.settings, "verify_tls", True)),
+            api=str(self.setting(step.settings, "api", "") or "") or None,
+            find_gateway=self.setting(step.settings, "flavour", CLOUD) == CLOUD)
         flavour = self.setting(step.settings, "flavour", CLOUD)
         wanted = str(self.setting(step.settings, "to")).strip()
         if "issues" in (step.settings or {}):

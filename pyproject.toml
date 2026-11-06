@@ -48,7 +48,7 @@ qavector = "session_launcher:main"
 py-modules = ["session_launcher", "runtime_paths", "system_load"]
 
 [tool.setuptools.packages.find]
-include = ["engine*", "adapters*", "domain*", "cycle*", "execution_runtime*", "qavector_sdk*", "plugin_host*", "qavector_agent_claude*"]
+include = ["engine*", "adapters*", "domain*", "cycle*", "integrations*", "execution_runtime*", "qavector_sdk*", "plugin_host*", "qavector_agent_claude*"]
 
 [tool.setuptools.package-data]
 engine = ["hud.js", "recorder.js"]

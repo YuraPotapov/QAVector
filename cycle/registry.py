@@ -104,7 +104,7 @@ Accepts = namedtuple("Accepts", "kind label when")
 
 #: Field kinds a front-end is expected to know how to draw.
 KINDS = ("text", "multiline", "number", "check", "args", "env", "file", "dir",
-         "choice", "scenario", "service", "json")
+         "choice", "scenario", "service", "json", "connection")
 
 #: Categories, for grouping in a UI. They organise; they constrain nothing.
 ACTION = "action"

@@ -52,6 +52,7 @@ hiddenimports = (
     + collect_submodules("adapters")
     + collect_submodules("domain")
     + collect_submodules("cycle")
+    + collect_submodules("integrations")
     + collect_submodules("execution_runtime")
     + collect_submodules("qavector_sdk")
     + collect_submodules("plugin_host")
@@ -94,6 +95,21 @@ for package in ("qavector_sdk", "qavector_agent_claude"):
 
 # Trusted bootstrap source is mounted in managed worker images.
 datas.append((os.path.join(ROOT, "plugin_host", "managed_bootstrap.py"), "plugin_host"))
+
+# Where "Sign in with Atlassian" goes: the sign-in service a team deploys
+# (signin-service/). Given at build time and written into the package only -
+# never into the public code. Without it the build signs in only with a
+# project's own OAuth app (developer mode) or an API token.
+signin_service = os.environ.get("QAVECTOR_SIGNIN_SERVICE", "").strip().rstrip("/")
+if signin_service:
+    if not signin_service.startswith("https://"):
+        raise SystemExit("QAVECTOR_SIGNIN_SERVICE must be an https:// address")
+    import json
+    signin_file = os.path.join(ROOT, "build", "signin-service.json")
+    os.makedirs(os.path.dirname(signin_file), exist_ok=True)
+    with open(signin_file, "w", encoding="utf-8") as handle:
+        json.dump({"url": signin_service}, handle)
+    datas.append((signin_file, "."))
 # Release tooling supplies a relocatable Python runtime; never substitute the
 # frozen executable or system site-packages when it is absent.
 plugin_runtime = os.environ.get("QAVECTOR_PLUGIN_RUNTIME", "")

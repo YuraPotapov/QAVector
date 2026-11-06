@@ -78,3 +78,11 @@ gui/.venv/
 # SHA256SUMS are committed (they record what was released); the payload is not.
 installers/**/*.deb
 installers/**/*.exe
+
+# A build's sign-in service address, written by core.spec; a checkout reads one
+# here too. Never committed: the address is the team's own.
+/signin-service.json
+# The sign-in service's local tooling and its real deployment settings.
+signin-service/node_modules/
+signin-service/.wrangler/
+signin-service/wrangler.toml
