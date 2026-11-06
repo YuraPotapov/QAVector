@@ -27,7 +27,7 @@ class FakeCore(object):
         self.asked = []
         self.seen = []
 
-    def cycle_watch(self, cycle_id, trigger_id=""):
+    def cycle_watch(self, cycle_id, trigger_id="", cancel=None):
         self.asked.append((cycle_id, trigger_id))
         answer = self.answers.get(cycle_id, {"ok": True, "new": []})
         if isinstance(answer, Exception):
@@ -69,6 +69,36 @@ def test_a_trigger_is_checked_as_soon_as_it_is_known(listening):
     listener.set_inventory(inventory(row("dev")))
     settle(listener)
     assert core.asked == [("dev", "new_task")]
+
+
+def test_node_execution_does_not_offer_to_start_the_cycle(listening):
+    listener, core, _ = listening
+    core.answers["health"] = {"ok": True, "new": [],
+                              "execution": {"step": "ping", "status": "success"}}
+    offered = []
+    listener.offers_changed.connect(lambda: offered.append(True))
+    listener.set_inventory(inventory(row("health")))
+    settle(listener)
+    assert core.asked == [("health", "new_task")]
+    assert listener.queue == [] and offered == [] and listener.problems == {}
+
+
+def test_turning_listen_off_cancels_an_active_check(listening):
+    import threading
+    listener, core, _ = listening
+    started, stopped = threading.Event(), threading.Event()
+    def check(cycle_id, trigger_id="", cancel=None):
+        started.set()
+        if cancel.wait(3):
+            stopped.set()
+        return {"ok": False, "problems": ["cancelled"]}
+    core.cycle_watch = check
+    listener.set_inventory(inventory(row("health")))
+    assert started.wait(2)
+    listener.set_enabled(False)
+    settle(listener)
+    assert stopped.is_set()
+    assert listener.problems == {} and not listener.timer.isActive()
 
 
 def test_the_next_check_waits_for_the_trigger_s_own_every(listening):

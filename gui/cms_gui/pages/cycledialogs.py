@@ -356,9 +356,15 @@ class NodeDialog(_Editor):
         if not self._plugin.get("watchable"):
             return
         trigger = self._trigger or {}
-        self.body_layout.addWidget(widgets.kicker("Listen for new work"))
+        executes = self._plugin.get("watch_execution", False)
+        self.body_layout.addWidget(widgets.kicker(
+            "Listen" if executes else "Listen for new work"))
         self._check("listen.enabled", "Listen",
                     bool(trigger) and trigger.get("enabled", True) is not False,
+                    "While the application is open, run this node with its "
+                    "current settings, then the nodes that wait on it. Other "
+                    "nodes do not start. Failures appear in the listening "
+                    "status." if executes else
                     "While the application is open, ask this step what it "
                     "would take and offer anything new: start work on it? "
                     "Nothing starts without the answer.")

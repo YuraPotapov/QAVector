@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 #: The core executable an installed build ships. Its name is fixed by the
 #: PyInstaller spec (packaging/pyinstaller/core.spec).
@@ -385,9 +386,11 @@ class Core:
                         + command[cut:])
 
     # -- one-shot calls -------------------------------------------------------
-    def run(self, *args, timeout=60):
+    def run(self, *args, timeout=60, cancel=None):
         """Run the launcher to completion; returns (returncode, stdout, stderr)."""
         try:
+            if cancel is not None:
+                return self._run_cancellable(args, timeout, cancel)
             proc = subprocess.run(self.argv(*args), capture_output=True, text=True,
                                   timeout=timeout, cwd=self.spawn_dir(),
                                   # Windows: never flash a console window.
@@ -401,6 +404,35 @@ class Core:
         except OSError as exc:
             raise CoreError(str(exc))
         return proc.returncode, proc.stdout, proc.stderr
+
+    def _run_cancellable(self, args, timeout, cancel):
+        """Let a listening node stop its children before the core exits."""
+        if cancel.is_set():
+            raise CoreError("Listen stopped.")
+        with subprocess.Popen(self.argv(*args), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, cwd=self.spawn_dir(),
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as proc:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    out, err = proc.communicate(timeout=0.1)
+                    return proc.returncode, out, err
+                except subprocess.TimeoutExpired:
+                    if not cancel.is_set() and time.monotonic() < deadline:
+                        continue
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   capture_output=True, timeout=20,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                else:
+                    proc.terminate()
+                try:
+                    proc.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                raise CoreError("Listen stopped." if cancel.is_set() else
+                                "The listener did not finish within %ds." % timeout)
 
     def describe(self):
         """The core's inventory as a dict (see ``session_launcher.describe``)."""
@@ -629,11 +661,12 @@ class Core:
     # The secrets flag because the watched query signs in to Jira; the memory
     # flag because what has been seen is kept in the memory store.
 
-    def cycle_watch(self, cycle_id, trigger_id=""):
-        """What is new in the queue a cycle's trigger watches. Starts nothing."""
+    def cycle_watch(self, cycle_id, trigger_id="", cancel=None):
+        """Check a listened queue or execute its node; never start the cycle."""
         target = cycle_id + (":" + trigger_id if trigger_id else "")
         return self._flow_json("--cycle-watch=" + target,
-                               *(self.secrets_flag() + self.memory_flag()))
+                               *(self.secrets_flag() + self.memory_flag()),
+                               timeout=330, cancel=cancel)
 
     def cycle_watch_seen(self, cycle_id, key, trigger_id=""):
         """Do not offer ``key`` again."""
@@ -774,14 +807,15 @@ class Core:
             except OSError:
                 pass
 
-    def _flow_json(self, *args):
+    def _flow_json(self, *args, timeout=60, cancel=None):
         """Run a --flow-* command and parse its answer.
 
         A non-zero exit is not an error here: "this did not compile" is the most
         useful thing these commands say, and it comes back with the exit code set.
         Only unparseable output is a real failure.
         """
-        code, out, err = self.run(*args, timeout=60)
+        code, out, err = self.run(*args, timeout=timeout,
+                                  **({"cancel": cancel} if cancel is not None else {}))
         text = (out or "").strip()
         if not text:
             raise CoreError("%s printed nothing (exit %d).\n%s"

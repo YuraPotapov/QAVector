@@ -833,6 +833,17 @@ def test_a_step_never_listened_to_says_nothing_about_it(node):
     assert dialog.saved is not None and dialog.saved_trigger is None
 
 
+def test_an_executing_listener_keeps_the_nodes_settings(node):
+    plugin = dict(SHELL, watchable=True, watch_execution=True)
+    dialog = node(plugin=plugin)
+    enabled, every = _listen(dialog)
+    assert enabled is not None and not enabled.isChecked()
+    enabled.setChecked(True)
+    dialog._save()
+    assert dialog.saved["with"]["command"] == "make all"
+    assert dialog.saved_trigger == {"enabled": True, "every": 300}
+
+
 def test_the_file_keeps_an_off_trigger_and_follows_a_renamed_step():
     from cms_gui.pages.cycles import _with_listening
 

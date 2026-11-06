@@ -24,6 +24,7 @@ minutes because the network is off.
 """
 
 import time
+import threading
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import QDialog
@@ -39,8 +40,8 @@ PLAN_LABEL = "In plan"
 
 #: When the window closes with a check still in flight, how long to wait for it
 #: before letting go. Not a schedule: a QThread destroyed while it runs takes
-#: the process with it, and a check cannot be cancelled halfway.
-CLOSE_WAIT_MS = 5000
+#: the process with it. Give a cancelled command time to stop its children.
+CLOSE_WAIT_MS = 25000
 
 
 def _clock(seconds):
@@ -71,14 +72,18 @@ class WatchThread(QThread):
     def __init__(self, core, targets, parent=None):
         super().__init__(parent)
         self.core, self.targets = core, list(targets)
+        self.cancel = threading.Event()
 
     def run(self):
         for cycle_id, trigger_id in self.targets:
+            if self.cancel.is_set():
+                break
             try:
-                payload = self.core.cycle_watch(cycle_id, trigger_id)
+                payload = self.core.cycle_watch(cycle_id, trigger_id, cancel=self.cancel)
             except core_mod.CoreError as exc:
                 payload = {"ok": False, "problems": [str(exc)]}
-            self.checked.emit(cycle_id, trigger_id, payload)
+            if not self.cancel.is_set():
+                self.checked.emit(cycle_id, trigger_id, payload)
 
 
 class Listener(QObject):
@@ -124,11 +129,15 @@ class Listener(QObject):
                     "pin": one.get("pin") or "",
                     "name": row.get("name") or row["id"]}
         self.triggers = found
+        if self.thread is not None and any(key not in found for key in self.thread.targets):
+            self.thread.cancel.set()
         self.queue = [one for one in self.queue
                       if (one["cycle"], one["trigger"]) in found]
         self.tick()
 
     def set_core(self, core):
+        if core is not self.core and self.thread is not None:
+            self.thread.cancel.set()
         self.core = core
 
     def set_enabled(self, enabled):
@@ -137,6 +146,8 @@ class Listener(QObject):
             self.tick()
         else:
             self.timer.stop()
+            if self.thread is not None:
+                self.thread.cancel.set()
 
     # -- the schedule ---------------------------------------------------------
     def due(self):
@@ -280,8 +291,10 @@ class Listener(QObject):
             return False
 
     def shutdown(self):
+        self.enabled = False
         self.timer.stop()
         if self.thread is not None and self.thread.isRunning():
+            self.thread.cancel.set()
             self.thread.wait(CLOSE_WAIT_MS)
 
 

@@ -16,6 +16,40 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cms_gui import core as core_mod
 
 
+def test_cancellable_core_call_stops_gracefully(tmp_path):
+    import threading
+    import time
+    script = tmp_path / "core.py"
+    ready, stopped = tmp_path / "ready", tmp_path / "stopped"
+    script.write_text(
+        "import signal, time, sys\nfrom pathlib import Path\n"
+        "def stop(*args):\n    Path(%r).touch()\n    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\nPath(%r).touch()\ntime.sleep(30)\n"
+        % (str(stopped), str(ready)))
+    core = core_mod.Core(str(script), sys.executable)
+    cancel = threading.Event()
+    errors = []
+    def run():
+        try:
+            core.run(timeout=10, cancel=cancel)
+        except core_mod.CoreError as exc:
+            errors.append(str(exc))
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 3
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+    finally:
+        cancel.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert errors == ["Listen stopped."]
+    if os.name != "nt":
+        assert stopped.exists()
+
+
 @pytest.fixture
 def packaged(tmp_path, monkeypatch):
     """A frozen GUI with the core executable beside it, in the .deb's layout."""
