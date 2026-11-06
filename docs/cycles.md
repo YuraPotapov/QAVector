@@ -747,8 +747,9 @@ that reason as its message.
 A cycle can listen for its own work. A trigger names the step the cycle takes
 its task from, and while the application is open that step is asked every
 `every` seconds what it would take now. Only a step whose plugin says it can be
-listened to (`watchable`, published by `--describe`) may be watched; today that
-is `jira.issues`, and the rest of this section uses it as the example:
+listened to (`watchable`, published by `--describe`) may be watched.
+`jira.issues` queries a queue, and the example below uses it; `command.shell`
+executes the listened node, as described further below.
 
 ```yaml
 subject:
@@ -826,6 +827,19 @@ can be listened to has a *Listen for new work* section with **Listen** and
 rather than deleting it, so ticking it again keeps the schedule; ticking it on
 a step that never had one adds a trigger for it. Like everything else in that
 dialog, it is saved in the cycle file.
+
+**Listening to a command node.** `command.shell` also offers Listen. Each check
+executes that node with its existing command and environment through the normal
+executor, then the nodes that wait on it. A node after it with
+`if: "${steps.ping.status} == 'failed'"` runs when the check fails, so a
+notification can be part of the check; give the listened node
+`on_failure: continue` so the run goes on to it. Nodes that do not wait on it
+do not start. It does not offer a task or require a `pin`. The first check
+executes too. A failure appears in the listening status, just like a failed
+Jira check. Nodes that depend on other nodes, belong to an execution phase,
+or require interactive approval cannot be listened to alone. Execution retains
+runtime and folder restrictions and the node's timeout, capped at five minutes
+for unattended checks. Turning Listen off cancels an active command check.
 
 **Seeing it work.** While anything is listened for, the status bar says so -
 *Listening: 1 cycle - next check 0:42* - with each cycle's own schedule in its
