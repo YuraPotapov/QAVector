@@ -220,7 +220,7 @@ def test_only_a_step_whose_plugin_says_so_can_be_watched():
     from cycle import registry
     raw = {"id": "dev", "variables": {"task_key": ""},
            "triggers": [{"id": "t", "watch": "sh", "pin": "task_key"}],
-           "steps": [{"id": "sh", "plugin": "command.shell"}]}
+           "steps": [{"id": "sh", "plugin": "time.wait"}]}
     found = model.problems(model.parse_cycle(raw, "dev"), registry=registry, raw=raw)
     assert any("cannot be watched" in one for one in found), found
 
@@ -264,7 +264,7 @@ def test_a_plugin_that_did_not_say_it_can_be_watched_is_refused(tmp_path):
     cycle = model.parse_cycle({
         "id": "b", "variables": {"card": ""},
         "triggers": [{"id": "t", "watch": "sh", "pin": "card"}],
-        "steps": [{"id": "sh", "plugin": "command.shell"}]}, "b")
+        "steps": [{"id": "sh", "plugin": "time.wait"}]}, "b")
     with pytest.raises(watch.WatchError, match="cannot be watched"):
         watch.check(cycle, memory_path=str(tmp_path / "m.json"))
 
@@ -292,7 +292,9 @@ def test_jira_says_it_can_be_watched_in_describe():
     from cycle import registry
     published = {one["id"]: one for one in registry.describe()}
     assert published["jira.issues"]["watchable"] is True
-    assert published["command.shell"]["watchable"] is False
+    assert published["command.shell"]["watchable"] is True
+    assert published["command.shell"]["watch_execution"] is True
+    assert published["jira.issues"]["watch_execution"] is False
 
 
 # ------------------------------------------------------------------ planned

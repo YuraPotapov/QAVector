@@ -1075,8 +1075,8 @@ def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=N
 
     ``--cycle-watch=CYCLE[:TRIGGER]`` asks the queue a trigger watches what is
     new since it last looked; ``--cycle-watch-seen=CYCLE[:TRIGGER]:KEY``
-    records one key as seen so it is not offered again. Neither starts a run:
-    that is the person's decision, made in the application.
+    records one key as seen so it is not offered again. Command listeners
+    execute only the watched node. Neither starts the rest of the cycle.
     """
     kind, argument = command
     try:
@@ -1113,11 +1113,19 @@ def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=N
                                              memory_path,
                                              items=about.get("items") or None)}
         elif kind == "check":
+            import signal
+            from cycle.context import CancelToken
             cycle_id, trigger_id = parts[0], (parts[1] if len(parts) > 1 else "")
             cycle = loader.load_cycle(cycle_id, cycles_dir)
-            payload = dict(watch.check(cycle, trigger_id, secrets_path=secrets_path,
-                                       memory_path=memory_path,
-                                       env=dict(os.environ)), ok=True)
+            cancel = CancelToken()
+            previous = signal.signal(signal.SIGTERM,
+                                     lambda *_: cancel.set("Listen stopped"))
+            try:
+                payload = dict(watch.check(cycle, trigger_id, secrets_path=secrets_path,
+                                           memory_path=memory_path, cancel=cancel,
+                                           env=dict(os.environ)), ok=True)
+            finally:
+                signal.signal(signal.SIGTERM, previous)
         else:
             if len(parts) < 2:
                 raise ValueError("--cycle-watch-seen needs CYCLE:KEY or "

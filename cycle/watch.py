@@ -4,9 +4,11 @@ A trigger names a step whose plugin declares itself ``watchable``. :func:`check`
 asks that plugin, with the step's settings resolved from the cycle's own
 variables and secrets, what the step would take now (``CyclePlugin.peek``), and
 says which items it has not seen before; the application asks a person about
-each one and starts the cycle only if they agree. Nothing here starts anything,
-and nothing here knows what kind of queue it is - Jira or anything else is the
-plugin's business.
+each one and starts the cycle only if they agree. What kind of queue it is -
+Jira or anything else - is the plugin's business. A plugin declaring
+``watch_execution`` instead executes its node, and the nodes that wait on it,
+through the normal executor and reports its result. It never offers anything
+and never starts the cycle's other nodes.
 
 **What "new" means.** The first check a trigger ever makes remembers everything
 already in the queue and reports none of it: turning a listener on must not
@@ -39,10 +41,16 @@ would take now.
 """
 
 import time
+from dataclasses import replace
+from tempfile import TemporaryDirectory
 
 
 from cycle import memory, model, registry as default_registry, secrets as secret_store
 from cycle import variables
+
+# Bound unattended commands, including ones without a node timeout. The GUI
+# gives the core additional time to stop the command's process group cleanly.
+EXECUTION_TIMEOUT = 300
 
 
 class WatchError(Exception):
@@ -139,7 +147,7 @@ def whole(found):
 
 
 def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
-          registry=None):
+          registry=None, cancel=None):
     """``{"trigger", "first", "new": [{key, title, ...}], "pin"}``.
 
     ``first`` is true on a trigger's very first check, when everything found is
@@ -148,7 +156,10 @@ def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
     with ``whole`` true and the items under ``items``.
     """
     trigger = trigger_of(cycle, trigger_id)
-    _step, plugin = plugin_for(cycle, trigger, registry)
+    step, plugin = plugin_for(cycle, trigger, registry)
+    if plugin.metadata.watch_execution:
+        return _execute_node(cycle, trigger, step, secrets_path, memory_path,
+                             env, registry, cancel)
     settings = settings_for(cycle, trigger, secrets_path, env, registry)
     each = each_on_its_own(cycle, trigger)
     try:
@@ -172,6 +183,51 @@ def check(cycle, trigger_id="", secrets_path=None, memory_path=None, env=None,
     return {"cycle": cycle.id, "trigger": trigger.id, "first": first,
             "every": trigger.every, "pin": model.trigger_pin(cycle, trigger),
             "new": new}
+
+
+def _execute_node(cycle, trigger, step, secrets_path, memory_path, env, registry, cancel):
+    """Run the listened node and the nodes that wait on it, never its peers.
+
+    This is a check, not a queue of new work. There is no baseline suppression,
+    pin or task offer. A node after it with ``if:`` can react to its failure.
+    """
+    from cycle import executor
+
+    problems = model.execution_watch_problems(cycle, step)
+    if problems:
+        raise WatchError("; ".join(problems))
+    # Reuse the listener's missing-secret and cross-node reference checks.
+    settings_for(cycle, trigger, secrets_path, env, registry)
+    secrets = {name: secret_store.get(cycle.id, name, secrets_path)
+               for name in cycle.secrets}
+    # Downstream nodes that also wait on something outside the set are left out.
+    after = model.downstream(cycle, [step.id])
+    kept = {step.id}
+    for layer in model.order(cycle):
+        for one in layer:
+            if one.id in after and one.needs and set(one.needs) <= kept:
+                kept.add(one.id)
+    selected = [replace(one, timeout=min(one.timeout or EXECUTION_TIMEOUT,
+                                         EXECUTION_TIMEOUT))
+                for one in cycle.steps if one.id in kept]
+    isolated = replace(cycle, steps=selected, triggers=(), subject=None,
+                       actions={}, phases=[])
+    problems = model.problems(isolated, registry=registry or default_registry)
+    if problems:
+        raise WatchError("; ".join(problems))
+    with TemporaryDirectory(prefix="qavector-listen-") as workspace:
+        run = executor.run_cycle(isolated, workspace, registry=registry,
+                                 environment=env, secrets=secrets,
+                                 memory_path=memory_path or "", cancel=cancel)
+        result = run.steps[step.id]
+        if result.status not in ("success", "skipped"):
+            raise WatchError("%s: %s" % (step.title, result.message or result.status))
+        # Temporary log paths are deliberately not published as artifacts.
+        return {"cycle": cycle.id, "trigger": trigger.id, "every": trigger.every,
+                "first": False, "pin": "", "new": [],
+                "execution": {"step": step.id, "status": result.status,
+                              "message": result.message,
+                              "stdout_tail": result.outputs.get("stdout_tail", "")}}
 
 
 def mark_seen(cycle, key, trigger_id="", memory_path=None):

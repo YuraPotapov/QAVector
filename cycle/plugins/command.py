@@ -52,6 +52,8 @@ class ShellCommand(CyclePlugin):
         name="Shell Command",
         category=registry.ACTION,
         summary="Run a command and collect its output.",
+        watchable=True,
+        watch_execution=True,
         permissions=("process.spawn", "filesystem.read", "filesystem.write"),
         inputs=(
             field("command", "Command", "multiline", required=True,

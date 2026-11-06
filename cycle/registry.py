@@ -196,8 +196,12 @@ class PluginMetadata:
     #: Whether a step of this plugin can be listened to: asked, outside any
     #: run, what it would take now - see :meth:`CyclePlugin.peek`. A cycle's
     #: ``triggers:`` may watch only such a step. What "a queue" means is the
-    #: plugin's own business; the engine only compares keys.
+    #: plugin's own business; the engine only compares keys. With
+    #: watch_execution, a check executes the node instead of asking a queue.
     watchable: bool = False
+    #: Listening executes this node instead of querying a queue with peek().
+    #: The nodes that wait on it run too; the rest of the cycle does not.
+    watch_execution: bool = False
     #: The messages a step of this plugin can read while it runs - see
     #: :data:`Accepts`. Empty for almost everything: a plugin says so only
     #: when it has points at which a message would actually change its work.
@@ -217,6 +221,7 @@ class PluginMetadata:
             "recoverable": self.recoverable,
             "asks_when_overdue": self.asks_when_overdue,
             "watchable": self.watchable,
+            "watch_execution": self.watch_execution,
             "permissions": list(self.permissions),
             "inputs": [{"key": one.key, "label": one.label, "kind": one.kind,
                         "hint": one.hint, "required": one.required,

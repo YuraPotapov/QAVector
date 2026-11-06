@@ -483,6 +483,15 @@ def _trigger_problems(cycle, raw, registry=None):
             found.append("%s: every is %d seconds; the least is %d, so a "
                          "listener does not hammer Jira"
                          % (where, trigger.every, WATCH_EVERY_MIN))
+        plugin = registry.get(step.plugin) if registry is not None and step else None
+        if plugin is not None and plugin.metadata.watch_execution:
+            found.extend("%s: %s" % (where, problem)
+                         for problem in execution_watch_problems(cycle, step))
+            continue
+        # Without plugin metadata, an absent pin may belong to an execution
+        # listener. The authoritative validation below runs with the registry.
+        if registry is None and not trigger_pin(cycle, trigger):
+            continue
         pin = trigger_pin(cycle, trigger)
         if not pin:
             found.append("%s: nothing to run an offered issue with; set pin, or "
@@ -490,6 +499,25 @@ def _trigger_problems(cycle, raw, registry=None):
         elif pin not in cycle.variables:
             found.append("%s: pin names %r, which is not one of the cycle's "
                          "variables" % (where, pin))
+    return found
+
+
+def execution_watch_problems(cycle, step):
+    """A node listened to alone cannot acquire another node's prerequisites."""
+    from cycle import variables
+    found = []
+    if step.needs or step.phase:
+        found.append("a node with dependencies or an execution phase cannot run alone through Listen")
+    if step.disabled:
+        found.append("a disabled node cannot run through Listen")
+    if any(ref.startswith("steps.") for ref in variables.references(
+            [step.settings, step.condition, cycle.project_folder, cycle.restrictions,
+             step.restrictions, cycle.execution, step.runtime])):
+        found.append("Listen cannot read other nodes' results before a run")
+    mode = (cycle.execution.get("default_mode", "auto")
+            if isinstance(cycle.execution, dict) else "auto")
+    if mode == "approve" or (mode == "important" and step.important):
+        found.append("this node requires approval; run it interactively instead of through Listen")
     return found
 
 
