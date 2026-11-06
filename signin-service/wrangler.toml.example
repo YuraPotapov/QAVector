@@ -1,0 +1,14 @@
+# Copy to wrangler.toml (git-ignored) and fill in. See README.md.
+name = "qavector-signin"
+main = "src/worker.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# This Worker's own address, as Atlassian will call it back. With a custom
+# domain, that domain; otherwise https://<name>.<your-subdomain>.workers.dev
+PUBLIC_URL = "https://signin.yourcompany.example"
+
+# Secrets - never here. Set each once:
+#   npx wrangler secret put ATLASSIAN_CLIENT_ID
+#   npx wrangler secret put ATLASSIAN_CLIENT_SECRET
+#   npx wrangler secret put RELAY_KEY        (any long random string)

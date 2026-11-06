@@ -1,0 +1,9 @@
+{
+  "name": "qavector-signin-service",
+  "private": true,
+  "type": "module",
+  "description": "Sign in with Atlassian for QAVector, without a client secret on any desktop.",
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
