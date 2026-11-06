@@ -454,6 +454,9 @@ picked something up, that is a different step:
       comment: Picked up by QAVector.
 ```
 
+With a project connection, `connection: product-team` replaces the site, email
+and token lines, as for `jira.issues`.
+
 **Name the transition, not the status.** A workflow is the project's own, and
 the move out of To Do is "Start Progress" in one instance and something else in
 the next. The step names what it wants, the plugin asks the issue what it can
@@ -1399,6 +1402,57 @@ steps:
       jql: updated >= -14d
       limit: 25
 ```
+
+**A project connection instead.** The site, account and token can be set once
+for the project in **Integrations → Jira → Connections**, and a step names that
+connection by its id instead of carrying them:
+
+```yaml
+variables:
+  jira: product-team              # a connection's id, not its name
+
+steps:
+  - id: mine
+    plugin: jira.issues
+    with:
+      connection: ${vars.jira}    # or the id itself
+      user: currentUser()
+      project: QA
+```
+
+The step then gives none of `site`, `flavour`, `auth`, `email`, `token`,
+`verify_tls` or `api`; giving both is refused.
+
+- `connection` may read the cycle's variables, never another step's output,
+  because which account a step acts as is decided before the run starts.
+- A run that names a connection the project does not have, or one without a
+  token, is refused before its first step.
+- The token stays in the project's encrypted secrets store. It reaches the step
+  only when the step executes: after anything shown for approval, which names
+  the connection and not its token, and before any sandbox, which cannot read
+  the project's files.
+- For a connection signed in with Atlassian, each step gets an access token
+  that is good at that moment, even late in a long run.
+- A listener (`triggers:`) reads the same connection.
+- `--cycle-list` reports the connections each cycle names, under
+  `connections`.
+- A change that a step makes through a connection (`jira.transition`) appears on
+  the connection's Activity tab, labelled with its cycle and step.
+- Steps written with their own `site` and `token` keep working unchanged, and an
+  API token with scopes works in them too.
+
+In the step's window, **Connection** lists the project's connections by id; a
+`${vars.x}` can be typed instead. With a connection named, the site, product,
+authentication, email, token and certificate fields are hidden and left out of
+the step when it is saved. A step that still carries its own site and email
+offers **Use connection ... instead** when the project has a connection to that
+same site and account, read through the cycle's variables. One click names the
+connection and clears the step's own site, email and token. The cycle's
+`jira_*` variables are then no longer needed by that step.
+
+This is the cycle's side of a connection (`cycle/connections.py`). The
+integration itself knows nothing about cycles; see
+[Integrations](integrations.md).
 
 **Projects.** Blank is every project the account can see, which is the right
 default for "what is on this person's plate" — work crosses projects and few

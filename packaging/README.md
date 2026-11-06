@@ -21,6 +21,19 @@ Target baseline: Linux x86_64 with glibc 2.35+, the declared DEB dependencies
 (installed by apt) and Google Chrome. Ubuntu 22.04 is the build/acceptance baseline;
 the runtime checks ABI/kernel capabilities rather than the distribution name.
 
+**Sign in with Atlassian.** For one-click Jira sign-in, give the address of
+the team's sign-in service (see [signin-service/](../signin-service/README.md))
+when building:
+
+```
+QAVECTOR_SIGNIN_SERVICE=https://signin.yourcompany.example ./packaging/build_deb.sh
+```
+
+The address is written into the package as `signin-service.json`, beside the
+core, and never into the code. A build without it signs in to Jira with an API
+token, or with a project's own OAuth app in developer mode. The same variable
+works for `build_exe.ps1`.
+
 ### Third-party license release gate (ER-LIC-001)
 
 Both PyInstaller specs and installer scripts require the offline Bubblewrap
