@@ -16,6 +16,56 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.58] - 2026-11-07
+
+### Added
+- **Integrations**, a new page after Plugins, with **Jira** as its first
+  provider. Its tabs are Issues, Connections, Activity and Settings.
+- **Connections.** A connection is a Jira site and an account, set once per
+  project (`<project>/integrations.json`). Its token is kept encrypted in the
+  project's secrets store and is never shown again. There are three ways to
+  sign in:
+  - **Sign in with Atlassian** in the browser, with no email or token to type,
+    through a sign-in service a team deploys once (`signin-service/`, a
+    Cloudflare Worker that holds the OAuth app's secret). The service's address
+    is given at build time (`QAVECTOR_SIGNIN_SERVICE`). In developer mode, a
+    project can use its own OAuth app instead.
+  - An email and an API token. A token with scopes is recognised on first use
+    and sent through Atlassian's API gateway.
+  - A personal access token, for Server and Data Center.
+- **Issues.** Search issues, filter them by project, status, *Assigned to me*
+  or raw JQL, and sort them by update time. The opened issue shows its fields,
+  description, attachments and comments. You can change its status (and fill
+  in the fields a transition asks for), comment, edit the summary,
+  description, labels and priority (an edit over somebody else's change is
+  refused), assign it to yourself or unassign it, attach and save files, and
+  create issues from the project's own create screen. The list folds away under
+  the issue.
+- **Requests are lazy.** Jira is asked only when you act: the first look at
+  the tab, a filter, Enter in the search box, Load more, opening an issue,
+  Refresh (only the rows on screen and the open issue), or Test. The automatic
+  refresh is off by default.
+- **Activity** lists what was changed in Jira through QAVector, and what
+  failed, with where each change came from. The log is
+  `integrations-activity.jsonl`.
+- **Cycles.** A `jira.issues` or `jira.transition` step can name a connection
+  (`connection: product-team`, or `${vars.x}`) instead of carrying a site, an
+  email and a token. A run naming a missing connection is refused before it
+  starts. The step's window lists the project's connections and offers *Use
+  connection ...* for an old step whose site and account match one.
+- **Ctrl+K** finds connections and issues that are already loaded.
+- **Export and Import** carry connections with their tokens, and keep their ids.
+- `qavector-core --integrations ...` holds connections and their operations,
+  and `--integrations-file` points runs and listeners at a project's
+  connections.
+
+### Changed
+- The sidebar scrolls when the window is shorter than its entries, so the
+  window still fits a 700 px tall screen.
+- A step that carries its own Jira site and token now also works with an API
+  token that has scopes. An expired token is reported as a refused sign-in,
+  not as an empty list of issues.
+
 ## [0.16.57] - 2026-11-04
 
 ### Added
