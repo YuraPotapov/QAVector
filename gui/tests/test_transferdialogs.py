@@ -103,3 +103,33 @@ def test_an_import_asks_once_only_when_something_is_here(qapp, dispose):
         assert not fresh.merge.isVisibleTo(fresh)
     finally:
         dispose(fresh)
+
+
+CONNECTIONS = [{"id": "product-team", "name": "Product team",
+                "site": "https://qa.example.invalid"}]
+
+
+def test_connections_can_be_ticked_and_are_counted(qapp, dispose):
+    projects, catalog, rows, cycles = _setup()
+    dialog = ExportDialog(None, projects, catalog, rows, cycles, {},
+                          connections=CONNECTIONS)
+    try:
+        items = _items(dialog)
+        assert items["product-team"].text(0) == "Product team"
+        items["product-team"].setCheckState(0, Qt.Checked)
+        assert dialog.selection()["connections"] == ["product-team"]
+        assert dialog.summary.text() == "In the file: 1 connection"
+        assert dialog.export_button.isEnabled()
+    finally:
+        dispose(dialog)
+
+
+def test_a_project_without_connections_shows_no_group_for_them(qapp, dispose):
+    projects, catalog, rows, cycles = _setup()
+    dialog = ExportDialog(None, projects, catalog, rows, cycles, {})
+    try:
+        groups = [dialog.tree.topLevelItem(i).text(0)
+                  for i in range(dialog.tree.topLevelItemCount())]
+        assert "Connections" not in groups
+    finally:
+        dispose(dialog)

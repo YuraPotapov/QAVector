@@ -20,7 +20,7 @@ from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLayout,
                                QLabel,
                                QMainWindow, QMenu,
-                               QPushButton, QSizePolicy, QStackedWidget,
+                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
 from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
@@ -46,6 +46,7 @@ from .pages.command import CommandPage
 from .pages.credentials import CredentialsPage
 from .pages.cycles import CyclesPage
 from .pages.plugins import PluginsPage
+from .pages.integrations import IntegrationsPage
 from .pages.services import ServicesPage
 from .pages.environments import EnvironmentsPage
 from .pages.history import HistoryPage
@@ -70,7 +71,8 @@ CONFIGURE = [("environments", "Environments", "environments"),
 OBSERVE = [("run", "Run", "run"), ("subjects", "Subjects", "subjects"),
            ("log", "Log", "log"), ("artifacts", "Artifacts", "artifacts"),
            ("history", "History", "history")]
-APPLICATION = [("plugins", "Plugins", "plugins")]
+APPLICATION = [("plugins", "Plugins", "plugins"),
+               ("integrations", "Integrations", "integrations")]
 NAVIGATION = CONFIGURE + OBSERVE + APPLICATION
 
 # Pages only a developer needs. Launch Sessions is never in here: it is the
@@ -738,7 +740,20 @@ class MainWindow(QMainWindow):
         rail.setFixedWidth(self._rail_width)
         # No versions at its foot: they are in Help -> About and Settings, and a
         # rail is for going places.
-        inner.addWidget(rail)
+        # In a scroll area, so a rail taller than the window scrolls instead of
+        # holding the window taller than a laptop screen - which one more entry
+        # (Integrations) was enough to do. At any ordinary height it fills the
+        # area exactly and nothing about it changes; the bar is never drawn,
+        # because it would take the width the labels were measured for, and the
+        # wheel scrolls it.
+        self._rail_scroll = QScrollArea()
+        self._rail_scroll.setWidget(rail)
+        self._rail_scroll.setWidgetResizable(True)
+        self._rail_scroll.setFrameShape(QFrame.NoFrame)
+        self._rail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._rail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._rail_scroll.setFixedWidth(self._rail_width)
+        inner.addWidget(self._rail_scroll)
 
         self.stack = QStackedWidget()
         # Over the pages while a project just picked is being read: they show
@@ -757,6 +772,8 @@ class MainWindow(QMainWindow):
         self.plugins = PluginsPage()
         self.plugins.set_core(self.core)
         self.plugins.changed.connect(self.refresh_inventory)
+        self.integrations = IntegrationsPage(self.settings)
+        self.integrations.set_core(self.core)
         self.cycles.set_run_state(self.run_state)
         self.cycles.interaction_requested.connect(self._send_cycle_interaction)
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
@@ -786,6 +803,7 @@ class MainWindow(QMainWindow):
                        "scenarios": self.scenarios,
                        "cycles": self.cycles,
                        "plugins": self.plugins,
+                       "integrations": self.integrations,
                        "commands": self.command, "launch": self.launch,
                        "run": self.run, "log": self.log,
                        "artifacts": self.artifacts, "history": self.history_page,
@@ -1035,9 +1053,11 @@ class MainWindow(QMainWindow):
             # not anything set here.
             marks = max(button.sizeHint().width()
                         for button in self._nav_buttons.values())
-            self._rail.setFixedWidth(max(RAIL_COLLAPSED_MIN_WIDTH, marks + 1))
+            width = max(RAIL_COLLAPSED_MIN_WIDTH, marks + 1)
         else:
-            self._rail.setFixedWidth(self._rail_width)
+            width = self._rail_width
+        self._rail.setFixedWidth(width)
+        self._rail_scroll.setFixedWidth(width)
 
     def set_always_on_top(self, enabled):
         enabled = bool(enabled)
@@ -1249,6 +1269,7 @@ class MainWindow(QMainWindow):
         self.scenarios.set_core(self.core)
         self.cycles.set_core(self.core)
         self.plugins.set_core(self.core)
+        self.integrations.set_core(self.core)
         self.services.set_core(self.core)
         
         def _splash_msg(text):
@@ -1712,7 +1733,8 @@ class MainWindow(QMainWindow):
                               self.launch_registry.environments(self.inventory), rows,
                               self.inventory.cycles, chosen,
                               secrets_included=True,
-                              project_name=self._project(self.settings.project_id).name)
+                              project_name=self._project(self.settings.project_id).name,
+                              connections=self._connections())
         if dialog.exec() != QDialog.Accepted:
             return
         from PySide6.QtWidgets import QFileDialog
@@ -1730,12 +1752,22 @@ class MainWindow(QMainWindow):
                 dialog.launch_document_part(),
                 transfer.cycles_part(self.inventory.cycles, chosen["cycles"],
                                      chosen["cycle_projects"], cycle_projects,
-                                     secrets=self.core.cycle_secret_export))
+                                     secrets=self.core.cycle_secret_export),
+                transfer.connections_part(self.core, chosen["connections"]))
             transfer.write(path, document)
         except (transfer.TransferError, core_mod.CoreError) as exc:
             widgets.warn(self, "Export", "Nothing was exported.", str(exc))
             return
         widgets.note(self, "Export", "Exported %s." % transfer.counts(document), path)
+
+    def _connections(self):
+        """The project's integration connections - its file, read by the core.
+        For Export and Import, which are actions somebody took."""
+        try:
+            answer = self.core.integrations("list")
+        except (core_mod.CoreError, AttributeError):
+            return []
+        return list(answer.get("connections") or []) if answer.get("ok") else []
 
     def import_items(self, path=None):
         """File -> Import: an export file, or a single cycle file."""
@@ -1759,7 +1791,8 @@ class MainWindow(QMainWindow):
         projects_path, cycle_projects = self._cycle_projects()
         cycle_ids = [row.get("id") for row in self.inventory.cycles]
         items = transfer.plan(document, self.launch_registry.projects, catalog, rows,
-                              [project.name for project in cycle_projects], cycle_ids)
+                              [project.name for project in cycle_projects], cycle_ids,
+                              [one.get("id") for one in self._connections()])
         dialog = ImportDialog(self, path, document, items)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -1786,6 +1819,12 @@ class MainWindow(QMainWindow):
                                                   projects_path, cycle_ids))
             except (transfer.TransferError, core_mod.CoreError) as exc:
                 said.append("Cycles were not imported: %s" % exc)
+        if document["connections"]:
+            try:
+                said.extend(transfer.apply_connections(document, mode, self.core))
+            except (transfer.TransferError, core_mod.CoreError) as exc:
+                said.append("Connections were not imported: %s" % exc)
+            self.integrations.jira.list_connections()
         widgets.output(self, "Import", "Imported from %s." % os.path.basename(path),
                        "\n".join(said))
         self._addresses_changed()
@@ -1815,7 +1854,8 @@ class MainWindow(QMainWindow):
                              cycles_dir=self.settings.cycles_path,
                              secrets_path=self.settings.cycle_secrets_path,
                              memory_path=self.settings.cycle_memory_path,
-                             runs_path=self.settings.cycle_runs_path)
+                             runs_path=self.settings.cycle_runs_path,
+                             integrations_path=self.settings.integrations_path)
 
     def _adopt_launch_projects(self):
         """Once: the projects Launch Sessions had become projects of their own
@@ -1889,6 +1929,8 @@ class MainWindow(QMainWindow):
             unsaved.append("the scenario being edited")
         if self.cycles.has_unsaved_draft():
             unsaved.append("the cycle being edited")
+        if self.integrations.jira.has_unsaved():
+            unsaved.append("the Jira comment not posted")
         if unsaved and not widgets.confirm(
                 self, "Unsaved changes", "Drop the changes to %s?" % " and ".join(unsaved),
                 "They are not saved, and another project has its own.",

@@ -160,6 +160,17 @@ class Settings:
         self._qs.setValue("cycles/secrets_path", value or "")
 
     @property
+    def integrations_path(self):
+        """The project's connections - Integrations -> Jira -> Connections.
+
+        Workspace has no setting of its own for it: "" is the core's default,
+        beside the user's data, where the secrets store's own default is too.
+        """
+        if self.project_folder:
+            return self._project_path("integrations")
+        return ""
+
+    @property
     def cycle_memory_path(self):
         """Where what the project remembers between runs is kept.
 
@@ -481,6 +492,16 @@ class Settings:
 
     def save_command_state(self, state):
         self._qs.setValue(self._scoped("command/state"), json.dumps(state))
+
+    # -- integrations ---------------------------------------------------------
+    def integrations_state(self):
+        """What Integrations was left showing in this project: which provider,
+        which connection, and the issue list's filters. Never any data."""
+        return self._json(self._scoped("integrations/state"), {})
+
+    def save_integrations_state(self, state):
+        self._qs.setValue(self._scoped("integrations/state"),
+                          json.dumps(state, sort_keys=True))
 
     # -- launch sessions form -------------------------------------------------
     def launch_state(self):

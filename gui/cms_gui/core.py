@@ -247,7 +247,7 @@ class Core:
     def __init__(self, script=None, interpreter=None, config=None,
                  log_sources=None, flows_dir=None, cycles_dir=None,
                  secrets_path="",
-                 memory_path="", runs_path=""):
+                 memory_path="", runs_path="", integrations_path=""):
         auto_script, auto_python = autodetect()
         self.script = script or auto_script
         if not needs_interpreter(self.script):
@@ -285,6 +285,9 @@ class Core:
         # read from the runs, so listing or deleting one with the runs somewhere
         # else would see nothing.
         self.runs_path = runs_path or ""
+        # The project's connections. Their tokens are in the secrets store, so
+        # this travels wherever that one does - see secrets_flag().
+        self.integrations_path = integrations_path or ""
 
     def memory_flag(self):
         """``--cycle-memory-file=`` - and ``--cycle-runs-dir=`` - as a list,
@@ -298,7 +301,110 @@ class Core:
         A list so a caller can splat it into an argv without a conditional, the
         way ``argv()`` treats the other paths.
         """
-        return ["--cycle-secrets-file=" + self.secrets_path] if self.secrets_path else []
+        return ((["--cycle-secrets-file=" + self.secrets_path] if self.secrets_path else [])
+                + self.integrations_flag())
+
+    def integrations_flag(self):
+        """``--integrations-file=`` as a list, empty when nobody has set one.
+
+        Part of :meth:`secrets_flag` as well: a connection's token is in the
+        secrets store, so a run or a listener told where the store is must be
+        told where the connections are, or a step naming one finds nothing.
+        """
+        return (["--integrations-file=" + self.integrations_path]
+                if self.integrations_path else [])
+
+    def integrations(self, *args, document=None, timeout=120, cancel=None):
+        """``--integrations COMMAND ...``: one JSON answer, never a token in argv.
+
+        ``document`` goes in a ``--from`` file that is deleted afterwards - a
+        connection being saved carries its token, and argv is readable by every
+        process on the machine. A failure the command reports (``ok`` false)
+        is an answer, not an error; only no answer at all raises. ``cancel``
+        (an Event) stops a long one - a sign-in waiting on the browser - the
+        way Listen is stopped: the process is asked to end and answers so.
+        """
+        flags = ((["--cycle-secrets-file=" + self.secrets_path] if self.secrets_path else [])
+                 + self.integrations_flag())
+        handle = None
+        if document is not None:
+            handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json",
+                                                 prefix="cms-integration-", delete=False)
+            with handle:
+                json.dump(document, handle, ensure_ascii=False, default=str)
+            os.chmod(handle.name, 0o600)
+            flags.append("--from=" + handle.name)
+        command = list(self.prefix) + ["--integrations"] + list(args) + flags
+        try:
+            if cancel is not None:
+                out = self._integrations_cancellable(command, timeout, cancel)
+            else:
+                out = subprocess.run(
+                    command, capture_output=True, text=True, timeout=timeout,
+                    cwd=self.spawn_dir(),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            payload = json.loads(out)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise CoreError("Integrations did not answer: %s" % exc) from exc
+        finally:
+            if handle is not None:
+                try:
+                    os.unlink(handle.name)
+                except OSError:
+                    pass
+        if not isinstance(payload, dict):
+            raise CoreError("Integrations answered with something other than an object.")
+        return payload
+
+    def integrations_export(self, ids):
+        """Connections with their tokens, for an export file. The core writes
+        them into a file only this account can read, and that file is read here
+        and deleted - never a pipe, a log or argv."""
+        handle, temp = tempfile.mkstemp(prefix="cms-integrations-", suffix=".json")
+        os.close(handle)
+        os.chmod(temp, 0o600)
+        try:
+            answer = self.integrations("export", *list(ids), "--to=" + temp)
+            if not answer.get("ok"):
+                raise CoreError(answer.get("error") or "the connections were not exported")
+            with open(temp, encoding="utf-8") as stream:
+                return json.load(stream)
+        except (OSError, ValueError) as exc:
+            raise CoreError("The connections could not be read back: %s" % exc) from exc
+        finally:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+
+    def _integrations_cancellable(self, command, timeout, cancel):
+        """stdout of ``command``; on ``cancel`` the process is told to stop and
+        what it says about having stopped is the answer."""
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, cwd=self.spawn_dir(),
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as proc:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    out, _err = proc.communicate(timeout=0.1)
+                    return out
+                except subprocess.TimeoutExpired:
+                    if not cancel.is_set() and time.monotonic() < deadline:
+                        continue
+                if os.name == "nt":
+                    proc.kill()
+                    proc.communicate()
+                    return json.dumps({"ok": False, "kind": "cancelled",
+                                       "error": "Sign-in cancelled."})
+                proc.terminate()
+                try:
+                    out, _err = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    out = ""
+                return out or json.dumps({"ok": False, "kind": "cancelled",
+                                          "error": "Sign-in cancelled."})
 
     @property
     def legacy_log_sources(self):

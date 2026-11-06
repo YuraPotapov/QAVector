@@ -14,9 +14,12 @@ signs in to; a cycle project brings its cycles. The file is JSON::
                                            "scenarios": ["smoke"]}]}],
      "cycle_projects": [{"name": "Claim", "description": "", "colour": ""}],
      "cycles":         [{"id": "ready", "project": "Claim", "yaml": "...",
-                         "secrets": {"jira_token": "..."}}]}
+                         "secrets": {"jira_token": "..."}}],
+     "connections":    [{"id": "product-team", "name": "Product team", ...,
+                         "token": "..."}],
+     "integration_apps": [{"provider": "atlassian", "client_id": "...", ...}]}
 
-Passwords and secret values are written as they are - the file is as private as
+Passwords, secret values and connection tokens are written as they are - the file is as private as
 users.json, and is written readable by its owner only. Environments are named,
 never keyed: an account key is this machine's business (it names profile
 folders), so an imported environment is given one of its own.
@@ -137,12 +140,21 @@ def cycles_part(cycle_rows, cycle_ids=(), project_names=(), cycle_projects=(),
     return found
 
 
+def connections_part(core, ids):
+    """``{connections, integration_apps}`` for the connections chosen, tokens
+    included - read by the core, which alone can open them."""
+    if not ids:
+        return {}
+    return core.integrations_export(ids)
+
+
 def bundle(*parts):
     """One export document from the parts."""
     document = {"format": FORMAT, "version": VERSION,
                 "exported": datetime.datetime.now().isoformat(timespec="seconds"),
                 "projects": [], "environments": [], "users": [],
-                "cycle_projects": [], "cycles": []}
+                "cycle_projects": [], "cycles": [], "connections": [],
+                "integration_apps": []}
     for part in parts:
         for key, values in part.items():
             document[key].extend(values)
@@ -175,7 +187,8 @@ def counts(document):
                            ("environments", "environment", "environments"),
                            ("users", "user", "users"),
                            ("cycle_projects", "cycle project", "cycle projects"),
-                           ("cycles", "cycle", "cycles")):
+                           ("cycles", "cycle", "cycles"),
+                           ("connections", "connection", "connections")):
         number = len(document.get(key) or [])
         if number:
             parts.append("%d %s" % (number, one if number == 1 else many))
@@ -205,7 +218,8 @@ def read(path):
     if isinstance(version, int) and version > VERSION:
         raise TransferError("%s was written by a newer QAVector (version %d)."
                             % (path, version))
-    for key in ("projects", "environments", "users", "cycle_projects", "cycles"):
+    for key in ("projects", "environments", "users", "cycle_projects", "cycles",
+                "connections", "integration_apps"):
         if not isinstance(document.get(key) or [], list):
             raise TransferError("%s: %s has to be a list." % (path, key))
         document[key] = [one for one in document.get(key) or [] if isinstance(one, dict)]
@@ -233,7 +247,8 @@ def _existing_env(catalog, project_id, name):
     return None
 
 
-def plan(document, projects, catalog, rows, cycle_project_names=(), cycle_ids=()):
+def plan(document, projects, catalog, rows, cycle_project_names=(), cycle_ids=(),
+         connection_ids=()):
     """``[Item]``: everything in ``document``, each said new or already here."""
     project_ids = _project_ids_by_name(projects, catalog)
     logins = {person.login for person in usersfile.credentials(rows)}
@@ -255,7 +270,24 @@ def plan(document, projects, catalog, rows, cycle_project_names=(), cycle_ids=()
                           _folded(project.get("name")) in folded_projects))
     for cycle in document.get("cycles") or []:
         items.append(Item("Cycle", cycle.get("id", ""), cycle.get("id") in set(cycle_ids)))
+    for connection in document.get("connections") or []:
+        items.append(Item("Connection", connection.get("name") or connection.get("id", ""),
+                          connection.get("id") in set(connection_ids)))
     return items
+
+
+def apply_connections(document, mode, core):
+    """Put the connections of ``document`` in through ``core``, which keeps
+    their tokens. Returns what was done, said."""
+    if not document.get("connections"):
+        return []
+    answer = core.integrations("import", document={
+        "connections": document.get("connections") or [],
+        "integration_apps": document.get("integration_apps") or [],
+        "mode": "copy" if mode == COPY else "merge"})
+    if not answer.get("ok"):
+        raise TransferError(answer.get("error") or "the connections were not imported")
+    return list(answer.get("said") or [])
 
 
 def _copy_name(name, taken):

@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QInputDialog,
                                QTableWidget, QVBoxLayout, QWidget)
 
-from .. import icons, theme, widgets
+from .. import background, icons, theme, widgets
 
 #: What a listening step's schedule starts at, and the least it may be. The
 #: core's own (domain/cycle.py) - repeated because the GUI never imports the
@@ -55,6 +55,10 @@ ON_FAILURE = ("stop", "continue")
 
 #: How the wait between tries grows - the core's domain.cycle.BACKOFF.
 BACKOFF = ("fixed", "exponential")
+
+#: What a project connection stands for in a step's settings: given by the
+#: connection, so out of sight and left out of the step once one is named.
+CONNECTION_FIELDS = ("site", "flavour", "auth", "email", "token", "verify_tls", "api")
 
 #: A value that is one ``${...}`` reference and nothing else. The core resolves
 #: it to whatever type it points at, so no widget but a line of text can hold
@@ -146,7 +150,7 @@ class NodeDialog(_Editor):
     def __init__(self, step, plugin, parent=None, writable=True, live=None,
                  ask_plugin=None, trigger=None, groups=(), apply_label="",
                  read_only_note="", phases=(), restrictions=None, core=None,
-                 agent_profiles=()):
+                 agent_profiles=(), variables=None):
         super().__init__(step.get("label") or step.get("id", "Step"), parent,
                          writable)
         if apply_label:
@@ -162,6 +166,11 @@ class NodeDialog(_Editor):
         #: then shows what it is held to - or None, and nothing changes.
         self._restriction_context = restrictions
         self._core = core
+        #: The cycle's own variables, for reading what ``${vars.x}`` a step's
+        #: site and email name - see _offer_connection.
+        self._variables = dict(variables or {})
+        #: The project's connections, once read: [{id, name, site, email, auth}].
+        self._connections = []
         self._step_restrictions = dict(step.get("restrictions") or {})
         self._ask_plugin = ask_plugin
         self._groups = [one for one in groups if one]
@@ -188,6 +197,7 @@ class NodeDialog(_Editor):
 
         self._add_step_fields()
         self._add_plugin_fields()
+        self._add_connection()
         self._add_restrictions()
         self._add_listening()
         self._add_actions()
@@ -317,7 +327,9 @@ class NodeDialog(_Editor):
                 return
             self._keep(key, label, value, hint)
             return
-        if kind == "check":
+        if kind == "connection":
+            self._connection_field(key, label, _text(value), hint)
+        elif kind == "check":
             self._check(key, label, bool(value), hint)
         elif kind == "choice":
             options = list(spec.get("options") or [])
@@ -537,6 +549,118 @@ class NodeDialog(_Editor):
             label, shown, (hint + " " if hint else "")
             + "Kept exactly as written; change it in the YAML tab."))
 
+    # -- a project connection -------------------------------------------------
+    def _connection_field(self, key, label, value, hint=""):
+        """The connection a step names: one of the project's, by id, or a
+        ``${vars.x}`` typed in. The list is the project's connections file,
+        read by the core - Jira is not asked anything."""
+        # The full width of the window, like every field in it.
+        widget = QComboBox()
+        widget.setEditable(True)
+        widget.addItem("")
+        widget.setEditText(value)
+        widget.setEnabled(self._writable)
+        widget.lineEdit().setPlaceholderText("None - the step's own site and token below")
+        self._widgets[key] = widget
+        self.body_layout.addWidget(widgets.field(label, widget, hint))
+        self.use_connection = QPushButton("")
+        self.use_connection.setProperty("variant", "ghost")
+        self.use_connection.setVisible(False)
+        self.use_connection.clicked.connect(self._use_offered)
+        self.body_layout.addWidget(self.use_connection, 0, Qt.AlignLeft)
+        self._offered = None
+        loader = getattr(self._core, "integrations", None)
+        if loader is None:
+            return
+
+        def done(result, error):
+            if error is None and isinstance(result, dict) and result.get("ok"):
+                self._connections = list(result.get("connections") or [])
+                current = widget.currentText()
+                for one in self._connections:
+                    widget.addItem(one.get("id", ""))
+                    widget.setItemData(widget.count() - 1, one.get("name", ""), Qt.ToolTipRole)
+                widget.setEditText(current)
+                self._sync_connection()
+
+        if background.offloads(self._core):
+            background.run(lambda: loader("list"), done, owner=self)
+        else:
+            done(*background.call(lambda: loader("list")))
+
+    def _add_connection(self):
+        widget = self._widgets.get("with.connection")
+        if widget is None:
+            return
+        # Filled in from a connection when the step runs; nobody types it.
+        self._field_box("with.api", visible=False)
+        widget.editTextChanged.connect(self._sync_connection)
+        for key in ("with.site", "with.email"):
+            line = self._widgets.get(key)
+            if isinstance(line, QLineEdit):
+                line.textChanged.connect(self._sync_connection)
+        self._sync_connection()
+
+    def _connected(self):
+        widget = self._widgets.get("with.connection")
+        return widget is not None and bool(widget.currentText().strip())
+
+    def _sync_connection(self, *_args):
+        """A named connection says where and who: its fields go out of sight,
+        and are left out of the step when it is saved."""
+        connected = self._connected()
+        for name in CONNECTION_FIELDS:
+            if name != "api":
+                self._field_box("with." + name, visible=not connected)
+        self._offered = None if connected else self._offer_connection()
+        if self._offered is not None:
+            self.use_connection.setText("Use connection %s instead"
+                                        % (self._offered.get("name") or self._offered["id"]))
+        self.use_connection.setVisible(self._offered is not None and self._writable)
+
+    def _offer_connection(self):
+        """The project's connection to the site and account this step names
+        itself, when there is one - so an old step can move to it in a click."""
+        site = self._resolved(self._value("with.site")).rstrip("/").lower()
+        email = self._resolved(self._value("with.email")).lower()
+        if not site:
+            return None
+        for one in self._connections:
+            if str(one.get("site") or "").rstrip("/").lower() != site:
+                continue
+            if one.get("auth") == "basic" and email and one.get("email", "").lower() != email:
+                continue
+            return one
+        return None
+
+    def _resolved(self, text):
+        """``${vars.x}`` read from the cycle's variables; anything else as written."""
+        text = str(text or "").strip()
+        match = re.match(r"^\$\{\s*vars\.([A-Za-z0-9_-]+)\s*\}$", text)
+        if match:
+            value = self._variables.get(match.group(1))
+            return value if isinstance(value, str) else ""
+        return text
+
+    def _use_offered(self):
+        offered = self._offered
+        if offered is None:
+            return
+        # The connection first: clearing the site below asks again what to
+        # offer, and with no site there would be nothing.
+        self._widgets["with.connection"].setEditText(offered["id"])
+        for name in ("site", "email", "token"):
+            line = self._widgets.get("with." + name)
+            if isinstance(line, QLineEdit):
+                line.clear()
+
+    def _field_box(self, key, visible):
+        """Show or hide one field with its label and hint."""
+        widget = self._widgets.get(key)
+        box = widget.parentWidget() if widget is not None else None
+        if box is not None and box is not self.body:
+            box.setVisible(visible)
+
     def _line(self, key, label, value, hint=""):
         widget = QLineEdit(value)
         widget.setEnabled(self._writable)
@@ -622,6 +746,8 @@ class NodeDialog(_Editor):
             if "with." + key in self._kept:
                 found[key] = (self._step.get("with") or {}).get(key)
                 continue
+            if key in CONNECTION_FIELDS and self._connected():
+                continue            # what the connection says, not the step
             raw = self._value("with." + key)
             kind = spec.get("kind", "text")
             if "with." + key in self._as_text:
@@ -754,6 +880,11 @@ class NodeDialog(_Editor):
         # and whether it was written at all - and so does whatever the form
         # has no field for.
         step = self._untouched_as_they_were(step)
+        if (step.get("with") or {}).get("connection"):
+            # A step names a connection or says where and who itself, never
+            # both: what it said before goes, untouched or not.
+            for name in CONNECTION_FIELDS:
+                step["with"].pop(name, None)
         # Everything else the core decides. A second opinion here is a second
         # thing to keep in step with the validator that actually runs.
         self.saved = step

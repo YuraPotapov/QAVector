@@ -2004,6 +2004,7 @@ class CyclesPage(QWidget):
             restrictions=self._step_restrictions_context(document),
             core=self.core,
             agent_profiles=document.get("agent_profiles") or {},
+            variables=document.get("variables") or {},
             **({"phases": document["phases"]} if document.get("phases") else {}),
             apply_label="Add" if adding else "Apply",
             read_only_note=("This is the step as the run on screen has it. "

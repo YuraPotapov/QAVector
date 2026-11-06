@@ -155,6 +155,12 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              "--cycle-memory-file", "--cycle-memory-list",
              "--cycle-memory-show", "--cycle-memory-forget",
              "--cycle-runs-dir",
+             # Integrations: the page's own commands, and the connections file
+             # a run and a listener read - kept beside the secrets store that
+             # holds their tokens, for the reason --cycle-secrets-file is here.
+             "--integrations", "--integrations-file",
+             # The Plugins page's own command line, with a parser of its own.
+             "--plugins",
              # The Inspector's Setup section: a plugin declares what it can be
              # asked outside a run, and the page renders and calls it. Nobody
              # composes one of these by hand.

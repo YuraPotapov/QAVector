@@ -776,6 +776,34 @@ QFrame#pluginDetailBody {{ background: {surface}; border: none; }}
 QWidget#pluginDetailActions {{ background: {surface}; border-top: 1px solid {divider}; }}
 QSplitter#pluginSplitter::handle {{ background: transparent; }}
 QSplitter#pluginSplitter::handle:hover {{ background: {divider}; }}
+/* Integrations -> Jira. A filter that is on or off ("Assigned to me", "JQL"):
+   the plain button when off, the accent's own tint and ink when on - the same
+   pair a selected row uses, so "on" reads the same everywhere. */
+QPushButton[variant="toggle"] {{
+    font-family: {body}; font-size: 13px; font-weight: 400; padding: 4px 11px;
+}}
+QPushButton[variant="toggle"]:checked {{
+    background: {select_bg}; color: {select_ink}; border-color: {accent};
+}}
+QPushButton[variant="toggle"]:disabled {{ color: {n400}; border-color: {n300}; }}
+/* A person as two letters: drawn, never fetched from Jira. */
+QLabel[role="initials"] {{
+    background: {mark_tint}; color: {mark_ink};
+    font-family: {mono}; font-size: 10px; font-weight: 600;
+}}
+QFrame#jiraDetailBody {{ background: {surface}; border: none; }}
+QToolButton#jiraMore::menu-indicator {{ image: none; width: 0; }}
+QFrame#jiraDetail QPlainTextEdit {{ background: {bg}; border: 1px solid {divider}; }}
+QSplitter#jiraSplitter::handle {{ background: transparent; }}
+QSplitter#jiraSplitter::handle:hover {{ background: {divider}; }}
+/* The way back to the list of providers: a breadcrumb, not a button. */
+QPushButton#jiraCrumb {{ color: {n600}; font-size: 13px; padding: 0; }}
+QPushButton#jiraCrumb:hover {{ color: {a700}; background: transparent; }}
+QToolButton#jiraOrder {{
+    border: none; background: transparent; color: {n600};
+    font-family: {heading}; font-size: 11px; letter-spacing: 0.6px;
+}}
+QToolButton#jiraOrder:hover {{ color: {text}; }}
 QLabel#pluginProblem {{
     background: {bad_tint}; color: {bad_ink}; padding: 10px;
     border-left: 2px solid {bad_ink};

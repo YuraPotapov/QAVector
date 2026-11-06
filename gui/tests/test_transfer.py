@@ -237,3 +237,46 @@ def test_cycles_added_as_copies_get_an_id_a_name_and_a_project_of_their_own(tmp_
     assert ("move", [{"id": "ready_copy", "project": "Claim (copy)"}]) in fake.calls
     assert ("secret", "ready_copy", "token", "t-1") in fake.calls
     assert [p.name for p in cpf.load(path)] == ["Claim", "Claim (copy)"]
+
+
+# -- connections --------------------------------------------------------------
+class ConnectionsCore:
+    """Exports and imports connections the way the core does: values in, said out."""
+
+    def __init__(self):
+        self.asked = []
+
+    def integrations_export(self, ids):
+        self.asked.append(("export", list(ids)))
+        return {"connections": [{"id": one, "name": one.title(), "token": "t-" + one}
+                                for one in ids],
+                "integration_apps": []}
+
+    def integrations(self, *args, document=None, **kwargs):
+        self.asked.append((args, document))
+        return {"ok": True, "said": ["Added connection %s." % one["name"]
+                                     for one in document["connections"]]}
+
+
+def test_connections_go_in_the_file_with_their_tokens(tmp_path):
+    core = ConnectionsCore()
+    document = transfer.bundle(transfer.connections_part(core, ["product-team"]))
+    path = transfer.write(str(tmp_path / ("out" + transfer.SUFFIX)), document)
+    again = transfer.read(path)
+    assert again["connections"] == [{"id": "product-team", "name": "Product-Team",
+                                     "token": "t-product-team"}]
+    assert transfer.counts(again) == "1 connection"
+    assert transfer.connections_part(core, []) == {}, "none chosen, the core is not asked"
+
+
+def test_the_plan_says_which_connections_are_here_and_the_core_puts_them_in():
+    document = transfer.bundle({"connections": [{"id": "product-team", "name": "Product team"},
+                                                {"id": "ops", "name": "Ops"}]})
+    items = transfer.plan(document, [], [], [], connection_ids=["ops"])
+    assert [(one.kind, one.name, one.exists) for one in items] == [
+        ("Connection", "Product team", False), ("Connection", "Ops", True)]
+    core = ConnectionsCore()
+    said = transfer.apply_connections(document, transfer.COPY, core)
+    assert said == ["Added connection Product team.", "Added connection Ops."]
+    args, sent = core.asked[0]
+    assert args == ("import",) and sent["mode"] == "copy"

@@ -223,6 +223,9 @@ def test_the_navigation_has_both_groups_in_the_intended_order(window):
     # Run is always the first of Observe; Subjects comes straight after it.
     assert [key for key, _l, _g in main_window_mod.OBSERVE] == [
         "run", "subjects", "log", "artifacts", "history"]
+    # Integrations sits straight after Plugins, at the same level.
+    assert [key for key, _l, _g in main_window_mod.APPLICATION] == [
+        "plugins", "integrations"]
 
 
 def test_the_rail_is_wide_enough_for_every_label_it_holds(window):

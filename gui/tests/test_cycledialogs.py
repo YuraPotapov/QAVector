@@ -1009,3 +1009,121 @@ def test_a_variable_nobody_changed_keeps_its_type(properties):
     dialog._save()
     assert dialog.saved["variables"] == {"runs": 3, "flag": False,
                                          "branch": "release"}
+
+
+# ---------------------------------------------------- a project connection
+def _field(key, label, kind="text", default=None, options=()):
+    return {"key": key, "label": label, "kind": kind, "hint": "", "required": False,
+            "default": default, "options": list(options)}
+
+
+JIRA = {"id": "jira.issues", "name": "Jira Issues", "summary": "Read issues.",
+        "inputs": [_field("connection", "Connection", "connection", options=["jira"]),
+                   _field("site", "Site"),
+                   _field("flavour", "Product", "choice", "cloud", ["cloud", "server"]),
+                   _field("auth", "Authentication", "choice", "basic", ["basic", "bearer"]),
+                   _field("email", "Account email"), _field("token", "API token"),
+                   _field("user", "Whose issues"),
+                   _field("verify_tls", "Verify the certificate", "check", True),
+                   _field("api", "API address")],
+        "outputs": [], "actions": []}
+
+CONNECTIONS = [{"id": "product-team", "name": "Product team", "auth": "basic",
+                "site": "https://qa.example.invalid", "email": "you@yourcompany.example"}]
+
+
+class _Core:
+    """Reads the project's connections file, as the core would. Nothing else."""
+
+    offload = False
+
+    def __init__(self):
+        self.asked = []
+
+    def integrations(self, *args, **kwargs):
+        self.asked.append(args)
+        return {"ok": True, "connections": [dict(one) for one in CONNECTIONS]}
+
+
+def _jira_step(**settings):
+    return {"id": "queue", "plugin": "jira.issues", "with": dict(settings)}
+
+
+def _visible(dialog, key):
+    widget = dialog._widgets[key]
+    return widget.parentWidget().isVisibleTo(dialog)
+
+
+@pytest.fixture
+def jira_node(qapp, dispose):
+    made = []
+
+    def build(one, variables=None):
+        dialog = NodeDialog(one, JIRA, None, True, core=_Core(), variables=variables)
+        made.append(dialog)
+        return dialog
+
+    yield build
+    for dialog in made:
+        dispose(dialog)
+
+
+def test_the_connection_is_a_choice_of_the_project_s_connections_or_typed(jira_node):
+    dialog = jira_node(_jira_step(connection="${vars.jira}", user="currentUser()"))
+    combo = dialog._widgets["with.connection"]
+    assert combo.isEditable() and combo.currentText() == "${vars.jira}"
+    assert [combo.itemText(i) for i in range(combo.count())] == ["", "product-team"]
+    assert dialog._core.asked == [("list",)], "the connections file - Jira is not asked"
+
+
+def test_a_named_connection_hides_what_it_stands_for_and_saves_without_it(jira_node):
+    dialog = jira_node(_jira_step(connection="product-team", user="currentUser()",
+                                  flavour="cloud", auth="basic"))
+    for key in ("site", "flavour", "auth", "email", "token", "verify_tls", "api"):
+        assert not _visible(dialog, "with." + key), key
+    assert _visible(dialog, "with.user")
+    dialog.save_button.click()
+    assert dialog.saved["with"] == {"connection": "product-team", "user": "currentUser()"}
+
+
+def test_an_old_step_is_offered_the_connection_to_its_own_site_and_account(jira_node):
+    dialog = jira_node(_jira_step(site="${vars.jira_site}", email="${vars.jira_email}",
+                                  token="${vars.jira_token}", flavour="cloud",
+                                  user="currentUser()"),
+                       variables={"jira_site": "https://qa.example.invalid/",
+                                  "jira_email": "you@yourcompany.example",
+                                  "jira_token": {"secret": True}})
+    offer = dialog.use_connection
+    assert offer.isVisibleTo(dialog)
+    assert offer.text() == "Use connection Product team instead"
+    assert _visible(dialog, "with.site")
+    offer.click()
+    assert dialog._widgets["with.connection"].currentText() == "product-team"
+    assert not offer.isVisibleTo(dialog) and not _visible(dialog, "with.site")
+    dialog.save_button.click()
+    assert dialog.saved["with"] == {"connection": "product-team", "user": "currentUser()"}
+
+
+def test_no_offer_for_another_site_or_another_account(jira_node):
+    elsewhere = jira_node(_jira_step(site="https://other.example.invalid",
+                                     email="you@yourcompany.example"))
+    assert not elsewhere.use_connection.isVisibleTo(elsewhere)
+    someone = jira_node(_jira_step(site="https://qa.example.invalid",
+                                   email="someone@yourcompany.example"))
+    assert not someone.use_connection.isVisibleTo(someone)
+
+
+def test_a_step_without_a_connection_saves_as_it_always_did(jira_node):
+    original = _jira_step(site="https://x.example.invalid", email="a@b.example",
+                          token="${vars.t}", user="me")
+    dialog = jira_node(original)
+    assert _visible(dialog, "with.site") and not _visible(dialog, "with.api")
+    dialog.save_button.click()
+    assert dialog.saved["with"] == original["with"]
+
+
+def test_the_connection_field_is_as_wide_as_the_others(jira_node, qapp):
+    dialog = jira_node(_jira_step(site="https://x.example.invalid", user="me"))
+    dialog.show()
+    qapp.processEvents()
+    assert dialog._widgets["with.connection"].width() == dialog._widgets["with.site"].width()

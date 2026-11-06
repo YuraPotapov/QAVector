@@ -47,13 +47,15 @@ class ExportDialog(QDialog):
     """Tick what goes in the file; :meth:`selection` says what was ticked."""
 
     def __init__(self, parent, projects, catalog, rows, cycle_rows, chosen=None,
-                 secrets_included=False, project_name=""):
+                 secrets_included=False, project_name="", connections=()):
         super().__init__(parent)
         #: What the project on screen is called - its environments' group.
         self.project_name = project_name
         self.setWindowTitle("Export")
         self.projects, self.catalog, self.rows = projects, catalog, rows
         self.cycle_rows = [row for row in cycle_rows if row.get("id")]
+        #: The project's integration connections: [{id, name, site, ...}].
+        self.connections = [one for one in connections if one.get("id")]
         chosen = chosen or {}
         self.frame = widgets.dress(self)
         column = QVBoxLayout(self)
@@ -75,9 +77,9 @@ class ExportDialog(QDialog):
 
         self.summary = widgets.mono("")
         column.addWidget(self.summary)
-        note = QLabel("Passwords%s are written in the file as they are - keep it as "
-                      "private as users.json."
-                      % (" and cycle secrets" if secrets_included else ""))
+        note = QLabel("Passwords%s and connection tokens are written in the file as "
+                      "they are - keep it as private as users.json."
+                      % (", cycle secrets" if secrets_included else ""))
         note.setProperty("role", "hint")
         note.setWordWrap(True)
         column.addWidget(note)
@@ -159,6 +161,12 @@ class ExportDialog(QDialog):
             for row in by_project[name]:
                 self._item(project, "cycle", row["id"], row["id"], row.get("name") or "",
                            name in whole_cycles or row["id"] in picked_cycles)
+        if self.connections:
+            linked = self._group("Connections")
+            picked_connections = set(chosen.get("connections") or ())
+            for one in self.connections:
+                self._item(linked, "connection", one["id"], one.get("name") or one["id"],
+                           one.get("site") or "", one["id"] in picked_connections)
         for index in range(self.tree.topLevelItemCount()):
             group = self.tree.topLevelItem(index)
             self._expand_ticked(group)
@@ -188,7 +196,7 @@ class ExportDialog(QDialog):
         ticked in part is the environments ticked in it. The same for cycles.
         """
         found = {"projects": [], "environments": [], "users": [],
-                 "cycle_projects": [], "cycles": []}
+                 "cycle_projects": [], "cycles": [], "connections": []}
         for item in self._walk():
             kind, value = item.data(0, KIND), item.data(0, VALUE)
             state = item.checkState(0)
@@ -204,6 +212,8 @@ class ExportDialog(QDialog):
             elif kind == "cycle" and state == Qt.Checked \
                     and item.parent().checkState(0) != Qt.Checked:
                 found["cycles"].append(value)
+            elif kind == "connection" and state == Qt.Checked:
+                found["connections"].append(value)
         return found
 
     def launch_document_part(self):
@@ -220,7 +230,8 @@ class ExportDialog(QDialog):
         preview = transfer.bundle(self.launch_document_part(), {
             "cycle_projects": [{"name": name} for name in chosen["cycle_projects"]
                                if name],
-            "cycles": [{"id": row["id"]} for row in cycles]})
+            "cycles": [{"id": row["id"]} for row in cycles],
+            "connections": [{"id": one} for one in chosen["connections"]]})
         said = transfer.counts(preview)
         self.summary.setText("In the file: %s" % said)
         self.export_button.setEnabled(said != "nothing")

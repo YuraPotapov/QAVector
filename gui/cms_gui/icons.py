@@ -600,6 +600,96 @@ def _unlock(painter, ink):
     painter.drawPath(path)
 
 
+
+def _integrations(painter, ink):
+    """A plug with its cord: a service this project is connected to."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(9.5, 3.5), QPointF(9.5, 8.5))
+    painter.drawLine(QPointF(14.5, 3.5), QPointF(14.5, 8.5))
+    body = QPainterPath()
+    body.moveTo(6.5, 8.5)
+    body.lineTo(17.5, 8.5)
+    body.lineTo(17.5, 12.5)
+    body.cubicTo(17.5, 15.5, 15, 17, 12, 17)
+    body.cubicTo(9, 17, 6.5, 15.5, 6.5, 12.5)
+    body.closeSubpath()
+    painter.drawPath(body)
+    painter.drawLine(QPointF(12, 17), QPointF(12, 21))
+
+
+def _attach(painter, ink):
+    """A paper clip: a file that goes with this."""
+    _stroke(painter, ink)
+    path = QPainterPath()
+    path.moveTo(15.5, 8.5)
+    path.lineTo(9.0, 15.0)
+    path.cubicTo(7.5, 16.5, 9.5, 18.5, 11.0, 17.0)
+    path.lineTo(18.0, 10.0)
+    path.cubicTo(21.0, 7.0, 17.0, 3.0, 14.0, 6.0)
+    path.lineTo(6.5, 13.5)
+    path.cubicTo(2.0, 18.0, 8.0, 24.0, 12.5, 19.5)
+    path.lineTo(18.5, 13.5)
+    painter.drawPath(path)
+
+
+def _file(painter, ink):
+    """A page with its corner folded: one file."""
+    _stroke(painter, ink)
+    path = QPainterPath()
+    path.moveTo(14.5, 3.5)
+    path.lineTo(5.5, 3.5)
+    path.lineTo(5.5, 20.5)
+    path.lineTo(18.5, 20.5)
+    path.lineTo(18.5, 7.5)
+    path.closeSubpath()
+    painter.drawPath(path)
+    corner = QPainterPath()
+    corner.moveTo(14.5, 3.5)
+    corner.lineTo(14.5, 7.5)
+    corner.lineTo(18.5, 7.5)
+    painter.drawPath(corner)
+
+
+def _sort_down(painter, ink):
+    """A shaft with its head at the bottom: newest first, going down."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(12, 4.5), QPointF(12, 18.5))
+    head = QPainterPath()
+    head.moveTo(7, 14)
+    head.lineTo(12, 19)
+    head.lineTo(17, 14)
+    painter.drawPath(head)
+
+
+def _sort_up(painter, ink):
+    """The same shaft, head at the top: oldest first."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(12, 5.5), QPointF(12, 19.5))
+    head = QPainterPath()
+    head.moveTo(7, 10)
+    head.lineTo(12, 5)
+    head.lineTo(17, 10)
+    painter.drawPath(head)
+
+
+def _external(painter, ink):
+    """An arrow out of a box: open this in the browser, outside the window."""
+    _stroke(painter, ink)
+    box = QPainterPath()
+    box.moveTo(10.5, 5.5)
+    box.lineTo(4.5, 5.5)
+    box.lineTo(4.5, 19.5)
+    box.lineTo(18.5, 19.5)
+    box.lineTo(18.5, 13.5)
+    painter.drawPath(box)
+    painter.drawLine(QPointF(11.5, 12.5), QPointF(19.5, 4.5))
+    head = QPainterPath()
+    head.moveTo(14.0, 4.5)
+    head.lineTo(19.5, 4.5)
+    head.lineTo(19.5, 10.0)
+    painter.drawPath(head)
+
+
 DRAWINGS = {
     "network": _network,
     "network-isolated": _network_isolated,
@@ -640,6 +730,12 @@ DRAWINGS = {
     "log": _log,
     "services": _services,
     "plugins": _plugins,
+    "integrations": _integrations,
+    "attach": _attach,
+    "file": _file,
+    "sort_down": _sort_down,
+    "sort_up": _sort_up,
+    "external": _external,
     "dot": _dot,
     "artifacts": _artifacts,
     "pass": _pass,
