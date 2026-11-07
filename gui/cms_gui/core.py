@@ -380,6 +380,9 @@ class Core:
     def _integrations_cancellable(self, command, timeout, cancel):
         """stdout of ``command``; on ``cancel`` the process is told to stop and
         what it says about having stopped is the answer."""
+        if cancel.is_set():
+            return json.dumps({"ok": False, "kind": "cancelled",
+                               "error": "Integration request cancelled."})
         with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               text=True, cwd=self.spawn_dir(),
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)) as proc:
@@ -395,7 +398,7 @@ class Core:
                     proc.kill()
                     proc.communicate()
                     return json.dumps({"ok": False, "kind": "cancelled",
-                                       "error": "Sign-in cancelled."})
+                                       "error": "Integration request cancelled."})
                 proc.terminate()
                 try:
                     out, _err = proc.communicate(timeout=10)
@@ -404,7 +407,7 @@ class Core:
                     proc.communicate()
                     out = ""
                 return out or json.dumps({"ok": False, "kind": "cancelled",
-                                          "error": "Sign-in cancelled."})
+                                          "error": "Integration request cancelled."})
 
     @property
     def legacy_log_sources(self):

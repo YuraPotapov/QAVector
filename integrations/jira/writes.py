@@ -15,7 +15,7 @@ import os
 
 from integrations.jira import adf
 from integrations.jira.client import CLOUD, JiraError, api
-from integrations.jira.operations import _key, _person, issue
+from integrations.jira.operations import _key, _person, account_of, issue
 
 #: The largest file the page uploads. Jira Cloud's own default limit is larger,
 #: but a file this big is a decision somebody should make in Jira itself.
@@ -87,12 +87,26 @@ def transition(get, connection, request):
 
 # -- comments -----------------------------------------------------------------
 def comment(get, connection, request):
+    """Post a comment: text, or on Cloud a document from the editor - with its
+    formatting and mentions - checked by :func:`adf.clean` before it is sent.
+    On Server a mention is written in the text, as ``[~username]``."""
     key = _key(request)
-    text = str(request.get("body") or "").strip()
-    if not text:
-        raise Refused("A comment needs some words.")
-    get("/rest/api/%s/issue/%s/comment" % (_version(connection), key),
-        body={"body": adf.from_text(text, connection["flavour"])})
+    given = request.get("body")
+    if isinstance(given, dict):
+        if connection["flavour"] != CLOUD:
+            raise Refused("A formatted comment is for Jira Cloud; this is Server.")
+        try:
+            body = adf.clean(given)
+        except ValueError as error:
+            raise Refused(str(error))
+        if body is None:
+            raise Refused("A comment needs some words.")
+    else:
+        text = str(given or "").strip()
+        if not text:
+            raise Refused("A comment needs some words.")
+        body = adf.from_text(text, connection["flavour"])
+    get("/rest/api/%s/issue/%s/comment" % (_version(connection), key), body={"body": body})
     return dict(_after(get, connection, key), summary="%s: comment" % key)
 
 
@@ -114,11 +128,17 @@ def edit_meta(get, connection, request):
 
 
 def edit(get, connection, request):
-    """Change summary, description, labels or priority - only those given.
+    """Change summary, description, labels, priority or assignee - only those given.
 
     ``updated`` is when the issue was last changed as the editor saw it: if
     Jira's is different, somebody else changed it since, and the edit is
     refused rather than written over their change.
+
+    A description is text, or on Cloud a document from the description editor,
+    checked by :func:`adf.clean` before it is sent. An assignee is ``me``, an
+    id from :func:`assignable`, or empty for nobody. It is set through the
+    issue's assignee, which needs the right to assign rather than the field on
+    the issue's edit screen.
     """
     key = _key(request)
     version = _version(connection)
@@ -136,19 +156,33 @@ def edit(get, connection, request):
             raise Refused("A summary is needed.")
         fields["summary"] = summary
     if "description" in wanted:
-        text = str(wanted["description"] or "")
-        fields["description"] = adf.from_text(text, connection["flavour"]) if text.strip() \
-            else None
+        given = wanted["description"]
+        if isinstance(given, dict):
+            if connection["flavour"] != CLOUD:
+                raise Refused("A formatted description is for Jira Cloud; this is Server.")
+            try:
+                fields["description"] = adf.clean(given)
+            except ValueError as error:
+                raise Refused(str(error))
+        else:
+            text = str(given or "")
+            fields["description"] = adf.from_text(text, connection["flavour"]) \
+                if text.strip() else None
     if "labels" in wanted:
         fields["labels"] = [one for one in (str(item).strip().replace(" ", "-")
                                             for item in wanted["labels"] or []) if one]
     if "priority" in wanted and wanted["priority"]:
         fields["priority"] = {"id": str(wanted["priority"])}
-    if not fields:
+    assignee = "assignee" in wanted
+    if not fields and not assignee:
         raise Refused("Nothing to change.")
-    get("/rest/api/%s/issue/%s" % (version, key), body={"fields": fields}, method="PUT")
+    if fields:
+        get("/rest/api/%s/issue/%s" % (version, key), body={"fields": fields}, method="PUT")
+    if assignee:
+        _assign(get, connection, key, wanted["assignee"])
     return dict(_after(get, connection, key),
-                summary="%s: %s" % (key, ", ".join(sorted(fields))))
+                summary="%s: %s" % (key, ", ".join(sorted(list(fields) + (
+                    ["assignee"] if assignee else [])))))
 
 
 # -- who carries it -----------------------------------------------------------
@@ -169,22 +203,24 @@ def assign(get, connection, request):
     """Assign an issue: ``account`` is ``me``, an id from :func:`assignable`, or
     empty for nobody."""
     key = _key(request)
-    version = _version(connection)
-    account = str(request.get("account") or "")
-    if account == "me":
-        account = _account(get("/rest/api/%s/myself" % version), connection)
-    cloud = connection["flavour"] == CLOUD
-    body = {"accountId": account or None} if cloud else {"name": account or None}
-    get("/rest/api/%s/issue/%s/assignee" % (version, key), body=body, method="PUT")
+    _assign(get, connection, key, request.get("account"))
     after = _after(get, connection, key)
     return dict(after, summary="%s: assigned to %s"
                 % (key, after["issue"].get("assignee") or "nobody"))
 
 
+def _assign(get, connection, key, account):
+    version = _version(connection)
+    account = str(account or "")
+    if account == "me":
+        account = _account(get("/rest/api/%s/myself" % version), connection)
+    cloud = connection["flavour"] == CLOUD
+    body = {"accountId": account or None} if cloud else {"name": account or None}
+    get("/rest/api/%s/issue/%s/assignee" % (version, key), body=body, method="PUT")
+
+
 def _account(person, connection):
-    if connection["flavour"] == CLOUD:
-        return str((person or {}).get("accountId") or "")
-    return str((person or {}).get("name") or (person or {}).get("key") or "")
+    return account_of(person, connection["flavour"])
 
 
 # -- creating -----------------------------------------------------------------

@@ -16,6 +16,48 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- A Jira issue is edited in place rather than in a separate window. It is
+  read-only until **Edit** is pressed. Then its summary, priority, assignee,
+  labels and description become fields where they stand, and **Save** or
+  **Cancel** end the edit. Leaving an issue with changes asks first.
+- On Jira Cloud the description is edited with its formatting kept, with a bar
+  for headings, bold, italic, underline, strikethrough, code, lists, checklists,
+  links, code blocks and quotes. Something the editor cannot keep, such as a
+  table or a picture, is named, and the description stays as it is unless you
+  choose to edit it without them. The core checks the document before Jira
+  sees it.
+- The assignee is picked in the same edit. The people to pick from are read
+  only when the list is opened or a name is searched for.
+- Comments on Jira Cloud have the same formatting bar, and **@** mentions
+  somebody who can see the issue. The people are read once per issue, the
+  first time @ is typed, on a background thread, and the list narrows locally
+  as you type. Other names are looked up only on request. On Jira Server a
+  mention is written as `[~username]`.
+
+### Added
+- **Ctrl+K searches integrations on request.** Below what QAVector lists, each
+  integration that is set up offers a row of its own, such as
+  `Search Jira for "QA-123"`. Typing never asks the service; choosing the row
+  does, once, off the window's thread. The results show in the same Search,
+  and opening one shows the issue on the Jira page, even if its list did not
+  have it. With no integration set up, nothing is offered. Every integration
+  answers for itself through the same contract.
+- Integrations can open in a separate window. Closing it returns the same view
+  to the main window, preserving loaded issues, filters and drafts. Each window
+  follows the active project and closes with the application; this is a shared
+  architectural requirement for all integration providers.
+
+### Fixed
+- Pressing **Edit** on an issue no longer scrolls the panel down to the
+  attachments.
+- Switching projects resets Jira's connections, activity and initial loading
+  state immediately, including in a separate window. Requests keep their
+  original project context; old reads are cancelled and late replies ignored.
+- Unsaved integration drafts and settings are checked before switching projects
+  or exiting. In-flight changes must finish first, and shutdown cancels pending
+  integration reads and sign-in waits.
+
 ## [0.16.58] - 2026-11-07
 
 ### Added

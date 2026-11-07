@@ -15,11 +15,13 @@ reaches this process.
 
 import datetime
 import re
+import threading
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPen
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog,
-                               QFrame,
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QKeySequence, QPen,
+                           QShortcut)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QCompleter,
+                               QDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMenu, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
@@ -28,9 +30,19 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 
 from .. import background, core as core_mod, icons, search, theme, widgets
 from .jiraconnections import ActivityTab, ConnectionsTab, SettingsTab
+from .jiradialogs import split_labels
+from .jiradoc import DescriptionEditor
 
 #: Rows a page of the list asks for.
 PAGE_ROWS = 25
+#: Issues one search from Ctrl+K brings back from each connection.
+FOUND_ROWS = 10
+#: The tallest the description grows while it is edited; past it, it scrolls.
+DESCRIPTION_HEIGHT = 420
+
+#: Requests that change something - in Jira or in the project's files. They
+#: are never cancelled, and leaving the project or the application waits for them.
+WRITES = frozenset(("write", "save", "remove", "app-save"))
 
 #: Comments an opened issue shows before "Show earlier".
 COMMENTS = 20
@@ -331,6 +343,118 @@ class LazyCombo(QComboBox):
         self._open_when_loaded = False
 
 
+#: The picker's first entry: the assignee left as it was.
+KEEP = "\0keep"
+LOADING = "\0loading"
+
+
+class PeoplePicker(QComboBox):
+    """Who carries an issue, while it is edited.
+
+    It starts with who carries it now, Unassigned and Me. The people it may be
+    assigned to are read the first time the list is opened, or when a name is
+    typed and Enter pressed, and never before. Typing filters whoever is
+    already in the list without asking Jira.
+    """
+
+    #: A name to look for; "" for whoever Jira lists first.
+    wanted = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setAccessibleName("Assignee")
+        self.lineEdit().setPlaceholderText("Type a name, then Enter")
+        self.lineEdit().returnPressed.connect(self._typed)
+        finder = self.completer()
+        finder.setFilterMode(Qt.MatchContains)
+        finder.setCaseSensitivity(Qt.CaseInsensitive)
+        finder.setCompletionMode(QCompleter.PopupCompletion)
+        self._current = ""
+        self._loaded = False
+        self._open_when_loaded = False
+
+    def start(self, current):
+        """Who carries the issue as editing begins. Nothing is read yet."""
+        self._current = current or ""
+        self._loaded = False
+        self._open_when_loaded = False
+        self.blockSignals(True)
+        self.clear()
+        self.addItem(current or "Unassigned", KEEP)
+        if current:
+            self.addItem("Unassigned", "")
+        self.addItem("Me", "me")
+        self.setCurrentIndex(0)
+        self.blockSignals(False)
+
+    def value(self):
+        """None while it is left as it was; else "", "me" or an account id."""
+        data = self.currentData()
+        if data in (None, KEEP, LOADING):
+            return None
+        if data not in ("", "me") and self.itemText(self.currentIndex()) == self._current:
+            return None
+        return str(data)
+
+    def showPopup(self):
+        if self._loaded:
+            super().showPopup()
+            return
+        self._ask("")
+
+    def _typed(self):
+        text = self.lineEdit().text().strip()
+        index = self.findText(text, Qt.MatchFixedString)
+        if index >= 0:
+            self.setCurrentIndex(index)
+        elif text:
+            self._ask(text)
+
+    def _ask(self, query):
+        self._open_when_loaded = True
+        if self.findData(LOADING) < 0:
+            self.blockSignals(True)
+            self.addItem("Loading…", LOADING)
+            self.blockSignals(False)
+        self.wanted.emit(query)
+
+    def set_people(self, people):
+        """``[{id, name}]`` from Jira, under the three it started with."""
+        chosen = self.currentData()
+        fixed = [(self.itemText(index), self.itemData(index)) for index in range(self.count())
+                 if self.itemData(index) in (KEEP, "", "me")]
+        self.blockSignals(True)
+        self.clear()
+        for text, data in fixed:
+            self.addItem(text, data)
+        seen = set()
+        for one in people or []:
+            if one.get("id") and one["id"] not in seen:
+                seen.add(one["id"])
+                self.addItem(one.get("name") or one["id"], one["id"])
+        self.setCurrentIndex(max(0, self.findData(chosen)))
+        self.blockSignals(False)
+        self._loaded = True
+        if self._open_when_loaded and self.isVisible():
+            self._open_when_loaded = False
+            super().showPopup()
+
+    def failed(self):
+        self._open_when_loaded = False
+        index = self.findData(LOADING)
+        if index >= 0:
+            self.blockSignals(True)
+            self.removeItem(index)
+            self.blockSignals(False)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        # What was typed and not picked is not a choice.
+        self.lineEdit().setText(self.itemText(self.currentIndex()))
+
+
 class _Rich(QLabel):
     """Escaped HTML the core rendered - a description, a comment - as text to read.
 
@@ -354,19 +478,32 @@ def _open_web(url):
 
 # -- one issue ----------------------------------------------------------------
 class IssueDetail(QFrame):
-    """The opened issue: what the core read of it, and what can be done to it."""
+    """The opened issue: what the core read of it, and what can be done to it.
+
+    It is read-only until Edit is pressed, so a stray click or keystroke
+    changes nothing. Edit turns summary, priority, labels and description into
+    fields where they stand. Save sends only what changed, together with when
+    the issue was last changed at the moment editing began. If someone changed
+    it in Jira since, the edit is refused rather than written over theirs.
+    """
 
     earlier_requested = Signal()
     #: A transition the person picked: ``{id, name, to}``.
     transition_requested = Signal(dict)
-    edit_requested = Signal()
+    #: Editing began on the issue shown: what may change is read now.
+    edit_started = Signal()
+    #: The request for ``edit``: ``{key, updated, fields}``.
+    save_requested = Signal(dict)
     #: ``me``, or "" for nobody.
     assign_requested = Signal(str)
     reload_requested = Signal()
     attach_requested = Signal()
     #: An attachment to save: ``{id, filename, url, ...}``.
     download_requested = Signal(dict)
-    comment_requested = Signal(str)
+    #: A comment to post: a document, or on Server text.
+    comment_requested = Signal(object)
+    #: People to mention are wanted: "" for the first read, else a name.
+    people_wanted = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -374,6 +511,12 @@ class IssueDetail(QFrame):
         self.setProperty("role", "panel-fixed")
         self.setMinimumWidth(320)
         self.issue = None
+        #: The issue as it was when Edit was pressed; None when not editing.
+        self.editing = None
+        self._editable = None
+        self._rewrite = False
+        self._partial = False
+        self._working = False
         frame = QVBoxLayout(self)
         frame.setContentsMargins(0, 0, 0, 0)
         frame.setSpacing(0)
@@ -406,11 +549,20 @@ class IssueDetail(QFrame):
         top.addWidget(self.key, 1)
         self.priority = widgets.Tag("", "neutral")
         top.addWidget(self.priority, 0, Qt.AlignRight)
+        self.priority_edit = widgets.capped(QComboBox(), 200)
+        self.priority_edit.setAccessibleName("Priority")
+        self.priority_edit.currentIndexChanged.connect(self._edited)
+        top.addWidget(self.priority_edit, 0, Qt.AlignRight)
         layout.addLayout(top)
         self.summary = _label("", "h2", wrap=True)
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.summary)
+        self.summary_edit = QLineEdit()
+        self.summary_edit.setObjectName("jiraSummaryEdit")
+        self.summary_edit.setAccessibleName("Summary")
+        self.summary_edit.textChanged.connect(self._edited)
+        layout.addWidget(self.summary_edit)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -424,8 +576,18 @@ class IssueDetail(QFrame):
         actions.addWidget(self.status)
         self.edit = QPushButton("Edit")
         icons.button(self.edit, "edit", "Edit")
-        self.edit.clicked.connect(self.edit_requested)
+        self.edit.setToolTip("Change summary, priority, labels or description here")
+        self.edit.clicked.connect(self.begin_edit)
         actions.addWidget(self.edit)
+        self.save = QPushButton("Save")
+        self.save.setProperty("variant", "primary")
+        self.save.setToolTip("Send what changed to Jira (Ctrl+S)")
+        self.save.clicked.connect(self._save)
+        actions.addWidget(self.save)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.setToolTip("Put the changes down; nothing is sent")
+        self.cancel.clicked.connect(self.put_down)
+        actions.addWidget(self.cancel)
         self.more = QToolButton()
         icons.button(self.more, "more", "")
         self.more.setObjectName("jiraMore")
@@ -447,6 +609,11 @@ class IssueDetail(QFrame):
         actions.addWidget(self.more)
         actions.addStretch(1)
         layout.addLayout(actions)
+        # What went wrong with an edit, where the person is looking: under
+        # Save, not past the comments.
+        self.edit_problem = _label("", "error", wrap=True)
+        self.edit_problem.setVisible(False)
+        layout.addWidget(self.edit_problem)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(18)
@@ -457,10 +624,22 @@ class IssueDetail(QFrame):
         self.project = _label("")
         self.labels = widgets.mono("")
         self.labels.setWordWrap(True)
+        self.labels_edit = QLineEdit()
+        self.labels_edit.setProperty("mono", "true")
+        self.labels_edit.setAccessibleName("Labels")
+        self.labels_edit.setPlaceholderText("Separated by spaces or commas")
+        self.labels_edit.textChanged.connect(self._edited)
+        labels = QVBoxLayout()
+        labels.setSpacing(0)
+        labels.addWidget(self.labels)
+        labels.addWidget(self.labels_edit)
         assignee = QHBoxLayout()
         assignee.setSpacing(6)
         assignee.addWidget(self.assignee_mark)
         assignee.addWidget(self.assignee, 1)
+        self.assignee_edit = widgets.capped(PeoplePicker(), 260)
+        self.assignee_edit.currentIndexChanged.connect(self._edited)
+        assignee.addWidget(self.assignee_edit, 1)
         grid.addWidget(_label("Assignee", "muted"), 0, 0)
         grid.addWidget(_label("Reporter", "muted"), 0, 1)
         grid.addLayout(assignee, 1, 0)
@@ -468,7 +647,7 @@ class IssueDetail(QFrame):
         grid.addWidget(_label("Project", "muted"), 2, 0)
         grid.addWidget(_label("Labels", "muted"), 2, 1)
         grid.addWidget(self.project, 3, 0)
-        grid.addWidget(self.labels, 3, 1)
+        grid.addLayout(labels, 3, 1)
         grid.setRowMinimumHeight(2, 26)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -478,6 +657,37 @@ class IssueDetail(QFrame):
         layout.addWidget(widgets.kicker("Description"))
         self.description = _Rich()
         layout.addWidget(self.description)
+        self.description_edit = QPlainTextEdit()
+        self.description_edit.setObjectName("jiraDescriptionEdit")
+        self.description_edit.setAccessibleName("Description")
+        self.description_edit.setPlaceholderText("No description")
+        self.description_edit.textChanged.connect(self._edited)
+        self.description_edit.document().documentLayout().documentSizeChanged.connect(
+            self._fit_description)
+        layout.addWidget(self.description_edit)
+        # Cloud: the description with its formatting. Server's is text.
+        self.rich_edit = DescriptionEditor()
+        self.rich_edit.changed.connect(self._edited)
+        # Who may be mentioned is read once per issue, for both.
+        self._people_of = None
+        self._people = []
+        self.rich_edit.people_wanted.connect(self._want_people)
+        layout.addWidget(self.rich_edit)
+        # A description with what the editor cannot hold - a table, a picture -
+        # stays as it is unless the person chooses to edit it without them.
+        rich = QHBoxLayout()
+        rich.setSpacing(10)
+        self.rich_note = _label("", "hint", wrap=True)
+        rich.addWidget(self.rich_note, 1)
+        self.rewrite = QPushButton("Rewrite as plain text")
+        self.rewrite.setProperty("variant", "ghost")
+        self.rewrite.clicked.connect(self._toggle_rewrite)
+        rich.addWidget(self.rewrite, 0, Qt.AlignTop)
+        self.rich_row = QFrame()
+        self.rich_row.setObjectName("jiraRichNote")
+        self.rich_row.setLayout(rich)
+        rich.setContentsMargins(10, 6, 6, 6)
+        layout.addWidget(self.rich_row)
 
         layout.addWidget(widgets.hline())
         files = QHBoxLayout()
@@ -504,17 +714,17 @@ class IssueDetail(QFrame):
         self.comments.setSpacing(10)
         layout.addLayout(self.comments)
 
-        self.composer = QPlainTextEdit()
-        self.composer.setObjectName("jiraComposer")
-        self.composer.setPlaceholderText("Add a comment…")
-        self.composer.setFixedHeight(64)
-        self.composer.textChanged.connect(self._composing)
+        self.composer = DescriptionEditor(name="Comment",
+                                          placeholder="Add a comment… (@ mentions someone)",
+                                          shortest=64)
+        self.composer.changed.connect(self._composing)
+        self.composer.people_wanted.connect(self._want_people)
         layout.addWidget(self.composer)
         bottom = QHBoxLayout()
         self.post = QPushButton("Post comment")
         self.post.setEnabled(False)
         self.post.clicked.connect(
-            lambda: self.comment_requested.emit(self.composer.toPlainText().strip()))
+            lambda: self.comment_requested.emit(self.composer.body()))
         bottom.addWidget(self.post)
         bottom.addStretch(1)
         layout.addLayout(bottom)
@@ -525,7 +735,6 @@ class IssueDetail(QFrame):
         self.note.setVisible(False)
         layout.addWidget(self.note)
         layout.addStretch(1)
-        self._working = False
         self.scroll.setWidget(body)
         self.stack.addWidget(self.scroll)
 
@@ -537,6 +746,12 @@ class IssueDetail(QFrame):
         column.addStretch(1)
         self.stack.addWidget(gone)
         self.skeleton = widgets.Skeleton(self, "lines", ground="SURFACE")
+        # On only while editing, so the keys mean nothing here otherwise.
+        self.save_key = QShortcut(QKeySequence.Save, self, self._save)
+        self.save_key.setContext(Qt.WidgetWithChildrenShortcut)
+        self.escape_key = QShortcut(QKeySequence(Qt.Key_Escape), self, self._escape)
+        self.escape_key.setContext(Qt.WidgetWithChildrenShortcut)
+        self._apply_mode()
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -550,6 +765,7 @@ class IssueDetail(QFrame):
 
     # -- what it shows --------------------------------------------------------
     def clear(self):
+        self._stop_editing()
         self.issue = None
         self.skeleton.stop()
         self.stack.setCurrentIndex(0)
@@ -564,6 +780,7 @@ class IssueDetail(QFrame):
             self.skeleton.start()
 
     def unavailable(self, key, text):
+        self._stop_editing()
         self.skeleton.stop()
         self.issue = None
         self.gone_title.setText("%s is not available" % key)
@@ -571,23 +788,34 @@ class IssueDetail(QFrame):
         self.stack.setCurrentIndex(2)
 
     def say(self, text):
+        """What went wrong: under Save while editing, under the issue otherwise."""
         self.skeleton.stop()
-        self.problem.setText(text)
-        self.problem.setVisible(bool(text))
+        shown = self.edit_problem if self.editing is not None else self.problem
+        shown.setText(text)
+        shown.setVisible(bool(text))
 
     def show_issue(self, issue, partial=False):
+        """An issue as the core read it. The one being edited may be read again
+        - by Refresh, say - and what was typed stays; it is compared with the
+        issue as it was when Edit was pressed."""
+        if self.editing is not None and issue.get("key") != self.editing.get("key"):
+            self._stop_editing()
+        if issue.get("key") != self._people_of:
+            self._people_of, self._people = issue.get("key"), []
+            for editor in (self.composer, self.rich_edit):
+                editor.forget_people()
         if not partial:
             self.skeleton.stop()
         self.issue = issue
+        self._partial = partial
         self.problem.setVisible(False)
         self.key.setText("%s  /  %s" % (issue.get("key", ""), issue.get("type") or "Issue")
                          if issue.get("type") else issue.get("key", ""))
         priority = issue.get("priority") or ""
         self.priority.set("%s priority" % priority if priority else "", "neutral")
-        self.priority.setVisible(bool(priority))
         self.summary.setText(issue.get("summary") or "")
         self.status.setText(issue.get("status") or "No status")
-        self._fill_transitions(issue.get("transitions") or [], partial)
+        self._fill_transitions(issue.get("transitions") or [])
         self.assignee.setText(issue.get("assignee") or "Unassigned")
         self.assignee_mark.set(issue.get("assignee") or "")
         self.reporter.setText(issue.get("reporter") or "—")
@@ -605,27 +833,23 @@ class IssueDetail(QFrame):
         self.description.style().polish(self.description)
         self._fill_files(issue.get("attachments") or [], partial)
         self._fill_comments(issue.get("comments") or {}, partial)
+        self._apply_mode()
         self.stack.setCurrentIndex(1)
 
-    def _fill_transitions(self, offered, partial):
+    def _fill_transitions(self, offered):
         menu = self.status.menu()
         menu.clear()
         for one in offered:
             name, to = one.get("name") or "", one.get("to") or ""
             text = name if not to or to.lower() == name.lower() else "%s  (to %s)" % (name, to)
             menu.addAction(text, lambda chosen=dict(one): self.transition_requested.emit(chosen))
-        self.status.setEnabled(bool(offered) and not partial and not self._working)
         self.status.setToolTip("Move it along its workflow" if offered else
                                "Its workflow offers no move from here to this account")
 
     def working(self, busy, note=""):
         """A change is being made: the controls that would make another wait."""
         self._working = busy
-        for widget in (self.edit, self.more, self.attach):
-            widget.setEnabled(not busy)
-        self.status.setEnabled(not busy and bool(self.status.menu().actions()))
-        self.post.setEnabled(not busy and bool(self.composer.toPlainText().strip()))
-        self.composer.setReadOnly(busy)
+        self._apply_mode()
         self.tell(note)
 
     def tell(self, text):
@@ -634,7 +858,300 @@ class IssueDetail(QFrame):
         self.note.setVisible(bool(text))
 
     def _composing(self):
-        self.post.setEnabled(not self._working and bool(self.composer.toPlainText().strip()))
+        self._apply_mode()
+
+    def _apply_mode(self):
+        """Reading or editing, idle or waiting on Jira: what shows, and what
+        may be pressed. While editing nothing else is written to the issue -
+        a change of its own would make the edit look like somebody else's.
+
+        The place on the page is kept. A focused button that is hidden or
+        disabled hands focus to the next one along, and the scroll area runs
+        to it - to the attachments, from Edit at the top.
+        """
+        bar = self.scroll.verticalScrollBar()
+        place = bar.value()
+        editing = self.editing is not None
+        busy = self._working
+        typing = self._typing_description()
+        cloud = self._cloud()
+        shown = {self.save: editing, self.cancel: editing, self.summary_edit: editing,
+                 self.priority_edit: editing, self.labels_edit: editing,
+                 self.assignee_edit: editing,
+                 self.status: not editing, self.edit: not editing, self.more: not editing,
+                 self.summary: not editing, self.labels: not editing,
+                 self.assignee: not editing, self.assignee_mark: not editing,
+                 self.priority: not editing and bool(self.priority.text()),
+                 self.description_edit: typing and not cloud,
+                 self.rich_edit: typing and cloud,
+                 self.description: not typing,
+                 self.rich_row: bool(self._losing()) and self._may("description")}
+        # What appears, before what goes: focus leaving a hidden button finds
+        # its neighbour already there.
+        for widget, visible in sorted(shown.items(), key=lambda pair: not pair[1]):
+            widget.setVisible(visible)
+        self.status.setEnabled(not busy and not self._partial
+                               and bool(self.status.menu().actions()))
+        self.edit.setEnabled(not busy and not self._partial)
+        self.more.setEnabled(not busy)
+        self.attach.setEnabled(not busy and not editing)
+        self.post.setEnabled(not busy and not editing
+                             and bool(self.composer.toPlainText().strip()))
+        self.composer.setReadOnly(busy)
+        for widget in (self.summary_edit, self.labels_edit, self.description_edit,
+                       self.rich_edit):
+            widget.setReadOnly(busy)
+        self.priority_edit.setEnabled(not busy and self._may("priority")
+                                      and self.priority_edit.count() > 1)
+        self.assignee_edit.setEnabled(not busy)
+        self.summary_edit.setEnabled(self._may("summary"))
+        self.labels_edit.setEnabled(self._may("labels"))
+        self.cancel.setEnabled(not busy)
+        self.save.setEnabled(editing and not busy and bool(self.changes()))
+        self.save.setText("Saving…" if editing and busy else "Save")
+        self.save_key.setEnabled(editing)
+        self.escape_key.setEnabled(editing)
+        bar.setValue(place)
+
+    # -- editing in place -----------------------------------------------------
+    def begin_edit(self):
+        """Turn the issue's fields into fields to type in. What this account
+        may change is read now; until it arrives each is offered as Jira
+        offered it last time, and priority waits for its list."""
+        if self.issue is None or self.editing is not None or self._partial:
+            return
+        issue = self.issue
+        self.editing = dict(issue)
+        self._editable = None
+        self._rewrite = False
+        for widget in (self.summary_edit, self.labels_edit, self.description_edit,
+                       self.priority_edit):
+            widget.blockSignals(True)
+        self.summary_edit.setText(issue.get("summary") or "")
+        self.labels_edit.setText(" ".join(issue.get("labels") or []))
+        self.description_edit.setPlainText(issue.get("description_text") or "")
+        self.priority_edit.clear()
+        self.priority_edit.addItem(issue.get("priority") or "No priority", "")
+        for widget in (self.summary_edit, self.labels_edit, self.description_edit,
+                       self.priority_edit):
+            widget.blockSignals(False)
+        self.assignee_edit.start(issue.get("assignee") or "")
+        if self._cloud():
+            self.rich_edit.set_document(issue.get("description_doc"))
+        self._say_what_is_lost()
+        self.edit_problem.setVisible(False)
+        self.tell("")
+        # Focus first, where the person is looking: the Edit button about to
+        # be hidden must not hand it to something further down.
+        self.summary_edit.setEnabled(True)
+        self.summary_edit.setVisible(True)
+        self.summary_edit.setFocus()
+        self.summary_edit.end(False)
+        self._apply_mode()
+        self._fit_description()
+        self.edit_started.emit()
+
+    def set_meta(self, meta):
+        """What the issue's screen lets this account change. A field it leaves
+        out stays as it is and cannot be typed in."""
+        if self.editing is None:
+            return
+        self._editable = set(meta.get("editable") or [])
+        current = self.editing.get("priority") or ""
+        self.priority_edit.blockSignals(True)
+        self.priority_edit.clear()
+        for one in meta.get("priorities") or []:
+            self.priority_edit.addItem(one["name"], one["id"])
+        index = self.priority_edit.findText(current)
+        if index < 0:
+            self.priority_edit.insertItem(0, current or "No priority", "")
+            index = 0
+        self.priority_edit.setCurrentIndex(index)
+        self.priority_edit.blockSignals(False)
+        self._apply_mode()
+
+    def _may(self, field):
+        """Whether a field may be changed - until Jira says, everything but
+        priority, whose choices it has not sent yet."""
+        if self.editing is None:
+            return False
+        return field != "priority" if self._editable is None else field in self._editable
+
+    def _cloud(self):
+        """Whether the description is edited with its formatting: Cloud's is
+        a document, Server's is text."""
+        return self.editing is not None and self.editing.get("description_doc") is not None
+
+    def _losing(self):
+        """What editing the description would lose, for a person to read."""
+        if self.editing is None:
+            return []
+        if self._cloud():
+            return list(self.editing.get("description_lost") or [])
+        return [] if self.editing.get("description_plain", True) else ["formatting"]
+
+    def _typing_description(self):
+        return self._may("description") and (not self._losing() or self._rewrite)
+
+    def changes(self):
+        """Only what differs from the issue as it was when Edit was pressed."""
+        if self.editing is None:
+            return {}
+        before, fields = self.editing, {}
+        summary = self.summary_edit.text().strip()
+        if self._may("summary") and summary != (before.get("summary") or ""):
+            fields["summary"] = summary
+        if self._typing_description() and self._cloud():
+            document = self.rich_edit.changed_document()
+            if document is not None:
+                fields["description"] = document
+        elif self._typing_description():
+            text = self.description_edit.toPlainText()
+            if text.strip() != (before.get("description_text") or "").strip():
+                fields["description"] = text
+        labels = split_labels(self.labels_edit.text())
+        if self._may("labels") and labels != list(before.get("labels") or []):
+            fields["labels"] = labels
+        if (self._may("priority") and self.priority_edit.currentData()
+                and self.priority_edit.currentText() != (before.get("priority") or "")):
+            fields["priority"] = self.priority_edit.currentData()
+        assignee = self.assignee_edit.value()
+        if assignee is not None:
+            fields["assignee"] = assignee
+        return fields
+
+    def has_changes(self):
+        return bool(self.changes())
+
+    def _edited(self, *_args):
+        if self.editing is not None:
+            self.edit_problem.setVisible(False)
+            self.save.setEnabled(not self._working and bool(self.changes()))
+
+    def _say_what_is_lost(self):
+        lost = self._losing()
+        if self._cloud():
+            things = _listed(lost)
+            if self._rewrite:
+                self.rich_note.setText("Saving replaces the description with what is above, "
+                                       "without its %s." % things)
+                self.rewrite.setText("Keep it as it is")
+            else:
+                self.rich_note.setText("This description has %s that this editor cannot "
+                                       "keep. It stays as it is unless you edit it without "
+                                       "them." % things)
+                self.rewrite.setText("Edit without them")
+        elif self._rewrite:
+            self.rich_note.setText("Saving replaces the formatted description with this "
+                                   "text. Lists, tables and pictures in it are lost.")
+            self.rewrite.setText("Keep the formatting")
+        else:
+            self.rich_note.setText(
+                "This description has formatting - lists, tables or pictures - that plain "
+                "text cannot hold. It stays as it is unless you rewrite it as plain text.")
+            self.rewrite.setText("Rewrite as plain text")
+
+    def _toggle_rewrite(self):
+        self._rewrite = not self._rewrite
+        if not self._rewrite:
+            # Back to the description as it is: what was typed goes.
+            self.description_edit.setPlainText(self.editing.get("description_text") or "")
+            if self._cloud():
+                self.rich_edit.set_document(self.editing.get("description_doc"))
+        self._say_what_is_lost()
+        self._apply_mode()
+        self._fit_description()
+        if self._rewrite:
+            (self.rich_edit if self._cloud() else self.description_edit).setFocus()
+
+    def _fit_description(self, *_args):
+        """As tall as its text, up to a screenful; past that it scrolls."""
+        lines = max(4, self.description_edit.document().documentLayout().documentSize()
+                    .height())
+        spacing = self.description_edit.fontMetrics().lineSpacing()
+        wanted = int(lines * spacing + 2 * self.description_edit.frameWidth()
+                     + self.description_edit.document().documentMargin() * 2 + 4)
+        self.description_edit.setFixedHeight(min(DESCRIPTION_HEIGHT, wanted))
+
+    def _save(self):
+        if self.editing is None or self._working:
+            return
+        fields = self.changes()
+        if not fields:
+            self.put_down()
+            return
+        self.save_requested.emit({"key": self.editing.get("key"),
+                                  "updated": self.editing.get("updated") or "",
+                                  "fields": fields})
+
+    def put_down(self):
+        """Stop editing; what was typed is dropped and nothing is sent."""
+        if self.editing is None or self._working:
+            return
+        self._stop_editing()
+        if self.issue is not None:
+            self.show_issue(self.issue)
+
+    def may_put_down(self):
+        """Stop editing if nothing was changed, or the person agrees to drop
+        what was. False: they want to keep editing."""
+        if self.editing is None:
+            return True
+        if self._working:
+            return False
+        if self.has_changes() and not widgets.confirm(
+                self, "Discard changes",
+                "Discard your changes to %s?" % self.editing.get("key", "this issue"),
+                "Nothing was sent to Jira.", agree="Discard", refuse="Keep editing",
+                kind="warn"):
+            return False
+        self.put_down()
+        return True
+
+    def _escape(self):
+        if self.editing is not None:
+            self.may_put_down()
+
+    def _stop_editing(self):
+        focused = QApplication.focusWidget()
+        inside = focused is not None and self.isAncestorOf(focused)
+        self.editing = None
+        self._editable = None
+        self._rewrite = False
+        self.edit_problem.setVisible(False)
+        if inside:
+            # Back to Edit, which is where the next edit starts.
+            self.edit.setVisible(True)
+            self.edit.setFocus()
+        self._apply_mode()
+
+    # -- people to mention ------------------------------------------------------
+    def set_cloud(self, cloud):
+        """Cloud takes a comment with its formatting; Server takes text."""
+        self.composer.set_plain(not cloud)
+
+    def _want_people(self, query):
+        """An editor wants people. The first read for an issue is shared: the
+        other editor gets the answer too, and does not ask again."""
+        if not query and self._people:
+            for editor in (self.composer, self.rich_edit):
+                editor.set_people(self._people)
+            return
+        self.people_wanted.emit(query)
+
+    def take_people(self, key, people, query=""):
+        """People who can see ``key``, read from Jira: for both editors."""
+        if key != self._people_of:
+            return
+        known = {one["id"] for one in self._people}
+        self._people += [one for one in people or [] if one.get("id") not in known]
+        for editor in (self.composer, self.rich_edit):
+            editor.set_people(self._people, query)
+
+    def people_failed(self, key):
+        if key == self._people_of:
+            for editor in (self.composer, self.rich_edit):
+                editor.people_failed()
 
     def add_earlier(self, page):
         """Earlier comments, read on request, under the ones shown."""
@@ -712,6 +1229,26 @@ class IssueDetail(QFrame):
     def _copy(self, field):
         if self.issue and self.issue.get(field):
             QApplication.clipboard().setText(str(self.issue[field]))
+
+
+def _issue_hit(row, connection_id, connection_name):
+    """An issue as Ctrl+K shows it - a loaded one and one Jira found alike."""
+    tone = "accent" if row.get("category") == "indeterminate" else "neutral"
+    return search.hit(
+        "%s  %s" % (row.get("key", ""), row.get("summary", "")),
+        "Jira issue · %s" % (connection_name or connection_id),
+        row.get("status", ""), tone,
+        keys=" ".join(part for part in (row.get("type"), row.get("assignee"),
+                                        row.get("priority")) if part),
+        target=("issue", connection_id, row.get("key")))
+
+
+def _listed(things):
+    """``["tables", "pictures"]`` as "tables and pictures"."""
+    things = [str(one) for one in things if one]
+    if len(things) < 2:
+        return things[0] if things else "things"
+    return "%s and %s" % (", ".join(things[:-1]), things[-1])
 
 
 def _empty_layout(layout):
@@ -995,15 +1532,17 @@ class IssuesTab(QWidget):
                       "No issues were updated in the last 90 days.")
 
     def select_key(self, key, emit=True):
-        for index in range(self.list.count()):
-            row = self.list.item(index).data(Qt.UserRole) or {}
-            if row.get("key") == key:
-                if not emit:
-                    self.list.blockSignals(True)
-                self.list.setCurrentRow(index)
-                self.list.blockSignals(False)
-                return True
-        return False
+        """Pick the row of ``key``; False if it is not in the list. With
+        ``emit`` False nothing is opened: the row only shows as picked."""
+        found = next((index for index in range(self.list.count())
+                      if (self.list.item(index).data(Qt.UserRole) or {}).get("key") == key),
+                     -1)
+        if found < 0 and emit:
+            return False
+        self.list.blockSignals(not emit)
+        self.list.setCurrentRow(found)
+        self.list.blockSignals(False)
+        return found >= 0
 
     def update_row(self, issue):
         """An opened issue's newer fields, onto its row - without asking again."""
@@ -1100,6 +1639,11 @@ class JiraView(QWidget):
         self._listing = False
         self._started = False
         self._closing = False
+        self._pending = {}  # cancellation event -> request kind
+        self._editing_on = ""  # the connection of the issue being edited
+        # Issues Ctrl+K found in Jira, by (connection, key): what their row in
+        # the list is, when one is opened before the list has it.
+        self._found = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 18, 24, 14)
@@ -1112,6 +1656,7 @@ class JiraView(QWidget):
         self.crumb.clicked.connect(self.back_requested)
         crumb.addWidget(self.crumb)
         crumb.addStretch(1)
+        self.window_actions = crumb
         outer.addLayout(crumb)
         header = QHBoxLayout()
         header.setSpacing(10)
@@ -1161,12 +1706,15 @@ class JiraView(QWidget):
         self.issues.create.clicked.connect(self.create_issue)
         detail = self.issues.detail
         detail.transition_requested.connect(self.move_issue)
-        detail.edit_requested.connect(self.edit_issue)
+        detail.edit_started.connect(self.edit_issue)
+        detail.save_requested.connect(self.save_edit)
+        detail.assignee_edit.wanted.connect(self.find_people)
         detail.assign_requested.connect(self.assign_issue)
         detail.reload_requested.connect(lambda: self.open_issue(detail.issue or {}))
         detail.attach_requested.connect(self.attach_file)
         detail.download_requested.connect(self.save_file)
         detail.comment_requested.connect(self.post_comment)
+        detail.people_wanted.connect(self.find_mentionable)
         self.activity.wanted.connect(self.load_activity)
         self._activity_stale = True
         self.connections_tab.save_requested.connect(self.save_connection)
@@ -1188,19 +1736,65 @@ class JiraView(QWidget):
         other paths: everything loaded so far belonged to the old one."""
         if core is self.core:
             return
+        self._cancel_requests()
         self.core = core
         self.connections, self.cache, self.health = [], {}, {}
+        self._found = {}
         self._asked = {}
         self._listed = False
+        self._listing = False
+        self._started = False
+        self._activity_stale = True
+        self.auto.stop()
         self.issues.projects.reset()
         self.issues.statuses.reset()
+        self.issues.list_skeleton.stop()
+        self.issues.load_more.setEnabled(True)
         self.issues.show_rows([], False)
         self.issues.detail.clear()
+        self.issues.detail.composer.clear()
+        self.issues.detail.working(False)
+        self.activity.set_rows([])
+        self.connections_tab.message.clear()
+        self.issues.search.clear()
+        self.issues._searched_text = ""
+        self.picker.blockSignals(True)
         self.picker.clear()
+        self.picker.blockSignals(False)
+        self.connections_tab.set_connections([])
+        self.settings_tab.set_connection(None)
+        self._show_health()
         state = self.settings.integrations_state()
         self.issues.set_filters(state.get("filters") or {})
         if self.isVisible():
             self.list_connections()
+            if self.tabs.currentWidget() is self.activity:
+                self.load_activity()
+
+    def busy_reason(self, include_dialogs=True):
+        if any(kind in WRITES for kind in self._pending.values()):
+            return "A Jira change is being saved. Wait for it to finish."
+        if include_dialogs and any(dialog.isVisible() for dialog in self.findChildren(QDialog)):
+            return "Finish or cancel the open Jira dialog first."
+        return ""
+
+    def _cancel_requests(self):
+        """Stop the reads in flight. A write is never stopped: killed half way,
+        nobody could say whether Jira took it. It runs to its end, and its
+        answer is dropped when the context it belonged to is gone."""
+        for cancel, kind in list(self._pending.items()):
+            if kind not in WRITES:
+                cancel.set()
+                del self._pending[cancel]
+        self._asked.clear()
+
+    def shutdown(self):
+        self._closing = True
+        self.ticker.stop()
+        self.auto.stop()
+        self._cancel_requests()
+        for dialog in self.findChildren(QDialog):
+            dialog.reject()
 
     def current(self):
         connection_id = self.picker.currentData()
@@ -1208,10 +1802,12 @@ class JiraView(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if self._closing:
+            return
         self.ticker.start()
         if not self._listed:
             self.list_connections()
-        else:
+        elif not self._started:
             self._first_look()
         self._arm_auto()
 
@@ -1228,18 +1824,25 @@ class JiraView(QWidget):
             self.issues.list.viewport().update()
 
     # -- asking the core ------------------------------------------------------
-    def _call(self, kind, work, done, quiet=False):
-        """``work`` on a thread; ``done(payload)`` for the latest call of a kind.
+    def _call(self, kind, work, done, quiet=False, cancel=None):
+        """``work(core, cancel)`` on a thread; the latest answer reaches ``done``.
 
         A core that could not answer at all is said on the Issues tab; a failure
         the core reports (``ok`` false) is the caller's to show.
         """
+        if self._closing or self.core is None:
+            return
         self._asked[kind] = self._asked.get(kind, 0) + 1
         mine = self._asked[kind]
         core = self.core
+        cancel = cancel if cancel is not None else threading.Event()
+        self._pending[cancel] = kind
+        # A write's process is not told about this cancel: see _cancel_requests.
+        handed = None if kind in WRITES else cancel
 
         def answer(result, error):
-            if self._asked.get(kind) != mine or core is not self.core:
+            self._pending.pop(cancel, None)
+            if self._closing or self._asked.get(kind) != mine or core is not self.core:
                 return
             if error is not None:
                 if not isinstance(error, core_mod.CoreError):
@@ -1250,12 +1853,15 @@ class JiraView(QWidget):
                 return
             done(result or {})
 
-        if core is None:
-            return
+        def request():
+            if handed is not None and handed.is_set():
+                return {"ok": False, "kind": "cancelled"}
+            return work(core, handed)
+
         if background.offloads(core):
-            background.run(work, answer, owner=self)
+            background.run(request, answer, owner=self)
         else:
-            answer(*background.call(work))
+            answer(*background.call(request))
 
     def list_connections(self, then=None):
         """The project's connections - a file the core reads; Jira is not asked."""
@@ -1274,7 +1880,7 @@ class JiraView(QWidget):
                 then()
             self._first_look()
 
-        self._call("list", lambda: self.core.integrations("list"), done)
+        self._call("list", lambda core, cancel: core.integrations("list", cancel=cancel), done)
 
     def _set_connections(self, connections, pick=""):
         self.connections = list(connections)
@@ -1295,11 +1901,20 @@ class JiraView(QWidget):
         self.connections_changed.emit()
 
     def _connection_picked(self, _index):
+        """Another connection picked. An issue being edited belongs to the one
+        it was opened through: leaving that puts the edit down, or - if the
+        person would rather keep it - puts the picker back."""
+        detail = self.issues.detail
+        if (detail.editing is not None and self.picker.currentData() != self._editing_on
+                and not detail.may_put_down()):
+            self.picker.setCurrentIndex(max(0, self.picker.findData(self._editing_on)))
+            return False
         self._remember()
         self.settings_tab.set_connection(self.current())
         self._show_health()
         self._show_issues()
         self._arm_auto()
+        return True
 
     def _remember(self):
         state = dict(self.settings.integrations_state())
@@ -1365,6 +1980,7 @@ class JiraView(QWidget):
     def _show_issues(self):
         connection = self.current()
         self.issues.say("")
+        self.issues.detail.set_cloud((connection or {}).get("flavour", "cloud") == "cloud")
         if connection is None:
             self.issues.offer(
                 "No Jira connection yet",
@@ -1391,7 +2007,9 @@ class JiraView(QWidget):
             return
         self.issues.ready()
         self.issues.show_rows(cache.rows, cache.cursor, keep_key=cache.opened)
-        if cache.opened and cache.opened in cache.details:
+        if self.issues.detail.editing is not None:
+            pass  # stays until it is saved or put down
+        elif cache.opened and cache.opened in cache.details:
             self.issues.detail.show_issue(cache.details[cache.opened])
         elif not cache.opened:
             self.issues.detail.clear()
@@ -1484,8 +2102,8 @@ class JiraView(QWidget):
                 if cache.opened and result.get("issue_error"):
                     self.issues.detail.unavailable(cache.opened, result["issue_error"])
 
-        self._call("list", lambda: self.core.integrations(
-            "call", connection_id, "refresh", document=request), done)
+        self._call("list", lambda core, cancel: core.integrations(
+            "call", connection_id, "refresh", document=request, cancel=cancel), done)
 
     def _list(self, connection, request, replace):
         cache = self._cache(connection)
@@ -1513,19 +2131,26 @@ class JiraView(QWidget):
                 cache.rows = cache.rows + [one for one in rows if one.get("key") not in known]
             cache.cursor = result.get("cursor")
             cache.loaded_at = datetime.datetime.now(datetime.timezone.utc)
-            if replace and cache.opened not in {one.get("key") for one in cache.rows}:
+            if (replace and self.issues.detail.editing is None
+                    and cache.opened not in {one.get("key") for one in cache.rows}):
                 cache.opened = ""
             if self.current() is connection:
                 self._show_issues()
 
-        self._call("list", lambda: self.core.integrations(
-            "call", connection_id, "search", document=request), done)
+        self._call("list", lambda core, cancel: core.integrations(
+            "call", connection_id, "search", document=request, cancel=cancel), done)
 
     def open_issue(self, row):
         """An issue opened: read it, alone, with its newest comments."""
         connection = self.current()
         key = (row or {}).get("key")
         if connection is None or not key:
+            return
+        detail = self.issues.detail
+        editing = (detail.editing or {}).get("key")
+        if editing and editing != key and not detail.may_put_down():
+            # Keep editing: the row picked goes back to the one being edited.
+            self.issues.select_key(editing, emit=False)
             return
         cache = self._cache(connection)
         cache.opened = key
@@ -1560,9 +2185,9 @@ class JiraView(QWidget):
             if cache.opened == key and self.current() is connection:
                 self.issues.detail.show_issue(issue)
 
-        self._call("issue", lambda: self.core.integrations(
-            "call", connection_id, "issue", document={"key": key, "comments": COMMENTS}),
-            done)
+        self._call("issue", lambda core, cancel: core.integrations(
+            "call", connection_id, "issue", document={"key": key, "comments": COMMENTS},
+            cancel=cancel), done)
 
     def earlier_comments(self):
         connection = self.current()
@@ -1584,9 +2209,9 @@ class JiraView(QWidget):
                 self.issues.detail.add_earlier(
                     (payload.get("result") or {}).get("comments") or {})
 
-        self._call("comments", lambda: self.core.integrations(
+        self._call("comments", lambda core, cancel: core.integrations(
             "call", connection_id, "comments",
-            document={"key": key, "start": start, "size": COMMENTS}), done)
+            document={"key": key, "start": start, "size": COMMENTS}, cancel=cancel), done)
 
     def _choices(self, which):
         """A filter's list, read the first time its box is opened."""
@@ -1611,12 +2236,15 @@ class JiraView(QWidget):
                 combo.set_choices([(one["name"], one["name"])
                                    for one in result.get("statuses") or []])
 
-        self._call(which, lambda: self.core.integrations("call", connection_id, which), done)
+        self._call(which, lambda core, cancel: core.integrations(
+            "call", connection_id, which, cancel=cancel), done)
 
     # -- the Issues tab: changing ---------------------------------------------
     def has_unsaved(self):
-        """A comment typed and not posted - what leaving the project would lose."""
-        return bool(self.issues.detail.composer.toPlainText().strip())
+        """Drafts and settings that leaving the project would lose."""
+        return (bool(self.issues.detail.composer.toPlainText().strip())
+                or self.issues.detail.has_changes()
+                or self.settings_tab.save.isEnabled())
 
     def _write(self, operation, request, then=None, note=""):
         """One change to Jira. The answer carries the issue as it is now, so the
@@ -1642,8 +2270,9 @@ class JiraView(QWidget):
             if then is not None:
                 then(payload)
 
-        self._call("write", lambda: self.core.integrations(
-            "call", connection_id, operation, document=request), answered, quiet=True)
+        self._call("write", lambda core, cancel: core.integrations(
+            "call", connection_id, operation, document=request, cancel=cancel),
+            answered, quiet=True)
 
     def _took(self, connection, issue):
         """An issue as a change left it: into the cache, its row and the detail."""
@@ -1685,43 +2314,98 @@ class JiraView(QWidget):
         self._write("transition", request, then, note="Moving %s…" % issue.get("key", ""))
 
     def edit_issue(self):
-        from .jiradialogs import EditIssueDialog
-        issue = self.issues.detail.issue
+        """Editing began: read what this account may change on the issue - one
+        request, asked because Edit was pressed."""
+        detail = self.issues.detail
         connection = self.current()
-        if not issue or connection is None:
+        if detail.editing is None or connection is None:
             return
-        dialog = EditIssueDialog(self, issue)
-        alive = [True]
+        key = detail.editing.get("key")
+        self._editing_on = connection["id"]
 
         def meta(payload):
-            if alive[0] and payload.get("ok"):
-                dialog.set_meta(payload.get("result") or {})
-            elif alive[0]:
-                dialog.problem.setText(payload.get("error") or "")
-                dialog.problem.setVisible(bool(payload.get("error")))
+            if (detail.editing or {}).get("key") != key:
+                return
+            if payload.get("ok"):
+                detail.set_meta(payload.get("result") or {})
+            else:
+                detail.say(payload.get("error") or "Jira did not say what may be changed.")
 
-        self._call("edit_meta", lambda: self.core.integrations(
-            "call", connection["id"], "edit_meta", document={"key": issue["key"]}), meta,
-            quiet=True)
-        dialog.save_requested.connect(
-            lambda request, done: self._write("edit", request, done, note="Saving…"))
-        dialog.exec()
-        alive[0] = False
-        dialog.deleteLater()
+        self._call("edit_meta", lambda core, cancel: core.integrations(
+            "call", connection["id"], "edit_meta", document={"key": key},
+            cancel=cancel), meta, quiet=True)
+
+    def find_people(self, query):
+        """People the issue being edited may be assigned to, matching ``query``:
+        read because its list was opened, or a name typed and Enter pressed."""
+        detail = self.issues.detail
+        picker = detail.assignee_edit
+        connection = self.current()
+        if detail.editing is None or connection is None:
+            picker.failed()
+            return
+        key = detail.editing.get("key")
+
+        def done(payload):
+            if (detail.editing or {}).get("key") != key:
+                return
+            if payload.get("ok"):
+                picker.set_people((payload.get("result") or {}).get("people") or [])
+            else:
+                picker.failed()
+                detail.say(payload.get("error") or "Jira did not say who it may be assigned to.")
+
+        self._call("people", lambda core, cancel: core.integrations(
+            "call", connection["id"], "assignable", document={"key": key, "query": query},
+            cancel=cancel), done, quiet=True)
+
+    def save_edit(self, request):
+        """Send an edit. Taken, the issue comes back as it is now and editing
+        ends; refused - changed in Jira meanwhile, say - it stays open with
+        what was typed, and the reason under Save."""
+        detail = self.issues.detail
+
+        def then(payload):
+            if payload.get("ok"):
+                detail.put_down()
+
+        self._write("edit", request, then, note="Saving…")
 
     def assign_issue(self, account):
         issue = self.issues.detail.issue or {}
         self._write("assign", {"key": issue.get("key"), "account": account},
                     note="Assigning…")
 
-    def post_comment(self, text):
+    def find_mentionable(self, query):
+        """People who can see the opened issue, for a mention: read when "@"
+        is first typed in it, or when a name is searched for. On a thread;
+        typing goes on meanwhile."""
+        detail = self.issues.detail
+        connection = self.current()
+        key = (detail.issue or {}).get("key")
+        if connection is None or not key:
+            detail.people_failed(key)
+            return
+
+        def done(payload):
+            if payload.get("ok"):
+                detail.take_people(key, (payload.get("result") or {}).get("people") or [],
+                                   query)
+            else:
+                detail.people_failed(key)
+
+        self._call("mentions", lambda core, cancel: core.integrations(
+            "call", connection["id"], "mentionable", document={"key": key, "query": query},
+            cancel=cancel), done, quiet=True)
+
+    def post_comment(self, body):
         issue = self.issues.detail.issue or {}
 
         def then(payload):
             if payload.get("ok"):
                 self.issues.detail.composer.clear()
 
-        self._write("comment", {"key": issue.get("key"), "body": text}, then,
+        self._write("comment", {"key": issue.get("key"), "body": body}, then,
                     note="Posting…")
 
     def attach_file(self):
@@ -1749,10 +2433,11 @@ class JiraView(QWidget):
                 self.issues.detail.tell("")
                 self.issues.detail.say(payload.get("error") or "Not saved.")
 
-        self._call("download", lambda: self.core.integrations(
+        self._call("download", lambda core, cancel: core.integrations(
             "call", connection["id"], "download",
             document={"key": issue.get("key"), "id": attachment.get("id"),
-                      "url": attachment.get("url") or "", "to": target}), done, quiet=True)
+                      "url": attachment.get("url") or "", "to": target}, cancel=cancel),
+            done, quiet=True)
 
     def create_issue(self):
         """The create window, with the projects the account can see - read now
@@ -1775,8 +2460,8 @@ class JiraView(QWidget):
                                for one in projects])
             self._create_with([(one["key"], one["name"]) for one in projects])
 
-        self._call("projects", lambda: self.core.integrations(
-            "call", connection["id"], "projects"), done)
+        self._call("projects", lambda core, cancel: core.integrations(
+            "call", connection["id"], "projects", cancel=cancel), done)
 
     def _create_with(self, projects):
         from .jiradialogs import CreateIssueDialog
@@ -1787,8 +2472,9 @@ class JiraView(QWidget):
             "default_project", "")
         dialog = CreateIssueDialog(self, projects, default)
         dialog.meta_requested.connect(lambda request, done: self._call(
-            "create_meta", lambda: self.core.integrations(
-                "call", connection["id"], "create_meta", document=request), done, quiet=True))
+            "create_meta", lambda core, cancel: core.integrations(
+                "call", connection["id"], "create_meta", document=request, cancel=cancel),
+            done, quiet=True))
         dialog.create_requested.connect(
             lambda request, done: self._write("create", request, done, note="Creating…"))
         dialog.exec()
@@ -1806,7 +2492,8 @@ class JiraView(QWidget):
             if payload.get("ok"):
                 self.activity.set_rows(payload.get("activity") or [], names)
 
-        self._call("activity", lambda: self.core.integrations("activity"), done, quiet=True)
+        self._call("activity", lambda core, cancel: core.integrations(
+            "activity", cancel=cancel), done, quiet=True)
 
     def _activity_changed(self):
         if self.tabs.currentWidget() is self.activity and self.isVisible():
@@ -1825,15 +2512,58 @@ class JiraView(QWidget):
                 target=("connection", one.get("id"))))
         for connection_id, cache in self.cache.items():
             for row in cache.rows:
-                tone = "accent" if row.get("category") == "indeterminate" else "neutral"
-                found.append(search.hit(
-                    "%s  %s" % (row.get("key", ""), row.get("summary", "")),
-                    "Jira issue · %s" % names.get(connection_id, connection_id),
-                    row.get("status", ""), tone,
-                    keys=" ".join(part for part in (row.get("type"), row.get("assignee"),
-                                                    row.get("priority")) if part),
-                    target=("issue", connection_id, row.get("key"))))
+                found.append(_issue_hit(row, connection_id,
+                                        names.get(connection_id, connection_id)))
         return found
+
+    def search_source(self):
+        """What Ctrl+K offers to search in Jira: ``(title, detail)``, or None
+        when no connection has a token. Offering it asks Jira nothing. The
+        connections are a file the core reads; the first time Search asks,
+        they are read, and the row is there from the next look."""
+        if not self._listed:
+            self.list_connections()
+            return None
+        ready = [one for one in self.connections if one.get("token_set")]
+        if not ready:
+            return None
+        return "Jira", "Issues in %s" % ", ".join(one.get("name") or one.get("id")
+                                                   for one in ready)
+
+    def search_remote(self, query, done):
+        """Search Jira for ``query`` because its row in Ctrl+K was chosen: one
+        request per connection with a token, on a thread. Every project, not
+        only the default one: this is looking for an issue, not a list."""
+        ready = [one for one in self.connections if one.get("token_set")]
+        if self.core is None or not ready:
+            done([], "No Jira connection has a token.")
+            return
+        answers = {}
+
+        def answered(connection, payload):
+            kind = self._heard(connection["id"], payload)
+            if payload.get("ok"):
+                rows = (payload.get("result") or {}).get("rows") or []
+                for row in rows:
+                    self._found[(connection["id"], row.get("key"))] = dict(row)
+                answers[connection["id"]] = ([_issue_hit(row, connection["id"],
+                                                         connection.get("name"))
+                                              for row in rows], "")
+            else:
+                answers[connection["id"]] = ([], payload.get("error") or kind or
+                                             "Jira did not answer.")
+            if len(answers) == len(ready):
+                hits = [found for one in ready for found in answers[one["id"]][0]]
+                errors = [answers[one["id"]][1] for one in ready if answers[one["id"]][1]]
+                done(hits, "" if hits or not errors else errors[0])
+
+        for connection in ready:
+            self._call("found:%s" % connection["id"],
+                       lambda core, cancel, one=connection: core.integrations(
+                           "call", one["id"], "search",
+                           document={"text": query, "size": FOUND_ROWS, "everywhere": True},
+                           cancel=cancel),
+                       lambda payload, one=connection: answered(one, payload), quiet=True)
 
     def show_found(self, target):
         if not target:
@@ -1847,14 +2577,24 @@ class JiraView(QWidget):
         if target[0] == "issue" and len(target) == 3:
             _kind, connection_id, key = target
             cache = self.cache.get(connection_id)
-            if cache is None or not any(row.get("key") == key for row in cache.rows):
+            listed = cache is not None and any(row.get("key") == key for row in cache.rows)
+            found = self._found.get((connection_id, key))
+            if not listed and found is None:
                 return False
             index = self.picker.findData(connection_id)
             if index < 0:
                 return False
             if self.picker.currentIndex() != index:
                 self.picker.setCurrentIndex(index)
-                self._connection_picked(index)
+                if not self._connection_picked(index):
+                    return True
+            if not listed:
+                # Found in Jira by Ctrl+K: its row goes at the top of the list,
+                # as a created issue's does, and opening it reads it.
+                cache = self._cache(self.current())
+                cache.rows.insert(0, dict(found))
+                cache.loaded_at = cache.loaded_at or datetime.datetime.now(
+                    datetime.timezone.utc)
             self.tabs.setCurrentWidget(self.issues)
             self._show_issues()
             # Opening it is what a click on its row does: it reads that issue.
@@ -1865,7 +2605,7 @@ class JiraView(QWidget):
     def _arm_auto(self):
         connection = self.current()
         minutes = int(((connection or {}).get("settings") or {}).get("refresh_minutes") or 0)
-        if minutes > 0 and self.isVisible():
+        if minutes > 0 and self.isVisible() and not self._closing:
             self.auto.start(minutes * 60000)
         else:
             self.auto.stop()
@@ -1894,7 +2634,8 @@ class JiraView(QWidget):
             if done is not None:
                 done(payload)
 
-        self._call("save", lambda: self.core.integrations("save", document=document),
+        self._call("save", lambda core, cancel: core.integrations(
+            "save", document=document, cancel=cancel),
                    answered, quiet=True)
 
     def test_connection(self, connection_id, done=None):
@@ -1912,7 +2653,8 @@ class JiraView(QWidget):
             if done is not None:
                 done(payload)
 
-        self._call("test", lambda: self.core.integrations("test", connection_id),
+        self._call("test", lambda core, cancel: core.integrations(
+            "test", connection_id, cancel=cancel),
                    answered, quiet=True)
 
     def sign_in(self, request, done, cancel):
@@ -1927,9 +2669,9 @@ class JiraView(QWidget):
                                        for one in self.connections], pick=saved.get("id"))
             done(payload)
 
-        self._call("sign-in", lambda: self.core.integrations(
+        self._call("sign-in", lambda core, cancel: core.integrations(
             "sign-in", document=dict(request), timeout=330, cancel=cancel),
-            answered, quiet=True)
+            answered, quiet=True, cancel=cancel)
 
     def open_app(self, parent=None):
         """The project's Atlassian OAuth app: read (a file, no request), then shown."""
@@ -1938,12 +2680,14 @@ class JiraView(QWidget):
         def loaded(payload):
             dialog = OAuthAppDialog(parent or self, payload.get("app") or {})
             dialog.save_requested.connect(
-                lambda document, done: self._call("app-save", lambda: self.core.integrations(
-                    "app-save", document=document), done, quiet=True))
+                lambda document, done: self._call(
+                    "app-save", lambda core, cancel: core.integrations(
+                        "app-save", document=document, cancel=cancel), done, quiet=True))
             dialog.exec()
             dialog.deleteLater()
 
-        self._call("app", lambda: self.core.integrations("app"), loaded, quiet=True)
+        self._call("app", lambda core, cancel: core.integrations("app", cancel=cancel),
+                   loaded, quiet=True)
 
     def remove_connection(self, connection_id, done=None):
         def answered(payload):
@@ -1955,7 +2699,8 @@ class JiraView(QWidget):
             if done is not None:
                 done(payload)
 
-        self._call("remove", lambda: self.core.integrations("delete", connection_id),
+        self._call("remove", lambda core, cancel: core.integrations(
+            "delete", connection_id, cancel=cancel),
                    answered, quiet=True)
 
 

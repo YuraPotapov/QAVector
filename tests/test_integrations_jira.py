@@ -84,6 +84,12 @@ def test_the_default_project_narrows_a_list_nobody_filtered():
     assert operations.jql({}, connection) == 'project = "QA" ORDER BY updated DESC'
 
 
+def test_looking_for_an_issue_is_not_narrowed_to_the_default_project():
+    connection = {"settings": {"default_project": "QA"}}
+    assert operations.jql({"text": "web-7", "everywhere": True}, connection) == \
+        'key = "WEB-7" ORDER BY updated DESC'
+
+
 def test_a_page_asks_for_the_row_s_fields_only_and_gives_a_cursor(jira):
     server = jira(**{"/rest/api/3/search/jql": {
         "issues": [_raw("QA-142"), _raw("QA-139", status="To Do", category="new")],
@@ -180,7 +186,10 @@ def test_an_opened_issue_is_one_read_and_its_newest_comments(jira):
 
 def test_a_description_with_a_list_is_marked_as_more_than_text(jira):
     server = jira(**_issue_answers(RICH))
-    assert _call("issue", server, {"key": "QA-142"})["issue"]["description_plain"] is False
+    detail = _call("issue", server, {"key": "QA-142"})["issue"]
+    assert detail["description_plain"] is False
+    # More than text, but nothing the description editor cannot hold.
+    assert detail["description_doc"]["type"] == "doc" and detail["description_lost"] == []
 
 
 def test_earlier_comments_start_where_the_shown_ones_end(jira):

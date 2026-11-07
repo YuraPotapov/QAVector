@@ -690,6 +690,117 @@ def _external(painter, ink):
     painter.drawPath(head)
 
 
+# -- the description editor's toolbar ----------------------------------------
+def _list_bullet(painter, ink):
+    """Three dots, each with its line: a list of separate things."""
+    _stroke(painter, ink)
+    for y in (6.5, 12, 17.5):
+        painter.drawLine(QPointF(9.5, y), QPointF(20.5, y))
+    _fill(painter, ink)
+    for y in (6.5, 12, 17.5):
+        painter.drawEllipse(QPointF(5, y), 1.8, 1.8)
+
+
+def _list_number(painter, ink):
+    """Lines with a count down the side: steps, in their order."""
+    _stroke(painter, ink)
+    for y in (6.5, 12, 17.5):
+        painter.drawLine(QPointF(10.5, y), QPointF(20.5, y))
+    # A one, a two and a three, drawn: no font is asked for a digit.
+    one = QPainterPath()
+    one.moveTo(3.5, 5.5)
+    one.lineTo(5.5, 4.0)
+    one.lineTo(5.5, 9.0)
+    painter.drawPath(one)
+    two = QPainterPath()
+    two.moveTo(3.5, 10.0)
+    two.cubicTo(4.0, 8.5, 7.5, 9.0, 6.5, 11.0)
+    two.lineTo(3.5, 14.5)
+    two.lineTo(7.0, 14.5)
+    painter.drawPath(two)
+    three = QPainterPath()
+    three.moveTo(3.5, 16.0)
+    three.lineTo(6.5, 16.0)
+    three.lineTo(5.0, 17.8)
+    three.cubicTo(7.5, 17.8, 7.5, 21.0, 3.5, 20.3)
+    painter.drawPath(three)
+
+
+def _checklist(painter, ink):
+    """Boxes, the first one ticked: things to do, and one done."""
+    _stroke(painter, ink)
+    painter.drawRect(QRectF(3.5, 4.0, 5.0, 5.0))
+    painter.drawRect(QRectF(3.5, 14.0, 5.0, 5.0))
+    tick = QPainterPath()
+    tick.moveTo(4.5, 6.5)
+    tick.lineTo(6.0, 8.0)
+    tick.lineTo(9.5, 3.0)
+    painter.drawPath(tick)
+    painter.drawLine(QPointF(12.5, 6.5), QPointF(20.5, 6.5))
+    painter.drawLine(QPointF(12.5, 16.5), QPointF(20.5, 16.5))
+
+
+def _link(painter, ink):
+    """Two links of a chain: this text leads somewhere."""
+    _stroke(painter, ink)
+    painter.save()
+    painter.translate(12, 12)
+    painter.rotate(-45)
+    painter.drawRoundedRect(QRectF(-9.5, -3.0, 9.0, 6.0), 3.0, 3.0)
+    painter.drawRoundedRect(QRectF(0.5, -3.0, 9.0, 6.0), 3.0, 3.0)
+    painter.drawLine(QPointF(-3.5, 0), QPointF(3.5, 0))
+    painter.restore()
+
+
+def _code(painter, ink):
+    """Angle brackets: words a machine reads, set as they are."""
+    _stroke(painter, ink)
+    left = QPainterPath()
+    left.moveTo(8.5, 6.5)
+    left.lineTo(3.5, 12.0)
+    left.lineTo(8.5, 17.5)
+    painter.drawPath(left)
+    right = QPainterPath()
+    right.moveTo(15.5, 6.5)
+    right.lineTo(20.5, 12.0)
+    right.lineTo(15.5, 17.5)
+    painter.drawPath(right)
+    painter.drawLine(QPointF(13.5, 5.5), QPointF(10.5, 18.5))
+
+
+def _code_block(painter, ink):
+    """The brackets in a box: a block of code, apart from the text."""
+    _stroke(painter, ink)
+    painter.drawRect(QRectF(3.5, 4.5, 17.0, 15.0))
+    left = QPainterPath()
+    left.moveTo(10.0, 9.0)
+    left.lineTo(7.0, 12.0)
+    left.lineTo(10.0, 15.0)
+    painter.drawPath(left)
+    right = QPainterPath()
+    right.moveTo(14.0, 9.0)
+    right.lineTo(17.0, 12.0)
+    right.lineTo(14.0, 15.0)
+    painter.drawPath(right)
+
+
+def _quote(painter, ink):
+    """A bar beside the lines: somebody else's words, set apart."""
+    _fill(painter, ink)
+    painter.drawRect(QRectF(4.0, 5.0, 2.5, 14.0))
+    _stroke(painter, ink)
+    for y in (7.5, 12, 16.5):
+        painter.drawLine(QPointF(10.5, y), QPointF(20.5, y))
+
+
+def _clear_format(painter, ink):
+    """A T struck through: take the formatting off, keep the words."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(5.5, 5.5), QPointF(16.5, 5.5))
+    painter.drawLine(QPointF(11.0, 5.5), QPointF(11.0, 19.5))
+    painter.drawLine(QPointF(4.5, 18.5), QPointF(19.5, 7.5))
+
+
 DRAWINGS = {
     "network": _network,
     "network-isolated": _network_isolated,
@@ -736,6 +847,14 @@ DRAWINGS = {
     "sort_down": _sort_down,
     "sort_up": _sort_up,
     "external": _external,
+    "list_bullet": _list_bullet,
+    "list_number": _list_number,
+    "checklist": _checklist,
+    "link": _link,
+    "code": _code,
+    "code_block": _code_block,
+    "quote": _quote,
+    "clear_format": _clear_format,
     "dot": _dot,
     "artifacts": _artifacts,
     "pass": _pass,

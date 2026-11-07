@@ -794,6 +794,34 @@ QLabel[role="initials"] {{
 QFrame#jiraDetailBody {{ background: {surface}; border: none; }}
 QToolButton#jiraMore::menu-indicator {{ image: none; width: 0; }}
 QFrame#jiraDetail QPlainTextEdit {{ background: {bg}; border: 1px solid {divider}; }}
+/* An issue being edited: its summary keeps the size it is read at. */
+QLineEdit#jiraSummaryEdit {{ font-family: {heading}; font-size: 17px; font-weight: 600; }}
+/* What editing a formatted description would lose: a note on the page's own
+   ground, framed like the editor it sits beside. */
+QFrame#jiraRichNote {{ background: {bg}; border: 1px solid {divider}; }}
+/* The description editor: a bar of what can be done, over the text it does it to. */
+QFrame#jiraDescriptionEditor {{ background: {bg}; border: 1px solid {divider}; }}
+QFrame#jiraFormatBar {{
+    background: {surface}; border: none; border-bottom: 1px solid {divider};
+}}
+QFrame#jiraFormatBar QToolButton {{
+    background: transparent; border: 1px solid transparent;
+    padding: 2px 5px; min-width: 16px;
+}}
+QFrame#jiraFormatBar QToolButton:hover {{ background: {a100}; }}
+QFrame#jiraFormatBar QToolButton:checked {{
+    background: {select_bg}; color: {select_ink}; border-color: {accent};
+}}
+QTextEdit#jiraDescriptionText {{ background: {bg}; border: none; }}
+/* Who to mention: a list over the text, framed so it reads as apart from it. */
+QListWidget#jiraMentions {{
+    background: {surface}; border: 1px solid {n400}; outline: none;
+}}
+QListWidget#jiraMentions::item {{ padding: 3px 8px; color: {text}; }}
+QListWidget#jiraMentions::item:disabled {{ color: {n600}; }}
+QListWidget#jiraMentions::item:selected {{ background: {select_bg}; color: {select_ink}; }}
+QFrame#jiraRichNote QPushButton {{ background: transparent; }}
+QFrame#jiraRichNote QPushButton:hover {{ background: {a100}; }}
 QSplitter#jiraSplitter::handle {{ background: transparent; }}
 QSplitter#jiraSplitter::handle:hover {{ background: {divider}; }}
 /* The way back to the list of providers: a breadcrumb, not a button. */

@@ -128,11 +128,56 @@ it. The project and status lists for the filters are read the first time their
 box is opened. Going back to the page shows what was already loaded, with the
 time it was loaded, and sends nothing.
 
+## Editing an issue
+
+An opened issue is read-only, so a stray click or keystroke changes nothing.
+**Edit** turns its summary, priority, assignee, labels and description into
+fields where they stand, and reads which of them this account may change on the
+issue's screen. **Save** (Ctrl+S) sends only what changed, together with when
+the issue was last changed at the moment Edit was pressed. If somebody changed
+it in Jira since, the edit is refused and stays open with what was typed.
+**Cancel** drops the changes, and so does Esc after asking if anything was
+changed.
+
+On Jira Cloud the description is edited with its formatting. The bar over it
+has paragraph styles and headings, bold (Ctrl+B), italic (Ctrl+I), underline
+(Ctrl+U), strikethrough, code, bulleted, numbered and check lists (Tab and
+Shift+Tab nest them), links, code blocks, quotes and clearing the formatting.
+What is pasted keeps only what Jira can hold. A description with something the
+editor cannot keep, such as a table or a picture, stays as it is unless you
+choose **Edit without them**. The words in a table are kept as lines. On Jira
+Server the description is text, as Jira Server keeps it.
+
+The people an issue can be assigned to are read when the assignee list is
+first opened, or when you type a name and press Enter, and never before.
+
+## Comments and mentions
+
+On Jira Cloud a comment has the same formatting bar as the description. Typing
+**@** offers the people who can see the issue. They are read once per issue,
+the first time @ is typed in its comment or its description, and the list then
+narrows as you type without asking Jira again. A name that is not among them
+is looked up only when you choose **Search Jira for "…"**. The read runs off
+the window's thread, so typing goes on while it is out. A mention is one piece
+of the text: Backspace removes it whole. Jira notifies the people mentioned.
+On Jira Server a comment is text, and a mention is written into it as
+`[~username]`.
+
+While an issue is being edited, nothing else is written to it from the page.
+Refresh leaves what was typed alone. Opening another issue, picking another
+connection or switching projects asks first when there are changes.
+
 ## Search, export and import
 
 **Ctrl+K** finds the project's connections, and the issues that are already
-loaded on the page, by key, summary, type, assignee or priority. It never asks
-Jira. Opening a found issue reads it, as clicking its row does.
+loaded on the page, by key, summary, type, assignee or priority, without asking
+Jira. Below them it offers a row of its own, `Search Jira for "QA-123"`. Typing
+never searches Jira. Choosing that row (Enter or a click) does, with one request
+per connection that has a token, in every project, not only the default one.
+What Jira finds shows under **Jira** in the same Search. Typing something else
+drops it, and the row has to be chosen again. Opening a found issue shows it on
+the Issues tab, at the top of the list if the list did not have it, and reads
+it there. With no connection that has a token, Jira is not offered at all.
 
 **File → Export** can include connections, each with its token, and the
 project's own OAuth app with its secret when it has one. The file is readable by

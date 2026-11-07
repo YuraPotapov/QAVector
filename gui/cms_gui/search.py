@@ -15,6 +15,15 @@ rail's order, and anything with a state - a service running or failed, a cycle
 listening, a run going - says so, which is also what an empty field shows: what
 is active now.
 
+A page may also offer **sources searched on request** (``search_sources()``):
+a service outside the application, such as an integration's issues. A source
+is never searched by typing. Each one shows as a row of its own -
+'Search Jira for "QA-123"' - and only choosing that row asks it, through the
+page (``search_source(key, query, done)``), off the GUI thread. The answer
+comes back as hits, in the same format the page's own rows use, and shows
+under the source's name. Typing something else drops the answer. Opening one
+of those hits is the page's ``show_found``, as for any hit.
+
 A page may also offer folders whose files are worth reading
 (``search_documents()``): the Artifacts page offers its runs, so a task is found
 by what its reading copy says, not only by the run's name. That is read off the
@@ -56,6 +65,11 @@ Hit = collections.namedtuple(
     defaults=("",))
 #: One section of the results: its page's key, and its hits, best first.
 Group = collections.namedtuple("Group", "section hits")
+#: Something a page searches only when asked: its page (filled in by the
+#: window), its name on that page, what it is called, and what it holds.
+Source = collections.namedtuple("Source", "section key title detail")
+#: The target of the row that offers a source: choosing it searches the source.
+Ask = collections.namedtuple("Ask", "section key")
 
 #: How many hits a section shows before "N more".
 PER_SECTION = 6
@@ -178,7 +192,8 @@ class SearchPopup(widgets.FloatingPanel):
     #: How long typing has to pause before the files are read.
     FILES_AFTER_MS = 300
 
-    def __init__(self, collect, sections, parent=None, documents=None):
+    def __init__(self, collect, sections, parent=None, documents=None, sources=None,
+                 ask=None):
         super().__init__(parent)
         self.setProperty("role", "clarifypopup")
         self.setFixedWidth(self.WIDTH)
@@ -198,6 +213,14 @@ class SearchPopup(widgets.FloatingPanel):
         self._documents_query = ""
         self._reading = False
         self._generation = 0
+        # Sources searched on request: ``sources()`` answers [Source], and
+        # ``ask(source, query, done)`` searches one; ``done(hits, error)``
+        # comes back on the GUI thread. What each answered, for which query.
+        self._sources_of = sources
+        self._ask = ask
+        self._sources = []
+        self._asked = {}
+        self._headings = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -259,6 +282,8 @@ class SearchPopup(widgets.FloatingPanel):
             self.field.selectAll()
             return
         self._hits = self._collect()
+        self._sources = self._read_sources()
+        self._asked = {}
         self._expanded = set()
         self._shown = None
         self._forget_documents()
@@ -300,20 +325,95 @@ class SearchPopup(widgets.FloatingPanel):
         if not words(query):
             return active(self._hits, order)
         named = find(self._hits, query, order)
-        if query != self._documents_query or not self._documents_found:
-            return named
-        merged = collections.OrderedDict((section, []) for section in order)
-        for group in named:
-            merged.setdefault(group.section, []).extend(group.hits)
-        for found in self._documents_found:
-            merged.setdefault(found.section, []).append(found)
-        return [Group(section, rows) for section, rows in merged.items() if rows]
+        if query == self._documents_query and self._documents_found:
+            merged = collections.OrderedDict((section, []) for section in order)
+            for group in named:
+                merged.setdefault(group.section, []).extend(group.hits)
+            for found in self._documents_found:
+                merged.setdefault(found.section, []).append(found)
+            named = [Group(section, rows) for section, rows in merged.items() if rows]
+        listed = {(found.section, repr(found.target)) for group in named
+                  for found in group.hits}
+        return named + [self._source_group(source, query.strip(), listed)
+                        for source in self._sources]
 
     def _typed(self, _text):
         self._expanded = set()
+        self._asked = {}
         self._forget_documents()
         self._fill(keep=False)
         self._files_after.start()
+
+    # -- sources searched on request ---------------------------------------------
+    def refresh_sources(self):
+        """What may be searched on request changed: show it, keeping the place."""
+        self._sources = self._read_sources()
+        self._fill(keep=True)
+
+    def _read_sources(self):
+        if self._sources_of is None:
+            return []
+        try:
+            return [one for one in self._sources_of() if isinstance(one, Source)]
+        except Exception:                # noqa: BLE001 - a source must not end search
+            logging.exception("Search could not read what it may search on request")
+            return []
+
+    @staticmethod
+    def _source_key(source):
+        return "%s/%s" % (source.section, source.key)
+
+    def _source_group(self, source, query, listed):
+        """The row that offers a source, and what it answered for this query."""
+        key = self._source_key(source)
+        self._headings[key] = source.title
+        asked = self._asked.get(key)
+        state = asked["state"] if asked else ""
+        hits = [found for found in (asked or {}).get("hits", [])
+                if (found.section, repr(found.target)) not in listed]
+        status, tone, detail = {
+            # Neutral, not outlined: an accent outline on the accent of a
+            # selected row is not there to read.
+            "": ("Search", "neutral", source.detail),
+            "searching": ("Searching...", "neutral", source.detail),
+            "failed": ("Failed", "bad", (asked or {}).get("error") or source.detail),
+        }.get(state, ("%d found" % len(hits), "neutral", source.detail)
+              if hits else ("None found", "neutral",
+                            'Nothing in %s matches "%s"' % (source.title, query)))
+        offer = Hit(source.section, 'Search %s for "%s"' % (source.title, query), detail,
+                    status, tone, "", Ask(source.section, source.key), False)
+        return Group(key, [offer] + hits)
+
+    def ask_source(self, target):
+        """Search the source a row offers, for what is in the field now."""
+        source = next((one for one in self._sources
+                       if (one.section, one.key) == tuple(target)), None)
+        if source is None or self._ask is None:
+            return
+        query = self.field.text().strip()
+        key = self._source_key(source)
+        asked = {"query": query, "state": "searching", "hits": [], "error": ""}
+        self._asked[key] = asked
+
+        def done(hits, error=None):
+            if self._asked.get(key) is not asked or self.field.text().strip() != query:
+                return  # another query, or asked again since: not this answer
+            found = [one for one in hits or [] if isinstance(one, Hit)]
+            asked.update(hits=found, error=str(error or ""),
+                         state="failed" if error and not found else "done")
+            on_offer = isinstance(self._payload(self.results.currentRow()), Hit) and \
+                self._payload(self.results.currentRow()).target == target
+            self._fill(keep=True)
+            if on_offer and found:
+                # The answer is what was asked for: Enter opens its first hit.
+                self._move(1)
+
+        self._fill(keep=True)
+        try:
+            self._ask(source, query, done)
+        except Exception as error:       # noqa: BLE001 - a source must not end search
+            logging.exception("Search could not ask %s", source.title)
+            done([], error)
 
     # -- what the files say ------------------------------------------------------
     def _forget_documents(self):
@@ -367,6 +467,7 @@ class SearchPopup(widgets.FloatingPanel):
     def _read_again(self):
         """The states shown are live: read them again, keeping the place."""
         self._hits = self._collect()
+        self._sources = self._read_sources()
         self._fill(keep=True)
 
     def _fill(self, keep):
@@ -380,22 +481,25 @@ class SearchPopup(widgets.FloatingPanel):
                                      for h in hits), more)
                      for section, hits, more in shown]
         if keep and signature == self._shown:
-            self._say(groups, sum(len(group.hits) for group in groups))
+            self._say(groups, sum(1 for group in groups for found in group.hits
+                                  if not isinstance(found.target, Ask)))
             return
         current = self._current_key() if keep else None
         self._shown = signature
         self.results.clear()
         self._rows = []
         for section, hits, more in shown:
-            self._add_heading(self._sections.get(section, section))
+            heading = self._headings.get(section) or self._sections.get(section, section)
+            self._add_heading(heading)
             for found in hits:
                 self._add_row(_HitRow(found), found)
             if more:
-                label = QLabel("%d more in %s" % (more, self._sections.get(section, section)))
+                label = QLabel("%d more in %s" % (more, heading))
                 label.setProperty("role", "searchmore")
                 label.setContentsMargins(12, 4, 12, 6)
                 self._add_row(label, section)
-        count = sum(len(group.hits) for group in groups)
+        count = sum(1 for group in groups for found in group.hits
+                    if not isinstance(found.target, Ask))
         self._say(groups, count)
         self.results.setVisible(bool(self._rows))
         self.results.setFixedHeight(min(self.LIST_HEIGHT, self._list_height()))
@@ -411,7 +515,8 @@ class SearchPopup(widgets.FloatingPanel):
                 count, sections, "" if sections == 1 else "s") if count else "")
             reading = "reading files..." if self._reading else ""
             self.summary.setText(" · ".join(part for part in (found, reading) if part))
-            self.empty.setText("" if count else
+            offered = bool(self._sources)
+            self.empty.setText("" if count or offered else
                                "Reading files for \"%s\"..." % query if self._reading
                                else "Nothing matches \"%s\"." % query)
         else:
@@ -507,7 +612,9 @@ class SearchPopup(widgets.FloatingPanel):
     def activate(self, row=None):
         """Open the hit at ``row`` (the current one by default), or expand a section."""
         payload = self._payload(self.results.currentRow() if row is None else row)
-        if isinstance(payload, Hit):
+        if isinstance(payload, Hit) and isinstance(payload.target, Ask):
+            self.ask_source(payload.target)
+        elif isinstance(payload, Hit):
             self.hide()
             self.opened.emit(payload)
         elif payload is not None:

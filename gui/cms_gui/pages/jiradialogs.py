@@ -1,15 +1,14 @@
 """The small windows of Integrations -> Jira that change an issue.
 
-Each asks the core only for what it shows, when it shows it: the editor asks
-what the issue's screen lets this account change; the create window asks for a
-project's issue types, then for the chosen type's fields. Nothing is sent until
-the person presses the button that sends it, and what Jira says back - fields a
-transition needs, an issue changed meanwhile - is said here, in the window that
-asked.
+Each asks the core only for what it shows, when it shows it: the create window
+asks for a project's issue types, then for the chosen type's fields. Nothing is
+sent until the person presses the button that sends it, and what Jira says back
+- fields a transition needs - is said here, in the window that asked. Editing
+an issue is not a window: it happens in place, in the issue (``jira.py``).
 """
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel,
                                QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout,
                                QWidget)
 
@@ -40,7 +39,8 @@ def _buttons(dialog, agree):
     return row, button
 
 
-def _labels(text):
+def split_labels(text):
+    """Labels as typed - separated by spaces or commas - as a list."""
     return [one for one in (part.strip() for part in str(text or "").replace(",", " ").split())
             if one]
 
@@ -82,118 +82,6 @@ class TransitionFieldsDialog(QDialog):
 
     def fields(self):
         return {key: combo.currentData() for key, combo in self.choices.items()}
-
-
-# -- editing ------------------------------------------------------------------
-class EditIssueDialog(QDialog):
-    """Summary, description, labels and priority of one issue.
-
-    Only what changed is sent, with when the issue was last changed as it was
-    opened - so an edit over somebody else's change is refused rather than made.
-    A description with formatting plain text cannot hold is only replaced when
-    the person says so.
-    """
-
-    #: (request for ``edit``, done(payload))
-    save_requested = Signal(dict, object)
-
-    def __init__(self, parent, issue):
-        super().__init__(parent)
-        self.issue = dict(issue)
-        self.setWindowTitle("Edit %s" % issue.get("key", ""))
-        self.frame = widgets.dress(self)
-        self.setMinimumWidth(560)
-        column = QVBoxLayout(self)
-        column.setSpacing(8)
-        self.summary = QLineEdit(issue.get("summary") or "")
-        column.addWidget(widgets.field("Summary", self.summary))
-        self.description = QPlainTextEdit(issue.get("description_text") or "")
-        self.description.setMinimumHeight(160)
-        column.addWidget(widgets.field("Description", self.description))
-        rich = not issue.get("description_plain", True)
-        self.rich_note = QLabel("This description has formatting - lists, tables or "
-                                "pictures - that plain text cannot hold. Edit it in Jira "
-                                "to keep it, or replace it with the text above.")
-        self.rich_note.setProperty("role", "hint")
-        self.rich_note.setWordWrap(True)
-        self.rich_note.setVisible(rich)
-        column.addWidget(self.rich_note)
-        self.rich = QCheckBox("Replace the formatted description with this text")
-        self.rich.setVisible(rich)
-        self.rich.toggled.connect(self.description.setEnabled)
-        if rich:
-            self.description.setEnabled(False)
-        column.addWidget(self.rich)
-        self.labels = QLineEdit(" ".join(issue.get("labels") or []))
-        self.labels.setProperty("mono", "true")
-        column.addWidget(widgets.field("Labels", self.labels, "Separated by spaces or commas."))
-        self.priority = QComboBox()
-        self.priority.addItem(issue.get("priority") or "No priority", "")
-        self.priority.setEnabled(False)
-        column.addWidget(widgets.field("Priority", self.priority))
-        self.problem = _problem()
-        column.addWidget(self.problem)
-        row, self.save = _buttons(self, "Save")
-        self.save.clicked.connect(self._save)
-        column.addLayout(row)
-
-    def set_meta(self, meta):
-        """What the issue's screen lets this account change, read when the
-        editor opened. A field it leaves out stays as it is."""
-        editable = set(meta.get("editable") or [])
-        for name, widget in (("summary", self.summary), ("labels", self.labels)):
-            widget.setEnabled(name in editable)
-        if "description" not in editable:
-            self.description.setEnabled(False)
-            self.rich.setVisible(False)
-            self.rich_note.setVisible(False)
-        current = self.issue.get("priority") or ""
-        self.priority.clear()
-        for one in meta.get("priorities") or []:
-            self.priority.addItem(one["name"], one["id"])
-        index = self.priority.findText(current)
-        if index < 0:
-            self.priority.insertItem(0, current or "No priority", "")
-            index = 0
-        self.priority.setCurrentIndex(index)
-        self.priority.setEnabled("priority" in editable and self.priority.count() > 1)
-
-    def changes(self):
-        fields = {}
-        if self.summary.isEnabled() and self.summary.text().strip() != (
-                self.issue.get("summary") or ""):
-            fields["summary"] = self.summary.text().strip()
-        if self.description.isEnabled() and self.description.toPlainText().strip() != (
-                self.issue.get("description_text") or "").strip():
-            fields["description"] = self.description.toPlainText()
-        labels = _labels(self.labels.text())
-        if self.labels.isEnabled() and labels != list(self.issue.get("labels") or []):
-            fields["labels"] = labels
-        if (self.priority.isEnabled() and self.priority.currentData()
-                and self.priority.currentText() != (self.issue.get("priority") or "")):
-            fields["priority"] = self.priority.currentData()
-        return fields
-
-    def _save(self):
-        fields = self.changes()
-        if not fields:
-            self.reject()
-            return
-        self.save.setEnabled(False)
-        self.save.setText("Saving…")
-
-        def done(payload):
-            self.save.setEnabled(True)
-            self.save.setText("Save")
-            if payload.get("ok"):
-                self.accept()
-            else:
-                self.problem.setText(payload.get("error") or "Not saved.")
-                self.problem.setVisible(True)
-
-        self.save_requested.emit({"key": self.issue.get("key"),
-                                  "updated": self.issue.get("updated") or "",
-                                  "fields": fields}, done)
 
 
 # -- creating -----------------------------------------------------------------
@@ -352,7 +240,7 @@ class CreateIssueDialog(QDialog):
             elif isinstance(widget, QComboBox):
                 value = {"id": widget.currentData()} if widget.currentData() else ""
             elif key == "labels" or spec.get("type") == "array":
-                value = _labels(widget.text())
+                value = split_labels(widget.text())
             elif spec.get("type") == "number":
                 text = widget.text().strip()
                 try:

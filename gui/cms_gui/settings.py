@@ -494,6 +494,13 @@ class Settings:
         self._qs.setValue(self._scoped("command/state"), json.dumps(state))
 
     # -- integrations ---------------------------------------------------------
+    def integration_geometry(self, provider):
+        """Window placement follows the provider across active projects."""
+        return self._qs.value("integrations/windows/%s/geometry" % provider, None)
+
+    def save_integration_geometry(self, provider, geometry):
+        self._qs.setValue("integrations/windows/%s/geometry" % provider, geometry)
+
     def integrations_state(self):
         """What Integrations was left showing in this project: which provider,
         which connection, and the issue list's filters. Never any data."""

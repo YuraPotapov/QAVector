@@ -113,7 +113,9 @@ def jql(request, connection=None):
         return "%s ORDER BY %s" % (written, order)
     clauses = []
     project = request.get("project")
-    if project in (None, "") and connection is not None:
+    if project in (None, "") and connection is not None and not request.get("everywhere"):
+        # ``everywhere``: looking for an issue rather than at a list, so the
+        # connection's default project does not narrow it.
         project = (connection.get("settings") or {}).get("default_project", "")
     for clause in (query.projects_clause(project or ""),
                    query.statuses_clause(request.get("status") or "")):
@@ -211,9 +213,57 @@ def refresh(get, connection, request):
 
 
 #: Operation name -> function. A name not here is refused before Jira is asked.
+#: People one "who can be mentioned" read brings back.
+MENTION_PEOPLE = 50
+
+
+def mentionable(get, connection, request):
+    """People who can see an issue, matching ``query``: who a comment or a
+    description may mention. An empty ``query`` is whoever Jira lists first.
+
+    Cloud documents ``query`` as required, and may refuse an empty one. Then
+    the people the issue can be assigned to are the start instead: that
+    search needs no query. Either way it is one read, and one more only when
+    the first is refused.
+    """
+    key = _key(request)
+    text = str(request.get("query") or "").strip()
+    flavour = connection["flavour"]
+    version = api(flavour)
+    params = {"issueKey": key, "maxResults": MENTION_PEOPLE}
+    if flavour == CLOUD:
+        if text:
+            params["query"] = text
+        try:
+            found = get("/rest/api/%s/user/viewissue/search" % version, params)
+        except JiraError as error:
+            if text or error.status != 400:
+                raise
+            found = get("/rest/api/%s/user/assignable/search" % version,
+                        {"issueKey": key, "maxResults": MENTION_PEOPLE})
+    else:
+        params["username"] = text
+        found = get("/rest/api/%s/user/viewissue/search" % version, params)
+    people = []
+    for one in found if isinstance(found, list) else []:
+        if not isinstance(one, dict):
+            continue
+        account = account_of(one, flavour)
+        if account:
+            people.append({"id": account, "name": _person(one) or account})
+    return {"people": people}
+
+
+def account_of(person, flavour):
+    """The id Jira takes back for a person: Cloud's account id, Server's name."""
+    if flavour == CLOUD:
+        return str((person or {}).get("accountId") or "")
+    return str((person or {}).get("name") or (person or {}).get("key") or "")
+
+
 OPERATIONS = {"test": test, "projects": projects, "statuses": statuses,
               "search": search, "issue": issue, "comments": comments,
-              "refresh": refresh}
+              "refresh": refresh, "mentionable": mentionable}
 
 
 def call(name, connection, token, request, get=None):
@@ -250,6 +300,7 @@ def _detail(raw, site, flavour):
     found = row(raw, site)
     description = fields.get("description")
     project = fields.get("project") or {}
+    doc, lost = adf.editable(description) if flavour == CLOUD else (None, [])
     found.update({
         "reporter": _person(fields.get("reporter")),
         "created": fields.get("created") or "",
@@ -263,6 +314,11 @@ def _detail(raw, site, flavour):
         # Whether editing the description as text would lose anything - a
         # table, a list, a picture. The editor warns before it does.
         "description_plain": adf.is_plain(description),
+        # On Cloud, the document as the description editor can hold it, and
+        # what it would lose: nothing, unless the document has tables,
+        # pictures or the like.
+        "description_doc": doc,
+        "description_lost": lost,
         "attachments": [_attachment(one) for one in fields.get("attachment") or []
                         if isinstance(one, dict)],
         "transitions": [{"id": str(one.get("id") or ""),

@@ -525,3 +525,39 @@ def test_the_runs_folder_goes_wherever_the_memory_store_does():
                                   "--cycle-runs-dir=/runs"]
     core.cycle_sessions("dev")
     assert "--cycle-runs-dir=/runs" in core.calls[-1]
+
+
+def test_cancelled_integration_request_never_starts_a_process(tmp_path):
+    import threading
+    marker = tmp_path / 'started'
+    script = tmp_path / 'integration.py'
+    script.write_text('from pathlib import Path\nPath(%r).touch()\n' % str(marker))
+    core = core_mod.Core(str(script), sys.executable)
+    cancel = threading.Event()
+    cancel.set()
+    answer = core.integrations('list', cancel=cancel)
+    assert answer['kind'] == 'cancelled'
+    assert not marker.exists()
+
+
+def test_cancelling_integration_read_reaps_the_core_process(tmp_path):
+    import threading
+    import time
+    script = tmp_path / 'integration.py'
+    ready = tmp_path / 'ready'
+    script.write_text('from pathlib import Path\nimport time\nPath(%r).touch()\ntime.sleep(30)\n'
+                      % str(ready))
+    core = core_mod.Core(str(script), sys.executable)
+    cancel, answers = threading.Event(), []
+    thread = threading.Thread(target=lambda: answers.append(core.integrations('list', cancel=cancel)))
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+    finally:
+        cancel.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert answers[0]['kind'] == 'cancelled'

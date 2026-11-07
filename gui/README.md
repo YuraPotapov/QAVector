@@ -5,6 +5,11 @@ describes a run in the words of the job, **Command** exposes every flag the
 launcher accepts. Both feed the same live view of what a run is doing, and both
 land in the same reusable history.
 
+Integrations can open in a separate window and return to the main window without
+losing their current state. Every window follows the active project and closes
+with the application. This is a requirement for every provider; see the
+[integration window architecture](../docs/integration-windows.md).
+
 ```bash
 python3 bootstrap.py          # creates gui/.venv, installs PySide6, starts the app
 ```

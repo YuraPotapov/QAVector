@@ -237,3 +237,37 @@ def test_each_project_comes_back_to_the_cycle_it_had_open(window, qapp):
     window.switch_project(second.id)
     _wait(qapp, window)
     assert _open_now(qapp, window, "beta") == "beta"
+
+
+def test_detached_integration_changes_project_even_while_inventory_is_busy(window, monkeypatch):
+    from test_integrations_page import FakeCore, _connection, _row
+    project = pf.add('Support window')
+    window.integrations.set_core(FakeCore())
+    detached = window.integrations.detach_provider('jira')
+    replacement = FakeCore(connections=[_connection('support', 'Support')], rows=[_row('OPS-1')])
+    original_core = window.core
+    with monkeypatch.context() as patch:
+        patch.setattr(window, '_new_core', lambda: replacement)
+        patch.setattr(window, 'refresh_inventory', lambda: None)
+        assert window.switch_project(project.id)
+        assert window.integrations.jira.core is replacement
+        assert window.integrations.hosts['jira'].window is detached
+        assert 'Support window' in detached.windowTitle()
+        assert window.integrations.jira.current()['id'] == 'support'
+    window.core = original_core
+    window.integrations.hosts['jira'].dock()
+
+
+def test_detached_integration_draft_can_refuse_project_switch(window, monkeypatch):
+    from cms_gui import widgets
+    from test_integrations_page import FakeCore
+    project = pf.add('Keep draft')
+    window.integrations.set_core(FakeCore())
+    window.integrations.detach_provider('jira')
+    window.integrations.jira.issues.detail.composer.setPlainText('Not posted')
+    with monkeypatch.context() as patch:
+        patch.setattr(widgets, 'confirm', lambda *a, **k: False)
+        assert not window.switch_project(project.id)
+        assert window.settings.project_id == pf.WORKSPACE
+    window.integrations.jira.issues.detail.composer.clear()
+    window.integrations.hosts['jira'].dock()

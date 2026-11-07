@@ -774,6 +774,9 @@ class MainWindow(QMainWindow):
         self.plugins.changed.connect(self.refresh_inventory)
         self.integrations = IntegrationsPage(self.settings)
         self.integrations.set_core(self.core)
+        self.integrations.set_project_name(self._project(self.settings.project_id).name)
+        self.integrations.return_to_main_requested.connect(self._return_to_integrations)
+        self.integrations.search_sources_changed.connect(self._search_sources_changed)
         self.cycles.set_run_state(self.run_state)
         self.cycles.interaction_requested.connect(self._send_cycle_interaction)
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
@@ -1915,8 +1918,16 @@ class MainWindow(QMainWindow):
             if not self.switch_project(project_id):
                 self._fill_projects()
 
+    def _return_to_integrations(self):
+        self.show_page("integrations")
+        self.come_forward()
+
     def _may_leave_project(self):
         """Whether the project in use can be left now; asks what has to be asked."""
+        reason = self.integrations.busy_reason()
+        if reason:
+            widgets.note(self, "Integrations", reason)
+            return False
         if self.process.is_running():
             widgets.note(self, "Projects", "A run is going.",
                          "Stop it, or let it finish, before picking another project: "
@@ -1929,8 +1940,8 @@ class MainWindow(QMainWindow):
             unsaved.append("the scenario being edited")
         if self.cycles.has_unsaved_draft():
             unsaved.append("the cycle being edited")
-        if self.integrations.jira.has_unsaved():
-            unsaved.append("the Jira comment not posted")
+        if self.integrations.has_unsaved():
+            unsaved.append("integration drafts or settings")
         if unsaved and not widgets.confirm(
                 self, "Unsaved changes", "Drop the changes to %s?" % " and ".join(unsaved),
                 "They are not saved, and another project has its own.",
@@ -1979,6 +1990,10 @@ class MainWindow(QMainWindow):
             page.set_inventory(self.inventory)
         self.cycles.set_inventory(self.inventory)
         self.core = self._new_core()
+        # Detached views remain visible while inventory is loading. Move them
+        # to the new context now, even if refresh_inventory is already busy.
+        self.integrations.set_project_name(project.name)
+        self.integrations.set_core(self.core)
         self._aim_log_sources()
         self.listener.set_core(self.core)
         self.subjects_page.set_core(self.core)
@@ -2021,6 +2036,7 @@ class MainWindow(QMainWindow):
         self._fill_projects()
         self.launch.project_name = name.strip()
         self.launch.refresh_address()
+        self.integrations.set_project_name(name.strip())
 
     def delete_project(self):
         project = self._project(self.settings.project_id)
@@ -2491,7 +2507,8 @@ class MainWindow(QMainWindow):
             self._search = search.SearchPopup(
                 self.search_hits,
                 [(key, label) for key, label, _mark in NAVIGATION], self,
-                documents=self.search_documents)
+                documents=self.search_documents, sources=self.search_sources,
+                ask=self.ask_source)
             self._search.opened.connect(self.open_hit)
         self._search.open_over(QApplication.activeWindow() or self)
 
@@ -2507,6 +2524,40 @@ class MainWindow(QMainWindow):
             except Exception:           # noqa: BLE001 - one page must not end search
                 logging.exception("Search could not read the %s page's folders", key)
         return found
+
+    def search_sources(self):
+        """What the pages search only when asked - an integration's issues -
+        each filed under its page. Offering one asks nothing of it."""
+        found = []
+        for key, _label, _mark in NAVIGATION:
+            offered = getattr(self._pages.get(key), "search_sources", None)
+            if offered is None or not self._offered(key):
+                continue
+            try:
+                found.extend(one._replace(section=key) for one in offered())
+            except Exception:           # noqa: BLE001 - one page must not end search
+                logging.exception("Search could not read what the %s page offers", key)
+        return found
+
+    def _search_sources_changed(self):
+        """A page's searchable sources changed: an open Search shows it now,
+        not at its next look."""
+        if self._search is not None and self._search.isVisible():
+            self._search.refresh_sources()
+
+    def ask_source(self, source, query, done):
+        """Search one source, because its row was chosen. ``done(hits, error)``
+        gets hits filed under the source's page, so opening one goes there."""
+        page = self._pages.get(source.section)
+        if page is None:
+            done([], "That page is not there any more.")
+            return
+
+        def answered(hits, error=None):
+            done([one._replace(section=source.section) for one in hits or []
+                  if isinstance(one, search.Hit)], error)
+
+        page.search_source(source.key, query, answered)
 
     def search_hits(self):
         """What every page on the rail lists, filed under that page."""
@@ -3207,6 +3258,17 @@ class MainWindow(QMainWindow):
         self._update_background_action()
 
     def closeEvent(self, event):
+        reason = self.integrations.busy_reason(include_dialogs=False)
+        if reason:
+            widgets.note(self, "Integrations", reason)
+            event.ignore()
+            return
+        if self.integrations.has_unsaved() and not widgets.confirm(
+                self, "Unsaved changes", "Discard integration drafts and settings?",
+                "They have not been saved. Closing the application discards them.",
+                agree="Discard and close", kind="warn"):
+            event.ignore()
+            return
         if self.process.is_running():
             if not self._confirm_close_during_run():
                 event.ignore()
@@ -3256,6 +3318,7 @@ class MainWindow(QMainWindow):
             if stopping:
                 QApplication.restoreOverrideCursor()
         self._closing = True
+        self.integrations.shutdown()
         # Back in its tab first: a row of Subjects going down with the window
         # must not take the Cycles page's Stages panel with it - and the
         # subjects open in windows of their own go with this one.

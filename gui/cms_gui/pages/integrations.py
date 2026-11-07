@@ -2,14 +2,15 @@
 
 The page opens on the provider it was left on - Jira, the only one so far - and
 its breadcrumb leads back to the list of providers. Everything Jira is in
-``jira.py``; this page only chooses which view is showing.
+``jira.py``; this page hosts providers and coordinates their window lifecycle.
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QPushButton,
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHeaderView, QPushButton,
                                QStackedWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import widgets
+from .. import search, widgets
+from ..integrationhost import IntegrationHost
 from .jira import JiraView
 
 #: Provider id -> what the list calls it and says about it.
@@ -21,12 +22,19 @@ class IntegrationsPage(QWidget):
     """The rail's Integrations entry: the providers, and the one opened."""
 
     HEADERS = ("Provider", "Connections", "What it does")
+    return_to_main_requested = Signal()
+    #: What Search may ask this page to search changed: a connection was
+    #: added, lost its token, or was read for the first time.
+    search_sources_changed = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self.core = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        self.window_button = QPushButton("Open in separate window")
+        self.window_button.clicked.connect(self.detach_selected)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack)
 
@@ -64,24 +72,60 @@ class IntegrationsPage(QWidget):
         self.open_button = QPushButton("Open")
         self.open_button.setProperty("variant", "primary")
         self.open_button.clicked.connect(self.open_selected)
-        column.addWidget(widgets.row(self.open_button, None))
+        column.addWidget(widgets.row(self.open_button, self.window_button, None))
         self.stack.addWidget(catalog)
         self.catalog = catalog
 
         self.jira = JiraView(settings)
-        self.jira.back_requested.connect(self.show_catalog)
+        self.jira.back_requested.connect(self._back_to_catalog)
         self.jira.connections_changed.connect(self._fill)
-        self.stack.addWidget(self.jira)
+        self.jira.connections_changed.connect(self.search_sources_changed)
+        # All providers are registered through a host: separate-window support
+        # is part of the integration contract, not a Jira-only feature.
+        self.views = {"jira": self.jira}
+        self.hosts = {provider: IntegrationHost(provider, name, self.views[provider],
+                                              self.stack, settings, self)
+                      for provider, name, _description in PROVIDERS}
+        for provider, host in self.hosts.items():
+            host.docked.connect(lambda provider=provider: self._returned(provider))
+        QApplication.instance().aboutToQuit.connect(self.shutdown)
         self._fill()
         self._restore()
 
     # -- the outside ----------------------------------------------------------
     def set_core(self, core):
-        changed = core is not self.jira.core
-        self.jira.set_core(core)
+        changed = core is not self.core
+        self.core = core
+        for view in self.views.values():
+            view.set_core(core)
         if changed:
             self._restore()
             self._fill()
+
+    def set_project_name(self, name):
+        for host in self.hosts.values():
+            host.set_project_name(name)
+
+    def _returned(self, provider):
+        self._save_view(provider)
+        self.return_to_main_requested.emit()
+
+    def has_unsaved(self):
+        return any(view.has_unsaved() for view in self.views.values())
+
+    def busy_reason(self, include_dialogs=True):
+        return next((reason for view in self.views.values()
+                     if (reason := view.busy_reason(include_dialogs))), "")
+
+    def shutdown(self):
+        for view in self.views.values():
+            view.shutdown()
+        for host in self.hosts.values():
+            host.shutdown()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     def set_developer_mode(self, enabled):
         """A developer can bring the project's own OAuth app and sign-in service;
@@ -96,16 +140,56 @@ class IntegrationsPage(QWidget):
             self.jira.list_connections(then=self._fill)
 
     # -- Ctrl+K ---------------------------------------------------------------
+    # -- search (Ctrl+K) --------------------------------------------------------
+    # Every provider answers for itself, and the page files what it answers
+    # under the provider's id: a target here is ``(provider, its own target)``.
+    # A provider's view offers ``search_rows()`` - what it has loaded, never
+    # asking its service - and ``search_source()`` with ``search_remote(query,
+    # done)``: its service, searched only when that row of Search is chosen.
+    # Results are :class:`search.Hit`s and nothing else.
     def search_rows(self):
-        """The connections, and the issues already loaded. Never asks Jira:
-        what has not been loaded is not offered."""
-        return self.jira.search_rows()
+        """What the providers have loaded. Never asks a service: what has not
+        been loaded is not offered."""
+        found = []
+        for provider, view in self.views.items():
+            rows = getattr(view, "search_rows", None)
+            if rows is not None:
+                found.extend(one._replace(target=(provider, one.target)) for one in rows()
+                             if isinstance(one, search.Hit))
+        return found
+
+    def search_sources(self):
+        """A source per provider that can be searched now - for Jira, a
+        connection with a token. With none set up, none is offered."""
+        found = []
+        for provider, view in self.views.items():
+            offered = getattr(view, "search_source", None)
+            source = offered() if offered is not None else None
+            if source:
+                title, detail = source
+                found.append(search.Source("", provider, title, detail))
+        return found
+
+    def search_source(self, provider, query, done):
+        """Search one provider's service, because its row was chosen."""
+        view = self.views.get(provider)
+        if view is None or getattr(view, "search_remote", None) is None:
+            done([], "%s cannot be searched." % provider)
+            return
+
+        def answered(hits, error=None):
+            done([one._replace(target=(provider, one.target)) for one in hits or []
+                  if isinstance(one, search.Hit)], error)
+
+        view.search_remote(query, answered)
 
     def show_found(self, target):
-        shown = self.jira.show_found(target)
+        if not (isinstance(target, tuple) and len(target) == 2 and target[0] in self.views):
+            return False
+        provider, inner = target
+        shown = self.views[provider].show_found(inner)
         if shown:
-            self.stack.setCurrentWidget(self.jira)
-            self._save_view("jira")
+            self.open_provider(provider)
         return shown
 
     # -- which view -----------------------------------------------------------
@@ -113,21 +197,44 @@ class IntegrationsPage(QWidget):
         self.stack.setCurrentWidget(self.catalog)
         self._save_view("")
 
+    def _back_to_catalog(self):
+        self.show_catalog()
+        self.return_to_main_requested.emit()
+
     def open_provider(self, provider):
-        if provider == "jira":
-            self.stack.setCurrentWidget(self.jira)
-            self._save_view("jira")
+        if provider in self.hosts:
+            self.hosts[provider].open()
+            self._save_view(provider)
+
+    def detach_provider(self, provider):
+        if provider in self.hosts:
+            self._save_view(provider)
+            return self.hosts[provider].detach()
+
+    def detach_selected(self):
+        current = self.stack.currentWidget()
+        for provider, host in self.hosts.items():
+            if current in (host.view, host.placeholder):
+                return self.detach_provider(provider)
+        provider = self.selected_provider()
+        if provider:
+            return self.detach_provider(provider)
 
     def open_selected(self):
+        provider = self.selected_provider()
+        if provider:
+            self.open_provider(provider)
+
+    def selected_provider(self):
         rows = self.table.selectionModel().selectedRows()
         item = self.table.item(rows[0].row() if rows else 0, 0)
-        if item is not None:
-            self.open_provider(item.data(Qt.UserRole))
+        return item.data(Qt.UserRole) if item is not None else ""
 
     def _restore(self):
         view = self.settings.integrations_state().get("view", "jira")
-        if view == "jira":
-            self.stack.setCurrentWidget(self.jira)
+        if view in self.hosts:
+            host = self.hosts[view]
+            self.stack.setCurrentWidget(host.placeholder if host.window else host.view)
         else:
             self.stack.setCurrentWidget(self.catalog)
 

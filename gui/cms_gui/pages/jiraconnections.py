@@ -769,6 +769,9 @@ class SettingsTab(QWidget):
         self.connection = dict(connection) if connection else None
         self.stack_empty.setVisible(connection is None)
         self.form.setVisible(connection is not None)
+        self.save.setEnabled(False)
+        self.saved.setText("")
+        self.problem.setVisible(False)
         if connection is None:
             return
         settings = connection.get("settings") or {}
@@ -779,9 +782,6 @@ class SettingsTab(QWidget):
         self.minutes.setValue(int(settings.get("refresh_minutes") or 0))
         for widget in (self.project, self.minutes):
             widget.blockSignals(False)
-        self.save.setEnabled(False)
-        self.saved.setText("")
-        self.problem.setVisible(False)
 
     def _changed(self, *_args):
         self.save.setEnabled(self.connection is not None)

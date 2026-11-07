@@ -117,6 +117,18 @@ class FakeCore:
             changed.pop("description", None)
             return {"ok": True, "result": {"issue": _issue(document["key"], **changed),
                                            "summary": "%s: %s" % (document["key"], operation)}}
+        if operation == "mentionable":
+            people = [{"id": "acc-olena", "name": "Olena"}, {"id": "acc-maksym", "name": "Maksym"}]
+            query = (document.get("query") or "").lower()
+            if query == "taras":
+                people = [{"id": "acc-taras", "name": "Taras"}]
+            return {"ok": True, "result": {"people": [
+                one for one in people if query in one["name"].lower()]}}
+        if operation == "assignable":
+            people = [{"id": "acc-olena", "name": "Olena"}, {"id": "acc-maksym", "name": "Maksym"}]
+            query = (document.get("query") or "").lower()
+            return {"ok": True, "result": {"people": [
+                one for one in people if query in one["name"].lower()]}}
         if operation == "edit_meta":
             return {"ok": True, "result": {"editable": ["summary", "labels", "priority"],
                                            "priorities": [{"id": "2", "name": "High"},
@@ -774,50 +786,493 @@ def test_a_comment_is_posted_once_typed_and_the_box_emptied(make):
     detail.composer.setPlainText("Fixed on staging")
     assert detail.post.isEnabled() and page.jira.has_unsaved()
     detail.post.click()
-    assert core.calls[-1] == (("call", "product-team", "comment"),
-                              {"key": "QA-142", "body": "Fixed on staging"})
+    assert core.calls[-1] == (("call", "product-team", "comment"), {
+        "key": "QA-142", "body": {"type": "doc", "version": 1, "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Fixed on staging"}]}]}})
     assert detail.composer.toPlainText() == "" and not page.jira.has_unsaved()
     assert detail.note.text() == "Comment posted."
 
 
-def test_editing_reads_what_may_change_and_sends_only_what_did(make, monkeypatch):
-    from cms_gui.pages import jiradialogs
+# -- editing in place ---------------------------------------------------------
+UPDATED = "2026-11-05T10:00:00.000+0000"
+CONFLICT = "QA-142 was changed in Jira after you opened it."
 
-    def drive(dialog):
-        assert dialog.priority.isEnabled() and dialog.priority.currentText() == "High"
-        assert not dialog.description.isEnabled(), "the screen does not offer it"
-        dialog.summary.setText("Session expires after an hour")
-        dialog.save.click()
-        return dialog.result()
 
-    monkeypatch.setattr(jiradialogs.EditIssueDialog, "exec", drive)
+def _ops(core):
+    return [args[-1] for args, _doc in core.calls if args[0] == "call"]
+
+
+def test_an_issue_is_read_only_until_edit_is_pressed(make):
+    core, page, detail = _opened(make)
+    assert detail.summary.isVisible() and not detail.summary_edit.isVisible()
+    assert detail.labels.isVisible() and not detail.labels_edit.isVisible()
+    assert detail.priority.isVisible() and not detail.priority_edit.isVisible()
+    assert not detail.description_edit.isVisible() and not detail.save.isVisible()
+    assert "edit_meta" not in _ops(core), "nothing asked until Edit is pressed"
+    assert not page.jira.has_unsaved()
+
+
+def test_edit_turns_the_fields_into_fields_where_they_stand(make):
     core, page, detail = _opened(make)
     detail.edit.click()
-    ops = [args[-1] for args, _doc in core.calls if args[0] == "call"]
-    assert ops[-2:] == ["edit_meta", "edit"]
-    assert core.calls[-1][1] == {"key": "QA-142", "updated": "2026-11-05T10:00:00.000+0000",
-                                 "fields": {"summary": "Session expires after an hour"}}
+    assert _ops(core)[-1] == "edit_meta"
+    for shown in (detail.summary_edit, detail.labels_edit, detail.priority_edit,
+                  detail.save, detail.cancel):
+        assert shown.isVisible()
+    for hidden in (detail.summary, detail.labels, detail.priority, detail.status,
+                   detail.edit, detail.more):
+        assert not hidden.isVisible()
+    assert detail.summary_edit.text() == "Session expires"
+    assert detail.labels_edit.text() == "regression"
+    assert detail.priority_edit.isEnabled() and detail.priority_edit.currentText() == "High"
+    assert not detail.description_edit.isVisible(), "the screen does not offer it"
+    assert not detail.save.isEnabled(), "nothing changed yet"
+    # Nothing else is written to it meanwhile: its own change would look like
+    # somebody else's when the edit is saved.
+    detail.composer.setPlainText("A note")
+    assert not detail.attach.isEnabled() and not detail.post.isEnabled()
+
+
+def test_save_sends_only_what_changed_and_goes_back_to_reading(make):
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    detail.summary_edit.setText("Session expires after an hour")
+    assert detail.save.isEnabled() and page.jira.has_unsaved()
+    detail.save.click()
+    assert core.calls[-1] == (("call", "product-team", "edit"),
+                              {"key": "QA-142", "updated": UPDATED,
+                               "fields": {"summary": "Session expires after an hour"}})
+    assert detail.editing is None and detail.summary.isVisible()
     assert detail.summary.text() == "Session expires after an hour"
+    assert detail.note.text() == "Saved." and detail.status.isVisible()
+    assert page.jira.issues.rows()[0]["summary"] == "Session expires after an hour"
+    assert not page.jira.has_unsaved()
 
 
-def test_an_edit_over_somebody_else_s_change_stays_open_and_says_so(make, monkeypatch):
-    from cms_gui.pages import jiradialogs
-    seen = []
-
-    def drive(dialog):
-        dialog.summary.setText("Mine")
-        dialog.save.click()
-        seen.append((dialog.result(), dialog.problem.text()))
-        return dialog.result()
-
-    monkeypatch.setattr(jiradialogs.EditIssueDialog, "exec", drive)
+def test_an_edit_over_somebody_else_s_change_stays_open_and_says_so_under_save(make):
     core = FakeCore(issue={"ok": True, "result": {"issue": _issue("QA-142")}},
-                    edit={"ok": False, "kind": "conflict",
-                          "error": "QA-142 was changed in Jira after you opened it."})
+                    edit={"ok": False, "kind": "conflict", "error": CONFLICT})
     _core, page, detail = _opened(make, core)
     detail.edit.click()
-    assert seen == [(0, "QA-142 was changed in Jira after you opened it.")]
-    assert detail.summary.text() == "Session expires"
+    detail.summary_edit.setText("Mine")
+    detail.save.click()
+    assert detail.editing is not None and detail.summary_edit.text() == "Mine"
+    assert detail.edit_problem.isVisible() and detail.edit_problem.text() == CONFLICT
+    assert detail.problem.isHidden()
+    assert detail.save.isEnabled() and detail.save.text() == "Save"
+    detail.summary_edit.setText("Mine, again")
+    assert detail.edit_problem.isHidden(), "typing again clears the old reason"
+
+
+def test_refresh_while_editing_keeps_what_was_typed_and_when_editing_began(make):
+    newer = "2026-11-06T09:00:00.000+0000"
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue("QA-142")}},
+                    refresh=lambda document: {"ok": True, "result": {
+                        "list": {"rows": [_row("QA-142"), _row("QA-139")], "cursor": None},
+                        "issue": _issue("QA-142", updated=newer)}})
+    _core, page, detail = _opened(make, core)
+    detail.edit.click()
+    detail.summary_edit.setText("Mine")
+    page.jira.refresh()
+    assert detail.editing is not None and detail.summary_edit.text() == "Mine"
+    detail.save.click()
+    assert core.calls[-1][1]["updated"] == UPDATED, "Jira decides whether it changed"
+
+
+def test_a_formatted_description_is_rewritten_only_when_the_person_says_so(make):
+    meta = {"ok": True, "result": {"editable": ["summary", "description"], "priorities": []}}
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", description_text="One\nTwo", description_plain=False)}}, edit_meta=meta)
+    _core, page, detail = _opened(make, core)
+    detail.edit.click()
+    assert detail.rich_row.isVisible() and detail.description.isVisible()
+    assert not detail.description_edit.isVisible()
+    assert "description" not in detail.changes()
+    detail.rewrite.click()
+    assert detail.description_edit.isVisible() and not detail.description.isVisible()
+    assert detail.description_edit.toPlainText() == "One\nTwo"
+    detail.description_edit.setPlainText("Rewritten")
+    assert detail.changes()["description"] == "Rewritten"
+    detail.rewrite.click()
+    assert "description" not in detail.changes() and detail.description.isVisible()
+
+
+def test_a_plain_description_is_typed_in_where_it_is_read(make):
+    meta = {"ok": True, "result": {"editable": ["description"], "priorities": []}}
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", description_text="Steps", description_plain=True)}}, edit_meta=meta)
+    _core, page, detail = _opened(make, core)
+    detail.edit.click()
+    assert detail.description_edit.isVisible() and not detail.rich_row.isVisible()
+    assert detail.description_edit.toPlainText() == "Steps"
+    assert not detail.summary_edit.isEnabled(), "the screen does not offer it"
+    detail.description_edit.setPlainText("Steps\n\nand more")
+    assert detail.changes() == {"description": "Steps\n\nand more"}
+
+
+def test_cancel_drops_the_changes_and_sends_nothing(make):
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    detail.labels_edit.setText("regression smoke")
+    sent = len(core.calls)
+    detail.cancel.click()
+    assert len(core.calls) == sent
+    assert detail.editing is None and detail.labels.text() == "regression"
+    assert not page.jira.has_unsaved()
+
+
+def test_escape_puts_an_untouched_edit_down_and_asks_about_a_changed_one(make, monkeypatch):
+    asked = []
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: asked.append(args[2]))
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    assert detail.escape_key.isEnabled()
+    detail.escape_key.activated.emit()
+    assert detail.editing is None and asked == []
+    assert not detail.escape_key.isEnabled() and not detail.save_key.isEnabled()
+    detail.edit.click()
+    detail.summary_edit.setText("Mine")
+    detail.escape_key.activated.emit()
+    assert asked == ["Discard your changes to QA-142?"]
+    assert detail.editing is not None, "kept: the question was not agreed to"
+
+
+def test_ctrl_s_saves(make):
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    detail.summary_edit.setText("Mine")
+    detail.save_key.activated.emit()
+    assert _ops(core)[-1] == "edit" and detail.editing is None
+
+
+def test_opening_another_issue_mid_edit_asks_and_keeping_it_keeps_its_row(make, monkeypatch):
+    answers = []
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: answers.pop(0))
+    core, page, detail = _opened(make, FakeCore())
+    issues = page.jira.issues
+    detail.edit.click()
+    detail.summary_edit.setText("Mine")
+    answers.append(False)
+    issues.select_key("QA-139")
+    assert detail.editing["key"] == "QA-142" and detail.summary_edit.text() == "Mine"
+    assert issues.list.currentItem().data(Qt.UserRole)["key"] == "QA-142"
+    assert not [doc for args, doc in core.calls
+                if args[-1] == "issue" and doc["key"] == "QA-139"]
+    answers.append(True)
+    issues.select_key("QA-139")
+    assert detail.editing is None and detail.issue["key"] == "QA-139"
+
+
+def test_an_untouched_edit_is_put_down_without_a_question(make, monkeypatch):
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: pytest.fail("asked"))
+    core, page, detail = _opened(make, FakeCore())
+    detail.edit.click()
+    page.jira.issues.select_key("QA-139")
+    assert detail.editing is None and detail.issue["key"] == "QA-139"
+
+
+def test_another_connection_mid_edit_asks_and_keeping_it_puts_the_picker_back(
+        make, monkeypatch):
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: False)
+    core = FakeCore(connections=[_connection(), _connection("ops", "Ops")],
+                    issue={"ok": True, "result": {"issue": _issue("QA-142")}})
+    _core, page, detail = _opened(make, core)
+    detail.edit.click()
+    detail.summary_edit.setText("Mine")
+    picker = page.jira.picker
+    picker.setCurrentIndex(picker.findData("ops"))
+    page.jira._connection_picked(picker.currentIndex())
+    assert picker.currentData() == "product-team"
+    assert detail.editing is not None and detail.summary_edit.text() == "Mine"
+
+
+def test_edit_keeps_the_place_on_the_page_and_starts_in_the_summary(make, qapp):
+    long_text = "".join("<p>line %d</p>" % index for index in range(60))
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", description_html=long_text)}})
+    _core, page, detail = _opened(make, core)
+    page.activateWindow()
+    qapp.processEvents()
+    bar = detail.scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+    detail.edit.setFocus()
+    qapp.processEvents()
+    assert detail.edit.hasFocus(), "the jump came from the focused Edit being hidden"
+    detail.edit.click()
+    qapp.processEvents()
+    assert bar.value() == 0, "Edit is at the top; the page stays there"
+    assert detail.summary_edit.hasFocus()
+    detail.summary_edit.setText("Mine")
+    detail.save.click()
+    qapp.processEvents()
+    assert bar.value() == 0
+
+
+CLOUD_DOC = {"type": "doc", "version": 1, "content": [
+    {"type": "paragraph", "content": [{"type": "text", "text": "Steps",
+                                       "marks": [{"type": "strong"}]}]},
+    {"type": "bulletList", "content": [{"type": "listItem", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "one"}]}]}]}]}
+
+
+def _cloud(lost=()):
+    meta = {"ok": True, "result": {"editable": ["summary", "description"], "priorities": []}}
+    return FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", description_doc=CLOUD_DOC, description_lost=list(lost),
+        description_text="Steps\n- one", description_plain=False)}}, edit_meta=meta)
+
+
+def test_a_cloud_description_is_edited_with_its_formatting_and_sent_as_a_document(make):
+    core = _cloud()
+    _core, page, detail = _opened(make, core)
+    detail.edit.click()
+    editor = detail.rich_edit
+    assert editor.isVisible() and not detail.description_edit.isVisible()
+    assert not detail.rich_row.isVisible(), "nothing would be lost"
+    assert editor.document() == CLOUD_DOC
+    assert "description" not in detail.changes(), "opened, not changed"
+    cursor = editor.text.textCursor()
+    cursor.movePosition(cursor.MoveOperation.End)
+    editor.text.setTextCursor(cursor)
+    editor.text.insertPlainText(" more")
+    assert detail.save.isEnabled()
+    detail.save.click()
+    sent = core.calls[-1][1]["fields"]["description"]
+    assert sent["content"][1]["content"][0]["content"][0]["content"] == [
+        {"type": "text", "text": "one more"}]
+    assert sent["content"][0] == CLOUD_DOC["content"][0], "the bold stays bold"
+
+
+def test_what_the_editor_cannot_keep_is_named_and_kept_until_asked(make):
+    core = _cloud(lost=["pictures", "tables"])
+    _core, page, detail = _opened(make, core)
+    detail.edit.click()
+    assert detail.rich_row.isVisible() and not detail.rich_edit.isVisible()
+    assert "has pictures and tables that" in detail.rich_note.text()
+    assert detail.rewrite.text() == "Edit without them"
+    detail.rewrite.click()
+    assert detail.rich_edit.isVisible() and detail.rewrite.text() == "Keep it as it is"
+    detail.rich_edit.text.insertPlainText("x")
+    assert "description" in detail.changes()
+    detail.rewrite.click()
+    assert "description" not in detail.changes() and not detail.rich_edit.isVisible()
+
+
+def test_people_are_read_only_when_the_assignee_list_is_opened(make):
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    picker = detail.assignee_edit
+    assert picker.isVisible() and not detail.assignee.isVisible()
+    assert [picker.itemText(index) for index in range(picker.count())] == [
+        "Alex", "Unassigned", "Me"]
+    assert "assignable" not in _ops(core)
+    picker.showPopup()
+    assert core.calls[-1] == (("call", "product-team", "assignable"),
+                              {"key": "QA-142", "query": ""})
+    picker.hidePopup()
+    assert [picker.itemText(index) for index in range(picker.count())] == [
+        "Alex", "Unassigned", "Me", "Olena", "Maksym"]
+    picker.showPopup()
+    assert _ops(core).count("assignable") == 1, "read once per edit"
+    picker.hidePopup()
+
+
+def test_a_typed_name_and_enter_looks_for_that_person(make):
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    picker = detail.assignee_edit
+    picker.lineEdit().setText("mak")
+    picker.lineEdit().returnPressed.emit()
+    assert core.calls[-1][1] == {"key": "QA-142", "query": "mak"}
+    picker.hidePopup()
+    assert picker.findText("Maksym") >= 0 and picker.findText("Olena") < 0
+
+
+def test_a_new_assignee_is_saved_with_the_edit(make):
+    core, page, detail = _opened(make)
+    detail.edit.click()
+    picker = detail.assignee_edit
+    assert detail.changes() == {}
+    picker.setCurrentIndex(picker.findData("me"))
+    assert detail.changes() == {"assignee": "me"} and detail.save.isEnabled()
+    picker.setCurrentIndex(picker.findData(""))
+    detail.save.click()
+    assert core.calls[-1] == (("call", "product-team", "edit"), {
+        "key": "QA-142", "updated": UPDATED, "fields": {"assignee": ""}})
+
+
+# -- mentions -----------------------------------------------------------------
+def _type_in(qapp, editor, text):
+    from PySide6.QtTest import QTest
+    editor.text.setFocus()
+    qapp.processEvents()
+    QTest.keyClicks(editor.text, text)
+    qapp.processEvents()
+
+
+def _listed(editor):
+    shown = editor.text.mentions
+    return [shown.item(index).text() for index in range(shown.count())] \
+        if shown.isVisible() else None
+
+
+def _comment_body(core):
+    return [doc for args, doc in core.calls if args[-1] == "comment"][-1]["body"]
+
+
+def test_the_first_at_sign_reads_who_can_see_the_issue_once(make, qapp):
+    core, page, detail = _opened(make, FakeCore())
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "Hi @")
+    assert core.calls[-1] == (("call", "product-team", "mentionable"),
+                              {"key": "QA-142", "query": ""})
+    assert _listed(detail.composer) == ["Maksym", "Olena"]
+    _type_in(qapp, detail.composer, "ol")
+    assert _listed(detail.composer) == ["Olena"], "narrowed here, not asked again"
+    _type_in(qapp, detail.composer, " and @")
+    assert _ops(core).count("mentionable") == 1
+
+
+def test_a_mention_is_one_piece_of_the_comment_and_is_posted_as_one(make, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    core, page, detail = _opened(make, FakeCore())
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "@ma")
+    QTest.keyClick(detail.composer.text, Qt.Key_Return)
+    assert _listed(detail.composer) is None
+    _type_in(qapp, detail.composer, "please look")
+    detail.post.click()
+    assert _comment_body(core)["content"] == [{"type": "paragraph", "content": [
+        {"type": "mention", "attrs": {"id": "acc-maksym", "text": "@Maksym"}},
+        {"type": "text", "text": " please look"}]}]
+
+
+def test_backspace_takes_a_whole_mention(make, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    core, page, detail = _opened(make, FakeCore())
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "to @ol")
+    QTest.keyClick(detail.composer.text, Qt.Key_Tab)
+    QTest.keyClick(detail.composer.text, Qt.Key_Backspace)
+    QTest.keyClick(detail.composer.text, Qt.Key_Backspace)
+    assert detail.composer.toPlainText() == "to "
+
+
+def test_a_name_not_among_those_read_is_searched_for_only_when_asked(make, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    core, page, detail = _opened(make, FakeCore())
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "@taras")
+    assert _listed(detail.composer) == ['Search Jira for "taras"']
+    assert _ops(core).count("mentionable") == 1, "typing asks nothing"
+    QTest.keyClick(detail.composer.text, Qt.Key_Return)
+    assert core.calls[-1][1] == {"key": "QA-142", "query": "taras"}
+    assert _listed(detail.composer) == ["Taras"]
+
+
+def test_escape_closes_the_list_and_not_the_edit(make, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    meta = {"ok": True, "result": {"editable": ["description"], "priorities": []}}
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", description_doc={"type": "doc", "version": 1, "content": []},
+        description_lost=[])}}, edit_meta=meta)
+    _core, page, detail = _opened(make, core)
+    page.activateWindow()
+    detail.edit.click()
+    _type_in(qapp, detail.rich_edit, "@")
+    assert _listed(detail.rich_edit) == ["Maksym", "Olena"]
+    QTest.keyClick(detail.rich_edit.text, Qt.Key_Escape)
+    assert _listed(detail.rich_edit) is None and detail.editing is not None
+
+
+def test_the_description_and_the_comment_share_one_read(make, qapp):
+    meta = {"ok": True, "result": {"editable": ["description"], "priorities": []}}
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", description_doc={"type": "doc", "version": 1, "content": []},
+        description_lost=[])}}, edit_meta=meta)
+    _core, page, detail = _opened(make, core)
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "@")
+    detail.edit.click()
+    _type_in(qapp, detail.rich_edit, "@")
+    assert _listed(detail.rich_edit) == ["Maksym", "Olena"]
+    assert _ops(core).count("mentionable") == 1
+
+
+def test_another_issue_has_its_own_people(make, qapp):
+    core, page, detail = _opened(make, FakeCore())
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "@")
+    detail.composer.clear()
+    page.jira.issues.select_key("QA-139")
+    _type_in(qapp, detail.composer, "@")
+    assert [doc["key"] for args, doc in core.calls if args[-1] == "mentionable"] == [
+        "QA-142", "QA-139"]
+
+
+def test_on_server_a_mention_is_written_into_the_text(make, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    core = FakeCore(connections=[_connection(flavour="server", auth="bearer")])
+    _core, page, detail = _opened(make, core)
+    page.activateWindow()
+    assert not detail.composer.bar.isVisible()
+    _type_in(qapp, detail.composer, "@ol")
+    QTest.keyClick(detail.composer.text, Qt.Key_Return)
+    _type_in(qapp, detail.composer, "see")
+    detail.post.click()
+    assert _comment_body(core) == "[~acc-olena] see"
+
+
+class SlowCore(FakeCore):
+    """Answers on a thread, the people a moment later: as a real core does."""
+
+    offload = True
+
+    def integrations(self, *args, **kw):
+        import time
+        if args and args[-1] == "mentionable":
+            time.sleep(0.6)
+        return super().integrations(*args, **kw)
+
+
+def test_the_window_keeps_going_while_people_are_read(make, qapp):
+    """The read is on a thread: keys are taken and the event loop turns
+    while it is out, and the list says it is loading until the answer."""
+    import time
+    from PySide6.QtCore import QTimer
+    core = SlowCore()
+    page = make(core)
+    deadline = time.time() + 5
+    while not page.jira.issues.rows() and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    page.jira.issues.select_key("QA-142")
+    detail = page.jira.issues.detail
+    while (detail.issue or {}).get("description_html") is None and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    page.activateWindow()
+    _type_in(qapp, detail.composer, "@")
+    assert _listed(detail.composer) == ["Loading people…"]
+    ticks = []
+    timer = QTimer()
+    timer.timeout.connect(lambda: ticks.append(time.monotonic()))
+    timer.start(10)
+    _type_in(qapp, detail.composer, "ma")
+    assert detail.composer.toPlainText() == "@ma", "typed while the read was out"
+    assert _listed(detail.composer) == ["Loading people…"]
+    while _listed(detail.composer) == ["Loading people…"] and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    timer.stop()
+    assert _listed(detail.composer) == ["Maksym"]
+    gaps = [later - earlier for earlier, later in zip(ticks, ticks[1:])]
+    assert gaps and max(gaps) < 0.15, "the window never stopped for the read"
 
 
 def test_assigning_to_me_and_unassigning_from_the_more_menu(make):
@@ -912,22 +1367,6 @@ def test_the_activity_tab_shows_what_was_changed_and_who_said_they_did_it(make, 
 
 
 
-def test_a_formatted_description_is_replaced_only_when_the_person_says_so(make, dispose):
-    from cms_gui.pages.jiradialogs import EditIssueDialog
-    page = make(FakeCore())
-    dialog = EditIssueDialog(page, _issue("QA-142", description_text="One\nTwo",
-                                          description_plain=False))
-    try:
-        dialog.set_meta({"editable": ["summary", "description"], "priorities": []})
-        assert dialog.rich_note.isVisibleTo(dialog) and not dialog.description.isEnabled()
-        dialog.description.setPlainText("Rewritten")
-        assert "description" not in dialog.changes()
-        dialog.rich.setChecked(True)
-        assert dialog.changes()["description"] == "Rewritten"
-    finally:
-        dispose(dialog)
-
-
 # -- Ctrl+K -------------------------------------------------------------------
 def test_ctrl_k_finds_connections_and_loaded_issues_without_asking_jira(make):
     core = FakeCore()
@@ -938,7 +1377,7 @@ def test_ctrl_k_finds_connections_and_loaded_issues_without_asking_jira(make):
     titles = [hit.title for hit in hits]
     assert titles == ["Product team", "QA-142  Session expires", "QA-139  Session expires"]
     assert hits[1].detail == "Jira issue · Product team" and hits[1].status == "In Progress"
-    assert hits[1].target == ("issue", "product-team", "QA-142")
+    assert hits[1].target == ("jira", ("issue", "product-team", "QA-142"))
 
 
 def test_a_found_issue_opens_as_a_click_on_it_would(make):
@@ -946,17 +1385,299 @@ def test_a_found_issue_opens_as_a_click_on_it_would(make):
     page = make(core)
     page.jira.tabs.setCurrentWidget(page.jira.connections_tab)
     page.show_catalog()
-    assert page.show_found(("issue", "product-team", "QA-139")) is True
+    assert page.show_found(("jira", ("issue", "product-team", "QA-139"))) is True
     assert page.stack.currentWidget() is page.jira
     assert page.jira.tabs.currentWidget() is page.jira.issues
     assert core.calls[-1] == (("call", "product-team", "issue"),
                               {"key": "QA-139", "comments": jira_module.COMMENTS})
-    assert page.show_found(("issue", "product-team", "QA-999")) is False
+    assert page.show_found(("jira", ("issue", "product-team", "QA-999"))) is False
+    assert page.show_found(("issue", "product-team", "QA-139")) is False, "whose?"
 
 
 def test_a_found_connection_is_selected_on_its_tab(make):
     page = make(FakeCore())
-    assert page.show_found(("connection", "product-team")) is True
+    assert page.show_found(("jira", ("connection", "product-team"))) is True
     tab = page.jira.connections_tab
     assert page.jira.tabs.currentWidget() is tab and tab.selected()["id"] == "product-team"
-    assert page.show_found(("connection", "nowhere")) is False
+    assert page.show_found(("jira", ("connection", "nowhere"))) is False
+
+
+def test_jira_is_offered_to_search_only_with_a_connection_that_has_a_token(make):
+    from cms_gui import search
+    for connections in ([], [_connection(token=False)]):
+        page = make(FakeCore(connections=connections))
+        assert page.search_sources() == []
+    core = FakeCore(connections=[_connection(), _connection("ops", "Ops", token=False)])
+    page = make(core)
+    before = core.asked()
+    assert page.search_sources() == [search.Source("", "jira", "Jira",
+                                                   "Issues in Product team")]
+    assert core.asked() == before, "offering it asks Jira nothing"
+
+
+def test_a_page_never_opened_reads_its_connections_when_search_first_asks(make):
+    core = FakeCore()
+    page = make(core, show=False)
+    assert [args[0] for args, _doc in core.calls] == []
+    assert page.search_sources() == [], "not read yet"
+    assert [args[0] for args, _doc in core.calls] == ["list"]
+    assert [one.title for one in page.search_sources()] == ["Jira"]
+    assert core.asked() == []
+
+
+def _found_in_jira(document):
+    """Ctrl+K's search finds QA-500; the page's own list is the usual two."""
+    if not document.get("everywhere"):
+        return {"ok": True, "result": {"rows": [_row("QA-142"), _row("QA-139")],
+                                       "cursor": None}}
+    assert document["size"] == jira_module.FOUND_ROWS
+    return {"ok": True, "result": {"rows": [_row("QA-500", "Export fails", "To Do", "new")],
+                                   "cursor": None}}
+
+
+def test_searching_jira_from_ctrl_k_is_one_request_per_connection(make):
+    core = FakeCore(connections=[_connection(), _connection("ops", "Ops")],
+                    search=_found_in_jira)
+    page = make(core)
+    sent = len(core.calls)
+    got = []
+    page.search_source("jira", "qa-500", lambda hits, error=None: got.append((hits, error)))
+    asked = [(args[1], doc["text"]) for args, doc in core.calls[sent:]]
+    assert asked == [("product-team", "qa-500"), ("ops", "qa-500")]
+    (hits, error), = got
+    assert error in (None, "")
+    assert [(hit.title, hit.detail) for hit in hits] == [
+        ("QA-500  Export fails", "Jira issue · Product team"),
+        ("QA-500  Export fails", "Jira issue · Ops")]
+    assert hits[0].target == ("jira", ("issue", "product-team", "QA-500"))
+
+
+def test_a_found_issue_opens_even_when_the_list_does_not_have_it(make):
+    core = FakeCore(search=_found_in_jira)
+    page = make(core, show=False)
+    page.search_sources()
+    got = []
+    page.search_source("jira", "qa-500", lambda hits, error=None: got.append(hits))
+    page.show()
+    assert page.show_found(got[0][0].target) is True
+    assert page.jira.tabs.currentWidget() is page.jira.issues
+    assert page.jira.issues.rows()[0]["key"] == "QA-500"
+    assert core.calls[-1] == (("call", "product-team", "issue"),
+                              {"key": "QA-500", "comments": jira_module.COMMENTS})
+
+
+def test_a_failed_search_says_why(make):
+    core = FakeCore(search={"ok": False, "kind": "signin", "error": "Sign-in refused."})
+    page = make(core)
+    got = []
+    page.search_source("jira", "qa-500", lambda hits, error=None: got.append((hits, error)))
+    assert got == [([], "Sign-in refused.")]
+
+
+# -- every provider can live in an application-owned window ------------------
+def test_detach_and_return_preserve_the_same_view_draft_and_loaded_state(make, qapp):
+    page = make()
+    view = page.jira
+    view.open_issue(_row('QA-142'))
+    view.issues.detail.composer.setPlainText('Keep this draft')
+    view.issues.search.setText('A query not submitted yet')
+    before = list(view.core.calls)
+    item = view.issues.list.item(0)
+    window = page.detach_provider('jira')
+    qapp.processEvents()
+    assert view.window() is window and view.isVisible()
+    assert not window.testAttribute(Qt.WA_QuitOnClose)
+    assert window.parent() is None
+    assert page.detach_provider('jira') is window
+    assert view.issues.list.item(0) is item  # not repopulated on reparenting
+    assert view.issues.detail.composer.toPlainText() == 'Keep this draft'
+    window.close()
+    qapp.processEvents()
+    assert page.hosts['jira'].window is None
+    assert page.stack.currentWidget() is view
+    assert view.issues.detail.issue['key'] == 'QA-142'
+    assert view.issues.detail.composer.toPlainText() == 'Keep this draft'
+    assert view.issues.search.text() == 'A query not submitted yet'
+    assert view.core.calls == before
+
+
+def test_detached_view_stays_visible_when_main_page_is_hidden(make, qapp):
+    page = make()
+    window = page.detach_provider('jira')
+    page.hide()
+    qapp.processEvents()
+    assert window.isVisible() and page.jira.isVisible()
+    assert page.jira.ticker.isActive()
+    page.shutdown()
+    assert not window.isVisible()
+    assert not page.jira.ticker.isActive()
+    assert not page.jira.auto.isActive()
+
+
+def test_search_and_repeated_open_raise_existing_window_without_docking(make):
+    page = make()
+    window = page.detach_provider('jira')
+    window.showMinimized()
+    page.show_catalog()
+    assert page.show_found(('jira', ('connection', 'product-team')))
+    assert page.hosts['jira'].window is window
+    assert not window.isMinimized()
+    assert page.jira.tabs.currentWidget() is page.jira.connections_tab
+    page.open_provider('jira')
+    assert page.jira.window() is window
+
+
+def test_active_project_changes_in_the_existing_window_and_clears_old_data(make, settings):
+    page = make()
+    page.set_project_name('Shop')
+    window = page.detach_provider('jira')
+    page.jira.open_issue(_row('QA-142'))
+    page.jira.issues.detail.composer.setPlainText('Discarded by project switch confirmation')
+    page.jira.issues.search.setText('Old search')
+    page.jira.activity.set_rows([{'op': 'edit', 'target': 'QA-142', 'ok': True}])
+    new_core = FakeCore(connections=[_connection('support', 'Support')], rows=[_row('OPS-1')])
+    page.set_project_name('Support')
+    page.set_core(new_core)
+    assert page.hosts['jira'].window is window
+    assert 'Support' in window.windowTitle() and 'Shop' not in window.windowTitle()
+    assert page.jira.current()['id'] == 'support'
+    assert page.jira.issues.list.item(0).data(Qt.UserRole)['key'] == 'OPS-1'
+    assert page.jira.issues.detail.issue is None
+    assert not page.has_unsaved()
+    assert page.jira.issues.search.text() == ''
+    assert page.jira.activity.table.rowCount() == 0
+    assert new_core.asked() == ['search']
+
+
+def test_switch_while_connections_load_drops_old_reply_and_starts_new_load(make, monkeypatch):
+    pending = []
+    monkeypatch.setattr(jira_module.background, 'run',
+                        lambda work, done, owner=None: pending.append((work, done)))
+    first = FakeCore()
+    first.offload = True
+    page = make(first)
+    assert len(pending) == 1 and page.jira._listing
+    old_work, old_done = pending[0]
+    # The old request completed before switching, but its UI reply is queued.
+    old_result = old_work()
+    second = FakeCore(connections=[_connection('second', 'Second')], rows=[])
+    page.set_core(second)
+    old_done(old_result, None)
+    assert page.jira.current()['id'] == 'second'
+    assert page.jira.core is second and not page.jira._listing
+    assert page.jira._pending == {}
+
+
+def test_shutdown_cancels_oauth_and_pending_reads_without_delivering_callbacks(make, monkeypatch):
+    import threading
+    pending = []
+    page = make()
+    core = page.jira.core
+    core.offload = True
+    monkeypatch.setattr(jira_module.background, 'run',
+                        lambda work, done, owner=None: pending.append((work, done)))
+    cancelled = threading.Event()
+    answers = []
+    page.jira.sign_in({}, answers.append, cancelled)
+    page.jira.refresh()
+    page.detach_provider('jira')
+    before = len(core.calls)
+    page.shutdown()
+    assert cancelled.is_set()
+    for work, done in pending:
+        done(work(), None)
+    assert len(core.calls) == before
+    assert not answers
+    assert not page.jira._pending
+
+
+def test_request_keeps_original_core_even_if_worker_starts_after_context_changed(make, monkeypatch):
+    pending = []
+    page = make()
+    original = page.jira.core
+    original.offload = True
+    monkeypatch.setattr(jira_module.background, 'run',
+                        lambda work, done, owner=None: pending.append((work, done)))
+    page.jira.refresh()
+    cancel = next(iter(page.jira._pending))
+    replacement = FakeCore()
+    # Simulate a queued worker starting during context transition. Its captured
+    # core must not be resolved dynamically from the page.
+    page.jira.core = replacement
+    pending[0][0]()
+    assert original.asked()[-1] == 'refresh'
+    assert replacement.calls == []
+    page.shutdown()
+    assert cancel.is_set()
+
+
+def test_write_in_flight_blocks_project_switch_until_the_result_arrives(make, monkeypatch):
+    pending = []
+    page = make()
+    page.jira.open_issue(_row('QA-142'))
+    page.jira.core.offload = True
+    monkeypatch.setattr(jira_module.background, 'run',
+                        lambda work, done, owner=None: pending.append((work, done)))
+    page.jira.assign_issue('me')
+    assert 'being saved' in page.busy_reason()
+    work, done = pending.pop()
+    done(work(), None)
+    assert not page.busy_reason()
+
+
+def test_window_geometry_is_reused_across_projects(make):
+    page = make()
+    first = page.detach_provider('jira')
+    first.resize(760, 740)
+    page.hosts['jira'].dock()
+    page.set_project_name('Another project')
+    second = page.detach_provider('jira')
+    assert (second.width(), second.height()) == (760, 740)
+
+
+def test_page_shutdown_cannot_reopen_an_integration_window(make):
+    page = make()
+    window = page.detach_provider('jira')
+    page.shutdown()
+    assert not window.isVisible()
+    assert page.detach_provider('jira') is None
+
+
+def test_discarded_settings_do_not_stay_dirty_in_a_project_without_connections(make):
+    page = make()
+    tab = page.jira.settings_tab
+    tab.project.setText('CHANGED')
+    tab.project.textEdited.emit('CHANGED')
+    assert page.has_unsaved()
+    page.set_core(FakeCore(connections=[]))
+    assert not page.has_unsaved()
+    assert page.jira.connections_tab.table.rowCount() == 0
+
+
+def test_a_write_is_never_cancelled_and_its_late_answer_is_dropped(make, monkeypatch):
+    """Killed half way, nobody could say whether Jira took a change. So a new
+    context - another project, new settings, the application quitting - lets
+    a write finish; only its answer, now about a context that is gone, is
+    dropped."""
+    pending = []
+    page = make()
+    page.jira.open_issue(_row('QA-142'))
+    old = page.jira.core
+    old.offload = True
+    monkeypatch.setattr(jira_module.background, 'run',
+                        lambda work, done, owner=None: pending.append((work, done)))
+    given = []
+    real = FakeCore.integrations
+
+    def integrations(self, *args, document=None, cancel=None, **kwargs):
+        given.append((args[-1], cancel))
+        return real(self, *args, document=document, **kwargs)
+
+    monkeypatch.setattr(FakeCore, 'integrations', integrations)
+    page.jira.assign_issue('me')
+    work, done = pending[-1]
+    page.set_core(FakeCore())
+    page.shutdown()
+    done(work(), None)
+    assert ('assign', None) in given, 'the write ran, with nothing that could stop it'
+    assert page.jira.issues.detail.issue is None, 'its answer belonged to the old project'

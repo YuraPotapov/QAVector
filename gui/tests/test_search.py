@@ -330,3 +330,92 @@ def test_it_leaves_the_keyboard_to_the_desktop_and_goes_when_its_window_is_used(
     window = popup.parentWidget()
     window.activateWindow()
     _until(lambda: not popup.isVisible())
+
+
+# -- sources searched only when their row is chosen ---------------------------------
+JIRA = search.Source("integrations", "jira", "Jira", "Issues in Product team")
+
+
+@pytest.fixture
+def asking(qapp, dispose):
+    """A popup with one source; its asks are written down and answered by hand."""
+    window = QWidget()
+    window.resize(1000, 700)
+    window.show()
+    QTest.qWaitForWindowActive(window)
+    asked, offered = [], [JIRA]
+    made = search.SearchPopup(lambda: list(_hits()), SECTIONS + [("integrations",
+                                                                  "Integrations")],
+                              window, sources=lambda: list(offered),
+                              ask=lambda source, query, done: asked.append(
+                                  (source.key, query, done)))
+    opened = []
+    made.opened.connect(opened.append)
+    made.open_over(window)
+    _until(lambda: QApplication.focusWidget() is made.field)
+    made.asked, made.chosen, made.offered = asked, opened, offered
+    yield made
+    made.hide()
+    dispose(window)
+
+
+def _found(title, key):
+    return search.hit(title, "Jira issue · Product team", "To Do",
+                      target=("jira", ("issue", "product-team", key)),
+                      section="integrations")
+
+
+def test_a_source_is_offered_by_name_and_not_searched_by_typing(asking):
+    assert "JIRA" not in _rows(asking), "an empty field offers nothing to search"
+    QTest.keyClicks(asking.field, "qa-500")
+    assert _rows(asking)[-2:] == ["JIRA", 'Search Jira for "qa-500"']
+    assert asking.asked == []
+    assert asking.empty.isHidden(), "the row is what there is to do"
+
+
+def test_choosing_the_row_searches_once_and_shows_what_came_back(asking):
+    QTest.keyClicks(asking.field, "qa-500")
+    asking._move_to(asking.results.count() - 1, -1)
+    QTest.keyClick(asking.field, Qt.Key_Return)
+    assert asking.isVisible() and [(key, query) for key, query, _d in asking.asked] == [
+        ("jira", "qa-500")]
+    row = asking.results.itemWidget(asking.results.item(asking.results.count() - 1))
+    assert row.tag.text() == "Searching..."
+    asking.asked[0][2]([_found("QA-500  Export fails", "QA-500")])
+    assert _rows(asking)[-3:] == ["JIRA", 'Search Jira for "qa-500"', "QA-500  Export fails"]
+    QTest.keyClick(asking.field, Qt.Key_Return)          # moved onto the first hit
+    assert [hit.target for hit in asking.chosen] == [("jira", ("issue", "product-team",
+                                                               "QA-500"))]
+
+
+def test_typing_again_drops_the_answer_and_a_late_one_is_ignored(asking):
+    QTest.keyClicks(asking.field, "qa-500")
+    asking._move_to(asking.results.count() - 1, -1)
+    QTest.keyClick(asking.field, Qt.Key_Return)
+    QTest.keyClicks(asking.field, "1")
+    asking.asked[0][2]([_found("QA-500  Export fails", "QA-500")])
+    assert "QA-500  Export fails" not in _rows(asking)
+    assert _rows(asking)[-1] == 'Search Jira for "qa-5001"'
+    assert len(asking.asked) == 1, "a new query is searched only when asked again"
+
+
+def test_nothing_found_and_a_failure_are_said_on_the_row(asking):
+    QTest.keyClicks(asking.field, "nothing")
+    asking._move_to(asking.results.count() - 1, -1)
+    QTest.keyClick(asking.field, Qt.Key_Return)
+    asking.asked[-1][2]([])
+    row = asking.results.itemWidget(asking.results.item(asking.results.count() - 1))
+    assert row.tag.text() == "None found"
+    assert row.detail.text() == 'Nothing in Jira matches "nothing"'
+    QTest.keyClick(asking.field, Qt.Key_Return)          # asked again
+    asking.asked[-1][2]([], "Sign-in refused")
+    row = asking.results.itemWidget(asking.results.item(asking.results.count() - 1))
+    assert row.tag.text() == "Failed" and row.detail.text() == "Sign-in refused"
+
+
+def test_with_no_source_set_up_nothing_is_offered(asking):
+    asking.offered.clear()
+    asking._read_again()
+    QTest.keyClicks(asking.field, "qa-500")
+    assert "JIRA" not in _rows(asking)
+    assert asking.empty.text() == 'Nothing matches "qa-500".'

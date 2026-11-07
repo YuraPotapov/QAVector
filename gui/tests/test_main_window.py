@@ -1829,3 +1829,40 @@ def test_last_scenario_result_is_saved_before_the_browser_windows_close(window):
     finally:
         window._stopping = False
         window._entry_id = None
+
+
+def test_returning_an_integration_brings_its_page_back_to_the_main_window(window):
+    from test_integrations_page import FakeCore
+    window.integrations.set_core(FakeCore())
+    detached = window.integrations.detach_provider('jira')
+    window.show_page('launch')
+    window.integrations.hosts['jira'].toggle_button.click()
+    assert window._page_key == 'integrations'
+    assert window.integrations.hosts['jira'].window is None
+    assert window.integrations.jira.isVisible()
+
+
+def test_closing_main_window_also_closes_detached_integrations(window, monkeypatch):
+    from test_integrations_page import FakeCore
+    window.integrations.set_core(FakeCore())
+    detached = window.integrations.detach_provider('jira')
+    with monkeypatch.context() as patch:
+        patch.setattr(main_window_mod.widgets, 'confirm', lambda *a, **k: True)
+        assert window.close()
+    assert not detached.isVisible()
+    assert window.integrations.jira._closing
+    assert not window.integrations.jira.ticker.isActive()
+
+
+def test_refusing_main_close_keeps_integration_and_draft_alive(window, monkeypatch):
+    from test_integrations_page import FakeCore
+    window.integrations.set_core(FakeCore())
+    detached = window.integrations.detach_provider('jira')
+    window.integrations.jira.issues.detail.composer.setPlainText('Unsent')
+    with monkeypatch.context() as patch:
+        patch.setattr(main_window_mod.widgets, 'confirm', lambda *a, **k: False)
+        assert not window.close()
+    assert detached.isVisible() and not window.integrations.jira._closing
+    assert window.integrations.jira.issues.detail.composer.toPlainText() == 'Unsent'
+    window.integrations.jira.issues.detail.composer.clear()
+    window.integrations.hosts['jira'].dock()

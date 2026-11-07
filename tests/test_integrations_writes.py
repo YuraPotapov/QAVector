@@ -151,6 +151,44 @@ def test_an_edit_sends_only_what_changed(jira):
     assert answer["summary"] == "QA-1: description, labels, priority, summary"
 
 
+def test_a_formatted_description_is_checked_and_sent_as_a_document(jira):
+    server = jira(**{"PUT /rest/api/3/issue/QA-1": (204, None)})
+    document = {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [
+        {"type": "text", "text": "Steps", "marks": [{"type": "strong"}]}]}]}
+    _do("edit", server, {"key": "QA-1", "fields": {"description": document}})
+    (_method, _path, body), = _writes(server)
+    assert body["fields"]["description"] == document
+
+
+def test_a_document_jira_would_refuse_is_refused_before_it_is_sent(jira):
+    server = jira()
+    with pytest.raises(writes.Refused) as caught:
+        _do("edit", server, {"key": "QA-1", "fields": {"description": {
+            "type": "doc", "content": [{"type": "table", "content": []}]}}})
+    assert "table" in str(caught.value)
+    with pytest.raises(writes.Refused):
+        _do("edit", server, {"key": "QA-1", "fields": {"description": {
+            "type": "doc", "content": []}}}, flavour="server")
+    assert _writes(server) == []
+
+
+def test_an_edit_can_change_who_carries_the_issue_too(jira):
+    server = jira(**{"PUT /rest/api/3/issue/QA-1": (204, None),
+                     "PUT /rest/api/3/issue/QA-1/assignee": (204, None),
+                     "/rest/api/3/myself": {"accountId": "acc-1"}})
+    answer = _do("edit", server, {"key": "QA-1", "fields": {"summary": "New",
+                                                            "assignee": "acc-2"}})
+    assert [(one[1], one[2]) for one in _writes(server)] == [
+        ("/rest/api/3/issue/QA-1", {"fields": {"summary": "New"}}),
+        ("/rest/api/3/issue/QA-1/assignee", {"accountId": "acc-2"})]
+    assert answer["summary"] == "QA-1: assignee, summary"
+    alone = jira(**{"PUT /rest/api/3/issue/QA-1/assignee": (204, None),
+                    "/rest/api/3/myself": {"accountId": "acc-1"}})
+    _do("edit", alone, {"key": "QA-1", "fields": {"assignee": "me"}})
+    assert [(one[1], one[2]) for one in _writes(alone)] == [
+        ("/rest/api/3/issue/QA-1/assignee", {"accountId": "acc-1"})]
+
+
 def test_what_may_be_edited_comes_from_the_issue_s_screen(jira):
     server = jira(**{"/rest/api/3/issue/QA-1/editmeta": {"fields": {
         "summary": {}, "labels": {}, "priority": {"allowedValues": [
@@ -183,6 +221,49 @@ def test_people_to_assign_are_found_by_query_on_cloud_and_username_on_server(jir
     assert _do("assignable", server, {"key": "QA-1", "query": "ol"}, flavour="server") == {
         "people": [{"id": "olena", "name": "Olena"}]}
     assert "query=ol" in server.seen[0].path and "username=ol" in server.seen[1].path
+
+
+# -- mentions -----------------------------------------------------------------
+def test_people_to_mention_are_those_who_can_see_the_issue(jira):
+    from integrations.jira import operations
+    server = jira(**{"/rest/api/3/user/viewissue/search": [
+        {"accountId": "acc-1", "displayName": "Olena", "emailAddress": EMAIL}],
+        "/rest/api/2/user/viewissue/search": [{"name": "olena", "displayName": "Olena"}]})
+    cloud, on_server = _connection(server.site), _connection(server.site, "server")
+    assert operations.mentionable(session(cloud, TOKEN), cloud, {
+        "key": "QA-1", "query": "ol"}) == {"people": [{"id": "acc-1", "name": "Olena"}]}
+    assert operations.mentionable(session(on_server, TOKEN), on_server, {
+        "key": "QA-1", "query": "ol"}) == {"people": [{"id": "olena", "name": "Olena"}]}
+    assert "query=ol" in server.seen[0].path and "issueKey=QA-1" in server.seen[0].path
+    assert "username=ol" in server.seen[1].path
+    assert EMAIL not in json.dumps(operations.mentionable(session(cloud, TOKEN), cloud, {
+        "key": "QA-1", "query": "ol"}))
+
+
+def test_an_empty_query_cloud_refuses_starts_from_who_the_issue_can_be_assigned_to(jira):
+    from integrations.jira import operations
+    server = jira(**{"/rest/api/3/user/viewissue/search": (400, {
+        "errorMessages": ["The query parameter is required."]}),
+        "/rest/api/3/user/assignable/search": [{"accountId": "acc-2", "displayName": "Maksym"}]})
+    cloud = _connection(server.site)
+    assert operations.mentionable(session(cloud, TOKEN), cloud, {"key": "QA-1"}) == {
+        "people": [{"id": "acc-2", "name": "Maksym"}]}
+    assert [one.path.split("?")[0] for one in server.seen] == [
+        "/rest/api/3/user/viewissue/search", "/rest/api/3/user/assignable/search"]
+    with pytest.raises(Exception):
+        operations.mentionable(session(cloud, TOKEN), cloud, {"key": "QA-1", "query": "x"})
+
+
+def test_a_formatted_comment_with_a_mention_is_sent_as_a_document(jira):
+    server = jira(**{"POST /rest/api/3/issue/QA-1/comment": {"id": "9"}})
+    document = {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [
+        {"type": "mention", "attrs": {"id": "acc-1", "text": "@Olena"}},
+        {"type": "text", "text": " please check", "marks": [{"type": "em"}]}]}]}
+    _do("comment", server, {"key": "QA-1", "body": document})
+    (_method, _path, body), = _writes(server)
+    assert body == {"body": document}
+    with pytest.raises(writes.Refused):
+        _do("comment", server, {"key": "QA-1", "body": {"type": "doc", "content": []}})
 
 
 # -- creating -----------------------------------------------------------------
