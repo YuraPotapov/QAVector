@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.59] - 2026-11-07
+
 ### Changed
 - A Jira issue is edited in place rather than in a separate window. It is
   read-only until **Edit** is pressed. Then its summary, priority, assignee,
