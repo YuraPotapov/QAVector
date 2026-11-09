@@ -74,26 +74,43 @@ class IntegrationHost(QObject):
         self.toggle_button.setCursor(Qt.PointingHandCursor)
         self.toggle_button.clicked.connect(self.toggle)
         view.window_actions.addWidget(self.toggle_button)
-        view.installEventFilter(self)
-        self._update_button()
-        # What the page shows while the view is in its own window: a state of
-        # the page, drawn like the application's other empty states.
+        # What the page shows while the view is in its own window. Not an empty
+        # state - nothing is missing: the page keeps its own header, crumb
+        # included, and says where the rest went with the line every detached
+        # panel leaves behind (widgets.Elsewhere, as Stages does).
         self.placeholder = QWidget()
         column = QVBoxLayout(self.placeholder)
-        column.setContentsMargins(24, 22, 24, 18)
-        column.setSpacing(10)
+        column.setContentsMargins(24, 18, 24, 14)   # the views' own margins
+        column.setSpacing(4)
+        self.crumb = QPushButton("Integrations  /")
+        self.crumb.setObjectName("integrationCrumb")
+        self.crumb.setProperty("variant", "ghost")
+        self.crumb.setCursor(Qt.PointingHandCursor)
+        if hasattr(view, "back_requested"):
+            self.crumb.clicked.connect(view.back_requested)
+        column.addWidget(self.crumb, 0, Qt.AlignLeft)
         column.addWidget(widgets.heading(name))
-        column.addWidget(widgets.empty_zone(
-            "%s is open in its own window" % name,
-            "It follows the project picked here. Bring its window forward, or put "
-            "it back on this page."))
-        self.show_button = QPushButton("Show window")
-        self.show_button.setProperty("variant", "primary")
-        self.show_button.clicked.connect(self.open)
-        self.return_button = QPushButton("Return here")
+        column.addSpacing(10)
+        panel = widgets.BlueprintPanel(padding=(14, 6, 8, 6))
+        self.elsewhere = widgets.Elsewhere("%s is in a separate window. It follows "
+                                           "the project picked here." % name)
+        self.elsewhere.show_requested.connect(self.open)
+        self.show_button = self.elsewhere.show_button
+        self.return_button = QToolButton()
+        self.return_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.return_button.setProperty("variant", "icon")
+        self.return_button.setCursor(Qt.PointingHandCursor)
+        self.return_button.setToolTip("Return to main window")
+        self.return_button.setAccessibleName("Return to main window")
         self.return_button.clicked.connect(self.dock)
-        column.addWidget(widgets.row(self.show_button, self.return_button, None))
+        self.elsewhere.add_widget(self.return_button)
+        panel.layout().addWidget(self.elsewhere)
+        column.addWidget(panel)
         column.addStretch(1)
+        # Icons carry the theme's ink: drawn again when the theme changes.
+        view.installEventFilter(self)
+        self.placeholder.installEventFilter(self)
+        self._update_button()
         stack.addWidget(view)
         stack.addWidget(self.placeholder)
 
@@ -106,6 +123,7 @@ class IntegrationHost(QObject):
         text = "Return to main window" if detached else "Open in separate window"
         self.toggle_button.setToolTip(text)
         self.toggle_button.setAccessibleName(text)
+        icons.button(self.return_button, "dock")
 
     def eventFilter(self, watched, event):
         if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):

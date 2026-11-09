@@ -1297,6 +1297,8 @@ class IssuesTab(QWidget):
         self.search.returnPressed.connect(self.search_requested)
         self.search.textChanged.connect(self._text_changed)
         self._searched_text = ""
+        # As tall as the buttons beside it, not 2px short of them.
+        self.search.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         line.addWidget(self.search, 1)
         self.refresh = QPushButton("")
         icons.button(self.refresh, "refresh", "")

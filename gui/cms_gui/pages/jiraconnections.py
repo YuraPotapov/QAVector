@@ -292,16 +292,20 @@ class ConnectionDialog(QDialog):
         self.auth.setCurrentIndex(max(0, self.auth.findData(
             self.connection.get("auth", "oauth" if not connection else "basic"))))
         self.auth.currentIndexChanged.connect(self._auth_changed)
-        column.addWidget(widgets.field("Authentication", self.auth))
+        auth_field = widgets.field("Authentication", self.auth)
+        # What signing in does, or how it went: the field's hint, drawn like
+        # the one under Name rather than as a paragraph of its own.
+        self.oauth_state = QLabel("")
+        self.oauth_state.setProperty("role", "hint")
+        self.oauth_state.setWordWrap(True)
+        auth_field.layout().addWidget(self.oauth_state)
+        column.addWidget(auth_field)
 
         # -- signed in through the browser
         self.oauth_box = QWidget()
         box = QVBoxLayout(self.oauth_box)
         box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(6)
-        self.oauth_state = QLabel("")
-        self.oauth_state.setWordWrap(True)
-        box.addWidget(self.oauth_state)
+        box.setSpacing(8)
         self.sign_in = QPushButton("Sign in with Atlassian")
         self.sign_in.setProperty("variant", "primary")
         self.sign_in.clicked.connect(self._sign_in)
@@ -382,10 +386,27 @@ class ConnectionDialog(QDialog):
     def _auth_changed(self, *_args):
         oauth = self.oauth()
         self.oauth_box.setVisible(oauth)
+        self.oauth_state.setVisible(oauth)
         self.token_box.setVisible(not oauth)
         self.email_field.setVisible(self.auth.currentData() == "basic")
         self._say_oauth()
-        self.adjustSize()
+        self._fit()
+
+    def _fit(self):
+        """As tall as the dialog's content at the width it has. adjustSize
+        measures the wrapped hints at the narrow width the layout would like,
+        which left space under a field at full width - and did not grow the
+        dialog for a problem shown later, so the problem covered the button."""
+        layout = self.layout()
+        layout.activate()
+        # Not shown yet, its width is Qt's default for any window, not its own.
+        width = max(self.width() if self.isVisible() else 0, self.minimumWidth())
+        self.resize(width, max(layout.totalHeightForWidth(width),
+                               layout.totalMinimumSize().height()))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit()
 
     def _say_oauth(self):
         waiting = self._cancel is not None
@@ -412,6 +433,7 @@ class ConnectionDialog(QDialog):
         self.sign_in.style().unpolish(self.sign_in)
         self.sign_in.style().polish(self.sign_in)
         self.save.setEnabled(not waiting)
+        self._fit()
 
     # -- signing in -----------------------------------------------------------
     def _sign_in(self):
@@ -521,6 +543,7 @@ class ConnectionDialog(QDialog):
     def _say(self, problems):
         self.problem.setText("\n".join(one for one in problems if one))
         self.problem.setVisible(any(problems))
+        self._fit()
 
 
 class OAuthAppDialog(QDialog):

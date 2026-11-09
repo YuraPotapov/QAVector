@@ -506,6 +506,13 @@ QToolButton {{
 QToolButton:hover {{ background: {n200}; }}
 QToolButton:pressed {{ background: {n300}; }}
 QToolButton:disabled {{ color: {n500}; border-color: {n300}; }}
+/* A line edit's own buttons - the clear button of setClearButtonEnabled. Qt
+   sizes them to the icon and centres them in the box; the box and min-height
+   above made one 32px tall in a 30px field, so it hung off the bottom. */
+QLineEdit > QToolButton, QLineEdit > QToolButton:hover,
+QLineEdit > QToolButton:pressed {{
+    background: transparent; border: none; padding: 0; min-height: 0;
+}}
 QToolButton[variant="primary"] {{
     background: {accent}; color: {bg}; border-color: {accent};
 }}
@@ -824,9 +831,14 @@ QFrame#jiraRichNote QPushButton {{ background: transparent; }}
 QFrame#jiraRichNote QPushButton:hover {{ background: {a100}; }}
 QSplitter#jiraSplitter::handle {{ background: transparent; }}
 QSplitter#jiraSplitter::handle:hover {{ background: {divider}; }}
-/* The way back to the list of providers: a breadcrumb, not a button. */
-QPushButton#jiraCrumb {{ color: {n600}; font-size: 13px; padding: 0; }}
-QPushButton#jiraCrumb:hover {{ color: {a700}; background: transparent; }}
+/* The way back to the list of providers: a breadcrumb, not a button. The
+   page's own, and the one it keeps while the provider is in a window. */
+QPushButton#jiraCrumb, QPushButton#integrationCrumb {{
+    color: {n600}; font-size: 13px; padding: 0;
+}}
+QPushButton#jiraCrumb:hover, QPushButton#integrationCrumb:hover {{
+    color: {a700}; background: transparent;
+}}
 QToolButton#jiraOrder {{
     border: none; background: transparent; color: {n600};
     font-family: {heading}; font-size: 11px; letter-spacing: 0.6px;
