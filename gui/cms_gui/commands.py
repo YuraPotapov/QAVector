@@ -85,6 +85,12 @@ FLAGS = [
     Flag("--lock-windows", "flag", FLOW,
          "Pages ignore your mouse and keyboard while their scenarios run.",
          needs_run_tests=True),
+    Flag("--step-history", "flag", FLOW,
+         "Keep a copy of the page after every step, to step back over while paused.",
+         needs_run_tests=True),
+    Flag("--pause-on-failure", "flag", FLOW,
+         "A failed step pauses its scenario instead of ending it.",
+         needs_run_tests=True),
 
     Flag("--report-level", "list", REPORTS,
          "Which artifacts to generate.",
@@ -239,13 +245,13 @@ def for_background(args):
     last). What only means something to a window comes out: ``--detach`` (there
     is none to leave running), ``--execution-overlay`` (no page to draw it in),
     ``--report-screen`` (nothing to photograph), ``--report-doc`` (a guide is a
-    picture of every page), and ``--maximized``, ``--lock-windows``,
-    ``--no-password-prompts`` and ``--no-autologin`` (no window to size, lock,
-    prompt in or sign in). Everything else - --jobs above all - is the run exactly as
-    it was configured.
+    picture of every page), ``--step-history`` (no page to copy), and
+    ``--maximized``, ``--lock-windows``, ``--no-password-prompts`` and
+    ``--no-autologin`` (no window to size, lock, prompt in or sign in). Everything
+    else - --jobs above all - is the run exactly as it was configured.
     """
     drop = {"--detach", "--execution-overlay", "--report-screen", "--report-doc",
-            "--maximized", "--lock-windows", "--no-password-prompts",
+            "--step-history", "--maximized", "--lock-windows", "--no-password-prompts",
             "--no-autologin"}
     return ["--no-browser"] + [a for a in args if a.split("=", 1)[0] not in drop]
 

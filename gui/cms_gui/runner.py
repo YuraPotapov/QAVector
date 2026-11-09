@@ -55,7 +55,7 @@ CYCLE_STAGES = 400
 # A session in one of these has a window on screen that Stop can still act on.
 # "stopping" is deliberately not among them: it has been told to go, and both
 # the Stop menu and the rail's count are about what is still there to stop.
-LIVE_STATES = ("launching", "launched", "attached", "running")
+LIVE_STATES = ("launching", "launched", "attached", "running", "paused")
 
 
 def launch_kind(argv):
@@ -316,6 +316,11 @@ def _new_process_group(args):
 CYCLE_FAILED = ("failed", "timeout", "interrupted", "error")
 
 
+def _no_stepping():
+    return {"live": False, "scenario": "", "paused": False, "cursor": 0, "last": 0,
+            "reason": "", "view": None, "refused": ""}
+
+
 class RunState(QObject):
     """Live model of a run, assembled from the event stream.
 
@@ -410,7 +415,10 @@ class RunState(QObject):
                                    # which is why the Run page could only ever
                                    # show the last scenario while the in-page
                                    # overlay showed the whole list.
-                                   "runs": collections.OrderedDict()}
+                                   "runs": collections.OrderedDict(),
+                                   # Stepping (engine/stepping.py) in the scenario
+                                   # under way: see _on_step_setup and after.
+                                   "step": _no_stepping()}
             self.order.append(name)
         return self.sessions[name]
 
@@ -985,6 +993,50 @@ class RunState(QObject):
         if run is not None:
             run["done"] = session["done"]
 
+    # -- stepping (engine/stepping.py) -------------------------------------------
+    # Positions, as the core counts them: 0 is the page before the first step,
+    # n the page after step n. ``last`` is how far the live page has gone,
+    # ``cursor`` the position being looked at - ``last`` unless somebody
+    # stepped back - and ``view`` the copy of that page to show, or None.
+    def _on_step_setup(self, event, name):
+        session = self._session(name)
+        session["step"].update(live=bool(event.get("live")),
+                               scenario=event.get("scenario") or "")
+        run = session["runs"].get(event.get("scenario") or session.get("scenario_key"))
+        if run is not None:
+            run["breakpoints"] = sorted(int(one) for one in event.get("breakpoints") or ())
+
+    def _on_step_paused(self, event, name):
+        session = self._session(name)
+        session["step"].update(paused=True, cursor=int(event.get("cursor") or 0),
+                               last=int(event.get("last") or 0),
+                               reason=event.get("reason") or "", view=event.get("view"),
+                               refused="")
+        session["state"] = "paused"
+
+    def _on_step_resumed(self, event, name):
+        session = self._session(name)
+        cursor = int(event.get("cursor") or 0)
+        session["step"].update(paused=False, cursor=cursor, last=cursor, view=None)
+        if session["state"] == "paused":
+            session["state"] = "running"
+
+    def _on_steps_rewound(self, event, name):
+        """Steps taken back, to be run again: not run as far as anyone can tell."""
+        session = self._session(name)
+        for index in range(int(event.get("first") or 0), int(event.get("last") or 0)):
+            session["steps"].pop(index, None)
+        session["done"] = sum(1 for one in session["steps"].values()
+                              if one.get("status") == "pass")
+        run = session["runs"].get(session.get("scenario_key"))
+        if run is not None:
+            run["done"] = session["done"]
+            run["rewound"] = run.get("rewound", 0) + 1
+
+    def _on_scenario_control_refused(self, event, name):
+        if name in self.sessions:
+            self.sessions[name]["step"]["refused"] = event.get("reason") or ""
+
     def _on_step_retry(self, event, name):
         session = self._session(name)
         step = session["steps"].setdefault(event.get("index"), {})
@@ -992,6 +1044,7 @@ class RunState(QObject):
 
     def _on_flow_end(self, event, name):
         session = self._session(name)
+        session["step"].update(paused=False, view=None, cursor=0, last=0)
         status = event.get("status", "")
         session["flows"].append({"scenario": session.get("scenario", ""),
                                  "status": status,

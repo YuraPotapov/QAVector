@@ -6,6 +6,7 @@ Query methods (``exists``/``visible``) wait up to the timeout and return a bool
 rather than raising, so assertions can report a clean pass/fail.
 """
 
+import time
 from abc import ABC, abstractmethod
 
 
@@ -122,6 +123,10 @@ class BrowserAdapter(ABC):
     def overlay_teardown(self):
         """Remove the injected overlay from the page."""
 
+    def overlay_copy(self, html, caption=""):
+        """Lay ``html`` - a copy of the page at an earlier step - over the live
+        page, with ``caption`` above it; None takes it away (engine.stepping)."""
+
     # --- scenario recorder (optional; default no-op) --------------------------
     # The recorder is the overlay's mirror image: the page collects what the user
     # picked and Python takes it away. Same reasoning for the no-ops - an adapter
@@ -148,6 +153,24 @@ class BrowserAdapter(ABC):
         run goes on with the window as it was.
         """
         return False
+
+    # --- stepping (optional; see engine.stepping and engine.history) ----------
+    def page_copy(self, path):
+        """Write a copy of the page as it is now to ``path`` (an MHTML archive),
+        typed-in form values included. Answers whether one was written; False -
+        the default - for an adapter with no page, and the history then simply
+        has no picture of that step."""
+        return False
+
+    def overlay_commands(self):
+        """What the person asked of the HUD since the last call: a list of
+        ``{"command": ...}`` dicts, oldest first. Empty by default."""
+        return []
+
+    def idle(self, seconds):
+        """Wait while a scenario is paused. An adapter whose page has to keep
+        receiving its events meanwhile waits through the page instead."""
+        time.sleep(seconds)
 
     def disconnect(self):
         """Release the backend. Default: no-op."""

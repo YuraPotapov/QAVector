@@ -9,6 +9,7 @@ tests) without the package installed.
 
 import contextlib
 import logging
+import time
 
 from adapters.base import BrowserAdapter
 
@@ -41,6 +42,72 @@ DOC_TARGET_MS = 3000
 # The guide is about the app, not about the test tool: its pictures leave the
 # HUD out. Applied by Playwright for the length of the capture only.
 DOC_HIDE = "#__exec_hud_host__ { visibility: hidden !important; }"
+
+# page_copy(): Chrome's copy of a page keeps each element's attributes, not what
+# was typed - every input came back empty, every select on its first option, as
+# the page was before the scenario touched it. So for the length of the copy the
+# live state is written into the attributes, and put back straight after. The
+# page shows no difference: a control somebody (or the scenario) has changed
+# no longer follows its attribute. A canvas's pixels go into an attribute the
+# same way (engine.history turns it back into a picture), passwords are left
+# out, and the HUD is taken off the page so the copy is of the app alone.
+_COPY_PREPARE_JS = r"""(pixels) => {
+  const undo = [];
+  const keep = (el, name) => undo.push([el, name, el.getAttribute(name)]);
+  const roots = [document];
+  for (let i = 0; i < roots.length; i++) {
+    roots[i].querySelectorAll('*').forEach(el => { if (el.shadowRoot) roots.push(el.shadowRoot); });
+  }
+  roots.forEach(root => {
+    root.querySelectorAll('input').forEach(el => {
+      const type = (el.type || '').toLowerCase();
+      if (type === 'checkbox' || type === 'radio') {
+        keep(el, 'checked');
+        if (el.checked) el.setAttribute('checked', ''); else el.removeAttribute('checked');
+      } else if (type !== 'file' && type !== 'password') {
+        keep(el, 'value'); el.setAttribute('value', el.value);
+      }
+    });
+    root.querySelectorAll('textarea').forEach(el => {
+      undo.push([el, '#text', el.textContent]); el.textContent = el.value;
+    });
+    root.querySelectorAll('option').forEach(el => {
+      keep(el, 'selected');
+      if (el.selected) el.setAttribute('selected', ''); else el.removeAttribute('selected');
+    });
+    root.querySelectorAll('canvas').forEach(el => {
+      if (!el.width || !el.height) return;
+      try { keep(el, pixels); el.setAttribute(pixels, el.toDataURL('image/png')); } catch (e) {}
+    });
+  });
+  const hud = document.getElementById('__exec_hud_host__');
+  if (hud && hud.parentNode) {
+    undo.push([hud, '#place', [hud.parentNode, hud.nextSibling]]);
+    hud.remove();
+  }
+  window.__qavCopyUndo = undo;
+  return undo.length;
+}"""
+
+_COPY_RESTORE_JS = r"""() => {
+  const undo = window.__qavCopyUndo || [];
+  delete window.__qavCopyUndo;
+  for (let i = undo.length - 1; i >= 0; i--) {
+    const [el, name, old] = undo[i];
+    if (name === '#place') {
+      const [parent, next] = old;
+      parent.insertBefore(el, next && next.parentNode === parent ? next : null);
+    } else if (name === '#text') {
+      const value = el.value; el.textContent = old;
+      if (el.value !== value) el.value = value;
+    } else if (old === null) {
+      el.removeAttribute(name);
+    } else {
+      el.setAttribute(name, old);
+    }
+  }
+  return undo.length;
+}"""
 
 # Which page the window is on, as the guide groups steps: the path with its
 # record ids (and "new", what a record is before it is saved) blanked out, so a
@@ -386,6 +453,14 @@ class PlaywrightAdapter(BrowserAdapter):
         except Exception as exc:
             log.debug("overlay_teardown failed: %s", exc)
 
+    def overlay_copy(self, html, caption=""):
+        try:
+            self._page.evaluate(
+                "([html, caption]) => window.__ExecHud"
+                " && window.__ExecHud.showCopy(html, caption)", [html, caption])
+        except Exception as exc:
+            log.debug("overlay_copy failed: %s", exc)
+
     # -------------------------------------------------------------- recorder
     def recorder_setup(self, js_source):
         """Same two-step install as the overlay: this document, and every next one."""
@@ -411,6 +486,58 @@ class PlaywrightAdapter(BrowserAdapter):
         except Exception as exc:
             log.debug("recorder_call failed: %s", exc)
             return None
+
+    # ---------------------------------------------------------------- stepping
+    def page_copy(self, path):
+        """Chrome's own copy of the page (MHTML), with what was typed in it.
+
+        See _COPY_PREPARE_JS for why the page is touched first; it is put back
+        whatever happens to the copy. A page in the middle of navigating answers
+        False - that step simply has no copy.
+        """
+        from engine.history import PIXELS_ATTR    # lazy, like playwright itself
+
+        page = self._page
+        try:
+            page.evaluate(_COPY_PREPARE_JS, PIXELS_ATTR)
+        except Exception as exc:
+            log.debug("page_copy: page not ready: %s", exc)
+            return False
+        try:
+            if self._cdp is None:
+                self._cdp = page.context.new_cdp_session(page)
+            data = self._cdp.send("Page.captureSnapshot", {"format": "mhtml"})["data"]
+        except Exception as exc:
+            log.debug("page_copy failed: %s", exc)
+            return False
+        finally:
+            try:
+                page.evaluate(_COPY_RESTORE_JS)
+            except Exception as exc:
+                log.debug("page_copy: could not put the page back: %s", exc)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(data)
+        return True
+
+    def overlay_commands(self):
+        """Take what the person asked of the HUD - see engine.stepping."""
+        try:
+            taken = self._page.evaluate(
+                "() => window.__ExecHud && window.__ExecHud.takeCommands"
+                " ? window.__ExecHud.takeCommands() : []")
+        except Exception as exc:
+            log.debug("overlay_commands failed: %s", exc)
+            return []
+        return [one for one in (taken or []) if isinstance(one, dict)]
+
+    def idle(self, seconds):
+        """Wait through the page: the sync API delivers the page's own events
+        only while it is inside a call, and a paused scenario can sit here for
+        an hour."""
+        try:
+            self._page.wait_for_timeout(max(1, int(seconds * 1000)))
+        except Exception:
+            time.sleep(seconds)
 
     # ------------------------------------------------------------ diagnostics
     def screenshot(self, path):

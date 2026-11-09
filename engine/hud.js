@@ -23,6 +23,14 @@
 // window.__ExecHud.render(state) / .remove(). render() is a diff: it rebuilds the
 // tree DOM only when state.treeVersion changes (once per scenario), and otherwise
 // only updates node classes / text - so 1000-node trees stay cheap.
+//
+// Stepping (engine/stepping.py), when somebody can pause the run: a bar under
+// the header - pause / continue, one step, back, forward - and its keys, a dot
+// in front of each step to stop before it, a click on a step taken to look at
+// the page it left. What is asked goes into a queue Python takes from
+// (takeCommands); nothing here changes the run by itself. Looking at an earlier
+// step lays a copy of that page over the live one (showCopy): the live page is
+// left exactly as the run left it, underneath.
 (function () {
   "use strict";
   var HOST_ID = "__exec_hud_host__";
@@ -132,7 +140,67 @@
     // banner
     ".banner{font-weight:600}" +
     ".banner.success{color:#3fbf5f}.banner.failed{color:#ff5c5c}" +
-    ".banner .sub{display:block;color:#c8ccd2;font-weight:400;margin-top:3px}";
+    ".banner .sub{display:block;color:#c8ccd2;font-weight:400;margin-top:3px}" +
+    // stepping bar: outside the body, so a folded card keeps it
+    ".steps{display:flex;align-items:center;gap:2px;padding:5px 8px;flex:0 0 auto;" +
+      "border-bottom:1px solid rgba(255,255,255,0.08)}" +
+    ".steps.paused{background:rgba(255,213,74,0.10)}" +
+    ".steps.failure{background:rgba(255,92,92,0.14)}" +
+    ".card.min .steps{border-bottom:none}" +
+    ".sbtn{cursor:pointer;width:26px;height:24px;flex:0 0 auto;display:flex;" +
+      "align-items:center;justify-content:center;border-radius:6px;color:#e8eaed}" +
+    ".sbtn:hover{background:rgba(255,255,255,0.12)}" +
+    ".sbtn.main{background:rgba(79,157,255,0.26);color:#fff}" +
+    ".sbtn.main:hover{background:rgba(79,157,255,0.40)}" +
+    ".sbtn.off{opacity:.3;pointer-events:none}" +
+    ".slabel{flex:1;min-width:0;margin-left:8px;color:#c8ccd2;font-size:11px;line-height:1.3}" +
+    ".slabel b{display:block;color:#fff;font-weight:600;white-space:nowrap;overflow:hidden;" +
+      "text-overflow:ellipsis}" +
+    // What going on will do is the line to read whole: it wraps.
+    ".slabel i{font-style:normal;display:block}" +
+    // breakpoints and the step being looked at
+    ".bp{width:10px;height:10px;flex:0 0 auto;border-radius:50%;box-sizing:border-box;" +
+      "border:1px solid transparent}" +
+    ".tree:not(.stepping) .bp{display:none}" +
+    ".tree.stepping .row.leaf .bp{cursor:pointer}" +
+    ".tree.stepping .row.leaf:hover .bp{border-color:rgba(255,92,92,0.65)}" +
+    ".bp.on,.tree.stepping .row.leaf:hover .bp.on{background:#ff5c5c;border-color:#ff5c5c}" +
+    ".tree.paused .row.leaf.taken{cursor:pointer}" +
+    ".tree.paused .row.leaf.taken:hover{background:rgba(255,255,255,0.06)}" +
+    ".row.cursor,.tree.paused .row.cursor:hover{background:rgba(255,213,74,0.18);" +
+      "box-shadow:inset 0 0 0 1px rgba(255,213,74,0.7)}" +
+    ".row.next{background:rgba(255,213,74,0.08)}" +
+    ".row.next .lbl{color:#ffe08a}" +
+    // the copy of an earlier page, over the live one
+    ".copy{position:fixed;inset:0;z-index:2147483645;display:flex;flex-direction:column;" +
+      "background:#fff;pointer-events:auto}" +
+    ".copy-strip{flex:0 0 auto;padding:5px 12px;background:#ffd54a;color:#1d1d1f;" +
+      "font:600 12px/1.45 'Segoe UI',system-ui,-apple-system,sans-serif;" +
+      "box-shadow:0 1px 4px rgba(0,0,0,0.25)}" +
+    ".copy-strip span{font-weight:400;margin-left:10px;opacity:.8}" +
+    ".copy iframe{flex:1 1 auto;width:100%;border:0;background:#fff}";
+
+  // Stepping icons: drawn, not glyphs, so every font draws them the same.
+  var SVG = function (body) {
+    return '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' + body + "</svg>";
+  };
+  var ICONS = {
+    pause: SVG('<rect x="3" y="2.5" width="3.5" height="11" rx="1" fill="currentColor"/>' +
+               '<rect x="9.5" y="2.5" width="3.5" height="11" rx="1" fill="currentColor"/>'),
+    play: SVG('<path d="M4 2.5v11l9.5-5.5z" fill="currentColor"/>'),
+    step: SVG('<path d="M2.5 2.5v11l7.5-5.5z" fill="currentColor"/>' +
+              '<rect x="11" y="2.5" width="2.5" height="11" rx="1" fill="currentColor"/>'),
+    back: SVG('<path d="M10.5 3 5.5 8l5 5" stroke="currentColor" stroke-width="2" fill="none"' +
+              ' stroke-linecap="round" stroke-linejoin="round"/>'),
+    forward: SVG('<path d="M5.5 3l5 5-5 5" stroke="currentColor" stroke-width="2" fill="none"' +
+                 ' stroke-linecap="round" stroke-linejoin="round"/>')
+  };
+
+  // One listener per document, whatever happens to the Hud object: it asks
+  // whichever renderer the window holds now.
+  function onKey(e) {
+    if (window.__ExecHud && window.__ExecHud._onKey) window.__ExecHud._onKey(e);
+  }
 
   function elem(tag, cls) {
     var n = document.createElement(tag);
@@ -157,6 +225,9 @@
     _userScrolledAt: 0,
     _autoScrolling: false,
     _drag: null,
+    _stepping: {},    // state.stepping as last rendered
+    _commands: [],    // what was asked of the run, for Python to take
+    _copy: null,      // the copy of an earlier page, while one is shown
 
     ensure: function () {
       var host = document.getElementById(HOST_ID);
@@ -181,8 +252,10 @@
       header.appendChild(this._makeBtn("▣", "Toggle click-through (let the mouse pass to the page)", this._togglePassthrough));
       header.appendChild(this._makeBtn("⊟", "Collapse / expand all branches", this._toggleCollapseAll));
       header.appendChild(this._makeBtn("–", "Minimize", this._toggleMinimize));
+      var steps = this._buildSteps();
       var body = elem("div", "body");
       card.appendChild(header);
+      card.appendChild(steps);
       card.appendChild(body);
       wrap.appendChild(card);
       shadow.appendChild(wrap);
@@ -191,7 +264,12 @@
       this._wrap = wrap; this._card = card; this._body = body; this._titleEl = title;
       this._header = header; this._minBtn = header.lastChild;
       this._els = {}; this._treeVersion = null; this._nodeEls = {};
+      this._copy = null;
       this._wireDrag(header);
+      if (!window.__ExecHudKeys) {
+        window.__ExecHudKeys = true;
+        window.addEventListener("keydown", onKey, true);
+      }
       var self = this;
       body.addEventListener("scroll", function () {
         if (!self._autoScrolling) self._userScrolledAt = Date.now();
@@ -242,6 +320,200 @@
         g.classList.toggle("collapsed", collapsed);
       });
       btn.textContent = collapsed ? "⊞" : "⊟";
+    },
+
+    // --- stepping --------------------------------------------------------
+    _buildSteps: function () {
+      var bar = elem("div", "steps");
+      bar.style.display = "none";
+      var self = this;
+      var make = function (name, handler) {
+        var b = elem("div", "sbtn");
+        b.innerHTML = ICONS[name];
+        b.addEventListener("mousedown", function (e) { e.stopPropagation(); });
+        b.addEventListener("click", function (e) { e.stopPropagation(); handler.call(self); });
+        bar.appendChild(b);
+        return b;
+      };
+      this._sb = {
+        back: make("back", function () { this._ask("back"); }),
+        play: make("pause", function () {
+          this._ask(this._stepping.paused ? "continue" : "pause");
+        }),
+        step: make("step", function () { this._ask("step"); }),
+        forward: make("forward", function () { this._ask("forward"); })
+      };
+      var label = elem("div", "slabel");
+      label.appendChild(elem("b"));
+      label.appendChild(elem("i"));
+      bar.appendChild(label);
+      this._sLabel = label;
+      this._stepsBar = bar;
+      return bar;
+    },
+
+    _ask: function (command, extra) {
+      var asked = { command: command };
+      Object.keys(extra || {}).forEach(function (k) { asked[k] = extra[k]; });
+      this._commands.push(asked);
+      if (this._commands.length > 50) this._commands.shift();
+    },
+
+    // What the person asked since Python last looked; taking it empties it.
+    takeCommands: function () {
+      var taken = this._commands;
+      this._commands = [];
+      return taken;
+    },
+
+    _keyText: function (action) {
+      var k = (this._stepping.keys || {})[action];
+      return k ? " (" + k.text + ")" : "";
+    },
+
+    _renderStepping: function (st, total) {
+      var bar = this._stepsBar;
+      st = st || {};
+      this._stepping = st;
+      if (!bar) return;
+      if (!st.live) { bar.style.display = "none"; return; }
+      bar.style.display = "";
+      var paused = !!st.paused, cursor = st.cursor || 0, last = st.last || 0;
+      var looking = paused && cursor < last;
+      var failed = paused && st.reason === "failure";
+      bar.className = "steps" + (failed ? " failure" : paused ? " paused" : "");
+      var sb = this._sb;
+      sb.play.innerHTML = ICONS[paused ? "play" : "pause"];
+      sb.play.classList.toggle("main", paused);
+      sb.play.title = (paused ? "Continue" : "Pause after this step") + this._keyText("pause");
+      sb.step.title = (paused ? "Run one step, then pause" : "Pause after this step") +
+                      this._keyText("step");
+      sb.back.title = "Back: the page one step earlier" + this._keyText("back");
+      sb.forward.title = (looking ? "Forward: the page one step later" : "Run one step") +
+                         this._keyText("forward");
+      sb.back.classList.toggle("off", paused && cursor <= 0);
+      sb.forward.classList.toggle("off", !paused);
+      var of = total ? " of " + total : "";
+      var head, sub = "";
+      if (!paused) {
+        head = "Running";
+        sub = "Pause" + this._keyText("pause") + " stops after this step";
+      } else if (looking) {
+        head = cursor ? "The page after step " + cursor : "The page before step 1";
+        sub = "Continue runs step " + (cursor + 1) + " again, on the live page";
+      } else if (failed) {
+        head = "Step " + last + of + " failed";
+        sub = "Go back to run steps again; continue ends the scenario";
+      } else {
+        head = last ? "Paused after step " + last + of : "Paused before step 1" + of;
+        sub = st.reason === "breakpoint" ? "At a breakpoint" : "";
+      }
+      this._sLabel.firstChild.textContent = head;
+      this._sLabel.lastChild.textContent = sub;
+      this._sLabel.title = head + (sub ? "\n" + sub : "");
+    },
+
+    // Breakpoints and the step looked at, on the active scenario's leaves.
+    _applyStepping: function (box, activeNode) {
+      var st = this._stepping || {};
+      if (box) {
+        box.classList.toggle("stepping", !!st.live);
+        box.classList.toggle("paused", !!st.paused);
+      }
+      var points = {};
+      (st.breakpoints || []).forEach(function (i) { points[i] = true; });
+      var prefix = (activeNode || "") + "/";
+      var self = this;
+      this._order.forEach(function (id) {
+        var n = self._nodeEls[id];
+        if (!n || n.index == null) return;
+        var mine = !!activeNode && id.indexOf(prefix) === 0;
+        n.bp.classList.toggle("on", mine && !!points[n.index]);
+        var taken = mine && st.paused && n.index < (st.last || 0);
+        n.row.classList.toggle("taken", taken);
+        n.row.classList.toggle("cursor", taken && n.index === (st.cursor || 0) - 1 &&
+                                         st.cursor < st.last);
+        n.row.classList.toggle("next", mine && st.paused && n.index === (st.last || 0) &&
+                                       st.cursor === st.last);
+      });
+    },
+
+    _toggleBreakpoint: function (id) {
+      var st = this._stepping || {}, n = this._nodeEls[id];
+      if (!st.live || !n || id.indexOf((this._activeNode || "") + "/") !== 0) return;
+      var points = (st.breakpoints || []).filter(function (i) { return i !== n.index; });
+      if (points.length === (st.breakpoints || []).length) points.push(n.index);
+      st.breakpoints = points.sort(function (a, b) { return a - b; });
+      this._ask("breakpoints", { indices: st.breakpoints });
+      this._applyStepping(null, this._activeNode);
+    },
+
+    _lookAt: function (id) {
+      var st = this._stepping || {}, n = this._nodeEls[id];
+      if (!st.live || !st.paused || !n || n.index >= (st.last || 0)) return;
+      if (id.indexOf((this._activeNode || "") + "/") !== 0) return;
+      this._ask("cursor", { index: n.index + 1 });
+    },
+
+    _onKey: function (e) {
+      var st = this._stepping || {};
+      if (!st.live) return;
+      var keys = st.keys || {};
+      var key = e.key || "";
+      for (var action in keys) {
+        var k = keys[action];
+        if (!k || !k.key) continue;
+        var same = k.key.length === 1 ? key.toLowerCase() === k.key.toLowerCase()
+                                      : key === k.key;
+        if (same && !!e.altKey === !!k.alt && !!e.ctrlKey === !!k.ctrl &&
+            !!e.shiftKey === !!k.shift && !!e.metaKey === !!k.meta) {
+          // Taken from the page: Alt+Left would otherwise also be the
+          // browser's Back, and leave the page the run is on.
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this._ask(action === "pause" ? (st.paused ? "continue" : "pause") : action);
+          return;
+        }
+      }
+    },
+
+    // Lay a copy of an earlier page over the live one, or take it away (null).
+    // A frame without scripts, filled from a string: the copy cannot run
+    // anything, and it asks the server for nothing.
+    showCopy: function (html, caption) {
+      try {
+        this.ensure();
+        if (!html) {
+          if (this._copy && this._copy.parentNode) this._copy.parentNode.removeChild(this._copy);
+          this._copy = null;
+          return true;
+        }
+        var layer = this._copy;
+        if (!layer) {
+          layer = elem("div", "copy");
+          var strip = elem("div", "copy-strip");
+          var frame = document.createElement("iframe");
+          frame.setAttribute("sandbox", "allow-same-origin");
+          frame.addEventListener("load", function () {
+            // The keys still work with the copy clicked into.
+            try { frame.contentWindow.addEventListener("keydown", onKey, true); } catch (e) {}
+          });
+          layer.appendChild(strip);
+          layer.appendChild(frame);
+          layer._strip = strip; layer._frame = frame;
+          this._shadow.insertBefore(layer, this._wrap);
+          this._copy = layer;
+        }
+        layer._strip.textContent = caption || "";
+        var keys = this._stepping.keys || {};
+        if (keys.back && keys.forward) {
+          var hint = elem("span");
+          hint.textContent = keys.back.text + " / " + keys.forward.text + " move between steps";
+          layer._strip.appendChild(hint);
+        }
+        layer._frame.srcdoc = html;
+        return true;
+      } catch (e) { return false; }
     },
 
     // --- dragging --------------------------------------------------------
@@ -298,6 +570,7 @@
           this._header.title = pr.total ? (pr.done || 0) + " / " + pr.total + " steps" : "";
         }
         this._renderBanner(state.banner);
+        this._renderStepping(state.stepping, pr.total);
         if (comp.status) this._renderStatus(state.status);
         if (comp.progress) this._renderProgress(state.progress);
         if (comp.tree) this._renderTree(state);
@@ -441,6 +714,7 @@
         });
       }
       this._applyStates(state.nodeStates || {});
+      this._applyStepping(p._box, this._activeNode);
     },
 
     _buildTree: function (box, root) {
@@ -450,18 +724,30 @@
       (function walk(node, container, parentId, isRoot) {
         var wrapper = elem("div", "node");
         var isGroup = node.kind !== "step";
-        var row = elem("div", "row" + (isGroup ? " group" : ""));
+        var row = elem("div", "row" + (isGroup ? " group" : " leaf"));
+        // Every row has the gutter, so steps and groups stay aligned; only a
+        // step's takes a breakpoint.
+        var bp = elem("span", "bp");
         var caret = elem("span", "caret");
         caret.textContent = isGroup ? "▾" : "";
         var ico = elem("span", "ico"); ico.textContent = ICON.pending;
         ico.style.color = COLOR.pending;
         var lbl = elem("span", "lbl"); lbl.textContent = node.label || node.id;
         lbl.title = node.label || node.id;
-        row.appendChild(caret); row.appendChild(ico); row.appendChild(lbl);
+        row.appendChild(bp); row.appendChild(caret); row.appendChild(ico); row.appendChild(lbl);
         wrapper.appendChild(row);
         container.appendChild(wrapper);
-        self._nodeEls[node.id] = { row: row, ico: ico, state: null };
+        var index = !isGroup && typeof node.step_index === "number" ? node.step_index : null;
+        self._nodeEls[node.id] = { row: row, ico: ico, bp: bp, index: index, state: null };
         if (parentId != null) self._parents[node.id] = parentId;
+        if (index != null) {
+          bp.title = "Pause before this step";
+          bp.addEventListener("click", function (e) {
+            e.stopPropagation();
+            self._toggleBreakpoint(node.id);
+          });
+          row.addEventListener("click", function () { self._lookAt(node.id); });
+        }
 
         if (isGroup) {
           if (isRoot) wrapper.setAttribute("data-root", "1");
@@ -527,11 +813,13 @@
       // the whole tree, and writing all of it each time had the browser
       // restyle 780 rows twice a step.
       if (!n || n.state === state) return;
+      // Only the state's own class changes: group, leaf and the stepping marks
+      // (breakpoint, the step looked at) belong to the row, not to its state.
+      if (n.state) n.row.classList.remove(n.state);
       n.state = state;
+      n.row.classList.add(state);
       n.ico.textContent = ICON[state] || ICON.pending;
       n.ico.style.color = COLOR[state] || COLOR.pending;
-      // keep the "group" class so the caret/hover styling survives a repaint
-      n.row.className = "row " + state + (n.row.classList.contains("group") ? " group" : "");
     },
 
     // --- logs ------------------------------------------------------------

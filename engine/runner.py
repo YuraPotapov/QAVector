@@ -20,7 +20,7 @@ import system_load
 
 from adapters.nobrowser import NoBrowserAdapter
 from domain.result import FlowResult, RunResult, StepResult, PASS, FAIL, ERROR
-from engine import artifacts, assertions, compiler, events, loader, services
+from engine import artifacts, assertions, compiler, events, history, loader, services, stepping
 from engine.context import RunContext
 from engine.overlay import ExecutionOverlay, NullOverlay
 
@@ -453,7 +453,8 @@ def _governor(slots, ceiling, stop_event, unit="windows"):
 
 def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
                   overlay_components=None, report=None, jobs=1, windows=None,
-                  server_logs=None, browser=True, lock_windows=False):
+                  server_logs=None, browser=True, lock_windows=False, step_history=False,
+                  pause_on_failure=False):
     """Run ``which`` scenarios against every launched ``sessions`` entry.
 
     ``sessions`` is a list of ``(cls, proc, profile, login, origin[, tests])``
@@ -490,6 +491,12 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
 
     ``lock_windows`` (``--lock-windows``) makes each page ignore the person at the
     machine from the moment it is attached until its scenarios are done.
+
+    ``step_history`` (``--step-history``) keeps a copy of the page after every
+    step while the run lives, for stepping back over a paused scenario;
+    ``pause_on_failure`` (``--pause-on-failure``) pauses at a failed step instead
+    of ending its scenario. Both need somebody to pause for - a control channel
+    (engine.stepping.configure) - and do nothing without one.
     """
     env = env or {}
     # flows_dir stays None when it was not given: the loader turns that into its
@@ -513,6 +520,26 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
     run_dir = artifacts.new_run_dir(reports_dir)
     log.info("Reports -> %s", run_dir)
     events.emit("run.dir", dir=run_dir)
+    run_history = None
+    if step_history and stepping.enabled():
+        # What a killed run left behind goes before this run adds its own.
+        history.sweep()
+        run_history = history.RunHistory()
+    steps = stepping.Options(history=run_history,
+                             pause_on_failure=pause_on_failure and stepping.enabled())
+    try:
+        return _run_sessions(sessions, per_session, shared, flows_dir, selectors, env,
+                             run_dir, overlay_components, report, jobs, windows,
+                             server_logs, browser, lock_windows, steps, run)
+    finally:
+        if run_history is not None:
+            run_history.close()
+
+
+def _run_sessions(sessions, per_session, shared, flows_dir, selectors, env, run_dir,
+                  overlay_components, report, jobs, windows, server_logs, browser,
+                  lock_windows, steps, run):
+    """The body of :func:`run_scenarios`, once the run has its folders."""
 
     # Results are collected per session POSITION, not appended as they finish, so
     # the summary lists sessions in the order given no matter what order they
@@ -542,7 +569,7 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
             return _run_one_session(session, session_name, scenarios, env, flows_dir,
                                     selectors, run_dir, overlay_components, report,
                                     log_prefix=log_prefix, server_logs=server_logs,
-                                    browser=browser, lock_windows=lock_windows)
+                                    browser=browser, lock_windows=lock_windows, steps=steps)
         if not slot_pool.acquire():
             return []            # stopping: this session never started
         proc = None
@@ -552,13 +579,13 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
                                         selectors, run_dir, overlay_components, report,
                                         log_prefix=log_prefix, slots=yielding,
                                         server_logs=server_logs, browser=browser,
-                                        lock_windows=lock_windows)
+                                        lock_windows=lock_windows, steps=steps)
             proc = windows.open(session)
             opened = (session[0], proc) + tuple(session[2:])
             return _run_one_session(opened, session_name, scenarios, env, flows_dir,
                                     selectors, run_dir, overlay_components, report,
                                     log_prefix=log_prefix, server_logs=server_logs,
-                                    browser=browser, lock_windows=lock_windows)
+                                    browser=browser, lock_windows=lock_windows, steps=steps)
         finally:
             # Close BEFORE releasing: the next window must not start while this
             # one is still flushing cookies, or the two overlap for the seconds
@@ -704,7 +731,7 @@ def _plan_sessions(sessions, per_session, shared, flows_dir, slots):
 
 def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors,
                      run_dir, overlay_components, report, log_prefix=None, slots=None,
-                     server_logs=None, browser=True, lock_windows=False):
+                     server_logs=None, browser=True, lock_windows=False, steps=None):
     """Drive ONE window: attach, run its scenarios, disconnect. Returns its results.
 
     Everything here - the CDP attach, every step, every screenshot and the
@@ -723,7 +750,7 @@ def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors
     try:
         return _drive_session(session, session_name, scenarios, env, flows_dir,
                               selectors, run_dir, overlay_components, report, results,
-                              slots, server_logs, browser, lock_windows)
+                              slots, server_logs, browser, lock_windows, steps)
     finally:
         if token is not None:
             _session_ctx.reset(token)
@@ -731,7 +758,7 @@ def _run_one_session(session, session_name, scenarios, env, flows_dir, selectors
 
 def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
                    run_dir, overlay_components, report, results, slots=None,
-                   server_logs=None, browser=True, lock_windows=False):
+                   server_logs=None, browser=True, lock_windows=False, steps=None):
     cls, _proc, profile, login, origin = session[:5]
     log.info("--- session %s: %s ---", session_name, ", ".join(scenarios))
     # No browser means nothing to attach to. The session is otherwise the same
@@ -766,19 +793,24 @@ def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
     if locked:
         log.info("Locked: this window ignores your mouse and keyboard until its "
                  "scenarios finish.")
+    # Where this window's steps can be paused and stepped back over, for as long
+    # as it is driven - and addressable by the window's name meanwhile.
+    gate = stepping.StepGate(session_name, adapter, overlay, options=steps,
+                             stopping=lambda: _stopping(session_name), locked=locked)
     try:
-        for scenario_id in scenarios:
-            if _stopping(session_name):
-                log.warning("Stopped: skipping %s", scenario_id)
-                break
-            if slots is not None:
-                # A scenario boundary is the only safe place to stand aside: the
-                # page is between flows, so a wait here costs time and nothing else.
-                slots.yield_if_over()
-            results.append(
-                _run_scenario(adapter, scenario_id, session_name, flows_dir,
-                              selectors, ctx, run_dir, overlay, report, server_logs,
-                              browser=browser))
+        with gate:
+            for scenario_id in scenarios:
+                if _stopping(session_name):
+                    log.warning("Stopped: skipping %s", scenario_id)
+                    break
+                if slots is not None:
+                    # A scenario boundary is the only safe place to stand aside: the
+                    # page is between flows, so a wait here costs time and nothing else.
+                    slots.yield_if_over()
+                results.append(
+                    _run_scenario(adapter, scenario_id, session_name, flows_dir,
+                                  selectors, ctx, run_dir, overlay, report, server_logs,
+                                  browser=browser, gate=gate))
     finally:
         if bridge is not None:
             logging.getLogger("flowengine").removeHandler(bridge)
@@ -858,7 +890,7 @@ def wait_for_devtools(profile, timeout_s=DEVTOOLS_WAIT_S):
 
 
 def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx, run_dir,
-                  overlay=None, report=None, server_logs=None, browser=True):
+                  overlay=None, report=None, server_logs=None, browser=True, gate=None):
     overlay = overlay or NullOverlay()
     out_dir = artifacts.scenario_dir(run_dir, session_name, scenario_id)
     # Before the reporter, so the artifact's window can close over it: the backend
@@ -897,16 +929,44 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
     reporter.doc_start(plan, steps, scenario_id, session=session_name,
                        role=ctx.user.get("class"))
     reporter.capture_start()
-    for index, step in enumerate(steps):
+    gate = gate or stepping.StepGate.off()
+    gate.start(scenario_id, settle=getattr(reporter, "settle", None))
+    try:
+        _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter,
+                   gate, result)
+    finally:
+        gate.finish()
+
+    result.duration_ms = (time.time() - started) * 1000
+    reporter.finalize(result, failed=result.status != PASS)
+    passed = sum(1 for s in result.steps if s.status == PASS)
+    overlay.flow_end(result.status, passed, len(steps))
+    log.info("[%s] %s  (%d/%d steps, %.0f ms)", scenario_id, result.status.upper(),
+             passed, len(result.steps), result.duration_ms)
+    return result
+
+
+def _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter, gate, result):
+    """Take the steps in order - or, when somebody stepped back and went on from
+    there (engine.stepping), from that earlier step again. ``result.steps`` holds
+    one entry for each step taken so far, so taking steps back drops theirs."""
+    index = 0
+    while index < len(steps):
         if _stopping(session_name):
             # Stop has to bite BETWEEN STEPS, not merely between scenarios. A
             # forty-step flow whose remaining steps each time out at 30 s takes
             # twenty minutes to reach the next scenario boundary, and for all of
             # that time the GUI's Stop looks like it did nothing at all.
-            result.status = ERROR
-            result.error = "stopped at step %d of %d" % (index + 1, len(steps))
-            log.warning("[%s] stopped at step %d of %d", scenario_id, index + 1, len(steps))
-            break
+            _stopped(result, scenario_id, "stopped at step %d of %d", index, len(steps))
+            return
+        again = gate.before_step(index)
+        if again is None:
+            _stopped(result, scenario_id, "stopped at step %d of %d", index, len(steps))
+            return
+        if again != index:
+            _rewind(result, overlay, reporter, gate, again, index)
+            index = again
+        step = steps[index]
         # The guide pictures a step that acts BEFORE it does - the page as the
         # reader will find it, the element still there to point at - and before
         # the HUD is told, so the picture is not taken mid-redraw.
@@ -916,26 +976,43 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
         result.steps.append(step_result)
         overlay.step_end(index, step_result.status, step_result.attempts, step_result.message)
         reporter.step_ended(index, step, step_result)
+        gate.after_step(index)
         if step_result.status != PASS:
             if _stopping(session_name):
                 # The window was closed under this step. Report what happened
                 # rather than the CDP error that closing it produced.
-                result.status = ERROR
-                result.error = "stopped during step %d of %d" % (index + 1, len(steps))
-                break
+                _stopped(result, scenario_id, "stopped during step %d of %d", index,
+                         len(steps))
+                return
+            again = gate.after_failure(index)
+            if again is not None:
+                _rewind(result, overlay, reporter, gate, again, index + 1)
+                index = again
+                continue
             result.status = step_result.status
             result.error = "%s(%s): %s" % (
                 step.action, step.target or step.value or "", step_result.message)
-            break
+            return
         reporter.capture_step(index)
+        index += 1
 
-    result.duration_ms = (time.time() - started) * 1000
-    reporter.finalize(result, failed=result.status != PASS)
-    passed = sum(1 for s in result.steps if s.status == PASS)
-    overlay.flow_end(result.status, passed, len(steps))
-    log.info("[%s] %s  (%d/%d steps, %.0f ms)", scenario_id, result.status.upper(),
-             passed, len(result.steps), result.duration_ms)
-    return result
+
+def _stopped(result, scenario_id, text, index, total):
+    result.status = ERROR
+    result.error = text % (index + 1, total)
+    log.warning("[%s] %s", scenario_id, result.error)
+
+
+def _rewind(result, overlay, reporter, gate, first, taken):
+    """Steps ``first`` .. ``taken - 1`` are taken again, on the page as it is."""
+    result.steps = result.steps[:first]
+    result.interventions.append({
+        "after_step": taken, "back_to_step": first, "reason": gate.reason,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    overlay.steps_rewound(first, taken)
+    rewind = getattr(reporter, "rewind", None)
+    if rewind is not None:
+        rewind(first)
 
 
 # Steps that DO something to an element, as opposed to asserting about one. Only

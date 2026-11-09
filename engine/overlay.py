@@ -53,6 +53,43 @@ def normalize_level(levelname):
     return "INFO"
 
 
+# The GUI names keys as Qt does ("Alt+Left"); a page's keydown says "ArrowLeft".
+_QT_KEYS = {"Left": "ArrowLeft", "Right": "ArrowRight", "Up": "ArrowUp",
+            "Down": "ArrowDown", "Return": "Enter", "Enter": "Enter", "Esc": "Escape",
+            "Escape": "Escape", "Space": " ", "PgUp": "PageUp", "PgDown": "PageDown",
+            "Del": "Delete", "Ins": "Insert"}
+_MODIFIERS = {"alt": "alt", "ctrl": "ctrl", "control": "ctrl", "shift": "shift",
+              "meta": "meta"}
+
+
+def hud_keys(keys):
+    """The stepping keys (engine.stepping.DEFAULT_KEYS, or what the GUI sent) as
+    the HUD matches them against a keydown: ``{action: {"key", "alt", "ctrl",
+    "shift", "meta", "text"}}``. A key the page cannot see as one press - a
+    sequence of two, or none at all - is left out: the action stays a button."""
+    from engine.stepping import DEFAULT_KEYS
+
+    out = {}
+    for action, text in dict(DEFAULT_KEYS, **(keys or {})).items():
+        text = str(text or "").strip()
+        if not text or "," in text:
+            continue
+        parts = text.split("+")
+        if text.endswith("++"):
+            parts = parts[:-2] + ["+"]
+        spec = {"key": "", "alt": False, "ctrl": False, "shift": False, "meta": False,
+                "text": text}
+        for part in parts:
+            modifier = _MODIFIERS.get(part.strip().lower())
+            if modifier:
+                spec[modifier] = True
+            else:
+                spec["key"] = _QT_KEYS.get(part.strip(), part.strip())
+        if spec["key"]:
+            out[action] = spec
+    return out
+
+
 class NullOverlay:
     """Disabled overlay: every hook is a no-op (the runner's default)."""
 
@@ -77,6 +114,18 @@ class NullOverlay:
         pass
 
     def log(self, level, message):
+        pass
+
+    def step_setup(self, scenario, live, breakpoints, keys):
+        pass
+
+    def step_paused(self, cursor, last, reason, view=None):
+        pass
+
+    def step_resumed(self, cursor):
+        pass
+
+    def steps_rewound(self, first, last):
         pass
 
     def flow_end(self, status, passed, total):
@@ -120,6 +169,12 @@ class ExecutionOverlay:
         # Every finished flow's status, so the banner can speak for the session
         # rather than for whichever scenario happened to end last.
         self._results = []
+        # What the stepping controls show (engine.stepping): nothing until a
+        # scenario says it can be paused.
+        self._stepping = {"live": False, "scenario": None, "paused": False,
+                          "cursor": 0, "last": 0, "reason": "", "breakpoints": [],
+                          "keys": hud_keys({})}
+        self._copy_shown = None     # the copy laid over the page now, by path
 
     # -- execution hooks ---------------------------------------------------
     def _ensure_setup(self):
@@ -257,13 +312,65 @@ class ExecutionOverlay:
         self._acting = False
         node_id = self._index_to_id.get(index)
         if node_id is not None:
-            if status == PASS:
-                self._node_states[node_id] = _SUCCESS
-                self._done += 1
-            else:
-                self._node_states[node_id] = _FAILED
+            self._node_states[node_id] = _SUCCESS if status == PASS else _FAILED
+        self._count_done()
         if status != PASS:
             self._status["state"] = "Failed"
+        self._push()
+
+    def _count_done(self):
+        # Counted, not added up: steps can be taken back (steps_rewound).
+        self._done = sum(1 for node_id in self._index_to_id.values()
+                         if self._node_states.get(node_id) == _SUCCESS)
+
+    # -- stepping (engine.stepping) ----------------------------------------
+    def step_setup(self, scenario, live, breakpoints, keys):
+        """What the HUD offers for stepping in this scenario: its controls only
+        when somebody can pause the run, the breakpoints, the keys."""
+        self._stepping.update(live=bool(live), scenario=scenario,
+                              breakpoints=list(breakpoints), keys=hud_keys(keys))
+        self._ensure_setup()
+        self._push()
+
+    def step_paused(self, cursor, last, reason, view=None):
+        """Stopped between steps; ``view`` is the copy of the page at ``cursor``
+        to lay over the live one (engine.history), None for the live page."""
+        self._acting = False
+        self._status["state"] = "Paused"
+        self._stepping.update(paused=True, cursor=cursor, last=last, reason=reason)
+        self._show_copy(view, cursor)
+        self._push()
+
+    def step_resumed(self, cursor):
+        self._status["state"] = "Running"
+        self._stepping.update(paused=False, cursor=cursor, last=cursor)
+        self._show_copy(None, cursor)
+        self._push()
+
+    def _show_copy(self, view, cursor):
+        # The copy is the size of the page - megabytes for an Odoo form - so it
+        # is sent when it changes, by its own call, never with every push.
+        if view == self._copy_shown:
+            return
+        html = None
+        if view:
+            try:
+                with open(view, encoding="utf-8") as handle:
+                    html = handle.read()
+            except OSError:
+                view = None
+        caption = ("Copy of the page before step 1" if cursor == 0 else
+                   "Copy of the page after step %d" % cursor)
+        self._adapter.overlay_copy(html, caption + " - the live page is underneath")
+        self._copy_shown = view
+
+    def steps_rewound(self, first, last):
+        """Steps ``first`` .. ``last - 1`` are to be run again: not run yet."""
+        for index in range(first, last):
+            node_id = self._index_to_id.get(index)
+            if node_id is not None:
+                self._node_states[node_id] = _PENDING
+        self._count_done()
         self._push()
 
     def retry(self, index, attempt):
@@ -319,6 +426,7 @@ class ExecutionOverlay:
             "banner": self._banner,
             "acting": self._acting,
             "collapsed": self._collapsed,
+            "stepping": dict(self._stepping),
         }
 
     def _push(self):

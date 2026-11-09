@@ -36,6 +36,11 @@ class FlowResult:
     duration_ms: float = 0.0
     artifacts_dir: str = None
     error: str = None
+    # Each time a person stepped back and had the run go on from there (see
+    # engine.stepping): {"after_step", "back_to_step", "reason", "at"}. Those
+    # steps ran twice on the same page, so a pass with any of these is a pass
+    # somebody helped along, and says so.
+    interventions: list = field(default_factory=list)
 
     @property
     def ok(self):

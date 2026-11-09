@@ -74,6 +74,10 @@ DEFAULTS = {
                  "keep_open": True, "detach": False, "maximized": False,
                  "no_password_prompts": False,
                  "lock_windows": False,
+                 # Stepping a paused scenario (engine/stepping.py): a copy of
+                 # the page after every step to step back over, and a failed
+                 # step pausing its scenario rather than ending it.
+                 "step_history": True, "pause_on_failure": False,
                  # Logins in the order their sessions run, as dragged in the
                  # Sessions at once panel; empty is the accounts' own order.
                  "order": []},
@@ -295,6 +299,8 @@ def to_command_state(config, inventory=None, env_urls=None, dirs=None, scope=Non
         "--reports-dir": advanced["reports_dir"] or dirs.get("reports", ""),
         "--close-after": not bool(sessions["keep_open"]),
         "--lock-windows": bool(sessions["lock_windows"]),
+        "--step-history": bool(sessions["step_history"]),
+        "--pause-on-failure": bool(sessions["pause_on_failure"]),
 
         "--report-level": ",".join(report_level(config, inventory)),
         "--report-screen": _report_screen(config["screenshots"]),
@@ -512,6 +518,8 @@ def notes(config, inventory=None, env_urls=None, scope=None):
             ignored.append("closing the windows afterwards")
         if config["sessions"]["lock_windows"]:
             ignored.append("locking the windows")
+        if config["sessions"]["pause_on_failure"]:
+            ignored.append("pausing on a failed step")
         if ignored:
             result.append("Nothing is scripted, so %s will not apply."
                           % _join(ignored))

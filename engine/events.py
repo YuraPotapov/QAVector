@@ -161,6 +161,25 @@ class EventObserver:
         # would duplicate every line on the other channel.
         pass
 
+    def step_setup(self, scenario, live, breakpoints, keys):
+        # What stepping can do in this window for this scenario: ``live`` False
+        # means nobody can pause it (no control channel). Sent again whenever the
+        # breakpoints change - the HUD can set them as well as the GUI.
+        self._emit("step.setup", scenario=scenario, live=live,
+                   breakpoints=list(breakpoints))
+
+    def step_paused(self, cursor, last, reason, view=None):
+        # Also sent each time the cursor moves while paused: ``view`` is then
+        # the copy of the page at ``cursor`` (engine.history), None for the live
+        # page or a step that left none.
+        self._emit("step.paused", cursor=cursor, last=last, reason=reason, view=view)
+
+    def step_resumed(self, cursor):
+        self._emit("step.resumed", cursor=cursor)
+
+    def steps_rewound(self, first, last):
+        self._emit("steps.rewound", first=first, last=last)
+
     def flow_end(self, status, passed, total):
         self._emit("flow.end", status=status, passed=passed, total=total)
 
@@ -210,6 +229,18 @@ class Tee:
 
     def log(self, level, message):
         self._fan("log", level, message)
+
+    def step_setup(self, scenario, live, breakpoints, keys):
+        self._fan("step_setup", scenario, live, breakpoints, keys)
+
+    def step_paused(self, cursor, last, reason, view=None):
+        self._fan("step_paused", cursor, last, reason, view)
+
+    def step_resumed(self, cursor):
+        self._fan("step_resumed", cursor)
+
+    def steps_rewound(self, first, last):
+        self._fan("steps_rewound", first, last)
 
     def flow_end(self, status, passed, total):
         self._fan("flow_end", status, passed, total)

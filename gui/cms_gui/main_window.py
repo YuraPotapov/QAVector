@@ -86,6 +86,20 @@ DEVELOPER_ONLY = ("commands",)
 # collapsed - see widgets.NavButton.
 NAV_BADGES = {"logsources": 2, "cycles": 2, "run": 1}
 
+#: A paused scenario's controls (engine/stepping.py): the core's name, the
+#: action's id, its menu text, its default key, what it does. F8 and F10 are a
+#: browser debugger's own keys for the same two things.
+STEP_ACTIONS = (
+    ("pause", "run.step_pause", "&Pause or continue the scenario", "F8",
+     "Pause the scenario after the step it is on, or let a paused one go on."),
+    ("step", "run.step_one", "Run &one step", "F10",
+     "Run one step of a paused scenario, then pause again."),
+    ("back", "run.step_back", "Step &back", "Alt+Left",
+     "Show the page as it was one step earlier; pauses a running scenario first."),
+    ("forward", "run.step_forward", "Step &forward", "Alt+Right",
+     "Show the page one step later; on the live page, run one step."),
+)
+
 # The rail's width is measured from its contents (see _build_ui); these only set
 # the floor, the left/right inset of the group headings, and enough slack that a
 # label never sits flush against the divider.
@@ -423,6 +437,22 @@ class MainWindow(QMainWindow):
         # Beside Run Last Cycle: both are about a cycle, Stop is about any run.
         run_menu.insertAction(self._run_menu_gap, self.clarify_action)
         self._clarify = None
+        # A paused scenario's four controls (engine/stepping.py), from any window
+        # of the application. The same keys work in the browser window, in the
+        # HUD, because the keymap is sent there (_send_step_keys).
+        run_menu.addSeparator()
+        self.step_actions = {}
+        for name, action_id, text, keys, description in STEP_ACTIONS:
+            action = QAction(text, self)
+            action.setShortcut(QKeySequence(keys))
+            action.setShortcutContext(Qt.ApplicationShortcut)
+            action.setEnabled(False)
+            action.triggered.connect(lambda _checked=False, name=name: self.run.step(name))
+            self._register_action(action, action_id, text.replace("&", ""), description,
+                                  "Run")
+            run_menu.addAction(action)
+            self.step_actions[name] = action
+        self._step_keys_sent = set()
 
         view_menu = menu.addMenu("&View")
         self.developer_action = QAction("&Developer mode", self)
@@ -791,7 +821,9 @@ class MainWindow(QMainWindow):
         # A desktop link's run is a windowless copy of the application; it must
         # not decide what the next ordinary start opens on.
         self.launch.set_persistent(not self._headless)
-        self.run = RunPage(self.run_state)
+        self.run = RunPage(self.run_state, settings=self.settings)
+        self.run.step_asked.connect(self._step_asked)
+        self.run_state.changed.connect(self._update_step_actions)
         self.log = LogPage(self.settings)
         self.artifacts = ArtifactsPage(self.settings)
         self.history_page = HistoryPage(self.history)
@@ -2421,6 +2453,7 @@ class MainWindow(QMainWindow):
         self.run_state.reset()
         self.log.clear()
         self._stopping = False
+        self._step_keys_sent = set()
         self._entry_id = self.history.begin(
             *self._history_payload(source, page, args, argv, background, empty))
         if recorder:
@@ -2490,6 +2523,35 @@ class MainWindow(QMainWindow):
         everything = QAction("Stop everything", self)
         everything.triggered.connect(self.stop_run)
         self.stop_menu.addAction(everything)
+
+    # -- stepping a paused scenario (engine/stepping.py) ------------------------
+    def _step_asked(self, name, command):
+        """A stepping command from the Run page, for one window's scenario."""
+        fields = dict(command)
+        action = fields.pop("command", "")
+        if action:
+            self.process.send_command(command="scenario." + action, session=name, **fields)
+
+    def _update_step_actions(self):
+        can = self.run.stepping_session() is not None
+        for action in self.step_actions.values():
+            action.setEnabled(can)
+
+    def _send_step_keys(self, names=None):
+        """The keymap's stepping keys, to the Run page's tooltips and to the HUD
+        in each window that can be paused - so F8 is F8 in both places, and a key
+        changed in the editor changes in both."""
+        portable, native = {}, {}
+        for name, action_id, _text, _keys, _description in STEP_ACTIONS:
+            sequence = self.action_registry.shortcut(action_id)
+            portable[name] = sequence.toString(QKeySequence.PortableText)
+            native[name] = sequence.toString(QKeySequence.NativeText)
+        self.run.set_step_keys(native)
+        if names is None:
+            names = [one["name"] for one in self.run_state.live()
+                     if (one.get("step") or {}).get("live")]
+        for name in names:
+            self.process.send_command(command="scenario.keys", session=name, keys=portable)
 
     def stop_session(self, name):
         """Stop ONE window: it closes, the rest of the run carries on."""
@@ -2858,6 +2920,13 @@ class MainWindow(QMainWindow):
             self.history.note(self._entry_id, last_scenario_status=event["status"])
         if kind == "cycle.control.refused":
             self.status_right.setText(event.get("reason", "Control action refused."))
+        if kind == "scenario.control.refused":
+            self.status_right.setText(event.get("reason", "The scenario did not take that."))
+        if kind == "step.setup" and event.get("live"):
+            name = event.get("session")
+            if name and name not in self._step_keys_sent:
+                self._step_keys_sent.add(name)
+                self._send_step_keys([name])
         if kind == "cycle.run.start":
             self._confirm_cycle_supervision()
         if kind == "service.request":
@@ -3256,6 +3325,8 @@ class MainWindow(QMainWindow):
         self.collapse_button.setToolTip("%s (%s)" % (hint, shortcut) if shortcut else hint)
         self.cycles.output.set_stages_shortcut(self.go_stages_action.shortcut())
         self._update_background_action()
+        if getattr(self, "run", None) is not None:
+            self._send_step_keys()
 
     def closeEvent(self, event):
         reason = self.integrations.busy_reason(include_dialogs=False)

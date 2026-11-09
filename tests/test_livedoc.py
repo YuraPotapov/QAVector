@@ -593,3 +593,28 @@ def test_what_was_covered_already_does_not_hold_the_picture_back(tmp_path):
     assert segment["shot"] == "doc/step_004.png"
     assert '<figure class="own">' not in (out / "documentation.html").read_text(
         encoding="utf-8")
+
+
+def test_steps_taken_again_are_told_once_as_they_went_the_second_time(tmp_path):
+    # engine.stepping: somebody stepped back and went on - the guide forgets
+    # what those steps wrote, and they write it again.
+    _write(tmp_path, "flows/scenarios/order.yaml", ORDER)
+    doc, steps, adapter, _out, _w = _guide(tmp_path, "order")
+    _run(doc, steps, adapter)
+    before = [item["index"] for item in _items(doc)]
+    doc.rewind(2)
+    assert [item["index"] for item in _items(doc)] == [i for i in before if i < 2]
+    for index in range(2, len(steps)):
+        step = steps[index]
+        doc.before(index, step)
+        doc.after(index, step, StepResult(index, step.action, PASS, step.target,
+                                          step.value, "ok"))
+    assert [item["index"] for item in _items(doc)] == before
+
+
+def test_taking_every_step_back_leaves_an_empty_guide(tmp_path):
+    _write(tmp_path, "flows/scenarios/order.yaml", ORDER)
+    doc, steps, adapter, _out, _w = _guide(tmp_path, "order")
+    _run(doc, steps, adapter)
+    doc.rewind(0)
+    assert _items(doc) == [] and doc.data()["latest"] is None

@@ -91,6 +91,18 @@ def _run_step(painter, ink):
                                     QPointF(9, 19)]))
 
 
+def _step_one(painter, ink):
+    """Play up against a bar: go on for one step, then stop at the bar.
+
+    A paused scenario's Step (engine/stepping.py) - not run-step, the cycle's
+    chevron, which beside the Back and Forward chevrons would read as a third
+    way of moving the cursor.
+    """
+    _fill(painter, ink)
+    painter.drawPolygon(QPolygonF([QPointF(5, 5), QPointF(5, 19), QPointF(14, 12)]))
+    painter.drawRect(QRectF(16, 5, 3, 14))
+
+
 def _run_from(painter, ink):
     """Two chevrons: this step and everything that waits on it."""
     _stroke(painter, ink)
@@ -824,6 +836,10 @@ DRAWINGS = {
     "redo": _redo,
     "run-step": _run_step,
     "run-from": _run_from,
+    # A paused scenario's controls (pages/runsteps.py).
+    "step-one": _step_one,
+    "back": _chevron_left,
+    "forward": _chevron_right,
     "stop": _stop,
     "copy": _copy,
     "refresh": _refresh,

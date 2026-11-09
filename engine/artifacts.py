@@ -266,6 +266,17 @@ class Reporter:
         if self._doc is not None:
             _safe(lambda: self._doc.after(index, step, step_result), "guide")
 
+    def settle(self):
+        """Let the page finish what the last step set off, once per change -
+        for whoever else copies it after a step (engine.history)."""
+        self._settle()
+
+    def rewind(self, first):
+        """Steps from ``first`` on are run again (engine.stepping): the guide
+        forgets what it wrote for them, so it does not describe them twice."""
+        if self._doc is not None:
+            _safe(lambda: self._doc.rewind(first), "guide")
+
     def finalize(self, flow_result, failed):
         """Write the finish screenshot and the outcome's report artifacts."""
         try:

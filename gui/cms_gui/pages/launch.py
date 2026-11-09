@@ -549,6 +549,29 @@ class LaunchSessionsPage(QWidget):
             "overlay cannot be scrolled until then.")
         self.lock_windows.toggled.connect(self._changed)
         inner.addWidget(self.lock_windows)
+        # Stepping a paused scenario (engine/stepping.py) - Pause, Step and the
+        # keys are on the Run page and in the window's overlay; these two say
+        # what a run keeps for them and when it stops by itself.
+        self.step_history = QCheckBox("Keep live history")
+        self.step_history.setToolTip(
+            "After every step, a copy of the whole page is kept - what was typed\n"
+            "into its forms included. With a scenario paused, Back and Forward show\n"
+            "the page as it was after an earlier step: on the Run page, and laid\n"
+            "over the live page in the window, which stays as the run left it.\n"
+            "The copies are temporary: each scenario's go as it ends, and nothing\n"
+            "reaches the report. Taking one costs up to about half a second on a\n"
+            "heavy page and a few megabytes of disk for as long as it is kept.\n"
+            "Off: Back still chooses where to go on from, without the page.")
+        self.step_history.toggled.connect(self._changed)
+        inner.addWidget(self.step_history)
+        self.pause_on_failure = QCheckBox("Pause when a step fails")
+        self.pause_on_failure.setToolTip(
+            "A step that fails pauses its scenario instead of ending it. Step back\n"
+            "to an earlier step and go on from there - the steps after it run again\n"
+            "on the page as it is, and the report says somebody stepped in - or go\n"
+            "on from the failed step to end the scenario as failed.")
+        self.pause_on_failure.toggled.connect(self._changed)
+        inner.addWidget(self.pause_on_failure)
         inner.addWidget(self._folder_field("reports_dir", "Reports folder"))
 
     def _extensions_section(self, inner):
@@ -883,6 +906,8 @@ class LaunchSessionsPage(QWidget):
                          "maximized": self.maximized.isChecked(),
                          "no_password_prompts": self.no_password_prompts.isChecked(),
                          "lock_windows": self.lock_windows.isChecked(),
+                         "step_history": self.step_history.isChecked(),
+                         "pause_on_failure": self.pause_on_failure.isChecked(),
                          "order": list(self._order)},
             "extensions": {"mode": self._ext_mode_value(),
                            "names": self.ext_list.checked(),
@@ -934,6 +959,8 @@ class LaunchSessionsPage(QWidget):
             self.maximized.setChecked(bool(sessions["maximized"]))
             self.no_password_prompts.setChecked(bool(sessions["no_password_prompts"]))
             self.lock_windows.setChecked(bool(sessions["lock_windows"]))
+            self.step_history.setChecked(bool(sessions["step_history"]))
+            self.pause_on_failure.setChecked(bool(sessions["pause_on_failure"]))
             self._order = list(sessions.get("order") or [])
 
             extensions = config["extensions"]

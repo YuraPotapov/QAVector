@@ -228,3 +228,36 @@ def test_tee_is_enabled_when_any_observer_is():
 
     assert events.Tee([Off(), _Recorder()]).enabled is True
     assert events.Tee([Off()]).enabled is False
+
+
+def test_stepping_is_reported_with_where_the_cursor_is_and_what_to_show():
+    buf = _capture()
+    observer = events.EventObserver("dev-admin")
+    observer.step_paused(2, 4, "breakpoint", "/tmp/qavector-history/1-2/a/s/step_002.html")
+    observer.step_resumed(2)
+    observer.steps_rewound(2, 4)
+    lines = _lines(buf)
+    assert [l["kind"] for l in lines] == ["step.paused", "step.resumed", "steps.rewound"]
+    assert lines[0]["cursor"] == 2 and lines[0]["last"] == 4
+    assert lines[0]["reason"] == "breakpoint" and lines[0]["view"].endswith("step_002.html")
+    assert (lines[2]["first"], lines[2]["last"]) == (2, 4)
+
+
+def test_the_tee_passes_stepping_on_to_every_observer():
+    seen = []
+
+    class One:
+        def step_paused(self, cursor, last, reason, view=None):
+            seen.append(("paused", cursor, last, reason, view))
+
+        def step_resumed(self, cursor):
+            seen.append(("resumed", cursor))
+
+        def steps_rewound(self, first, last):
+            seen.append(("rewound", first, last))
+
+    events.Tee([One(), One()]).step_paused(1, 3, "pause", None)
+    events.Tee([One()]).steps_rewound(1, 3)
+    events.Tee([One()]).step_resumed(1)
+    assert seen == [("paused", 1, 3, "pause", None)] * 2 + [("rewound", 1, 3),
+                                                             ("resumed", 1)]

@@ -230,6 +230,35 @@ class LiveDoc:
         check = assertions.is_assertion(step.action) or step.action == "wait_for"
         self._add(index, step, "result" if check else "step")
 
+    def rewind(self, first):
+        """Steps from ``first`` on are run again (engine.stepping): what they
+        put in the guide goes, so the guide tells each step once - as it went
+        the second time. A section's picture taken by one of them goes too; the
+        step that runs again takes it again."""
+        kept_last = None
+        for chapter in self._chapters:
+            for segment in chapter["segments"]:
+                segment["items"] = [item for item in segment["items"]
+                                    if item["index"] < first]
+                ids = {str(item["id"]) for item in segment["items"]}
+                segment["boxes"] = {key: box for key, box in segment["boxes"].items()
+                                    if key in ids}
+                taken = re.search(r"step_(\d+)\.png$", segment.get("shot") or "")
+                if taken and int(taken.group(1)) > first:
+                    segment["shot"], segment["boxes"] = "", {}
+                if segment["items"]:
+                    kept_last = segment["items"][-1]
+            chapter["segments"] = [one for one in chapter["segments"] if one["items"]]
+        self._chapters = [one for one in self._chapters if one["segments"]]
+        if self._chapters:
+            self._segment = self._chapters[-1]["segments"][-1]
+            self._chapter_key = _chapter_key(self._blocks.get(kept_last["index"]))
+        else:
+            self._segment, self._chapter_key = None, object()
+        self._covered = set()
+        self._latest = kept_last["id"] if kept_last else None
+        self._write()
+
     def finish(self, flow_result):
         self._head["status"] = flow_result.status
         self._head["duration_ms"] = flow_result.duration_ms

@@ -510,7 +510,15 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
   lock is lifted for the instant each scripted click or key press is sent (a few
   hundredths of a second, its checks made while still locked): too short for a
   person's click, whose button is held longer, but a key pressed at that very
-  moment can get through. Only valid together with `--run-tests`.
+  moment can get through. A paused scenario lets go of the window until it goes on.
+  Only valid together with `--run-tests`.
+- `--step-history` — keep a copy of the page after every step, what was typed into
+  its forms included, so a paused scenario can be stepped back over (see
+  [Stepping through a scenario](#stepping-through-a-scenario)). The copies live in
+  the system's temporary folder only while the run does, never in the report.
+  Needs `--run-tests` and `--control=-`; the GUI passes both.
+- `--pause-on-failure` — a failed step pauses its scenario instead of ending it.
+  Needs `--run-tests` and `--control=-`.
 - `--no-browser` — run the scenarios with no browser at all. Only for scenarios made
   of service steps and `assert_host_up`, their `use:` blocks included; any other is
   refused before the run starts, named with the page steps it takes. Sessions,
@@ -736,6 +744,43 @@ python3 session_launcher.py --user=admin --password=admin \
   --url=http://localhost:8069 --run-tests=my_scenario \
   --execution-overlay=tree,progress,status,logs
 ```
+
+### Stepping through a scenario
+
+A run started from the GUI can be paused between steps and stepped over - from
+the Run page, or from the HUD in the window (with `--execution-overlay`). A step
+that is running is never cut short: a pause lands after it.
+
+| | Key | |
+|---|---|---|
+| Pause / continue | F8 | Pause after the step under way; continue a paused scenario. |
+| One step | F10 | Run one step, then pause again. |
+| Back | Alt+Left | The page as it was one step earlier. |
+| Forward | Alt+Right | The page one step later; on the live page, run one step. |
+
+The keys are the GUI's own (Settings → Hotkeys) and the HUD follows them.
+Clicking the dot in front of a step - in the Run page's tree or the HUD's - stops
+the run before that step each time it gets there; clicking a step already taken
+shows the page it left.
+
+**Back shows a copy, it undoes nothing.** With *Keep live history* on (Launch →
+Advanced; `--step-history`), every step leaves a copy of the page, typed values
+included, and Back lays it over the live page - which stays exactly as the run
+left it. **Continuing from an earlier step N runs step N+1 and everything after it
+again, on the live page as it is now.** That can repeat what those steps did in
+the application, which is why the result says so: `result.json` lists each such
+return under `interventions`, and the Run page marks the scenario "stepped back".
+
+*Pause when a step fails* (`--pause-on-failure`) stops at a failed step instead
+of ending the scenario: go back and continue to run steps again, or continue from
+the failed step to end the scenario as failed.
+
+From a terminal the same commands go on stdin with `--control=-`, one JSON object
+a line - `{"command": "scenario.pause", "session": "<window>"}`, and `.continue`,
+`.step`, `.back`, `.forward`, `.cursor` (`"index"`), `.breakpoints` (`"scenario"`,
+`"indices"`) - and the stream (`--events=-`) answers with `step.setup`,
+`step.paused`, `step.resumed` and `steps.rewound`. Without `--control` nothing ever
+pauses: background runs, cycles and plain terminal runs go as they always did.
 
 Single ad-hoc user:
 

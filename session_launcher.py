@@ -3170,8 +3170,12 @@ def read_commands(windows_by_session, on_closed=None):
     wants a running cycle to know - see ``cycle/interactions.py``; it is handed
     to the run's own scheduler, which decides whether it is taken and says so
     as a ``cycle.interaction`` event, and only a message that reaches no run is
-    refused here. Unknown commands are ignored rather than
-    fatal: a newer GUI talking to an older core should lose a feature, not the run.
+    refused here. ``scenario.pause``, ``.continue``, ``.step``, ``.back``,
+    ``.forward``, ``.cursor``, ``.breakpoints`` and ``.keys`` steer one window's
+    scenario between its steps (engine/stepping.py); one that finds no scenario
+    running there is answered with ``scenario.control.refused``. Unknown commands
+    are ignored rather than fatal: a newer GUI talking to an older core should
+    lose a feature, not the run.
 
     ``windows_by_session`` is ``{}`` in cycle mode, where there are no windows of
     this process's own - ``stop-session`` then simply finds nothing to close,
@@ -3244,6 +3248,15 @@ def read_commands(windows_by_session, on_closed=None):
             refused = cycle_executor.control_run(message.get("run_id"), "set_mode", mode=message.get("mode"))
             if refused:
                 _emit("cycle.control.refused", run_id=message.get("run_id"), action="set_mode", reason=refused)
+        elif isinstance(command, str) and command.startswith("scenario."):
+            # Pausing a scenario and stepping over its steps (engine.stepping).
+            # Queued for the session's own thread, which acts on it between steps.
+            from engine import stepping as engine_stepping
+
+            refused = engine_stepping.deliver(message)
+            if refused:
+                _emit("scenario.control.refused", session=session,
+                      command=command, reason=refused)
         elif command == "cycle.supervision":
             from cycle import executor as cycle_executor
             cycle_executor.confirm_supervision(message.get("run_id"))
@@ -3893,7 +3906,16 @@ Flow execution (require --run-tests):
                             your mouse and keyboard, so a stray click cannot
                             steer the run. It unlocks when they finish. The
                             browser's own tabs, address bar and close button
-                            still work.
+                            still work. A paused scenario lets go until it
+                            goes on.
+  --step-history            Keep a copy of the page after every step - what was
+                            typed into it included - so a paused scenario can
+                            be stepped back over. Kept only while the run
+                            lives, never in the report. Needs --control=-.
+  --pause-on-failure        A failed step pauses its scenario instead of ending
+                            it: step back to an earlier step and go on from
+                            there, or go on to end it as failed. Needs
+                            --control=-.
   --no-browser            Run with no browser at all, for scenarios made only
                             of service steps and assert_host_up (use: blocks
                             included). Any other scenario is refused before the
@@ -3999,6 +4021,8 @@ def main():
     no_autologin = False  # --no-autologin: windows open on the sign-in form
     empty_sessions = False   # --empty-sessions: clear each profile's data first
     lock_windows = False  # --lock-windows: pages ignore the user while scenarios run
+    step_history = False  # --step-history: a copy of the page after every step, for stepping back
+    pause_on_failure = False  # --pause-on-failure: a failed step pauses instead of ending
     report_level = None   # raw --report-level value (None = flag absent -> default artifacts)
     report_always = False # --report-always: produce a full report on success too
     report_screen = None  # raw --report-screen value (None = flag absent -> default capture)
@@ -4058,6 +4082,12 @@ def main():
             # Flow-execution mode only (checked after the loop): the engine holds
             # the lock, so without a run there is nobody to hold it.
             lock_windows = True
+        elif arg == "--step-history":
+            # Both stepping flags: flow-execution mode only, and only with
+            # somebody to pause for (--control) - checked after the loop.
+            step_history = True
+        elif arg == "--pause-on-failure":
+            pause_on_failure = True
         elif arg.startswith("--extensions="):
             # Comma-separated friendly names (see KNOWN_EXTENSIONS) or raw Web Store
             # ids. Nothing is installed by default.
@@ -4548,6 +4578,18 @@ def main():
     if lock_windows and run_tests is None:
         sys.exit("--lock-windows requires --run-tests (the windows are locked while "
                  "their scenarios run; with none, there is nothing to lock them for).")
+    for flag, given in (("--step-history", step_history),
+                        ("--pause-on-failure", pause_on_failure)):
+        if given and run_tests is None:
+            sys.exit("%s requires --run-tests (it is about the steps of a scenario run)."
+                     % flag)
+        if given and not control_stdin:
+            # Said and dropped, as the overlay is with --no-browser: nobody can
+            # step through a run that takes no commands, so it simply runs.
+            log.warning("%s does nothing without --control=-: nobody can pause "
+                        "this run. Running without it.", flag)
+    if not control_stdin:
+        step_history = pause_on_failure = False
     if no_browser:
         if recorder:
             sys.exit("--no-browser cannot record: the recorder is used by clicking in "
@@ -4565,11 +4607,12 @@ def main():
                             ("--maximized", maximized),
                             ("--no-password-prompts", no_password_prompts),
                             ("--no-autologin", no_autologin),
-                            ("--empty-sessions", empty_sessions)):
+                            ("--empty-sessions", empty_sessions),
+                            ("--step-history", step_history)):
             if given:
                 log.info("%s does nothing with --no-browser: there are no windows "
                          "and no profiles to open.", flag)
-        lock_windows = maximized = empty_sessions = False
+        lock_windows = maximized = empty_sessions = step_history = False
         if detach:
             # Before the --server-log check below: a detach that is about to be
             # ignored must not cost the run its server logs.
@@ -4960,6 +5003,10 @@ def main():
             from engine import services as engine_services
 
             engine_services.configure(_events is not None and _events.enabled())
+            # And a scenario can be paused: there is somebody to resume it.
+            from engine import stepping as engine_stepping
+
+            engine_stepping.configure(True)
         except ImportError:
             pass                    # no engine installed: a plain launch, nothing to ask
 
@@ -5022,7 +5069,9 @@ def main():
                                                     maximized=maximized)
                                        if staged else None,
                                browser=not no_browser,
-                               lock_windows=lock_windows)
+                               lock_windows=lock_windows,
+                               step_history=step_history,
+                               pause_on_failure=pause_on_failure)
         except KeyboardInterrupt:
             stopped = True
             raise

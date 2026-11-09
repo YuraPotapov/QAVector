@@ -7,7 +7,7 @@ states, progress counters, log buffer, and completion banner.
 
 from domain.plan import PlanNode, GROUP, STEP
 from domain.result import PASS, FAIL
-from engine.overlay import ExecutionOverlay, NullOverlay, normalize_level
+from engine.overlay import ExecutionOverlay, NullOverlay, hud_keys, normalize_level
 
 
 class FakeAdapter:
@@ -16,6 +16,7 @@ class FakeAdapter:
     def __init__(self, on_render=None):
         self.setups = []
         self.renders = []
+        self.copies = []
         self.torn_down = False
         self._on_render = on_render
 
@@ -29,6 +30,9 @@ class FakeAdapter:
 
     def overlay_teardown(self):
         self.torn_down = True
+
+    def overlay_copy(self, html, caption=""):
+        self.copies.append((html, caption))
 
 
 def _tree():
@@ -449,3 +453,78 @@ def test_without_the_tree_panel_the_tree_is_never_sent():
     ov.flow_start(_tree(), role="Admin")
     ov.step_start(0)
     assert not any("tree" in state for state in adapter.renders)
+
+
+# ------------------------------------------------- stepping (engine.stepping)
+
+def test_steps_taken_back_are_pending_again_and_no_longer_counted():
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    for index in range(3):
+        ov.step_start(index)
+        ov.step_end(index, PASS)
+    assert adapter.renders[-1]["progress"]["done"] == 3
+    ov.steps_rewound(1, 3)
+    state = adapter.renders[-1]
+    assert state["progress"]["done"] == 1
+    assert state["nodeStates"]["s0/0/0/0"] == "success"
+    assert state["nodeStates"]["s0/0/1"] == "pending"
+
+
+def test_a_paused_scenario_says_so_until_it_goes_on():
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    ov.step_paused(1, 1, "pause")
+    assert adapter.renders[-1]["status"]["state"] == "Paused"
+    ov.step_resumed(1)
+    assert adapter.renders[-1]["status"]["state"] == "Running"
+
+
+def test_the_null_overlay_takes_the_stepping_hooks_too():
+    overlay = NullOverlay()
+    overlay.step_paused(0, 0, "pause", None)
+    overlay.step_resumed(0)
+    overlay.steps_rewound(0, 1)
+
+
+def test_the_stepping_controls_show_only_where_somebody_can_pause():
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    assert adapter.renders[-1]["stepping"]["live"] is False
+    ov.step_setup("smoke", True, [2], {})
+    stepping = adapter.renders[-1]["stepping"]
+    assert stepping["live"] is True and stepping["breakpoints"] == [2]
+    assert stepping["keys"]["back"]["key"] == "ArrowLeft"
+
+
+def test_the_copy_of_a_page_is_sent_once_and_taken_away_on_going_on(tmp_path):
+    view = tmp_path / "step_001.html"
+    view.write_text("<html>the page after step 1</html>", encoding="utf-8")
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    ov.step_paused(2, 2, "pause", None)
+    ov.step_paused(1, 2, "pause", str(view))
+    ov.step_paused(1, 2, "pause", str(view))       # the same copy is not sent again
+    ov.step_resumed(1)
+    assert [html for html, _caption in adapter.copies] == [
+        "<html>the page after step 1</html>", None]
+    assert adapter.copies[0][1].startswith("Copy of the page after step 1")
+    stepping = adapter.renders[-1]["stepping"]
+    assert stepping["paused"] is False and stepping["cursor"] == stepping["last"] == 1
+
+
+def test_keys_are_read_as_the_page_sees_them():
+    keys = hud_keys({"back": "Alt+Left", "step": "Ctrl+Shift+N", "pause": "Ctrl++",
+                     "forward": "Ctrl+K, Ctrl+F"})
+    assert keys["back"] == {"key": "ArrowLeft", "alt": True, "ctrl": False, "shift": False,
+                            "meta": False, "text": "Alt+Left"}
+    assert keys["step"]["key"] == "N" and keys["step"]["ctrl"] and keys["step"]["shift"]
+    assert keys["pause"]["key"] == "+" and keys["pause"]["ctrl"]
+    # A sequence of two presses is not one keydown: that action stays a button.
+    assert "forward" not in keys
+
+
+def test_without_keys_from_the_gui_the_hud_answers_to_the_usual_ones():
+    keys = hud_keys({})
+    assert {action: spec["text"] for action, spec in keys.items()} == {
+        "pause": "F8", "step": "F10", "back": "Alt+Left", "forward": "Alt+Right"}

@@ -2096,6 +2096,73 @@ def test_lock_windows_reaches_the_run(launched, local_config, monkeypatch):
     assert captured["lock_windows"] is True
 
 
+@pytest.mark.parametrize("flag", ["--step-history", "--pause-on-failure"])
+def test_stepping_needs_scenarios(monkeypatch, config, flag):
+    message = _main(monkeypatch, config, "--env=dev", flag)
+    assert "%s requires --run-tests" % flag in message
+
+
+def _stepping_run(launched, local_config, monkeypatch, *flags):
+    from engine import runner as engine_runner
+    from engine import services as engine_services
+    from engine import stepping as engine_stepping
+
+    # Whatever main() switches on for this run is put back afterwards.
+    monkeypatch.setattr(engine_stepping, "_enabled", engine_stepping._enabled)
+    monkeypatch.setattr(engine_services, "_enabled", engine_services._enabled)
+    monkeypatch.setattr(sl, "read_commands", lambda *a, **k: None)
+    captured = {}
+
+    def fake_run(sessions, which, **kwargs):
+        captured.update(kwargs, stepping=engine_stepping.enabled())
+        return 0
+
+    monkeypatch.setattr(engine_runner, "run_scenarios", fake_run)
+    with pytest.raises(SystemExit):
+        launched(local_config, "--env=localhost", "--run-tests=anything", *flags)
+    return captured
+
+
+def test_stepping_reaches_a_run_somebody_can_pause(launched, local_config, monkeypatch):
+    captured = _stepping_run(launched, local_config, monkeypatch, "--control=-",
+                             "--step-history", "--pause-on-failure")
+    assert captured["step_history"] is True and captured["pause_on_failure"] is True
+    assert captured["stepping"] is True
+
+
+def test_stepping_is_said_and_dropped_without_a_control_channel(
+        launched, local_config, monkeypatch, caplog):
+    with caplog.at_level("WARNING"):
+        captured = _stepping_run(launched, local_config, monkeypatch,
+                                 "--step-history", "--pause-on-failure")
+    assert captured["step_history"] is False and captured["pause_on_failure"] is False
+    assert captured["stepping"] is False
+    assert "--step-history does nothing without --control=-" in caplog.text
+
+
+def test_a_scenario_command_reaches_the_window_or_says_why_not(monkeypatch):
+    import io
+
+    from engine import stepping as engine_stepping
+
+    taken, said = [], []
+
+    def deliver(message):
+        taken.append(message["command"])
+        return "" if message["session"] == "dev-agent" else "no scenario is running"
+
+    monkeypatch.setattr(engine_stepping, "deliver", deliver)
+    monkeypatch.setattr(sl, "_emit", lambda kind, **fields: said.append((kind, fields)))
+    monkeypatch.setattr(sl.sys, "stdin", io.StringIO(
+        '{"command": "scenario.pause", "session": "dev-agent"}\n'
+        '{"command": "scenario.back", "session": "gone"}\n'))
+    sl.read_commands({})
+    assert taken == ["scenario.pause", "scenario.back"]
+    refused = [fields for kind, fields in said if kind == "scenario.control.refused"]
+    assert refused == [{"session": "gone", "command": "scenario.back",
+                        "reason": "no scenario is running"}]
+
+
 def test_no_browser_drops_the_window_flags(launched, monkeypatch, config, caplog):
     with caplog.at_level("INFO"):
         captured, code = _run_without_browser(launched, monkeypatch, config,

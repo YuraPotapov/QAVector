@@ -405,6 +405,20 @@ QLabel[role="rungroup"] {{
     font-family: {heading}; font-size: 13px; font-weight: 600; color: {a800};
 }}
 QLabel[role="runtook"] {{ font-family: {mono}; font-size: 12px; color: {n600}; }}
+/* Stepping a paused scenario (pages/runsteps.py): the bar takes the warning
+   tint while the window waits, the bad one when it waits on a failed step. */
+QWidget[role="stepbar"] {{ border-bottom: 1px solid {divider}; }}
+QWidget[role="stepbar"][state="paused"] {{ background: {warn_tint}; }}
+QWidget[role="stepbar"][state="failure"] {{ background: {bad_tint}; }}
+QLabel[role="stephead"] {{
+    font-family: {heading}; font-size: 13px; font-weight: 600; color: {text};
+}}
+/* A step row: the step whose page is being looked at, and the one that runs
+   next. The breakpoint is painted by the row itself (pages/run.py). */
+QWidget[role="steprow"][mark="cursor"] {{
+    background: {warn_tint}; border: 1px solid {warn};
+}}
+QWidget[role="steprow"][mark="next"] {{ background: {warn_tint}; }}
 QLabel[role="summary"] {{ font-size: 12px; color: {n800}; }}
 /* The line an empty zone leads with: the subject, said once, in the page's own
    heading face so it is plainly a state and not a row that lost its text. */

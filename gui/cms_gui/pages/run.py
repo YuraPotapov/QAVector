@@ -8,12 +8,15 @@ an event the launcher sent.
 
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
                                QPlainTextEdit, QProgressBar,
-                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QStyle, QStyleOption,
+                               QVBoxLayout, QWidget)
 
 from .. import icons, search, theme, widgets
+from .runsteps import CopyPane, StepBar
 from .serverlogwindow import ServerLogWindow, level_html
 
 #: Lines painted in one session's Server log box. The model keeps more (see
@@ -27,6 +30,7 @@ STATE_TAGS = {
     "launched": ("LAUNCHED", "neutral"),
     "attached": ("ATTACHED", "outline"),
     "running": ("RUNNING", "outline"),
+    "paused": ("PAUSED", "warn"),
     "passed": ("PASS", "accent"),
     "failed": ("FAIL", "bad"),
     "closed": ("CLOSED", "neutral"),
@@ -36,6 +40,10 @@ STATE_TAGS = {
 #: monospaced string, and is now a margin, because the mark beside it is a
 #: painted icon rather than a character in the same run of text.
 INDENT_PX = 14
+
+#: The strip in front of every step where its breakpoint goes - there only when
+#: the run can be paused (engine/stepping.py), so other runs look as they did.
+GUTTER_PX = 16
 
 #: Status -> (icon name, colour token). The mark and the colour say the same
 #: thing twice on purpose: colour alone is not something everyone can read.
@@ -93,6 +101,9 @@ def _mark_label(name, colour, size=13):
 class SessionPanel(widgets.BlueprintPanel):
     """One window's state and step tree."""
 
+    #: (session name, a command for its scenario - engine/stepping.py)
+    step_asked = Signal(str, dict)
+
     def __init__(self, parent=None):
         super().__init__(parent, padding=(0, 0, 0, 0))
         column = self.layout()
@@ -118,6 +129,16 @@ class SessionPanel(widgets.BlueprintPanel):
         head_layout.setContentsMargins(14, 10, 14, 10)
         head_layout.addWidget(head_row)
         column.addWidget(head)
+
+        # Only while its scenario can be paused: a run nobody can step looks
+        # exactly as it did before there was stepping.
+        self.step_bar = StepBar()
+        self.step_bar.asked.connect(lambda command: self.step_asked.emit(
+            self.name.text(), command))
+        self.step_bar.setVisible(False)
+        column.addWidget(self.step_bar)
+        self._session = {}
+        self._keys = {}
 
         self.steps = QWidget()
         self.steps_layout = QVBoxLayout(self.steps)
@@ -319,8 +340,43 @@ class SessionPanel(widgets.BlueprintPanel):
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(session.get("done", 0))
         self.counter.setText("%d/%d" % (session.get("done", 0), total) if total else "")
+        self._session = session
+        step = session.get("step") or {}
+        stepping = bool(step.get("live")) and session.get("state") in ("running", "paused")
+        self.step_bar.setVisible(stepping)
+        if stepping:
+            self.step_bar.show_state(step, total, self._keys)
         self._render_tree(session)
         self._update_server(session)
+
+    def set_step_keys(self, keys):
+        """The keymap's text for each stepping action, for the bar's tooltips."""
+        self._keys = dict(keys or {})
+        if self.step_bar.isVisible():
+            self.step_bar.show_state(self._session.get("step") or {},
+                                     self._session.get("total") or 0, self._keys)
+
+    # -- stepping (engine/stepping.py) -----------------------------------------
+    def _toggle_breakpoint(self, key, index):
+        """Ask for a breakpoint before step ``index`` of scenario ``key`` - or
+        for that one to go. Drawn at once; the core's answer redraws it."""
+        run = (self._session.get("runs") or {}).get(key) or {}
+        points = set(run.get("breakpoints") or ())
+        points.symmetric_difference_update({index})
+        run["breakpoints"] = sorted(points)
+        self.step_asked.emit(self.name.text(), {"command": "breakpoints", "scenario": key,
+                                                "indices": sorted(points)})
+        self._paint_tree(self._session.get("runs") or {})
+
+    def _pick(self, key, index):
+        """A click on a step taken: the page it left. Only while paused, in the
+        scenario that is paused - the others' pages are gone."""
+        step = self._session.get("step") or {}
+        if not step.get("paused") or key != self._session.get("scenario_key"):
+            return
+        last = step.get("last") or 0
+        if index < last:
+            self.step_asked.emit(self.name.text(), {"command": "cursor", "index": index + 1})
 
     def _render_tree(self, session):
         """Every scenario this window has run, not only the one running now.
@@ -340,14 +396,15 @@ class SessionPanel(widgets.BlueprintPanel):
         runs = session.get("runs") or {}
         pending = [one for one in session.get("scenarios") or [] if one not in runs]
         waiting = not runs and not session.get("scenarios")
+        live = bool((session.get("step") or {}).get("live"))
         shape = (tuple((key, id(run.get("tree"))) for key, run in runs.items()),
-                 tuple(pending), waiting)
+                 tuple(pending), waiting, live)
         if shape != self._shape:
             self._shape = shape
-            self._build_tree(runs, pending, waiting)
+            self._build_tree(runs, pending, waiting, GUTTER_PX if live else 0)
         self._paint_tree(runs)
 
-    def _build_tree(self, runs, pending, waiting):
+    def _build_tree(self, runs, pending, waiting, gutter=0):
         while self.steps_layout.count():
             item = self.steps_layout.takeAt(0)
             if item.widget():
@@ -374,9 +431,14 @@ class SessionPanel(widgets.BlueprintPanel):
                 for node, depth in _walk(run.get("tree") or {}):
                     if depth == 0:
                         continue        # the header above already names the flow
-                    row, step = _step_row(node, depth)
+                    row, step = _step_row(node, depth, gutter)
                     if step is not None:
-                        cells[node.get("step_index")] = step
+                        index = node.get("step_index")
+                        cells[index] = step
+                        if gutter:
+                            row.on_gutter = (lambda key=key, index=index:
+                                             self._toggle_breakpoint(key, index))
+                            row.on_pick = lambda key=key, index=index: self._pick(key, index)
                     self.steps_layout.addWidget(row)
             for scenario in pending:
                 header = _ScenarioHeader(scenario)
@@ -388,6 +450,9 @@ class SessionPanel(widgets.BlueprintPanel):
     def _paint_tree(self, runs):
         """Bring the built rows up to date; a row that has not changed is not touched."""
         self._live = None
+        step = self._session.get("step") or {}
+        current = self._session.get("scenario_key")
+        cursor, last = step.get("cursor") or 0, step.get("last") or 0
         for key, run in runs.items():
             header = self._headers.get(key)
             if header is not None:
@@ -395,8 +460,16 @@ class SessionPanel(widgets.BlueprintPanel):
                 if run.get("status") == "running" and run.get("started"):
                     self._live = (header.took, run)
             steps = run.get("steps") or {}
+            points = set(run.get("breakpoints") or ())
+            paused_here = bool(step.get("paused")) and key == current
             for index, cells in self._rows.get(key, {}).items():
-                cells.paint(steps.get(index) or {})
+                mark = ""
+                if paused_here:
+                    if cursor < last and index == cursor - 1:
+                        mark = "cursor"
+                    elif cursor == last and index == last:
+                        mark = "next"
+                cells.paint(steps.get(index) or {}, mark, index in points)
 
     def tick(self, now=None):
         """Move the running scenario's time on, and nothing else."""
@@ -447,7 +520,10 @@ class _ScenarioHeader:
         if run.get("total"):
             counts = "   %s/%s" % (run.get("done", 0), run["total"])
         took = _took(run)
-        painted = (status, counts, took)
+        # A pass somebody helped along - stepped back, and had steps run again
+        # on the same page - says so beside the time, as result.json does.
+        again = run.get("rewound") or 0
+        painted = (status, counts, took, again)
         if painted == self._painted:
             return
         if self._painted is None or self._painted[0] != status:
@@ -455,19 +531,25 @@ class _ScenarioHeader:
             self.mark.setPixmap(icons.pixmap(name, 13, colour))
             _restyle(self.label, status=status)
         self.label.setText("%s%s" % (self.scenario, counts))
-        self.took.setText(took)
+        self.took.setText(took + ("   stepped back" if again else ""))
+        self.took.setToolTip("Somebody stepped back and the run went on from there: "
+                             "some steps ran twice on the same page." if again else "")
         self._painted = painted
 
 
 class _StepCells:
     """A step row's mark and label, repainted only when its state changes."""
 
-    def __init__(self, mark, label):
-        self.mark, self.label = mark, label
+    def __init__(self, mark, label, row):
+        self.mark, self.label, self.row = mark, label, row
         # Built as a step still to come, so most rows never need a paint at all.
         self._painted = ("pending", "")
+        self._marked = ("", False)
 
-    def paint(self, state):
+    def paint(self, state, mark="", breakpoint=False):
+        """``mark`` is "cursor" for the step whose page is being looked at, "next"
+        for the one that runs next, "" otherwise (engine/stepping.py)."""
+        self.row.set_marks(mark, breakpoint)
         status = state.get("status", "pending")
         message = state.get("message") if status in ("fail", "error") else ""
         painted = (status, message or "")
@@ -480,6 +562,80 @@ class _StepCells:
         self._painted = painted
 
 
+class _StepRow(QWidget):
+    """A step's row: with a gutter, a breakpoint in it, and a click to go there.
+
+    The breakpoint is painted rather than a widget of its own: a scenario can
+    be hundreds of steps, and a button on each was hundreds more widgets for
+    something most rows never show. ``on_gutter`` and ``on_pick`` are what a
+    click in the gutter, and on the rest of the row, ask for.
+    """
+
+    def __init__(self, gutter=0):
+        super().__init__()
+        self.setProperty("role", "steprow")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.gutter = gutter
+        self.on_gutter = self.on_pick = None
+        self._mark, self._breakpoint, self._hover = "", False, False
+        if gutter:
+            self.setMouseTracking(True)
+
+    def set_marks(self, mark, breakpoint):
+        if mark != self._mark:
+            self._mark = mark
+            _restyle(self, mark=mark)
+        if breakpoint != self._breakpoint:
+            self._breakpoint = breakpoint
+            self.update()
+
+    def _in_gutter(self, event):
+        return bool(self.gutter) and event.position().x() < self.gutter
+
+    def mousePressEvent(self, event):                 # noqa: N802 - Qt's spelling
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        handler = self.on_gutter if self._in_gutter(event) else self.on_pick
+        if handler is not None:
+            handler()
+
+    def mouseMoveEvent(self, event):                  # noqa: N802
+        hover = self._in_gutter(event)
+        if hover != self._hover:
+            self._hover = hover
+            self.setCursor(Qt.PointingHandCursor if hover else Qt.ArrowCursor)
+            self.setToolTip("Pause before this step" if hover else "")
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):                      # noqa: N802
+        if self._hover:
+            self._hover = False
+            self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):                      # noqa: N802
+        option = QStyleOption()
+        option.initFrom(self)
+        painter = QPainter(self)
+        # The theme's background for a marked row: a styled plain QWidget paints
+        # nothing unless asked to.
+        self.style().drawPrimitive(QStyle.PE_Widget, option, painter, self)
+        if self.gutter and (self._breakpoint or self._hover):
+            painter.setRenderHint(QPainter.Antialiasing)
+            size = 9.0
+            dot = QRectF((self.gutter - size) / 2, (self.height() - size) / 2, size, size)
+            colour = QColor(theme.BAD)
+            if self._breakpoint:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(colour)
+            else:
+                painter.setPen(colour)
+                painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(dot)
+        painter.end()
+
+
 def _walk(node, depth=0):
     """Depth-first (node, depth) pairs, in the order the runner executes them."""
     yield node, depth
@@ -487,12 +643,15 @@ def _walk(node, depth=0):
         yield from _walk(child, depth + 1)
 
 
-def _step_row(node, depth):
-    """A row of the tree, and for a step the cells that show its state."""
+def _step_row(node, depth, gutter=0):
+    """A row of the tree, and for a step the cells that show its state.
+
+    ``gutter`` is the breakpoint strip in front of every row - the groups'
+    too, so the tree keeps its shape - while a scenario can be paused."""
     is_step = node.get("kind") == "step"
-    row = QWidget()
+    row = _StepRow(gutter) if is_step else QWidget()
     line = QHBoxLayout(row)
-    line.setContentsMargins(depth * INDENT_PX, 0, 0, 0)
+    line.setContentsMargins(gutter + depth * INDENT_PX, 0, 0, 0)
     line.setSpacing(0)
     label = QLabel(node.get("label", ""))
     if is_step:
@@ -503,18 +662,24 @@ def _step_row(node, depth):
         label.setProperty("role", "rungroup")
     line.addWidget(mark)
     line.addWidget(label, 1)
-    return row, (_StepCells(mark, label) if is_step else None)
+    return row, (_StepCells(mark, label, row) if is_step else None)
 
 
 class RunPage(QWidget):
     """Header (state, elapsed) plus one panel per session, and the summary."""
 
     open_artifacts = Signal()
+    #: (session name, a command for its scenario) - see engine/stepping.py.
+    step_asked = Signal(str, dict)
 
-    def __init__(self, run_state, parent=None):
+    def __init__(self, run_state, parent=None, settings=None):
         super().__init__(parent)
         self.run_state = run_state
         self._panels = {}
+        # The window stepping is about: the one the keys and the copy pane mean
+        # (see stepping_session).
+        self._stepping = None
+        self._step_keys = {}
         self._started_at = None
         # When the scenarios ended. Kept, because run_finished is called twice -
         # once for run.finished and again when the launcher exits, which without
@@ -550,7 +715,20 @@ class RunPage(QWidget):
         self.body_layout.addWidget(self.placeholder)
         self.body_layout.addStretch(1)
         scroll.setWidget(body)
-        column.addWidget(scroll, 1)
+        # Under the windows, while one of them is paused: the page its cursor
+        # is on. One pane for the run, not one per window - it is the size of a
+        # page, and it follows the window being stepped.
+        self.copy_pane = CopyPane()
+        self.copy_pane.setVisible(False)
+        self.split = widgets.FoldingSplitter(Qt.Vertical)
+        self.split.setChildrenCollapsible(True)
+        self.split.addWidget(scroll)
+        self.split.addWidget(self.copy_pane)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 1)
+        if settings is not None:
+            self.split.remember_in(settings, "run/copy")
+        column.addWidget(self.split, 1)
         self._scroll = scroll           # Search scrolls a session's panel into view
 
         self.summary = QLabel("")
@@ -603,6 +781,8 @@ class RunPage(QWidget):
         self._started_at = time.time()
         self._finished_at = None
         self._panels.clear()
+        self._stepping = None
+        self.copy_pane.setVisible(False)
         while self.body_layout.count():
             item = self.body_layout.takeAt(0)
             if item.widget() and item.widget() is not self.placeholder:
@@ -658,7 +838,55 @@ class RunPage(QWidget):
             panel = self._panels.get(session["name"])
             if panel is None:
                 panel = SessionPanel()
+                panel.set_step_keys(self._step_keys)
+                panel.step_asked.connect(self._asked)
                 self._panels[session["name"]] = panel
                 # Keep the trailing stretch last.
                 self.body_layout.insertWidget(self.body_layout.count() - 1, panel)
             panel.update_from(session)
+        self._show_copy()
+
+    # -- stepping (engine/stepping.py) ------------------------------------------
+    def stepping_session(self):
+        """The window the stepping keys and the copy pane are about.
+
+        The one somebody last stepped, while it can still be stepped; else the
+        first paused one; else the first that can be paused at all.
+        """
+        candidates = [one for one in self.run_state.ordered()
+                      if (one.get("step") or {}).get("live")
+                      and one.get("state") in ("running", "paused")]
+        names = [one["name"] for one in candidates]
+        if self._stepping in names:
+            return self.run_state.sessions[self._stepping]
+        paused = [one for one in candidates if one["state"] == "paused"]
+        chosen = (paused or candidates or [None])[0]
+        self._stepping = chosen["name"] if chosen else None
+        return chosen
+
+    def step(self, action):
+        """A stepping key: ``back``, ``pause``, ``step`` or ``forward``, for the
+        window :meth:`stepping_session` names. False when there is none."""
+        session = self.stepping_session()
+        if session is None:
+            return False
+        if action == "pause":
+            action = "continue" if session["step"].get("paused") else "pause"
+        self._asked(session["name"], {"command": action})
+        return True
+
+    def set_step_keys(self, keys):
+        self._step_keys = dict(keys or {})
+        for panel in self._panels.values():
+            panel.set_step_keys(self._step_keys)
+
+    def _asked(self, name, command):
+        self._stepping = name
+        self.step_asked.emit(name, command)
+
+    def _show_copy(self):
+        session = self.stepping_session()
+        paused = session is not None and session["step"].get("paused")
+        self.copy_pane.setVisible(bool(paused))
+        if paused:
+            self.copy_pane.show_step(session, session["step"])
