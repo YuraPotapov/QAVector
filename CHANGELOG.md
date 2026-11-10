@@ -16,6 +16,40 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.60] - 2026-11-10
+
+### Added
+- **Stepping through a scenario.** A run started from the GUI can be paused
+  between steps and stepped over, from the Run page or from the HUD in the
+  window: **F8** pauses after the step under way or continues, **F10** runs one
+  step and pauses again, **Alt+Left** and **Alt+Right** go back and forward over
+  the steps taken. A step that is running is never cut short. The keys are set
+  in Settings → Hotkeys, and the HUD uses the same ones.
+- Breakpoints: clicking the dot in front of a step, on the Run page or in the
+  HUD, stops the run before that step each time it gets there. Clicking a step
+  already taken shows the page it left.
+- **Keep live history** (Launch → Advanced, on by default; `--step-history`):
+  every step leaves a copy of the page, what was typed into its forms
+  included. Back shows that copy over the live page in the window and in a
+  pane on the Run page; the live page stays as the run left it. The copies are
+  temporary: each scenario's go as it ends, and nothing reaches the report.
+- **Pause when a step fails** (Launch → Advanced; `--pause-on-failure`) stops
+  at a failed step instead of ending the scenario.
+- Going on from an earlier step runs the steps after it again on the live page
+  as it is. `result.json` lists each such return under `interventions`, and
+  the Run page marks the scenario "stepped back".
+
+### Fixed
+- While an integration is in a separate window, its page keeps its header and
+  the way back to the providers instead of showing an empty state.
+- The clear button in a search field sits in the middle of the field.
+- The Jira connection dialog shows its notes in one style and grows to show a
+  problem instead of covering the **Sign in** button.
+- A wait timer of a service step, or a service removed from the configuration,
+  could crash the application when it was deleted.
+- The Plugins page's filters can no longer hold the window wider than the
+  screen.
+
 ## [0.16.59] - 2026-11-07
 
 ### Changed
