@@ -16,6 +16,41 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.64] - 2026-11-10
+
+### Added
+- **Predefined query** for a Jira connection (Integrations → Jira → Settings):
+  JQL every query of the connection is ANDed with - the issue list, a typed
+  query, a key, Ctrl+K and cycle steps and listeners that name the connection.
+  It may use `{{name}}` variables of an environment chosen in *Variables from*,
+  so the same connection text keeps each project to its own Jira projects
+  (`project = {{jira_project}}`). The field shows what it comes to as it is
+  typed; the project filter and Create issue offer only the projects it names.
+- A value cannot widen the query: each variable goes in as one quoted, escaped
+  literal, and the predefined query, a typed query and a cycle's extra JQL must
+  each be whole - every bracket closed, every quote ended - or nothing is
+  sent. A predefined query that does not resolve stops the request; it never
+  becomes "every project".
+
+### Changed
+- **Environments** is laid out as Integrations is: the environment on screen is
+  the heading, tagged *Opens windows* or *Variables only*, the others are a
+  picker beside *+ Environment*, and what it holds is on tabs - Variables,
+  Users and Settings. Project actions are under *Project…*.
+- An environment need not have a url: one without holds variables only, for
+  whatever reads them. It has no Users tab and Launch Sessions does not offer
+  it; typing a url makes it one windows open in.
+- *Default project* is gone from Jira settings: the predefined query says which
+  projects a connection reaches, where it can be seen.
+
+### Fixed
+- Searching Jira for a number - `1296` for `QA-1296` - inside a predefined
+  query finds the issue: Jira's quick search is asked within the query, not
+  across the site, where other projects' keys could crowd it out. With nothing
+  found, Ctrl+K says what the search was bounded by.
+- Create issue with a project chosen beforehand loads its issue types instead
+  of staying on "Loading…".
+
 ## [0.16.63] - 2026-11-10
 
 ### Fixed
