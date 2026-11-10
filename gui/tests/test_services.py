@@ -434,6 +434,28 @@ def test_a_runner_removed_from_the_configuration_goes_with_it(supervisor):
     assert supervisor.service("Claim", "a") is None
 
 
+def test_a_removed_runner_goes_without_taking_the_process_with_it(qapp, state):
+    # Its signals went to slots holding the supervisor: freed by the runner's
+    # deferred delete, they could free the supervisor, which deleted the runner
+    # again while it was being deleted. Only the runner's own delete is
+    # delivered here - flushing every pending one is a hazard of its own.
+    import gc
+
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    supervisor = services.ServiceSupervisor(state=state)
+    supervisor.sync(_stack(_shell_row("a", "pass")))
+    service = supervisor.service("Claim", "a")
+    supervisor.sync([sf.ProjectRow(name="Claim")])
+    supervisor.shutdown(1000)
+    del supervisor
+    gc.collect()
+    if shiboken6.isValid(service):
+        QCoreApplication.sendPostedEvents(service, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(service)
+
+
 def test_a_runner_deleted_while_attached_and_running_is_stopped(qapp, supervisor):
     supervisor.sync(_stack(_shell_row("a", "import time;time.sleep(30)")))
     service = supervisor.service("Claim", "a")

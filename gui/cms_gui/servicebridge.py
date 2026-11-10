@@ -347,5 +347,10 @@ class ServiceBridge(QObject):
     def _discard(self, pending):
         if pending.timer is not None:
             pending.timer.stop()
+            # Let go of the slot first: it holds this bridge, and freed by the
+            # deferred delete it could take the last reference to the bridge
+            # with it - which then deleted its children, the timer still being
+            # deleted among them, and the process died in ~QObject.
+            pending.timer.timeout.disconnect()
             pending.timer.deleteLater()
             pending.timer = None

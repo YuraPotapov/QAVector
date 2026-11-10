@@ -1287,6 +1287,13 @@ class ServiceSupervisor(QObject):
                 service.stop()
                 service.wait_for_stop(3000)
             service.dispose()
+            # Its signals go to slots that hold this supervisor. Left connected,
+            # the deferred delete freed them and could free the supervisor with
+            # them - which deleted its children, this service among them while
+            # it was being deleted, and the process died in ~QObject.
+            for signal in (service.status_changed, service.output,
+                           service.criteria_changed):
+                signal.disconnect()
             service.deleteLater()
 
         for key, (project, runner) in wanted.items():

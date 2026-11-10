@@ -77,12 +77,12 @@ class PluginsPage(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumWidth(220)
         filters.addWidget(self.search, 1)
-        self.source = QComboBox()
+        self.source = widgets.capped(QComboBox())
         self.source.setAccessibleName('Plugin source')
         for text, value in [('All sources', ''), ('Built-in', 'core_node'), ('Bundled', 'bundled'), ('Imported', 'installed')]:
             self.source.addItem(text, value)
         filters.addWidget(self.source)
-        self.state_filter = QComboBox()
+        self.state_filter = widgets.capped(QComboBox())
         self.state_filter.setAccessibleName('Plugin status')
         for text, value in [('All statuses', ''), ('Available', 'available'), ('Inactive', 'inactive'), ('Needs attention', 'attention')]:
             self.state_filter.addItem(text, value)

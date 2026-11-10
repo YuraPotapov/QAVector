@@ -443,6 +443,27 @@ def test_cancel_all_drops_everything_pending(bridge):
     assert not replies.sent
 
 
+def test_a_dropped_bridge_s_timer_goes_without_taking_the_process_with_it(qapp):
+    # The timer's slot held the bridge. Its deferred delete freed the slot, the
+    # slot the last reference to the bridge, and the bridge deleted its children
+    # - the timer, still being deleted - and the process died in ~QObject. Only
+    # this timer's delete is delivered: flushing everyone's is its own hazard.
+    import gc
+
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    bridge = ServiceBridge(FakeSupervisor(), Replies())
+    request(bridge, "wait_for_service", timeout_ms=60000)
+    timer = next(iter(bridge._pending.values())).timer
+    bridge.cancel_all()
+    del bridge
+    gc.collect()
+    if shiboken6.isValid(timer):
+        QCoreApplication.sendPostedEvents(timer, QEvent.DeferredDelete)
+    assert not shiboken6.isValid(timer)
+
+
 def test_an_event_that_is_not_a_service_request_is_left_alone(bridge):
     bridge, supervisor, replies = bridge
     assert bridge.handle({"kind": "step.end"}) is False
