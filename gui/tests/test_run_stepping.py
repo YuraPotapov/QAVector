@@ -182,7 +182,9 @@ def test_the_keys_go_to_the_paused_window(qapp, dispose):
     asked = []
     page.step_asked.connect(lambda name, command: asked.append((name, command)))
     assert page.step("pause") and page.step("back")
-    assert asked == [("shop-bob", {"command": "continue"}), ("shop-bob", {"command": "back"})]
+    # Back goes as where to look: presses that pile up end where the last did.
+    assert asked == [("shop-bob", {"command": "continue"}),
+                     ("shop-bob", {"command": "cursor", "index": 2})]
 
 
 def test_without_a_window_to_step_the_keys_do_nothing(qapp, dispose):
@@ -219,8 +221,57 @@ def test_a_step_with_no_copy_says_why_rather_than_showing_nothing(qapp, dispose)
 
 # -- the launch options -------------------------------------------------------------------
 def test_live_history_is_kept_and_failures_do_not_pause_unless_asked():
-    state = launch.to_command_state(launch.DEFAULTS)
+    config = launch.merged({"overlay": {"enabled": True, "components": []}})
+    state = launch.to_command_state(config)
     assert state["--step-history"] is True and state["--pause-on-failure"] is False
-    config = launch.merged({"sessions": {"pause_on_failure": True, "step_history": False}})
+    config = launch.merged({"overlay": {"enabled": True, "components": []},
+                            "sessions": {"pause_on_failure": True, "step_history": False}})
     state = launch.to_command_state(config)
     assert state["--step-history"] is False and state["--pause-on-failure"] is True
+
+
+def test_without_the_overlay_there_is_no_stepping_to_ask_for():
+    # Stepping is done through the overlay: a run shown without it simply runs.
+    config = launch.merged({"sessions": {"pause_on_failure": True, "step_history": True}})
+    state = launch.to_command_state(config)
+    assert state["--step-history"] is False and state["--pause-on-failure"] is False
+
+
+# -- every press shows at once ------------------------------------------------------
+def test_each_press_shows_at_once_and_a_late_answer_does_not_pull_it_back(qapp, dispose):
+    state = RunState()
+    page = RunPage(state)
+    session = _run(state)
+    _paused(state, cursor=3, last=3)
+    page.refresh()
+    asked = []
+    page.step_asked.connect(lambda name, command: asked.append(command))
+    page.step("back")
+    page.step("back")
+    assert session["step"]["cursor"] == 1                     # before the core answers
+    assert [one["index"] for one in asked] == [2, 1]
+    _paused(state, cursor=2, last=3, view="/v/2")             # the answer to the first
+    assert session["step"]["cursor"] == 1
+    _paused(state, cursor=1, last=3, view="/v/1")             # and to the last
+    assert session["step"]["cursor"] == 1 and session["step"]["pending"] is None
+
+
+def test_looking_back_the_bar_shows_the_step_looked_at(qapp):
+    state = RunState()
+    _run(state)
+    _paused(state, cursor=1, last=3)
+    panel = SessionPanel()
+    panel.update_from(state.sessions["shop-alice"])
+    assert panel.progress.value() == 1 and panel.counter.text() == "1/4"
+
+
+def test_a_copy_on_its_way_says_so_under_the_step_s_own_title(qapp, dispose):
+    state = RunState()
+    page = RunPage(state)
+    _run(state)
+    _paused(state, cursor=3, last=3)
+    page.refresh()
+    page.step("back")
+    page.refresh()
+    assert page.copy_pane.title.text() == "The page after step 2"
+    assert page.copy_pane._empty_title.text() == "On its way"

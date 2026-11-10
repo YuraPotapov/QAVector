@@ -337,11 +337,17 @@ class SessionPanel(widgets.BlueprintPanel):
             bits.append(session["scenario"])
         self.meta.setText(" · ".join(bits))
         total = session.get("total") or 0
-        self.progress.setRange(0, max(total, 1))
-        self.progress.setValue(session.get("done", 0))
-        self.counter.setText("%d/%d" % (session.get("done", 0), total) if total else "")
-        self._session = session
         step = session.get("step") or {}
+        # Looking back, the bar shows where: the step looked at, not how far
+        # the run has gone.
+        looking = step.get("paused") and (step.get("cursor") or 0) < (step.get("last") or 0)
+        at = (step.get("cursor") or 0) if looking else session.get("done", 0)
+        self.progress.setRange(0, max(total, 1))
+        self.progress.setValue(at)
+        self.counter.setText("%d/%d" % (at, total) if total else "")
+        self.progress.setToolTip("Looking at step %d; the live page is after step %d"
+                                 % (at, step.get("last") or 0) if looking else "")
+        self._session = session
         stepping = bool(step.get("live")) and session.get("state") in ("running", "paused")
         self.step_bar.setVisible(stepping)
         if stepping:
@@ -881,7 +887,25 @@ class RunPage(QWidget):
             panel.set_step_keys(self._step_keys)
 
     def _asked(self, name, command):
+        """Back and forward go as where to look, by number, and are shown at
+        once: presses that pile up while the core is busy end where the last
+        one did (engine/stepping.py), and each shows the moment it is made."""
         self._stepping = name
+        session = self.run_state.sessions.get(name) or {}
+        step = session.get("step") or {}
+        action = command.get("command")
+        if action in ("back", "forward") and step.get("paused"):
+            last, here = step.get("last") or 0, step.get("cursor") or 0
+            if action == "forward" and here >= last:
+                command = {"command": "step"}
+            else:
+                target = max(0, min(last, here + (1 if action == "forward" else -1)))
+                if target == here:
+                    return
+                self.run_state.go_to(name, target)
+                command = {"command": "cursor", "index": target}
+        elif action == "cursor" and step.get("paused"):
+            self.run_state.go_to(name, int(command.get("index") or 0))
         self.step_asked.emit(name, command)
 
     def _show_copy(self):

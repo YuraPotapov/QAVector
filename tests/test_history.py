@@ -33,6 +33,8 @@ Content-Location: http://shop.example.invalid/web/form
 <my-widget><template shadowmode=3D"open"><b>shadow</b></template></my-widget>=
 <iframe src=3D"cid:frame-2@mhtml.blink"></iframe>=
 <div style=3D"background: url(&quot;img/bg.png&quot;)">x</div>=
+<div id=3D"__exec_hud_host__" aria-hidden=3D"true"><template shadowmode=3D"open">=
+<div class=3D"wrap">the HUD</div></template></div>=
 </body></html>
 ------MultipartBoundary--abc----
 Content-Type: text/css
@@ -46,6 +48,7 @@ Content-Transfer-Encoding: quoted-printable
 Content-Location: http://shop.example.invalid/web/css/app.css
 
 body {{ background: url("../img/bg.png") repeat-x; }}
+{many}
 ------MultipartBoundary--abc----
 Content-Type: image/png
 Content-Transfer-Encoding: base64
@@ -65,54 +68,92 @@ Content-Transfer-Encoding: quoted-printable
 
 <html><body><img src=3D"http://shop.example.invalid/web/img/logo.png"></body></html>
 ------MultipartBoundary--abc------
-""".format(png=PNG).replace("\n", "\r\n").encode("ascii")
+""".format(png=PNG, many="".join(".r{0} {{ background: url(../img/bg.png); }}\n".format(i)
+                                   for i in range(1000))).replace("\n", "\r\n").encode("ascii")
 
 
-def _html():
-    return history.to_html(MHTML)
+def _converted():
+    store = {}
+    html, names = history.convert(MHTML, store)
+    return html, names, store
 
 
-def test_the_copy_keeps_what_was_typed_and_needs_nothing_from_the_server():
-    html = _html()
+def _body(store, html, ref_in):
+    """The resource ``ref_in`` names, as text."""
+    name = history.REF_PATTERN.search(ref_in).group(1)
+    return store[name][1].decode("utf-8")
+
+
+def test_the_copy_keeps_what_was_typed_and_names_nothing_on_the_server():
+    html, _names, store = _converted()
     assert 'value="typed by the scenario"' in html
     # Not one address of the live site is left to fetch: the copy is the page
     # as it was, not the page as the server serves it now.
-    assert "shop.example.invalid" not in html
-    assert "cid:" not in html
+    texts = [html] + [body.decode("utf-8") for kind, body in store.values()
+                      if kind in history.TEXT_TYPES]
+    assert not any("shop.example.invalid" in text or "cid:" in text for text in texts)
+
+
+def test_a_resource_named_a_thousand_times_is_kept_once():
+    # Built into every place that named it, one Odoo page grew from 4 MB to 43.
+    html, names, store = _converted()
+    stylesheet = [body for kind, body in store.values() if kind == "text/css"
+                  and b".r999" in body][0]
+    # A thousand short names of one picture, not a thousand copies of it.
+    assert b"data:" not in stylesheet and stylesheet.count(history.REF.encode()) == 1001
+    pictures = [name for name in names if store[name][0] == "image/png"]
+    # logo.png and bg.png hold the same bytes: one resource, not two.
+    assert len(pictures) == 1
+
+
+def test_whatever_a_resource_names_comes_before_it():
+    html, names, store = _converted()
+    for position, name in enumerate(names):
+        kind, body = store[name]
+        if kind in history.TEXT_TYPES:
+            for named in history.REF_PATTERN.findall(body.decode("utf-8")):
+                assert names.index(named) < position
 
 
 def test_a_stylesheet_s_pictures_are_read_against_the_stylesheet():
     # "../img/bg.png" inside web/css/app.css is web/img/bg.png. Read against the
     # page's address it would be img/bg.png, which the archive does not hold.
-    css = base64.b64decode(_html().split('href="data:text/css;base64,')[2].split('"')[0])
-    assert b"url(data:image/png;base64," in css
+    html, _names, store = _converted()
+    css = _body(store, html, html.split('href="')[2])
+    assert css.startswith("body { background: url(qavres:")
 
 
-def test_a_picture_named_in_a_style_attribute_is_built_in():
+def test_a_picture_named_in_a_style_attribute_is_a_resource_too():
     # Chrome writes the attribute's inner quotes as &quot;.
-    assert '<div style="background: url(data:image/png;base64,%s)">' % PNG in _html()
+    html, _names, _store = _converted()
+    assert '<div style="background: url(qavres:' in html
 
 
 def test_scripts_are_dropped_and_a_canvas_becomes_its_picture():
-    html = _html()
+    html, _names, _store = _converted()
     assert "<script" not in html and "alert(1)" not in html
     assert "<canvas" not in html
     assert '<img src="data:image/png;base64,%s" width="120" height="40">' % PNG in html
 
 
 def test_a_shadow_root_is_written_the_standard_way():
-    assert '<template shadowrootmode="open">' in _html()
+    assert '<template shadowrootmode="open">' in _converted()[0]
 
 
-def test_a_frame_is_built_in_with_its_own_pictures():
-    html = _html()
-    frame = html.split('<iframe src="data:text/html;base64,')[1].split('"')[0]
-    assert b"data:image/png;base64," in base64.b64decode(frame)
+def test_the_hud_is_left_out_of_the_copy():
+    html = _converted()[0]
+    assert "__exec_hud_host__" not in html and "the HUD" not in html
+
+
+def test_a_frame_is_a_resource_naming_its_own_pictures():
+    html, _names, store = _converted()
+    frame = _body(store, html, html.split('<iframe src="')[1])
+    assert history.REF in frame and "<img" in frame
 
 
 def test_an_archive_without_a_page_is_refused():
     try:
-        history.to_html(b"Content-Type: text/plain\r\n\r\nnothing")
+        history.convert(b"Content-Type: text/plain\r\n\r\nnothing")
     except ValueError:
         return
     raise AssertionError("expected a ValueError")
@@ -141,10 +182,21 @@ def test_copies_are_kept_by_position_and_shown_as_html(tmp_path):
     view = copies.view(1)
     assert view.endswith("step_001.html")
     with open(view, encoding="utf-8") as handle:
-        assert "typed by the scenario" in handle.read()
+        page = handle.read()
+    assert "typed by the scenario" in page and "qavres:" not in page
+    # The GUI reads it from disk: what it names is beside it, in res/, and a
+    # stylesheet's own pictures are named from there.
+    named = [part.split('"')[0] for part in page.split('"res/')[1:]]
+    assert named and all(os.path.exists(os.path.join(copies.dir, "res", one)) for one in named)
+    css = [one for one in named if one.endswith(".css") and
+           "url(" in open(os.path.join(copies.dir, "res", one)).read()]
+    assert css and "qavres:" not in open(os.path.join(copies.dir, "res", css[0])).read()
     assert copies.view(1) == view            # made once
     assert copies.view(2) is None            # never taken
+    html, resources = history.lookup(view)
+    assert "qavres:" in html and [kind for _n, kind, _b in resources]
     run.close()
+    assert history.lookup(view) is None
 
 
 def test_a_page_that_cannot_be_copied_leaves_no_position(tmp_path):
@@ -161,7 +213,28 @@ def test_steps_taken_again_forget_what_they_left_the_first_time(tmp_path):
     copies.view(3)
     copies.forget_from(2)
     assert [copies.has(p) for p in range(4)] == [True, True, False, False]
-    assert sorted(os.listdir(copies.dir)) == ["step_000.mhtml", "step_001.mhtml"]
+    # The resources stay: the next copies will name most of them again.
+    assert sorted(os.listdir(copies.dir)) == ["res", "step_000.mhtml", "step_001.mhtml"]
+
+
+def test_a_step_that_leaves_the_page_as_it_was_shares_the_copy_before_it(tmp_path):
+    copies = history.RunHistory(base=str(tmp_path)).scenario("s", "x")
+    adapter = CopyingAdapter()
+    copies.capture(adapter, 0)
+    assert copies.same_as(1, 0) and adapter.copied == ["step_000.mhtml"]
+    assert copies.view(1).endswith("step_001.html")
+    assert not copies.same_as(3, 2)          # nothing to share
+
+
+def test_steps_are_made_ready_in_the_background(tmp_path):
+    copies = history.RunHistory(base=str(tmp_path)).scenario("s", "x")
+    adapter = CopyingAdapter()
+    for position in range(3):
+        copies.capture(adapter, position)
+    copies.prepare([2, 1, 0])
+    copies._worker.shutdown(wait=True)
+    assert sorted(copies._pages) == [0, 1, 2]
+    assert os.path.exists(copies.path(1, "html"))
 
 
 def test_a_scenario_run_twice_in_a_window_gets_a_second_folder(tmp_path):

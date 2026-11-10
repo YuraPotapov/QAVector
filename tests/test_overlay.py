@@ -497,17 +497,18 @@ def test_the_stepping_controls_show_only_where_somebody_can_pause():
     assert stepping["keys"]["back"]["key"] == "ArrowLeft"
 
 
-def test_the_copy_of_a_page_is_sent_once_and_taken_away_on_going_on(tmp_path):
-    view = tmp_path / "step_001.html"
-    view.write_text("<html>the page after step 1</html>", encoding="utf-8")
+def test_the_copy_of_a_page_is_sent_once_and_taken_away_on_going_on(monkeypatch):
+    from engine import history
+
+    copy = ("<html>the page after step 1</html>", [("abc", "image/png", b"x")])
+    monkeypatch.setattr(history, "lookup", lambda view: copy if view == "/v/1" else None)
     ov, adapter = _overlay()
     ov.flow_start(_tree(), role="Admin")
     ov.step_paused(2, 2, "pause", None)
-    ov.step_paused(1, 2, "pause", str(view))
-    ov.step_paused(1, 2, "pause", str(view))       # the same copy is not sent again
+    ov.step_paused(1, 2, "pause", "/v/1")
+    ov.step_paused(1, 2, "pause", "/v/1")          # the same copy is not sent again
     ov.step_resumed(1)
-    assert [html for html, _caption in adapter.copies] == [
-        "<html>the page after step 1</html>", None]
+    assert [sent for sent, _caption in adapter.copies] == [copy, None]
     assert adapter.copies[0][1].startswith("Copy of the page after step 1")
     stepping = adapter.renders[-1]["stepping"]
     assert stepping["paused"] is False and stepping["cursor"] == stepping["last"] == 1

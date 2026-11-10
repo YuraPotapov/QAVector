@@ -561,7 +561,9 @@ class LaunchSessionsPage(QWidget):
             "The copies are temporary: each scenario's go as it ends, and nothing\n"
             "reaches the report. Taking one costs up to about half a second on a\n"
             "heavy page and a few megabytes of disk for as long as it is kept.\n"
-            "Off: Back still chooses where to go on from, without the page.")
+            "Off: Back still chooses where to go on from, without the page.\n"
+            "Only with the execution overlay on: pausing and stepping are done\n"
+            "through it, so a run without it simply runs.")
         self.step_history.toggled.connect(self._changed)
         inner.addWidget(self.step_history)
         self.pause_on_failure = QCheckBox("Pause when a step fails")
@@ -569,7 +571,8 @@ class LaunchSessionsPage(QWidget):
             "A step that fails pauses its scenario instead of ending it. Step back\n"
             "to an earlier step and go on from there - the steps after it run again\n"
             "on the page as it is, and the report says somebody stepped in - or go\n"
-            "on from the failed step to end the scenario as failed.")
+            "on from the failed step to end the scenario as failed.\n"
+            "Only with the execution overlay on.")
         self.pause_on_failure.toggled.connect(self._changed)
         inner.addWidget(self.pause_on_failure)
         inner.addWidget(self._folder_field("reports_dir", "Reports folder"))
@@ -1094,6 +1097,13 @@ class LaunchSessionsPage(QWidget):
         self.report_list.setEnabled(
             config["reports"]["level"] == launch.REPORTS_CUSTOM)
         self.overlay_list.setEnabled(config["overlay"]["enabled"])
+        # Stepping is done in the window, through the overlay: without it the
+        # run is one nobody means to step into, so these have nothing to do.
+        stepping = bool(config["overlay"]["enabled"])
+        for box in (self.step_history, self.pause_on_failure):
+            box.setEnabled(stepping)
+            box.setStatusTip("" if stepping else "Needs the execution overlay: stepping "
+                             "is done through it.")
         # Greyed out whenever the number is not the thing deciding: left editable
         # under "Auto" it would read as a value in force, which it is not - the
         # governor starts from the machine's core count, not from the box.

@@ -2125,9 +2125,20 @@ def _stepping_run(launched, local_config, monkeypatch, *flags):
 
 def test_stepping_reaches_a_run_somebody_can_pause(launched, local_config, monkeypatch):
     captured = _stepping_run(launched, local_config, monkeypatch, "--control=-",
-                             "--step-history", "--pause-on-failure")
+                             "--execution-overlay=all", "--step-history",
+                             "--pause-on-failure")
     assert captured["step_history"] is True and captured["pause_on_failure"] is True
     assert captured["stepping"] is True
+
+
+def test_stepping_is_said_and_dropped_without_the_overlay_to_step_in(
+        launched, local_config, monkeypatch, caplog):
+    # A run shown without its HUD is one its person does not mean to step into.
+    with caplog.at_level("WARNING"):
+        captured = _stepping_run(launched, local_config, monkeypatch, "--control=-",
+                                 "--step-history", "--pause-on-failure")
+    assert captured["step_history"] is False and captured["pause_on_failure"] is False
+    assert "--step-history does nothing without --execution-overlay" in caplog.text
 
 
 def test_stepping_is_said_and_dropped_without_a_control_channel(

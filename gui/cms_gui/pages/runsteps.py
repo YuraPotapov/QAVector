@@ -185,6 +185,14 @@ class CopyPane(QWidget):
         self.title.setText(("The page after step %d" % cursor) if cursor else
                            "The page before step 1")
         view = step.get("view")
+        if step.get("view_cursor") != cursor and step.get("pending") is not None:
+            # On its way: the title is the step the person went to; the copy
+            # still on show waits under the skeleton for that step's own.
+            if self.preview is not None and self.stack.currentWidget() is self.preview:
+                self.skeleton.start(0)
+                return
+            self._say("On its way", "The copy of this step is being made ready.")
+            return
         if not view or not os.path.exists(view):
             self._say("No copy of this step",
                       "Keep live history was off for this run, or the page could not be "
@@ -197,6 +205,8 @@ class CopyPane(QWidget):
             self.shown = view
             self.skeleton.start()
             preview.load_file(view, os.path.dirname(view))
+        else:
+            self.skeleton.stop()          # back to the copy already on show
 
     def _say(self, title, text):
         self._empty_title.setText(title)

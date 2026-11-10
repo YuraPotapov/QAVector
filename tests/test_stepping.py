@@ -275,3 +275,42 @@ def test_a_scenario_says_what_stepping_can_do_and_again_when_that_changes(make):
     keys = told.setups[-1][3]
     assert keys["back"] == "Ctrl+Left" and keys["forward"] == "Alt+Right"
     assert "nonsense" not in keys
+
+
+def test_moves_asked_together_are_said_once_where_they_end(make):
+    # Five presses of Back while the gate was busy are one copy to make and
+    # send, not five in a row.
+    gate, person, told = make(("gui-batch", None), gui("continue"))
+    walk(gate, 4)
+    original = person.idle
+
+    def idle(seconds):
+        if person.script and person.script[0][0] == "gui-batch":
+            person.script.pop(0)
+            for _ in range(3):
+                assert stepping.deliver({"command": "scenario.back", "session": "dev-agent"}) == ""
+            return
+        original(seconds)
+
+    person.idle = idle
+    gate.put({"command": "pause"})
+    assert gate.before_step(4) == 1
+    assert [one[1] for one in told.said if one[0] == "paused"] == [4, 1]
+
+
+def test_a_check_or_a_wait_shares_the_copy_of_the_step_before(make):
+    gate, person, _told = make(copies=True)
+    copied = []
+    original = person.page_copy
+
+    def page_copy(path):
+        copied.append(os.path.basename(path))
+        return original(path)
+
+    person.page_copy = page_copy
+    gate.before_step(0)
+    gate.after_step(0, changes_page=True)
+    gate.before_step(1)
+    gate.after_step(1, changes_page=False)
+    assert copied == ["step_001.mhtml"]
+    assert gate._copies.has(2)

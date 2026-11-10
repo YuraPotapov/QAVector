@@ -348,20 +348,19 @@ class ExecutionOverlay:
         self._push()
 
     def _show_copy(self, view, cursor):
-        # The copy is the size of the page - megabytes for an Odoo form - so it
-        # is sent when it changes, by its own call, never with every push.
+        # Sent when it changes, by its own call, never with every push - and of
+        # its resources only what the page does not hold yet (overlay_copy).
         if view == self._copy_shown:
             return
-        html = None
+        copy = None
         if view:
-            try:
-                with open(view, encoding="utf-8") as handle:
-                    html = handle.read()
-            except OSError:
+            from engine import history
+            copy = history.lookup(view)
+            if copy is None:
                 view = None
         caption = ("Copy of the page before step 1" if cursor == 0 else
                    "Copy of the page after step %d" % cursor)
-        self._adapter.overlay_copy(html, caption + " - the live page is underneath")
+        self._adapter.overlay_copy(copy, caption + " - the live page is underneath")
         self._copy_shown = view
 
     def steps_rewound(self, first, last):

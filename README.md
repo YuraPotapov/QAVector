@@ -516,9 +516,9 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
   its forms included, so a paused scenario can be stepped back over (see
   [Stepping through a scenario](#stepping-through-a-scenario)). The copies live in
   the system's temporary folder only while the run does, never in the report.
-  Needs `--run-tests` and `--control=-`; the GUI passes both.
+  Needs `--run-tests`, `--execution-overlay` and `--control=-`.
 - `--pause-on-failure` — a failed step pauses its scenario instead of ending it.
-  Needs `--run-tests` and `--control=-`.
+  Needs `--run-tests`, `--execution-overlay` and `--control=-`.
 - `--no-browser` — run the scenarios with no browser at all. Only for scenarios made
   of service steps and `assert_host_up`, their `use:` blocks included; any other is
   refused before the run starts, named with the page steps it takes. Sessions,
@@ -747,8 +747,10 @@ python3 session_launcher.py --user=admin --password=admin \
 
 ### Stepping through a scenario
 
-A run started from the GUI can be paused between steps and stepped over - from
-the Run page, or from the HUD in the window (with `--execution-overlay`). A step
+A run started from the GUI with the execution overlay on (Launch → Advanced;
+`--execution-overlay`) can be paused between steps and stepped over - from the
+Run page, or from the HUD in the window. Without the overlay the run is taken as
+one nobody means to step into and simply runs: no pauses, no page copies. A step
 that is running is never cut short: a pause lands after it.
 
 | | Key | |
@@ -779,8 +781,9 @@ From a terminal the same commands go on stdin with `--control=-`, one JSON objec
 a line - `{"command": "scenario.pause", "session": "<window>"}`, and `.continue`,
 `.step`, `.back`, `.forward`, `.cursor` (`"index"`), `.breakpoints` (`"scenario"`,
 `"indices"`) - and the stream (`--events=-`) answers with `step.setup`,
-`step.paused`, `step.resumed` and `steps.rewound`. Without `--control` nothing ever
-pauses: background runs, cycles and plain terminal runs go as they always did.
+`step.paused`, `step.resumed` and `steps.rewound`. Without `--control`, or without
+`--execution-overlay`, nothing ever pauses: background runs, cycles and plain
+terminal runs go as they always did.
 
 Single ad-hoc user:
 

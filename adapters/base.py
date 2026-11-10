@@ -123,9 +123,10 @@ class BrowserAdapter(ABC):
     def overlay_teardown(self):
         """Remove the injected overlay from the page."""
 
-    def overlay_copy(self, html, caption=""):
-        """Lay ``html`` - a copy of the page at an earlier step - over the live
-        page, with ``caption`` above it; None takes it away (engine.stepping)."""
+    def overlay_copy(self, copy, caption=""):
+        """Lay ``copy`` - a copy of the page at an earlier step, as
+        engine.history.lookup gives it - over the live page, with ``caption``
+        above it; None takes it away (engine.stepping)."""
 
     # --- scenario recorder (optional; default no-op) --------------------------
     # The recorder is the overlay's mirror image: the page collects what the user

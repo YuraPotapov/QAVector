@@ -3911,11 +3911,12 @@ Flow execution (require --run-tests):
   --step-history            Keep a copy of the page after every step - what was
                             typed into it included - so a paused scenario can
                             be stepped back over. Kept only while the run
-                            lives, never in the report. Needs --control=-.
+                            lives, never in the report. Stepping needs the HUD
+                            (--execution-overlay) and --control=-.
   --pause-on-failure        A failed step pauses its scenario instead of ending
                             it: step back to an earlier step and go on from
-                            there, or go on to end it as failed. Needs
-                            --control=-.
+                            there, or go on to end it as failed. Needs the HUD
+                            (--execution-overlay) and --control=-.
   --no-browser            Run with no browser at all, for scenarios made only
                             of service steps and assert_host_up (use: blocks
                             included). Any other scenario is refused before the
@@ -4588,7 +4589,12 @@ def main():
             # step through a run that takes no commands, so it simply runs.
             log.warning("%s does nothing without --control=-: nobody can pause "
                         "this run. Running without it.", flag)
-    if not control_stdin:
+        elif given and not overlay_components:
+            # Stepping is done through the HUD in the window: without it the
+            # run is one its person does not mean to step into.
+            log.warning("%s does nothing without --execution-overlay: stepping "
+                        "is done through it. Running without it.", flag)
+    if not control_stdin or not overlay_components:
         step_history = pause_on_failure = False
     if no_browser:
         if recorder:

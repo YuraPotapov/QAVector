@@ -31,8 +31,9 @@ Playwright is bound to - the wait too, which goes through the adapter so the
 page keeps receiving its events while nobody drives it.
 
 **Nobody to ask, nothing to wait for.** Without a control channel
-(:func:`configure`) a gate never pauses and keeps no history: a run in the
-background, from a cycle or from a terminal goes exactly as it always did.
+(:func:`configure`), or without the HUD in the window (``--execution-overlay``),
+a gate never pauses and keeps no history: a run in the background, from a
+cycle, from a terminal or shown without its HUD goes exactly as it always did.
 """
 
 import collections
@@ -94,9 +95,12 @@ class Options:
     engine.history.RunHistory, or None for no copies - and whether a failed
     step pauses instead of ending its scenario."""
 
-    def __init__(self, history=None, pause_on_failure=False):
+    def __init__(self, history=None, pause_on_failure=False, live=False):
         self.history = history
         self.pause_on_failure = bool(pause_on_failure)
+        #: Whether this run can be paused at all: a control channel, and the
+        #: HUD to step in (engine.runner.run_scenarios).
+        self.live = bool(live)
 
 
 class StepGate:
@@ -124,6 +128,7 @@ class StepGate:
         self.paused = False
         self.reason = ""
         self._wanted = False           # pause at the next boundary
+        self._moved = False            # the cursor moved since it was last said
         self._once = False             # one step, then pause
         self._deferred = []            # moves asked for while running
 
@@ -189,12 +194,20 @@ class StepGate:
             return index
         return self._hold(reason)
 
-    def after_step(self, index):
-        """Step ``index`` has run, whatever came of it: copy the page it left."""
+    def after_step(self, index, changes_page=True):
+        """Step ``index`` has run, whatever came of it: copy the page it left.
+
+        A step that leaves the page as it was - a check, a wait, a service -
+        shares the copy of the step before it (``changes_page`` False), rather
+        than paying a second on a heavy page for the same picture.
+        """
         if not self.live:
             return
         self.last = self.cursor = index + 1
-        self._copy(index + 1)
+        if changes_page or self._copies is None:
+            self._copy(index + 1)
+        elif not self._copies.same_as(index + 1, index):
+            self._copy(index + 1)
 
     def after_failure(self, index):
         """Step ``index`` failed. None ends the scenario, as a failure always
@@ -216,6 +229,7 @@ class StepGate:
         for move in moves:
             self._apply(move)
         unlocked = self.locked and self._adapter.lock_input(False)
+        self._moved = False
         self._announce()
         log.info("Paused %s step %d of %s (%s)", "after" if self.last else "before",
                  self.last or 1, self.scenario, reason)
@@ -259,6 +273,12 @@ class StepGate:
                     with self._queue_lock:
                         self._queue.extendleft(reversed(rest))
                 return go
+        # Moves are said once, where they ended: five presses of Back are one
+        # copy to make and send, not five in a row (the HUD and the GUI show
+        # each press at once on their own).
+        if self.paused and self._moved:
+            self._moved = False
+            self._announce()
         return None
 
     def _apply(self, message):
@@ -317,15 +337,20 @@ class StepGate:
         target = max(0, min(self.last, target))
         if target != self.cursor:
             self.cursor = target
-            self._announce()
+            self._moved = True
 
     def _announce(self):
         """Say where the cursor is, with the copy to show there - None on the
-        live page, or for a step that left no copy."""
+        live page, or for a step that left no copy - and make the steps around
+        it ready, for where somebody is likely to go next."""
         view = None
         if self.cursor < self.last and self._copies is not None:
             view = self._copies.view(self.cursor)
         self._overlay.step_paused(self.cursor, self.last, self.reason, view)
+        if self._copies is not None:
+            self._copies.prepare([one for one in (self.cursor - 1, self.cursor - 2,
+                                                  self.cursor + 1, self.cursor - 3)
+                                  if 0 <= one < self.last])
 
     def _copy(self, position):
         if self._copies is None:

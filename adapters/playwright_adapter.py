@@ -49,8 +49,10 @@ DOC_HIDE = "#__exec_hud_host__ { visibility: hidden !important; }"
 # live state is written into the attributes, and put back straight after. The
 # page shows no difference: a control somebody (or the scenario) has changed
 # no longer follows its attribute. A canvas's pixels go into an attribute the
-# same way (engine.history turns it back into a picture), passwords are left
-# out, and the HUD is taken off the page so the copy is of the app alone.
+# same way (engine.history turns it back into a picture), and passwords are left
+# out. The HUD stays where it is: taken off for the copy, it blinked away for
+# the second a heavy page takes, every step - engine.history cuts it out of
+# the copy instead.
 _COPY_PREPARE_JS = r"""(pixels) => {
   const undo = [];
   const keep = (el, name) => undo.push([el, name, el.getAttribute(name)]);
@@ -80,24 +82,19 @@ _COPY_PREPARE_JS = r"""(pixels) => {
       try { keep(el, pixels); el.setAttribute(pixels, el.toDataURL('image/png')); } catch (e) {}
     });
   });
-  const hud = document.getElementById('__exec_hud_host__');
-  if (hud && hud.parentNode) {
-    undo.push([hud, '#place', [hud.parentNode, hud.nextSibling]]);
-    hud.remove();
-  }
   window.__qavCopyUndo = undo;
   return undo.length;
 }"""
+
+# overlay_copy(): how much of a copy's resources goes in one call into the page.
+_COPY_BATCH = 4 * 1024 * 1024
 
 _COPY_RESTORE_JS = r"""() => {
   const undo = window.__qavCopyUndo || [];
   delete window.__qavCopyUndo;
   for (let i = undo.length - 1; i >= 0; i--) {
     const [el, name, old] = undo[i];
-    if (name === '#place') {
-      const [parent, next] = old;
-      parent.insertBefore(el, next && next.parentNode === parent ? next : null);
-    } else if (name === '#text') {
+    if (name === '#text') {
       const value = el.value; el.textContent = old;
       if (el.value !== value) el.value = value;
     } else if (old === null) {
@@ -453,11 +450,43 @@ class PlaywrightAdapter(BrowserAdapter):
         except Exception as exc:
             log.debug("overlay_teardown failed: %s", exc)
 
-    def overlay_copy(self, html, caption=""):
+    def overlay_copy(self, copy, caption=""):
+        """Lay ``copy`` - ``(html, [(hash, type, body)])`` from engine.history -
+        over the page; None takes it away.
+
+        The page keeps every resource it has been sent, so it is asked which
+        it lacks, and only those go: after the first copy of a page that is
+        the step's own HTML and little else, where sending everything each time
+        was tens of megabytes a step back.
+        """
+        import base64
+
+        from engine.history import TEXT_TYPES
+
+        page = self._page
         try:
-            self._page.evaluate(
-                "([html, caption]) => window.__ExecHud"
-                " && window.__ExecHud.showCopy(html, caption)", [html, caption])
+            if copy is None:
+                page.evaluate("() => window.__ExecHud && window.__ExecHud.showCopy(null, '')")
+                return
+            html, resources = copy
+            missing = set(page.evaluate(
+                "names => window.__ExecHud ? window.__ExecHud.missingResources(names) : []",
+                [name for name, _kind, _body in resources]) or ())
+            batch, size = [], 0
+            for name, kind, body in resources:
+                if name not in missing:
+                    continue
+                text = kind in TEXT_TYPES
+                data = body.decode("utf-8") if text else base64.b64encode(body).decode("ascii")
+                batch.append([name, kind, data, text])
+                size += len(data)
+                if size > _COPY_BATCH:
+                    page.evaluate("list => window.__ExecHud.addResources(list)", batch)
+                    batch, size = [], 0
+            if batch:
+                page.evaluate("list => window.__ExecHud.addResources(list)", batch)
+            page.evaluate("([html, caption]) => window.__ExecHud"
+                          " && window.__ExecHud.showCopy(html, caption)", [html, caption])
         except Exception as exc:
             log.debug("overlay_copy failed: %s", exc)
 

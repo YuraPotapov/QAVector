@@ -299,8 +299,10 @@ def to_command_state(config, inventory=None, env_urls=None, dirs=None, scope=Non
         "--reports-dir": advanced["reports_dir"] or dirs.get("reports", ""),
         "--close-after": not bool(sessions["keep_open"]),
         "--lock-windows": bool(sessions["lock_windows"]),
-        "--step-history": bool(sessions["step_history"]),
-        "--pause-on-failure": bool(sessions["pause_on_failure"]),
+        # Stepping is done through the overlay, so only with it (engine.runner).
+        "--step-history": bool(sessions["step_history"]) and bool(config["overlay"]["enabled"]),
+        "--pause-on-failure": (bool(sessions["pause_on_failure"])
+                               and bool(config["overlay"]["enabled"])),
 
         "--report-level": ",".join(report_level(config, inventory)),
         "--report-screen": _report_screen(config["screenshots"]),

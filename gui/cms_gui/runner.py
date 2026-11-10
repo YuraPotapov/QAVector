@@ -317,8 +317,11 @@ CYCLE_FAILED = ("failed", "timeout", "interrupted", "error")
 
 
 def _no_stepping():
+    # pending: where the person last went, until the core says it got there;
+    # view_cursor: the step the copy in view belongs to.
     return {"live": False, "scenario": "", "paused": False, "cursor": 0, "last": 0,
-            "reason": "", "view": None, "refused": ""}
+            "reason": "", "view": None, "view_cursor": None, "pending": None,
+            "refused": ""}
 
 
 class RunState(QObject):
@@ -1008,16 +1011,31 @@ class RunState(QObject):
 
     def _on_step_paused(self, event, name):
         session = self._session(name)
-        session["step"].update(paused=True, cursor=int(event.get("cursor") or 0),
-                               last=int(event.get("last") or 0),
-                               reason=event.get("reason") or "", view=event.get("view"),
-                               refused="")
+        step = session["step"]
+        cursor = int(event.get("cursor") or 0)
+        step.update(paused=True, last=int(event.get("last") or 0),
+                    reason=event.get("reason") or "", view=event.get("view"),
+                    view_cursor=cursor, refused="")
+        # An answer to an earlier press must not pull the cursor back from
+        # where the person has gone since (see go_to).
+        if step.get("pending") is None or step["pending"] == cursor:
+            step.update(cursor=cursor, pending=None)
         session["state"] = "paused"
+
+    def go_to(self, name, cursor):
+        """Show ``cursor`` as where the person is, at once - the core says so
+        when it has the copy for it, a moment or a second later."""
+        session = self.sessions.get(name)
+        if session is None:
+            return
+        session["step"].update(cursor=cursor, pending=cursor)
+        self.changed.emit()
 
     def _on_step_resumed(self, event, name):
         session = self._session(name)
         cursor = int(event.get("cursor") or 0)
-        session["step"].update(paused=False, cursor=cursor, last=cursor, view=None)
+        session["step"].update(paused=False, cursor=cursor, last=cursor, view=None,
+                               view_cursor=None, pending=None)
         if session["state"] == "paused":
             session["state"] = "running"
 

@@ -1628,3 +1628,23 @@ def test_the_guide_pictures_a_step_before_the_hud_marks_it_and_checks_after(
                      ("doc.before", 1), ("hud.start", 1), ("hud.end", 1),
                      ("doc.after", 1, "pass")]
 
+
+
+def test_a_run_shown_without_its_hud_is_never_paused(monkeypatch, tmp_path):
+    # Stepping is done through the HUD: without one, the run is one its person
+    # does not mean to step into - no pauses, and no page copies paid for.
+    seen = {}
+    monkeypatch.setattr(runner.stepping, "_enabled", True)
+
+    def fake_sessions(*args):
+        steps = args[-2]                        # ..., lock_windows, steps, run
+        seen["live"], seen["history"] = steps.live, steps.history
+        return 0
+
+    monkeypatch.setattr(runner, "_run_sessions", fake_sessions)
+    monkeypatch.setattr(runner.loader, "load_selectors", lambda flows_dir: {})
+    monkeypatch.setattr(runner.artifacts, "new_run_dir", lambda d: str(tmp_path))
+    monkeypatch.setattr(runner, "_resolve_scenarios", lambda which, flows_dir: ["s"])
+    runner.run_scenarios(_sessions(("a", ("s",))), ["s"], reports_dir=str(tmp_path),
+                         step_history=True, pause_on_failure=True)
+    assert seen == {"live": False, "history": None}

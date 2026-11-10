@@ -101,6 +101,7 @@
     ".bar>i{display:block;height:100%;width:0;border-radius:6px;background:#4f9dff;" +
       "transition:width .18s ease}" +
     ".pmeta{display:flex;justify-content:space-between;margin-top:6px;color:#c8ccd2}" +
+    ".bar>i.back{background:#ffd54a}" +
     ".pct{font-weight:600;color:#fff}" +
     // status grid
     ".grid{display:grid;grid-template-columns:auto 1fr;gap:3px 10px}" +
@@ -178,7 +179,9 @@
       "font:600 12px/1.45 'Segoe UI',system-ui,-apple-system,sans-serif;" +
       "box-shadow:0 1px 4px rgba(0,0,0,0.25)}" +
     ".copy-strip span{font-weight:400;margin-left:10px;opacity:.8}" +
-    ".copy iframe{flex:1 1 auto;width:100%;border:0;background:#fff}";
+    // The frame takes no pointer, so focus never goes into it and the keys
+    // always reach the HUD; the layer scrolls it for the wheel instead.
+    ".copy iframe{flex:1 1 auto;width:100%;border:0;background:#fff;pointer-events:none}";
 
   // Stepping icons: drawn, not glyphs, so every font draws them the same.
   var SVG = function (body) {
@@ -228,6 +231,10 @@
     _stepping: {},    // state.stepping as last rendered
     _commands: [],    // what was asked of the run, for Python to take
     _copy: null,      // the copy of an earlier page, while one is shown
+    _res: {},         // a copy's resources by hash -> blob: address, kept
+    _pending: null,   // where the person went, until Python has caught up
+    _total: 0,
+    _progress: null,
 
     ensure: function () {
       var host = document.getElementById(HOST_ID);
@@ -336,12 +343,12 @@
         return b;
       };
       this._sb = {
-        back: make("back", function () { this._ask("back"); }),
+        back: make("back", function () { this._move(-1); }),
         play: make("pause", function () {
           this._ask(this._stepping.paused ? "continue" : "pause");
         }),
         step: make("step", function () { this._ask("step"); }),
-        forward: make("forward", function () { this._ask("forward"); })
+        forward: make("forward", function () { this._move(1); })
       };
       var label = elem("div", "slabel");
       label.appendChild(elem("b"));
@@ -366,6 +373,47 @@
       return taken;
     },
 
+    // Where the person is looking: their own last press until Python says it
+    // has got there - so each press shows at once in the tree, the bar and the
+    // progress, however long the copy for it takes to arrive.
+    _cursor: function () {
+      var st = this._stepping || {};
+      if (this._pending && st.paused && Date.now() - this._pending.at < 15000) {
+        return this._pending.cursor;
+      }
+      return st.cursor || 0;
+    },
+
+    // Back (-1) or forward (+1), from a key or a button.
+    _move: function (delta) {
+      var st = this._stepping || {};
+      if (!st.paused) { this._ask(delta < 0 ? "back" : "forward"); return; }
+      var last = st.last || 0, here = this._cursor();
+      if (delta > 0 && here >= last) { this._ask("step"); return; }
+      this._goTo(Math.max(0, Math.min(last, here + delta)));
+    },
+
+    // Where to look, as a number: presses that pile up while Python is busy
+    // end where the last one did, not one after another.
+    _goTo: function (cursor) {
+      if (cursor === this._cursor()) return;
+      this._pending = { cursor: cursor, at: Date.now() };
+      this._ask("cursor", { index: cursor });
+      this._renderStepping(this._stepping, this._total);
+      this._applyStepping(null, this._activeNode);
+      this._paintProgress();
+      var st = this._stepping || {};
+      if (cursor >= (st.last || 0)) {
+        this.showCopy(null, "");                 // the live page is underneath
+      } else if (this._copy) {
+        this._copy._strip.textContent = this._caption(cursor) + " - on its way";
+      }
+    },
+
+    _caption: function (cursor) {
+      return cursor ? "Copy of the page after step " + cursor : "Copy of the page before step 1";
+    },
+
     _keyText: function (action) {
       var k = (this._stepping.keys || {})[action];
       return k ? " (" + k.text + ")" : "";
@@ -375,10 +423,11 @@
       var bar = this._stepsBar;
       st = st || {};
       this._stepping = st;
+      this._total = total || this._total;
       if (!bar) return;
       if (!st.live) { bar.style.display = "none"; return; }
       bar.style.display = "";
-      var paused = !!st.paused, cursor = st.cursor || 0, last = st.last || 0;
+      var paused = !!st.paused, cursor = this._cursor(), last = st.last || 0;
       var looking = paused && cursor < last;
       var failed = paused && st.reason === "failure";
       bar.className = "steps" + (failed ? " failure" : paused ? " paused" : "");
@@ -423,7 +472,7 @@
       var points = {};
       (st.breakpoints || []).forEach(function (i) { points[i] = true; });
       var prefix = (activeNode || "") + "/";
-      var self = this;
+      var self = this, cursor = this._cursor();
       this._order.forEach(function (id) {
         var n = self._nodeEls[id];
         if (!n || n.index == null) return;
@@ -431,10 +480,10 @@
         n.bp.classList.toggle("on", mine && !!points[n.index]);
         var taken = mine && st.paused && n.index < (st.last || 0);
         n.row.classList.toggle("taken", taken);
-        n.row.classList.toggle("cursor", taken && n.index === (st.cursor || 0) - 1 &&
-                                         st.cursor < st.last);
+        n.row.classList.toggle("cursor", taken && n.index === cursor - 1 &&
+                                         cursor < st.last);
         n.row.classList.toggle("next", mine && st.paused && n.index === (st.last || 0) &&
-                                       st.cursor === st.last);
+                                       cursor === st.last);
       });
     },
 
@@ -452,7 +501,7 @@
       var st = this._stepping || {}, n = this._nodeEls[id];
       if (!st.live || !st.paused || !n || n.index >= (st.last || 0)) return;
       if (id.indexOf((this._activeNode || "") + "/") !== 0) return;
-      this._ask("cursor", { index: n.index + 1 });
+      this._goTo(n.index + 1);
     },
 
     _onKey: function (e) {
@@ -460,6 +509,21 @@
       if (!st.live) return;
       var keys = st.keys || {};
       var key = e.key || "";
+      // The copy cannot take focus, so its scrolling keys come here.
+      var scroll = { PageDown: [0, 0.9], PageUp: [0, -0.9], ArrowDown: [40, 0],
+                     ArrowUp: [-40, 0], " ": [0, 0.9] }[key];
+      if (this._copy && !e.altKey && !e.ctrlKey && !e.metaKey && (scroll || key === "Home" ||
+                                                                  key === "End")) {
+        var win = this._copy._frame.contentWindow;
+        if (win) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (key === "Home") win.scrollTo(0, 0);
+          else if (key === "End") win.scrollTo(0, win.document.body.scrollHeight);
+          else win.scrollBy(0, scroll[0] + scroll[1] * win.innerHeight);
+          return;
+        }
+      }
       for (var action in keys) {
         var k = keys[action];
         if (!k || !k.key) continue;
@@ -471,10 +535,44 @@
           // browser's Back, and leave the page the run is on.
           e.preventDefault();
           e.stopImmediatePropagation();
-          this._ask(action === "pause" ? (st.paused ? "continue" : "pause") : action);
+          if (action === "back" || action === "forward") this._move(action === "back" ? -1 : 1);
+          else this._ask(action === "pause" ? (st.paused ? "continue" : "pause") : action);
           return;
         }
       }
+    },
+
+    // A copy's resources, each sent once and kept as a blob: address for every
+    // later copy of the page (engine/history.py names them qavres:<hash>).
+    missingResources: function (names) {
+      var self = this;
+      return (names || []).filter(function (name) { return !self._res[name]; });
+    },
+
+    addResources: function (list) {
+      var self = this;
+      (list || []).forEach(function (one) {
+        var name = one[0], kind = one[1], data = one[2], text = one[3];
+        if (self._res[name]) return;
+        var blob;
+        if (text) {
+          // What a stylesheet or a frame names was sent before it.
+          blob = new Blob([self._resolve(data)], { type: kind });
+        } else {
+          var bytes = atob(data), out = new Uint8Array(bytes.length);
+          for (var i = 0; i < bytes.length; i++) out[i] = bytes.charCodeAt(i);
+          blob = new Blob([out], { type: kind });
+        }
+        self._res[name] = URL.createObjectURL(blob);
+      });
+      return true;
+    },
+
+    _resolve: function (text) {
+      var res = this._res;
+      return String(text || "").replace(/qavres:([0-9a-f]{40})/g, function (all, name) {
+        return res[name] || all;
+      });
     },
 
     // Lay a copy of an earlier page over the live one, or take it away (null).
@@ -494,16 +592,20 @@
           var strip = elem("div", "copy-strip");
           var frame = document.createElement("iframe");
           frame.setAttribute("sandbox", "allow-same-origin");
-          frame.addEventListener("load", function () {
-            // The keys still work with the copy clicked into.
-            try { frame.contentWindow.addEventListener("keydown", onKey, true); } catch (e) {}
-          });
+          frame.setAttribute("tabindex", "-1");
+          layer.addEventListener("wheel", function (e) {
+            try {
+              frame.contentWindow.scrollBy(e.deltaX, e.deltaY);
+              e.preventDefault();
+            } catch (err) {}
+          }, { passive: false });
           layer.appendChild(strip);
           layer.appendChild(frame);
           layer._strip = strip; layer._frame = frame;
           this._shadow.insertBefore(layer, this._wrap);
           this._copy = layer;
         }
+        html = this._resolve(html);
         layer._strip.textContent = caption || "";
         var keys = this._stepping.keys || {};
         if (keys.back && keys.forward) {
@@ -565,12 +667,15 @@
         var folded = this._userMin === undefined ? !!state.collapsed : this._userMin;
         if (this._card && this._card.classList.contains("min") !== folded) this._setMin(folded);
         var pr = state.progress || {};
-        if (this._header) {
-          this._header.style.setProperty("--p", (pr.total ? Math.round(100 * (pr.done || 0) / pr.total) : 0) + "%");
-          this._header.title = pr.total ? (pr.done || 0) + " / " + pr.total + " steps" : "";
-        }
+        this._progress = pr;
         this._renderBanner(state.banner);
-        this._renderStepping(state.stepping, pr.total);
+        var stepping = state.stepping || {};
+        // Python has caught up with the person's last press: its word again.
+        if (this._pending && (!stepping.paused || stepping.cursor === this._pending.cursor)) {
+          this._pending = null;
+        }
+        this._renderStepping(stepping, pr.total);
+        this._paintProgress();
         if (comp.status) this._renderStatus(state.status);
         if (comp.progress) this._renderProgress(state.progress);
         if (comp.tree) this._renderTree(state);
@@ -675,11 +780,30 @@
         panel._fill = fill; panel._pct = pct; panel._cnt = cnt;
         return panel;
       });
+      this._progress = pr;
+      this._paintProgress();
+    },
+
+    // The bar and the folded header's fill: how far the run has gone - or,
+    // looking back at an earlier step, where that step is.
+    _paintProgress: function () {
+      var pr = this._progress || {}, st = this._stepping || {};
       var total = pr.total || 0, done = pr.done || 0;
-      var pctv = total ? Math.round((done / total) * 100) : 0;
+      var cursor = this._cursor(), looking = st.paused && cursor < (st.last || 0);
+      var at = looking ? cursor : done;
+      var pctv = total ? Math.round((at / total) * 100) : 0;
+      var text = looking ? "step " + cursor + " of " + total + " - live after step " + st.last
+                         : done + " / " + total + " steps";
+      if (this._header) {
+        this._header.style.setProperty("--p", pctv + "%");
+        this._header.title = total ? text : "";
+      }
+      var p = this._els.progress;
+      if (!p) return;
       p._fill.style.width = pctv + "%";
+      p._fill.classList.toggle("back", !!looking);
       p._pct.textContent = pctv + "%";
-      p._cnt.textContent = done + " / " + total + " steps";
+      p._cnt.textContent = total ? text : "";
     },
 
     // --- tree ------------------------------------------------------------

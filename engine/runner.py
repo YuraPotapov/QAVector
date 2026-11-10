@@ -495,8 +495,9 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
     ``step_history`` (``--step-history``) keeps a copy of the page after every
     step while the run lives, for stepping back over a paused scenario;
     ``pause_on_failure`` (``--pause-on-failure``) pauses at a failed step instead
-    of ending its scenario. Both need somebody to pause for - a control channel
-    (engine.stepping.configure) - and do nothing without one.
+    of ending its scenario. Stepping at all needs somebody to pause for - a
+    control channel (engine.stepping.configure) - and the HUD
+    (``overlay_components``) to do it in; without either the run never pauses.
     """
     env = env or {}
     # flows_dir stays None when it was not given: the loader turns that into its
@@ -520,13 +521,17 @@ def run_scenarios(sessions, which, env=None, flows_dir=None, reports_dir=None,
     run_dir = artifacts.new_run_dir(reports_dir)
     log.info("Reports -> %s", run_dir)
     events.emit("run.dir", dir=run_dir)
+    # Stepping is something done in the window, through its HUD: a run shown
+    # without one is a run its person does not mean to step into, so it runs
+    # as it always did - no pauses, and no copies paid for (the user, 2026-11-10).
+    steppable = stepping.enabled() and bool(overlay_components)
     run_history = None
-    if step_history and stepping.enabled():
+    if step_history and steppable:
         # What a killed run left behind goes before this run adds its own.
         history.sweep()
         run_history = history.RunHistory()
     steps = stepping.Options(history=run_history,
-                             pause_on_failure=pause_on_failure and stepping.enabled())
+                             pause_on_failure=pause_on_failure and steppable, live=steppable)
     try:
         return _run_sessions(sessions, per_session, shared, flows_dir, selectors, env,
                              run_dir, overlay_components, report, jobs, windows,
@@ -796,7 +801,8 @@ def _drive_session(session, session_name, scenarios, env, flows_dir, selectors,
     # Where this window's steps can be paused and stepped back over, for as long
     # as it is driven - and addressable by the window's name meanwhile.
     gate = stepping.StepGate(session_name, adapter, overlay, options=steps,
-                             stopping=lambda: _stopping(session_name), locked=locked)
+                             stopping=lambda: _stopping(session_name), locked=locked,
+                             live=bool(steps and steps.live))
     try:
         with gate:
             for scenario_id in scenarios:
@@ -976,7 +982,7 @@ def _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter, gat
         result.steps.append(step_result)
         overlay.step_end(index, step_result.status, step_result.attempts, step_result.message)
         reporter.step_ended(index, step, step_result)
-        gate.after_step(index)
+        gate.after_step(index, step.action in artifacts.CHANGES_PAGE)
         if step_result.status != PASS:
             if _stopping(session_name):
                 # The window was closed under this step. Report what happened
