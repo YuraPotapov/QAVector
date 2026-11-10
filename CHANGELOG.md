@@ -16,6 +16,18 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.63] - 2026-11-10
+
+### Fixed
+- Searching Jira for part of a key - `1334` for `QA-1334` - or the start of
+  a word finds the issue, in Ctrl+K and in the Issues search: Jira's own quick
+  search is asked first, and what it finds joins the search by words. A whole
+  key was found before; part of one was not, since a key is not text to Jira.
+- An issue opened from Ctrl+K that the list did not have is shown under
+  filters it matches: its project, its status, *Assigned to me* only when it
+  is, and no search text. The list is read again with them and the issue
+  picked, instead of sitting under filters for another project and status.
+
 ## [0.16.62] - 2026-11-10
 
 ### Added
