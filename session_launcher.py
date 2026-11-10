@@ -2317,18 +2317,59 @@ def set_profile_name(profile, name, maximized=False):
         json.dump(prefs, fh)
 
 
-# The Preferences keys --no-password-prompts sets: Chrome's offer to save a
-# password, the password manager behind it, and its warning that a password was
-# found in a data breach - a test account's "admin" is in every such list.
-PASSWORD_PROMPT_PREFS = (("credentials_enable_service",),
-                         ("profile", "password_manager_enabled"),
-                         ("profile", "password_manager_leak_detection"))
+# --quiet-browser: what Chrome may show over the page, or ask, that a window can
+# do without - each checked in a real Chrome before it went in (2026-11-10).
+# Some are a profile's Preferences, rewritten every launch (set_browser_quiet);
+# translate and restore are switches on Chrome's command line (open_window).
+# A run of scenarios has every one of them, always: a scenario types test data
+# nobody wants kept, cannot answer a question, and a bubble over the page is in
+# every picture ("Save IBAN to this device?" sat over a claim's payment details).
+QUIET_BROWSER = ("passwords", "payments", "addresses", "translate", "restore",
+                 "permissions", "popups")
+
+_CONTENT = ("profile", "default_content_setting_values")
+QUIET_PREFS = {
+    # The offer to save a password, the manager behind it, and its warning that
+    # one was found in a data breach - a test account's "admin" is in every list.
+    "passwords": ((("credentials_enable_service",), False),
+                  (("profile", "password_manager_enabled"), False),
+                  (("profile", "password_manager_leak_detection"), False)),
+    # Cards and IBANs: Chrome's payment methods.
+    "payments": ((("autofill", "credit_card_enabled"), False),),
+    # Addresses - and, the same switch in Chrome, the earlier entries it lists
+    # under a field, which can take the ArrowDown a many2one is picked with.
+    "addresses": ((("autofill", "profile_enabled"), False),),
+    # 2 = block: the page is answered at once instead of a question hanging.
+    "permissions": tuple(((_CONTENT + (kind,)), 2) for kind in (
+        "notifications", "geolocation", "media_stream_camera", "media_stream_mic",
+        "clipboard")),
+    # 1 = allow: a report Odoo opens in a tab of its own a moment after the
+    # click would otherwise be "Pop-up blocked", and the scenario wait for it.
+    "popups": (((_CONTENT + ("popups",)), 1),),
+}
 
 
-def set_password_prompts(profile, quiet):
-    """Turn Chrome's password offers and breach warnings off (``quiet``) or back.
+def quiet_browser_list(text):
+    """``--quiet-browser``'s value as names, in QUIET_BROWSER's order: a
+    comma-separated list, ``all`` or ``none``. Raises ValueError on a name it
+    does not know."""
+    names = [one.strip() for one in str(text or "").split(",") if one.strip()]
+    if names == ["all"]:
+        return list(QUIET_BROWSER)
+    if names in ([], ["none"]):
+        return []
+    unknown = [one for one in names if one not in QUIET_BROWSER]
+    if unknown:
+        raise ValueError("unknown: %s (known: %s)" % (", ".join(unknown),
+                                                       ", ".join(QUIET_BROWSER)))
+    return [one for one in QUIET_BROWSER if one in names]
 
-    Rewritten on every launch, so leaving the flag off later gives the profile
+
+def set_browser_quiet(profile, quiet):
+    """Write the Preferences of ``quiet`` (names from QUIET_BROWSER) and take the
+    others' away.
+
+    Rewritten on every launch, so an option left off later gives the profile
     back Chrome's own defaults rather than keeping the last run's answer. The
     auto-login extension fills the form itself, so it needs none of this.
     Merged into Preferences like set_profile_name; run while the window is closed.
@@ -2339,14 +2380,15 @@ def set_password_prompts(profile, quiet):
             prefs = json.load(fh)
     except (ValueError, OSError):
         prefs = {}
-    for path in PASSWORD_PROMPT_PREFS:
-        holder = prefs
-        for key in path[:-1]:
-            holder = holder.setdefault(key, {})
-        if quiet:
-            holder[path[-1]] = False
-        else:
-            holder.pop(path[-1], None)
+    for name, settings in QUIET_PREFS.items():
+        for path, value in settings:
+            holder = prefs
+            for key in path[:-1]:
+                holder = holder.setdefault(key, {})
+            if name in quiet:
+                holder[path[-1]] = value
+            else:
+                holder.pop(path[-1], None)
     os.makedirs(os.path.dirname(prefs_path), exist_ok=True)
     with open(prefs_path, "w", encoding="utf-8") as fh:
         json.dump(prefs, fh)
@@ -3278,7 +3320,7 @@ def read_commands(windows_by_session, on_closed=None):
 
 
 def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
-                bind_lifetime=False, maximized=False, scenario=False):
+                bind_lifetime=False, maximized=False, scenario=False, quiet=()):
     """Start one Chrome on one profile and announce it. Returns the Popen.
 
     Split out of the launch loop because a --run-tests run may open a window long
@@ -3293,7 +3335,10 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
 
     ``scenario`` is a --run-tests window: it never shows Chrome's "Restore pages?"
     bubble or its offer to translate, which cover the page the scenario is driving.
+    ``quiet`` is --quiet-browser, which asks the same of any window ("restore",
+    "translate"); the rest of it is the profile's (set_browser_quiet).
     """
+    quiet = set(QUIET_BROWSER) if scenario else set(quiet or ())
     clear_devtools_port(profile)  # so --run-tests cannot attach to a dead/reused port
     log.info("Launching %-8s (login: %s)", cls, login)
     chrome_args = [
@@ -3313,11 +3358,12 @@ def open_window(chrome, profile, cls, login, url, debug_port, spawn_kwargs,
     ]
     if maximized:
         chrome_args.append("--start-maximized")
-    if scenario:
+    if "restore" in quiet:
         # The exit_type pref set_profile_name writes is not enough on its own: a
         # Chrome still running on the profile, or killed after that write, brings
         # the bubble back. The switch hides it whatever the profile says.
         chrome_args.append("--hide-crash-restore-bubble")
+    if "translate" in quiet:
         # Nor its offer to translate the page: the app may render in a language
         # Chrome's UI is not in, and the popup covers what the scenario clicks.
         # Chrome reads only the last --disable-features, so add any other
@@ -3592,8 +3638,16 @@ Options:
                             opens at its normal size, even one that was
                             maximized the last time it closed.
   --no-password-prompts     Chrome never offers to save a password or warns
-                            that one was found in a data breach. Without it the
-                            profile has Chrome's own defaults again.
+                            that one was found in a data breach: the same as
+                            --quiet-browser=passwords.
+  --quiet-browser=LIST      What Chrome may not show over the page or ask:
+                            passwords, payments (cards and IBANs), addresses
+                            (and earlier entries under a field), translate,
+                            restore (after a crash), permissions (notifications,
+                            location, camera, microphone: blocked) and popups
+                            (opened without asking); or all. What is left out
+                            has Chrome's own defaults. Running scenarios always
+                            has all of it.
   --no-autologin            Do not sign the windows in: a profile without a
                             live session opens on the sign-in form, for a
                             person or a scenario to fill (--empty-sessions
@@ -4019,6 +4073,7 @@ def main():
     no_browser = False    # --no-browser: service-only scenarios, no Chrome at all
     maximized = False     # --maximized: every window opens maximized
     no_password_prompts = False   # --no-password-prompts: no save-password offers
+    quiet_browser = []    # --quiet-browser: what Chrome may not show or ask (QUIET_BROWSER)
     no_autologin = False  # --no-autologin: windows open on the sign-in form
     empty_sessions = False   # --empty-sessions: clear each profile's data first
     lock_windows = False  # --lock-windows: pages ignore the user while scenarios run
@@ -4072,7 +4127,13 @@ def main():
         elif arg == "--maximized":
             maximized = True
         elif arg == "--no-password-prompts":
+            # What --quiet-browser=passwords says now; kept, so saved commands work.
             no_password_prompts = True
+        elif arg.startswith("--quiet-browser="):
+            try:
+                quiet_browser = quiet_browser_list(arg.split("=", 1)[1])
+            except ValueError as exc:
+                sys.exit("--quiet-browser: %s" % exc)
         elif arg == "--no-autologin":
             no_autologin = True
         elif arg == "--empty-sessions":
@@ -4612,6 +4673,7 @@ def main():
         for flag, given in (("--lock-windows", lock_windows),
                             ("--maximized", maximized),
                             ("--no-password-prompts", no_password_prompts),
+                            ("--quiet-browser", quiet_browser),
                             ("--no-autologin", no_autologin),
                             ("--empty-sessions", empty_sessions),
                             ("--step-history", step_history)):
@@ -4908,6 +4970,14 @@ def main():
             log.warning("--server-log matched no logs for %s; nothing to stream.",
                         ", ".join(sorted({u.env for u in users})) or "this run")
 
+    # What Chrome may not show or ask in these windows. A run of scenarios - or
+    # a recording of one - has all of it, whatever the flags say (the user,
+    # 2026-11-10): nothing over the page it works on, nothing it cannot answer.
+    if run_tests is not None or recorder:
+        quiet = list(QUIET_BROWSER)
+    else:
+        quiet = quiet_browser_list(",".join(quiet_browser + (["passwords"]
+                                                             if no_password_prompts else [])))
     procs = []
     sessions = []  # (cls, proc, profile, login, origin, tests) per window, for --run-tests
     windows_by_session = {}  # session name -> Popen, for "stop just this one"
@@ -4946,7 +5016,7 @@ def main():
             log.info("Emptying %s: %d item(s) of cache, cookies, storage and history "
                      "removed.", session_dir, clear_session_data(profile))
         set_profile_name(profile, "%s - %s" % (cls, login), maximized=maximized)
-        set_password_prompts(profile, no_password_prompts)
+        set_browser_quiet(profile, quiet)
         clear_previous_tabs(profile)  # always start with one tab, keep the login
         # Install the auto-login extension into the profile (must run after
         # set_profile_name, which writes the Preferences file this merges into).
@@ -4982,7 +5052,7 @@ def main():
                            bool(run_tests or recorder)
                            or bool(EXTENSIONS_NEED_CDP and wanted),
                            spawn_kwargs, bind_lifetime=not detach,
-                           maximized=maximized, scenario=bool(run_tests))
+                           maximized=maximized, scenario=bool(run_tests), quiet=quiet)
         procs.append((cls, proc))
         if EXTENSIONS_NEED_CDP and wanted:
             _install_extensions_for(profile, wanted)

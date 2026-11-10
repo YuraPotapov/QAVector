@@ -784,6 +784,8 @@ QFrame[role="panel"] {{ background: transparent; border: 1px solid {divider}; }}
 QFrame[role="panel"][emphasis="primary"] {{ border-left: 3px solid {accent}; }}
 QFrame[role="section"] {{ background: {section}; border: none; }}
 QFrame[role="section"] QWidget[seethrough="true"] {{ background: transparent; }}
+/* A barely-there line between the groups of a section (Launch: Browser prompts). */
+QFrame[role="faintrule"] {{ background: {divider}; border: none; margin: 2px 0; }}
 /* A panel for something that is always there, as against the ones a person
    makes: Connections and the block for logs belonging to no project, beside the
    projects themselves. Same frame, filled rather than clear, so the page reads

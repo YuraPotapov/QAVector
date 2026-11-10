@@ -1899,12 +1899,17 @@ def test_only_a_scenario_window_hides_the_restore_and_translate_popups(monkeypat
                    scenario=True)
     source = sl.WindowSource("/usr/bin/chrome", "http://x", {}, [], stagger_s=0)
     source.open(("Agent", None, "/tmp/dev-agent", "agent", "http://x", ()))
+    # A plain launch asks for them by name (--quiet-browser).
+    sl.open_window("/usr/bin/chrome", "/tmp/p", "Agent", "a", "http://x", False, {},
+                   quiet=["translate"])
     assert "--hide-crash-restore-bubble" not in opened[0]
     assert "--hide-crash-restore-bubble" in opened[1]
     assert "--hide-crash-restore-bubble" in opened[2]   # staged = --run-tests
     assert "--disable-features=Translate" not in opened[0]
     assert "--disable-features=Translate" in opened[1]
     assert "--disable-features=Translate" in opened[2]
+    assert "--disable-features=Translate" in opened[3]
+    assert "--hide-crash-restore-bubble" not in opened[3]
     # Chrome honours only the last one, so there must never be two.
     assert all(sum(a.startswith("--disable-features") for a in argv) <= 1
                for argv in opened)
@@ -2714,29 +2719,68 @@ def test_report_doc_needs_flows_to_run(monkeypatch, config):
 
 # ------------------------------------------------ --no-password-prompts
 
-def test_password_prompts_are_turned_off_and_back(tmp_path):
+def test_what_chrome_may_not_show_is_set_and_given_back(tmp_path):
     profile = tmp_path / "localhost:8069-admin"
     (profile / "Default").mkdir(parents=True)
     prefs = profile / "Default" / "Preferences"
     prefs.write_text(json.dumps({"profile": {"name": "Admin - admin"}, "keep": 1}))
-    sl.set_password_prompts(str(profile), True)
+    sl.set_browser_quiet(str(profile), list(sl.QUIET_BROWSER))
     data = json.loads(prefs.read_text())
     assert data["credentials_enable_service"] is False
-    assert data["profile"]["password_manager_enabled"] is False
     assert data["profile"]["password_manager_leak_detection"] is False
+    # "Save IBAN to this device?" came up over a claim's payment details.
+    assert data["autofill"] == {"credit_card_enabled": False, "profile_enabled": False}
+    content = data["profile"]["default_content_setting_values"]
+    assert content["notifications"] == 2 and content["geolocation"] == 2
+    assert content["popups"] == 1
     assert data["profile"]["name"] == "Admin - admin" and data["keep"] == 1
-    sl.set_password_prompts(str(profile), False)
+    sl.set_browser_quiet(str(profile), ["payments"])
     data = json.loads(prefs.read_text())
+    assert data["autofill"] == {"credit_card_enabled": False}
     assert "credentials_enable_service" not in data
-    assert "password_manager_enabled" not in data["profile"]
+    assert data["profile"]["default_content_setting_values"] == {}
     assert data["profile"]["name"] == "Admin - admin"
 
 
-def test_password_prompts_on_a_profile_with_no_preferences_yet(tmp_path):
+def test_quiet_browser_on_a_profile_with_no_preferences_yet(tmp_path):
     profile = tmp_path / "fresh"
-    sl.set_password_prompts(str(profile), True)
+    sl.set_browser_quiet(str(profile), ["passwords"])
     data = json.loads((profile / "Default" / "Preferences").read_text())
     assert data["credentials_enable_service"] is False
+
+
+def test_quiet_browser_reads_a_list_all_or_none():
+    assert sl.quiet_browser_list("popups,passwords") == ["passwords", "popups"]
+    assert sl.quiet_browser_list("all") == list(sl.QUIET_BROWSER)
+    assert sl.quiet_browser_list("none") == [] and sl.quiet_browser_list("") == []
+    with pytest.raises(ValueError):
+        sl.quiet_browser_list("passwords,downloads")
+
+
+@pytest.mark.parametrize("args,quiet", [
+    ((), []),                                                  # Chrome's own
+    (("--no-password-prompts",), ["passwords"]),               # the old flag
+    (("--quiet-browser=popups,payments",), ["payments", "popups"]),
+    (("--no-password-prompts", "--quiet-browser=popups"), ["passwords", "popups"]),
+    (("--run-tests=anything",), list(sl.QUIET_BROWSER)),       # scenarios: all of it
+])
+def test_a_scripted_run_has_every_quiet_and_a_launch_what_it_asked(
+        launched, local_config, monkeypatch, args, quiet):
+    from engine import runner as engine_runner
+
+    asked = []
+    monkeypatch.setattr(sl, "set_browser_quiet", lambda profile, q: asked.append(list(q)))
+    monkeypatch.setattr(engine_runner, "run_scenarios", lambda *a, **k: 0)
+    try:
+        launched(local_config, "--env=localhost", *args)
+    except SystemExit:
+        pass
+    assert asked == [quiet]
+
+
+def test_an_unknown_quiet_is_refused(monkeypatch, config):
+    message = _main(monkeypatch, config, "--env=dev", "--quiet-browser=downloads")
+    assert "--quiet-browser: unknown: downloads" in message
 
 
 # ------------------------------------------------ --no-autologin

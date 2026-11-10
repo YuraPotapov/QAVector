@@ -771,13 +771,6 @@ class LaunchSessionsPage(QWidget):
         self.maximized = QCheckBox("Open the windows full screen (maximized)")
         self.maximized.toggled.connect(self._changed)
         windows.addWidget(self.maximized)
-        self.no_password_prompts = QCheckBox("Don't offer to save passwords")
-        self.no_password_prompts.setToolTip(
-            "Chrome neither offers to save the password an account signs in with "
-            "nor warns that it was found in a data breach. Sign-in is unaffected: "
-            "the launcher fills the form itself.")
-        self.no_password_prompts.toggled.connect(self._changed)
-        windows.addWidget(self.no_password_prompts)
         self.detach = QCheckBox("Leave the windows running after the launcher exits")
         self.detach.toggled.connect(self._changed)
         windows.addWidget(self.detach)
@@ -788,10 +781,85 @@ class LaunchSessionsPage(QWidget):
         self.log_level.currentTextChanged.connect(self._changed)
         windows.addWidget(widgets.row(widgets.field("Log detail", self.log_level), None))
 
+        self._quiet_section(self._advanced_section(inner, "Browser prompts"))
         self._extensions_section(self._advanced_section(inner, None))
         for section in self._advanced_sections:
             widgets.see_through(section)
         return panel
+
+    #: The Browser prompts section: (name, label, tooltip) in its three groups -
+    #: what Chrome offers to keep, what it lays over the page, what the site asks.
+    QUIET_GROUPS = (
+        (("passwords", "Don't offer to save passwords",
+          "Chrome neither offers to save the password an account signs in with nor "
+          "warns that it was found in a data breach. Sign-in is unaffected: the "
+          "launcher fills the form itself."),
+         ("payments", "Don't offer to save cards and IBANs",
+          "No \"Save IBAN to this device?\" or save-card bubble over a form with "
+          "payment details."),
+         ("addresses", "Don't offer to save addresses or suggest earlier entries",
+          "No \"Save address?\" bubble, and no list of what was typed before under "
+          "a field - one Chrome setting for both. The list can take the arrow keys a "
+          "field's own choices are picked with.")),
+        (("translate", "Don't offer to translate pages",
+          "The app may be in a language Chrome's own is not, and the offer covers "
+          "the top of the page."),
+         ("restore", "Don't offer to restore pages after a crash",
+          "No \"Restore pages?\" bubble when a window was closed by force.")),
+        (("permissions", "Block requests for notifications, location, camera and "
+                         "microphone",
+          "The page is told no at once, instead of a question waiting for a click "
+          "nobody makes."),
+         ("popups", "Open pop-up windows without asking",
+          "A report the app opens in a tab of its own a moment after the click "
+          "opens, rather than ending as \"Pop-up blocked\".")),
+    )
+
+    def _quiet_section(self, column):
+        """What Chrome may not show or ask: a checkbox each, in three groups.
+
+        A run of scenarios has all of them whatever is ticked here, so while the
+        page is set to run or record scenarios they show ticked and grey - and
+        what was ticked for opening windows is kept, and back when it is.
+        """
+        note = QLabel("What Chrome may not show over the page or ask. Running "
+                      "scenarios always has all of these.")
+        note.setProperty("role", "hint")
+        note.setWordWrap(True)
+        column.addWidget(note)
+        self.quiet_boxes = {}
+        self._quiet_own = {}
+        self._quiet_forcing = False
+        for number, group in enumerate(self.QUIET_GROUPS):
+            if number:
+                rule = QFrame()
+                rule.setProperty("role", "faintrule")
+                rule.setFixedHeight(1)
+                column.addWidget(rule)
+            for name, label, tip in group:
+                box = QCheckBox(label)
+                box.setToolTip(tip)
+                box.toggled.connect(lambda on, name=name: self._quiet_toggled(name, on))
+                column.addWidget(box)
+                self.quiet_boxes[name] = box
+        # The one this page always had, by the name its tests and callers know.
+        self.no_password_prompts = self.quiet_boxes["passwords"]
+
+    def _quiet_toggled(self, name, on):
+        if not self._quiet_forcing:
+            self._quiet_own[name] = on
+        self._changed()
+
+    def _show_quiet(self, scripted):
+        """Ticked and grey while scenarios run or are recorded; the person's own
+        choice otherwise."""
+        self._quiet_forcing = True
+        try:
+            for name, box in self.quiet_boxes.items():
+                box.setEnabled(not scripted)
+                box.setChecked(True if scripted else bool(self._quiet_own.get(name)))
+        finally:
+            self._quiet_forcing = False
 
     def _advanced_section(self, inner, title):
         """A group of Advanced on its own faint ground; its layout to fill."""
@@ -907,7 +975,9 @@ class LaunchSessionsPage(QWidget):
                          "keep_open": self.keep_open.isChecked(),
                          "detach": self.detach.isChecked(),
                          "maximized": self.maximized.isChecked(),
-                         "no_password_prompts": self.no_password_prompts.isChecked(),
+                         "no_password_prompts": bool(self._quiet_own.get("passwords")),
+                         "quiet_browser": [name for name in launch.QUIET_BROWSER[1:]
+                                           if self._quiet_own.get(name)],
                          "lock_windows": self.lock_windows.isChecked(),
                          "step_history": self.step_history.isChecked(),
                          "pause_on_failure": self.pause_on_failure.isChecked(),
@@ -960,7 +1030,9 @@ class LaunchSessionsPage(QWidget):
             self.keep_open.setChecked(bool(sessions["keep_open"]))
             self.detach.setChecked(bool(sessions["detach"]))
             self.maximized.setChecked(bool(sessions["maximized"]))
-            self.no_password_prompts.setChecked(bool(sessions["no_password_prompts"]))
+            self._quiet_own = {name: name in (sessions.get("quiet_browser") or ())
+                               for name in launch.QUIET_BROWSER}
+            self._quiet_own["passwords"] = bool(sessions["no_password_prompts"])
             self.lock_windows.setChecked(bool(sessions["lock_windows"]))
             self.step_history.setChecked(bool(sessions["step_history"]))
             self.pause_on_failure.setChecked(bool(sessions["pause_on_failure"]))
@@ -1097,6 +1169,8 @@ class LaunchSessionsPage(QWidget):
         self.report_list.setEnabled(
             config["reports"]["level"] == launch.REPORTS_CUSTOM)
         self.overlay_list.setEnabled(config["overlay"]["enabled"])
+        self._show_quiet(config["scenarios"]["mode"] != launch.SCENARIOS_NONE
+                         or bool(config.get("record")))
         # Stepping is done in the window, through the overlay: without it the
         # run is one nobody means to step into, so these have nothing to do.
         stepping = bool(config["overlay"]["enabled"])

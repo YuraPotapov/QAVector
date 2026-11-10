@@ -383,7 +383,14 @@ python3 session_launcher.py --env=dev --url=https://dev.example.com/orders/12
 - `--maximized` — open every window maximized. Without it a window opens at its
   normal size, even one Chrome last closed maximized.
 - `--no-password-prompts` — Chrome never offers to save a password or warns that
-  one was found in a data breach. Without it the profile has Chrome's defaults.
+  one was found in a data breach: the same as `--quiet-browser=passwords`.
+- `--quiet-browser=LIST` — what Chrome may not show over the page or ask:
+  `passwords`, `payments` (cards and IBANs), `addresses` (and the earlier entries
+  it lists under a field - one Chrome setting), `translate`, `restore` (after a
+  crash), `permissions` (notifications, location, camera, microphone: blocked)
+  and `popups` (opened without asking), or `all`. What is left out has Chrome's
+  own defaults. A run of scenarios (`--run-tests`, or a recording) always has
+  all of it, whatever the flags say.
 - `--no-autologin` — do not sign the windows in: a profile without a live session
   opens on the sign-in form, for a person or a scenario to fill (`--empty-sessions`
   drops the session). Without it the auto-login extension signs in again.

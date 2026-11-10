@@ -61,6 +61,11 @@ REPORT_LABELS = {
     REPORTS_CUSTOM: "Chosen artifacts",
 }
 
+#: What Chrome may not show over the page or ask (the core's --quiet-browser), in
+#: the order the Launch page lists them; "passwords" is --no-password-prompts.
+QUIET_BROWSER = ("passwords", "payments", "addresses", "translate", "restore",
+                 "permissions", "popups")
+
 DEFAULTS = {
     "environment": "",                                  # "" = every environment
     # The users.json ``env`` string behind that alias. The alias is worked out
@@ -73,6 +78,9 @@ DEFAULTS = {
     "sessions": {"jobs": 1, "all_at_once": False, "auto_jobs": False,
                  "keep_open": True, "detach": False, "maximized": False,
                  "no_password_prompts": False,
+                 # The rest of what Chrome may not show or ask (--quiet-browser);
+                 # "passwords" is no_password_prompts above, as it always was.
+                 "quiet_browser": [],
                  "lock_windows": False,
                  # Stepping a paused scenario (engine/stepping.py): a copy of
                  # the page after every step to step back over, and a failed
@@ -289,6 +297,8 @@ def to_command_state(config, inventory=None, env_urls=None, dirs=None, scope=Non
         "--detach": bool(sessions["detach"]),
         "--maximized": bool(sessions["maximized"]),
         "--no-password-prompts": bool(sessions["no_password_prompts"]),
+        "--quiet-browser": ",".join(name for name in QUIET_BROWSER[1:]
+                                    if name in (sessions.get("quiet_browser") or ())),
         "--no-autologin": not extensions.get("autologin", True),
 
         "--run-tests": _run_tests(config["scenarios"]),
@@ -749,6 +759,9 @@ def windows_label(config):
         parts.append("maximized")
     if sessions["no_password_prompts"]:
         parts.append("no password offers")
+    quiet = [name for name in QUIET_BROWSER[1:] if name in (sessions.get("quiet_browser") or ())]
+    if quiet:
+        parts.append("%d more of Chrome's prompts off" % len(quiet))
     if not config["extensions"].get("autologin", True):
         parts.append("not signed in")
     if sessions["lock_windows"] and config["scenarios"]["mode"] != SCENARIOS_NONE:

@@ -55,6 +55,10 @@ FLAGS = [
     Flag("--maximized", "flag", GENERAL, "Open every window maximized."),
     Flag("--no-password-prompts", "flag", GENERAL,
          "Chrome never offers to save a password or warns about a breached one."),
+    Flag("--quiet-browser", "list", GENERAL,
+         "What Chrome may not show over the page or ask.",
+         choices=["passwords", "payments", "addresses", "translate", "restore",
+                  "permissions", "popups"]),
     Flag("--no-autologin", "flag", GENERAL,
          "Do not sign the windows in: they open on the sign-in form."),
     # No needs_run_tests: a plain launch streams these into the Run page's
@@ -252,6 +256,7 @@ def for_background(args):
     """
     drop = {"--detach", "--execution-overlay", "--report-screen", "--report-doc",
             "--step-history", "--maximized", "--lock-windows", "--no-password-prompts",
+            "--quiet-browser",
             "--no-autologin"}
     return ["--no-browser"] + [a for a in args if a.split("=", 1)[0] not in drop]
 

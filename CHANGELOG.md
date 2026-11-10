@@ -16,6 +16,20 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Browser prompts** (Launch → Advanced; `--quiet-browser`): what Chrome may
+  not show over the page or ask, a checkbox each - saving passwords, cards and
+  IBANs, addresses and earlier entries; offering to translate and to restore
+  pages; asking for notifications, location, camera and microphone (blocked);
+  and pop-up windows (opened without asking). Each was checked in Chrome before
+  it went in. *Don't offer to save passwords* moved here.
+
+### Fixed
+- A run of scenarios has all of these, always: no "Save IBAN to this device?"
+  or any other bubble over the page it works on. The checkboxes show so - ticked
+  and grey - while the Launch page runs or records scenarios, and keep what was
+  chosen for opening windows.
+
 ## [0.16.61] - 2026-11-10
 
 ### Changed

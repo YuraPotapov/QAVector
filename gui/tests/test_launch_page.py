@@ -1261,3 +1261,25 @@ def test_dont_offer_to_save_passwords_is_kept_with_the_configuration(page):
     page.no_password_prompts.setChecked(False)
     page.reset()
     assert page.no_password_prompts.isChecked()
+
+
+# -- Browser prompts ---------------------------------------------------------------
+def test_browser_prompts_ticked_for_windows_reach_the_command(page):
+    page.what.set_current("Open windows")
+    page.quiet_boxes["payments"].setChecked(True)
+    page.quiet_boxes["popups"].setChecked(True)
+    assert page.state()["sessions"]["quiet_browser"] == ["payments", "popups"]
+    assert "--quiet-browser=payments,popups" in page.argv()
+
+
+def test_running_scenarios_shows_every_prompt_off_and_keeps_the_choice_for_windows(page):
+    # A run of scenarios has all of them whatever is ticked, so they say so -
+    # ticked and grey - and what was chosen for opening windows comes back.
+    page.what.set_current("Open windows")
+    page.quiet_boxes["translate"].setChecked(True)
+    page.what.set_current("Run scenarios")
+    assert all(box.isChecked() and not box.isEnabled() for box in page.quiet_boxes.values())
+    assert page.state()["sessions"]["quiet_browser"] == ["translate"]
+    page.what.set_current("Open windows")
+    assert [name for name, box in page.quiet_boxes.items() if box.isChecked()] == ["translate"]
+    assert all(box.isEnabled() for box in page.quiet_boxes.values())
