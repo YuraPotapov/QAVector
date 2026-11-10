@@ -1681,3 +1681,33 @@ def test_a_write_is_never_cancelled_and_its_late_answer_is_dropped(make, monkeyp
     done(work(), None)
     assert ('assign', None) in given, 'the write ran, with nothing that could stop it'
     assert page.jira.issues.detail.issue is None, 'its answer belonged to the old project'
+
+
+def test_a_found_issue_is_shown_under_filters_it_matches(make):
+    # Opened from Ctrl+K into a list filtered for another project and status,
+    # it sat under filters that contradicted it.
+    found = dict(_row("QA-500", "Export fails", "To Do", "new"), project="QA",
+                 project_name="Quality", assignee="Somebody else")
+    asked = []
+
+    def search(document):
+        asked.append(dict(document))
+        if document.get("everywhere"):
+            return {"ok": True, "result": {"rows": [found], "cursor": None}}
+        return {"ok": True, "result": {"rows": [_row("QA-142")], "cursor": None}}
+
+    core = FakeCore(search=search)
+    page = make(core)
+    page.jira.issues.mine.setChecked(True)
+    got = []
+    page.search_source("jira", "500", lambda hits, error=None: got.append(hits))
+    assert page.show_found(got[0][0].target) is True
+    filters = page.jira.issues.filters()
+    assert (filters["project"], filters["status"], filters["mine"], filters["text"]) == (
+        "QA", "To Do", False, "")
+    assert page.jira.issues.projects.currentText() == "Quality"
+    assert {key: asked[-1][key] for key in ("project", "status", "mine")} == {
+        "project": "QA", "status": "To Do", "mine": False}
+    # Not on the list's first page: at the top, and opened.
+    assert page.jira.issues.rows()[0]["key"] == "QA-500"
+    assert core.calls[-1][0] == ("call", "product-team", "issue")

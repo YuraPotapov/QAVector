@@ -13,7 +13,12 @@ from integrations.jira import adf, query
 from integrations.jira.client import CLOUD, JiraError, Session, api
 
 #: What one row of the issue list shows - and so everything the list asks for.
-LIST_FIELDS = ("summary", "status", "issuetype", "priority", "assignee", "updated")
+LIST_FIELDS = ("summary", "status", "issuetype", "priority", "assignee", "updated",
+               "project")
+
+#: How many issues Jira's own quick search (the issue picker) may add to a
+#: text search - what a person would look through, not a list.
+PICKED = 20
 
 #: What an opened issue shows, apart from its comments, which are asked for
 #: separately so a thread of hundreds costs the newest few.
@@ -96,7 +101,7 @@ def statuses(get, connection, request):
     return {"statuses": rows}
 
 
-def jql(request, connection=None):
+def jql(request, connection=None, picked=()):
     """The JQL a list request stands for.
 
     ``jql`` given is used as written - the JQL toggle is somebody typing a
@@ -104,6 +109,10 @@ def jql(request, connection=None):
     added only when it has none. Otherwise the filters are joined: projects,
     statuses, "assigned to me", and the search text, which is an issue key or
     words. With none of them the list is bounded by :data:`UNFILTERED`.
+
+    ``picked`` are the keys Jira's own quick search found for the text (see
+    :func:`picked`): words alone miss "1334" for QA-1334 - an issue's key is
+    not text to Jira - and the start of a word.
     """
     order = query.ordering(str(request.get("order") or ""))
     written = str(request.get("jql") or "").strip()
@@ -126,6 +135,9 @@ def jql(request, connection=None):
     text = str(request.get("text") or "").strip()
     if text and ISSUE_KEY.match(text):
         clauses.append('key = "%s"' % query.escape(text.upper()))
+    elif text and picked:
+        clauses.append('(text ~ "%s" OR key in (%s))' % (
+            query.escape(text), ", ".join('"%s"' % query.escape(one) for one in picked)))
     elif text:
         clauses.append('text ~ "%s"' % query.escape(text))
     if not clauses:
@@ -142,7 +154,10 @@ def search(get, connection, request):
     """
     flavour = connection["flavour"]
     wanted = _bounded(request.get("size"), PAGE_ROWS, MOST_ROWS)
-    question = jql(request, connection)
+    text = str(request.get("text") or "").strip()
+    found = (picked(get, flavour, text)
+             if text and not request.get("jql") and not ISSUE_KEY.match(text) else [])
+    question = jql(request, connection, found)
     rows, cursor = [], request.get("cursor") or None
     first = cursor
     try:
@@ -169,6 +184,24 @@ def search(get, connection, request):
             return {"rows": [], "cursor": None, "jql": question}
         raise
     return {"rows": rows[:wanted], "cursor": cursor, "jql": question}
+
+
+def picked(get, flavour, text):
+    """Keys of the issues Jira's own quick search finds for ``text`` - by part
+    of a key ("1334", "QA-13") or the start of a word - as its search box
+    does. Empty when that search is not there or fails: the words still go."""
+    try:
+        raw = get("/rest/api/%s/issue/picker" % api(flavour),
+                  {"query": text, "showSubTasks": "true", "showSubTaskParent": "true"})
+    except JiraError:
+        return []
+    keys = []
+    for section in (raw or {}).get("sections") or []:
+        for one in section.get("issues") or []:
+            key = str(one.get("key") or "")
+            if ISSUE_KEY.match(key) and key not in keys:
+                keys.append(key)
+    return keys[:PICKED]
 
 
 def issue(get, connection, request):
@@ -292,6 +325,8 @@ def row(raw, site):
             "category": _category(fields.get("status")),
             "assignee": _person(fields.get("assignee")),
             "updated": fields.get("updated") or "",
+            "project": str((fields.get("project") or {}).get("key") or ""),
+            "project_name": str((fields.get("project") or {}).get("name") or ""),
             "url": "%s/browse/%s" % (site, key)}
 
 

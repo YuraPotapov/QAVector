@@ -1459,6 +1459,25 @@ class IssuesTab(QWidget):
                 "mine": self.mine.isChecked(), "jql_mode": self.jql.isChecked(),
                 "order": self.order_text()}
 
+    def match_issue(self, row, mine):
+        """Filters that fit ``row``: its project, its status, "assigned to me"
+        only when it is, and no search text - so an issue opened from Ctrl+K is
+        never shown under filters it does not match."""
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self._searched_text = ""
+        for widget in (self.mine, self.jql):
+            widget.blockSignals(True)
+        self.projects.set_value(row.get("project") or "",
+                                row.get("project_name") or row.get("project") or "")
+        self.statuses.set_value(row.get("status") or "")
+        self.mine.setChecked(bool(mine))
+        self.jql.setChecked(False)
+        for widget in (self.mine, self.jql):
+            widget.blockSignals(False)
+        self._jql_toggled(False, search=False)
+
     def clear_filters(self):
         self.search.blockSignals(True)
         self.search.clear()
@@ -1646,6 +1665,9 @@ class JiraView(QWidget):
         # Issues Ctrl+K found in Jira, by (connection, key): what their row in
         # the list is, when one is opened before the list has it.
         self._found = {}
+        # (connection id, row) of an issue opened from Ctrl+K whose list is
+        # being read with filters made to fit it: picked when the list comes.
+        self._reveal = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 18, 24, 14)
@@ -2133,11 +2155,19 @@ class JiraView(QWidget):
                 cache.rows = cache.rows + [one for one in rows if one.get("key") not in known]
             cache.cursor = result.get("cursor")
             cache.loaded_at = datetime.datetime.now(datetime.timezone.utc)
+            reveal = self._reveal if replace and self._reveal else None
+            if reveal is not None and reveal[0] == connection_id:
+                self._reveal = None
+                if reveal[1].get("key") not in {one.get("key") for one in cache.rows}:
+                    # Past the first page: at the top, as a created issue goes.
+                    cache.rows.insert(0, dict(reveal[1]))
             if (replace and self.issues.detail.editing is None
                     and cache.opened not in {one.get("key") for one in cache.rows}):
                 cache.opened = ""
             if self.current() is connection:
                 self._show_issues()
+                if reveal is not None and reveal[0] == connection_id:
+                    self.issues.select_key(reveal[1].get("key"))
 
         self._call("list", lambda core, cancel: core.integrations(
             "call", connection_id, "search", document=request, cancel=cancel), done)
@@ -2591,12 +2621,17 @@ class JiraView(QWidget):
                 if not self._connection_picked(index):
                     return True
             if not listed:
-                # Found in Jira by Ctrl+K: its row goes at the top of the list,
-                # as a created issue's does, and opening it reads it.
-                cache = self._cache(self.current())
-                cache.rows.insert(0, dict(found))
-                cache.loaded_at = cache.loaded_at or datetime.datetime.now(
-                    datetime.timezone.utc)
+                # Found in Jira by Ctrl+K, and not in the list as it is filtered:
+                # the filters are made to fit the issue and the list read with
+                # them - shown under filters it does not match, it was a list
+                # that contradicted itself. The issue is picked when it comes.
+                connection = self.current()
+                me = ((connection or {}).get("last_check") or {}).get("account") or ""
+                self.issues.match_issue(found, mine=bool(me) and found.get("assignee") == me)
+                self._reveal = (connection_id, dict(found))
+                self.tabs.setCurrentWidget(self.issues)
+                self.search()
+                return True
             self.tabs.setCurrentWidget(self.issues)
             self._show_issues()
             # Opening it is what a click on its row does: it reads that issue.

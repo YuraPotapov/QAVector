@@ -102,10 +102,50 @@ def test_a_page_asks_for_the_row_s_fields_only_and_gives_a_cursor(jira):
     assert answer["rows"][0] == {
         "key": "QA-142", "summary": "Session expires", "type": "Bug", "priority": "High",
         "status": "In Progress", "category": "indeterminate", "assignee": "Tester T",
-        "updated": "2026-11-05T10:00:00.000+0000",
+        "updated": "2026-11-05T10:00:00.000+0000", "project": "", "project_name": "",
         "url": server.site + "/browse/QA-142"}
     assert EMAIL not in json.dumps(answer)
     assert len(server.seen) == 1, "one page is one request"
+
+
+def test_the_keys_jira_s_quick_search_finds_join_the_words():
+    # "1334" is not a word of QA-1334's text: an issue's key is not text to
+    # Jira, so the words alone found nothing.
+    assert operations.jql({"text": "1334"}, None, ["QA-1334", "WEB-1334"]) == (
+        '(text ~ "1334" OR key in ("QA-1334", "WEB-1334")) ORDER BY updated DESC')
+
+
+def test_a_text_search_asks_jira_s_quick_search_first(jira):
+    server = jira(**{
+        "/rest/api/3/issue/picker": {"sections": [
+            {"issues": [{"key": "QA-1334"}, {"key": "WEB-1334"}]},
+            {"issues": [{"key": "QA-1334"}]}]},
+        "/rest/api/3/search/jql": {"issues": [_raw("QA-1334")]}})
+    answer = _call("search", server, {"text": "1334", "everywhere": True})
+    assert [one["key"] for one in answer["rows"]] == ["QA-1334"]
+    assert server.seen[0].path.startswith("/rest/api/3/issue/picker?query=1334")
+    assert server.seen[1].body["jql"].startswith(
+        '(text ~ "1334" OR key in ("QA-1334", "WEB-1334"))')
+
+
+def test_without_the_quick_search_the_words_still_go(jira):
+    server = jira(**{"/rest/api/3/search/jql": {"issues": [_raw("QA-142")]}})  # picker: 404
+    _call("search", server, {"text": "session"})
+    assert server.seen[-1].body["jql"].startswith('text ~ "session"')
+
+
+def test_a_key_typed_whole_is_not_asked_of_the_quick_search(jira):
+    server = jira(**{"/rest/api/3/search/jql": {"issues": [_raw("QA-142")]}})
+    _call("search", server, {"text": "qa-142"})
+    assert not any("picker" in one.path for one in server.seen)
+
+
+def test_a_row_says_which_project_it_is_in(jira):
+    raw = _raw("QA-142")
+    raw["fields"]["project"] = {"key": "QA", "name": "Quality"}
+    server = jira(**{"/rest/api/3/search/jql": {"issues": [raw]}})
+    row = _call("search", server, {"size": 1})["rows"][0]
+    assert (row["project"], row["project_name"]) == ("QA", "Quality")
 
 
 def test_load_more_hands_the_cursor_back(jira):
