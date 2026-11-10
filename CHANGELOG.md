@@ -16,6 +16,29 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.61] - 2026-11-10
+
+### Changed
+- Stepping through a scenario is on only with the execution overlay (Launch →
+  Advanced): a run shown without its HUD simply runs, with no pauses and no page
+  copies. *Keep live history* and *Pause when a step fails* are greyed without it.
+- Going back over an Odoo page is fast again. A page copy keeps each picture,
+  font and stylesheet once for the whole scenario instead of once for every
+  place that names it - one page had grown from 4 MB to 43 MB - and the HUD is
+  sent each of them once. The steps just before the one looked at are made
+  ready while the scenario waits.
+- Each press of Back or Forward shows at once in the tree, the progress bar and
+  the step bar, on the Run page and in the HUD; presses made while a copy is on
+  its way end where the last one did.
+- A check or a wait (`assert_*`, `wait_for`) shares the copy of the step before
+  it rather than taking one of the same page.
+
+### Fixed
+- The HUD no longer disappears from the window while a page copy is taken.
+- Keys reach the HUD while a copy is shown: the copy no longer takes the
+  focus, so Alt+Left cannot fall through to the browser's own Back. The wheel
+  and the scrolling keys scroll the copy.
+
 ## [0.16.60] - 2026-11-10
 
 ### Added
