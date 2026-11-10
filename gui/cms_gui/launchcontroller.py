@@ -185,13 +185,19 @@ class LaunchController(QObject):
     def _environments(self):
         envs = self.registry.environments(self.inventory)
         known = {env.id for env in envs}
+        # What a configuration or this page already names stays offered,
+        # whatever it holds; otherwise one that holds variables only is not a
+        # place to launch (lpf.launchable).
+        named = {self.environment_id}
         extra = []
         for preset in self.presets.all():
             env_id = self.preset_environment_id(preset, envs)
+            named.add(env_id)
             if env_id in known:
                 continue
             known.add(env_id)
             extra.append(self._stand_in(env_id, preset))
+        envs = [env for env in envs if env.id in named or lpf.launchable(env)]
         # A stand-in only for an environment something here still names: the
         # open configuration's. One remembered from nothing - a context written
         # before a project was switched, say - is not offered as a place.

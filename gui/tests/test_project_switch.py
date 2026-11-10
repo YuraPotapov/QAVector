@@ -61,7 +61,7 @@ def test_a_new_project_is_an_empty_application(window, qapp, monkeypatch):
     assert window.core.flows_dir == pf.paths(project.folder).flows
     assert window.launch_registry.path == pf.paths(project.folder).launch_projects
     assert window.history.directory == project.folder
-    assert window.environments.table.rowCount() == 0
+    assert window.environments.picker.count() == 0
     assert window.credentials.table.rowCount() == 0
     assert window.inventory.users == [] and window.inventory.scenarios == []
     assert window.launch.controller.presets.all() == []
@@ -112,10 +112,10 @@ def test_rename_and_delete_from_the_environments_page(window, qapp, monkeypatch)
     window.switch_project(project.id)
     _wait(qapp, window)
     monkeypatch.setattr(widgets, "ask_text", lambda *a, **k: "New")
-    window.environments.rename_project_button.click()
+    window.environments.rename_project_button.trigger()
     assert window.project_combo.currentText() == "New"
     monkeypatch.setattr(widgets, "confirm", lambda *a, **k: True)
-    window.environments.delete_project_button.click()
+    window.environments.delete_project_button.trigger()
     _wait(qapp, window)
     assert window.settings.project_id == pf.WORKSPACE
     assert pf.find(pf.load(), project.id) is None
@@ -155,7 +155,7 @@ def test_nothing_of_the_project_left_shows_while_the_next_is_read(window, qapp):
     assert window.switching.active()
     assert window.inventory.users == [] and window.inventory.envs == []
     assert window.launch.users_list.rows() == []
-    assert window.environments.table.rowCount() == 0
+    assert window.environments.picker.count() == 0
     _wait(qapp, window)
     assert not window.switching.active()
 

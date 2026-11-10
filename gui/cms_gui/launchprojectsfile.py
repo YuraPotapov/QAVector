@@ -484,6 +484,18 @@ def catalog(projects, inventory=None):
     return found
 
 
+def launchable(env, members=None):
+    """Whether ``env`` is a place windows open: it has a url (its own or its
+    origin's) or accounts. One with neither holds variables only - for
+    whatever else reads them, a Jira connection's predefined query say - and
+    is not offered for launching. ``members`` counts its accounts where the
+    caller read users.json itself; otherwise the inventory's count is used.
+    A virtual one is always a place: it exists because users.json files
+    accounts under it."""
+    accounts = env.accounts if members is None else members
+    return bool(env.virtual or env.address or env.origin or accounts)
+
+
 def find(environments, env_id):
     """The environment ``env_id`` names, or None.
 

@@ -1,9 +1,11 @@
 """The two small windows of the Environments page: a new environment, and who
 is in one.
 
-**A new environment** is a name and its ``url`` - where its windows open, which
-may use variables the environment is given afterwards
+**A new environment** is a name and, optionally, its ``url`` - where its windows
+open, which may use variables the environment is given afterwards
 (``http://localhost:{{port}}/web``). The url is shown filled in as it is typed.
+An environment is not only the launcher's: one without a url is a set of
+variables other parts read - a Jira connection's predefined query, say.
 
 **Who is in an environment** is everyone in users.json, ticked when they are in
 it. Ticking puts someone in, unticking takes them out; ``New user…`` adds an
@@ -21,9 +23,10 @@ from .launchaccountform import AccountForm
 
 
 def opens_text(template, variables=None):
-    """``(text, bad)``: "Opens http://…" for ``template``, or what stops it."""
+    """``(text, bad)``: "Opens http://…" for ``template``, or what stops it;
+    ``("", False)`` for no url - an environment that holds variables only."""
     if not template:
-        return "No url yet - its windows cannot open until url has a value.", True
+        return "", False                    # variables only: nothing to say
     scope = lpf.scope(variables or {})
     result = launchvars.resolve(template, scope.definitions, scope.layers)
     if result.problems:
@@ -49,7 +52,7 @@ def _problem_label():
 
 
 class EnvironmentDialog(QDialog):
-    """A new environment of a project: its name and url."""
+    """A new environment of a project: its name and, when it opens windows, its url."""
 
     def __init__(self, parent, project_name, taken_names=()):
         super().__init__(parent)
@@ -60,18 +63,19 @@ class EnvironmentDialog(QDialog):
         column = QVBoxLayout(self)
         column.setSpacing(8)
         column.addWidget(widgets.lede(
-            "An environment of %s. Its variables and users are added on the page "
-            "once it is there." % project_name))
+            "An environment of %s: a name and its variables. Its variables and users "
+            "are added on the page once it is there." % project_name))
         self.name = QLineEdit()
         self.name.setPlaceholderText("Local, Staging, Branch 42…")
         column.addWidget(widgets.field("Name", self.name))
         self.url = QLineEdit()
         self.url.setProperty("mono", True)
-        self.url.setPlaceholderText("http://localhost:{{port}}/web")
+        self.url.setPlaceholderText("Optional - http://localhost:{{port}}/web")
         self.url.textChanged.connect(self._preview)
         column.addWidget(widgets.field(
-            "url", self.url, "Where its windows open. {{name}} uses a variable you "
-            "add to it afterwards."))
+            "url", self.url, "Where its windows open, for an environment you launch. "
+            "Leave it empty for one that only holds variables. {{name}} uses a "
+            "variable you add to it afterwards."))
         self.preview = widgets.mono("")
         self.preview.setWordWrap(True)
         column.addWidget(self.preview)
@@ -108,8 +112,6 @@ class EnvironmentDialog(QDialog):
         elif name.casefold() in self._taken:
             found.append("%s already has an environment called %s."
                          % (self.project_name, name))
-        if not url:
-            found.append("Give it a url: where its windows open.")
         return found
 
     def _accept(self):

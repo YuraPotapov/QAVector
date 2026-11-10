@@ -1622,11 +1622,10 @@ def test_a_hit_opens_its_page_with_the_record_on_it(window):
     window.environments._envs = [lpf.Environment(
         "env:shop.example.invalid", lpf.WORKSPACE, "shop", "shop.example.invalid",
         "", {}, "", 0, True)]
-    window.environments.table.setRowCount(1)
     window.show_page("history")
     window.open_hit(search_mod.hit("shop", target="shop", section="environments"))
     assert window.stack.currentWidget() is window.environments
-    assert window.environments.table.selectionModel().selectedRows()[0].row() == 0
+    assert window.environments.title.text() == "shop"
     window.open_hit(search_mod.hit("gone", target="gone", section="environments"))
     assert window.status_right.text() == "gone is no longer there"
 

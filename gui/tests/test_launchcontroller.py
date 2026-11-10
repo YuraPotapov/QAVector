@@ -279,3 +279,16 @@ def test_one_saved_before_with_no_environment_reads_as_all_environments(make):
     preset = controller.save(_state(controller), "Old")
     preset.environment_id, preset.legacy, preset.all_environments = "", None, False
     assert controller.preset_environment_id(preset) == lc.ALL_ENVIRONMENTS
+
+
+def test_an_environment_that_holds_variables_only_is_not_a_place_to_launch(make, tmp_path):
+    lpf.save(str(tmp_path / lpf.FILE_NAME), [lpf.ProjectRow("p1", "Shop", [
+        lpf.EnvironmentRow("e-jira", "Shop Jira", "shop-jira", "",
+                           {"jira_project": "QA"}),
+        lpf.EnvironmentRow("e-local", "Local", "local", "http://localhost:8069", {})])])
+    controller = _ready(make())
+    offered = [env.id for env in controller.environments()]
+    assert "e-local" in offered and "e-jira" not in offered
+    # One this page already names is still offered, whatever it holds.
+    controller.environment_id = "e-jira"
+    assert "e-jira" in [env.id for env in controller.environments()]

@@ -98,11 +98,17 @@ def _env(page, env_id):
 
 
 def _pick(page, name):
-    for row in range(page.table.rowCount()):
-        if page.table.item(row, 0).text() == name:
-            page.table.selectRow(row)
+    for index in range(page.picker.count()):
+        if page.picker.itemText(index).split("  ·  ")[-1] == name:
+            page.picker.setCurrentIndex(index)
+            page.picker.activated.emit(index)
             return
-    raise AssertionError("no %s in the list" % name)
+    raise AssertionError("no %s in the picker" % name)
+
+
+def _names(page):
+    return [page.picker.itemText(index).split("  ·  ")[-1]
+            for index in range(page.picker.count())]
 
 
 def _variables(page):
@@ -113,9 +119,8 @@ def _variables(page):
 # ------------------------------------------------------------- what is shown
 
 def test_every_users_json_value_is_an_environment_with_nothing_set_up(page):
-    rows = [(page.table.item(row, 0).text(), page.table.item(row, 1).text())
-            for row in range(page.table.rowCount())]
-    assert rows == [("local", "2"), ("staging", "1"), ("demo", "1")]
+    assert _names(page) == ["local", "staging", "demo"]
+    assert page.title.text() == "local" and page.kind_tag.text() == "Opens windows"
 
 
 def test_the_first_environment_is_open_with_url_first(page):
@@ -134,17 +139,19 @@ def test_nothing_internal_is_said_until_developer_mode(page):
     for internal in ("Account key", "Origin", "env value", "--"):
         assert internal not in plain, internal
     page.set_developer_mode(True)
-    assert "--env https://staging.example.invalid/" in _labels(page)
     assert "--url" in _labels(page)
+    page.tabs.setCurrentWidget(page.settings_tab)       # the key is a setting
+    assert "--env https://staging.example.invalid/" in _labels(page)
     page.set_developer_mode(False)
     assert "--" not in _labels(page)
 
 
-def test_an_environment_without_a_url_says_it_cannot_open(page):
+def test_an_environment_without_a_url_says_nothing_about_opening(page):
+    # Variables only is an environment as good as any: no warning under it.
     _pick(page, "demo")
     assert _variables(page) == [("url", "")]
-    assert "No url yet" in page.opens.text()
-    assert page.opens.property("role") == "error"
+    assert page.opens.text() == ""
+    assert not page.opens.isVisibleTo(page)
 
 
 def test_nothing_selected_and_nothing_found_are_said(page):
@@ -155,13 +162,10 @@ def test_nothing_selected_and_nothing_found_are_said(page):
         def dirs(self):
             return {}
 
-    page.search_row.box(0).setText("nothing like this")
-    assert page.table.rowCount() == 3
-    assert "matches the search" in page._env_note.text()
-    page.search_row.box(0).setText("")
     page.set_inventory(Empty())
-    assert page.table.rowCount() == 0
+    assert page.picker.count() == 0 and not page.picker.isEnabled()
     assert page.editor_stack.currentIndex() == 0
+    assert page.title.text() == "Environments" and not page.kind_tag.isVisibleTo(page)
     assert not page.add_variable_button.isEnabled()
 
 
@@ -303,6 +307,7 @@ def test_an_unreadable_users_file_is_said_and_users_cannot_change(page, files):
     open(files["users"], "w").write("[broken")
     page.set_inventory(page.inventory)
     assert "cannot be read" in page.users_problem.text()
+    page.tabs.setCurrentWidget(page.users_tab)          # said where users are
     assert page.users_problem.isVisibleTo(page)
     assert not page.add_users_button.isEnabled()
 
@@ -333,7 +338,7 @@ def test_a_rename_keeps_the_key_and_so_the_profiles(page, files):
     page.name_edit.editingFinished.emit()
     env = _env(page, LOCAL)
     assert (env.name, env.account_key) == ("Local box", "localhost:8069")
-    assert page.table.item(0, 0).text() == "Local box"
+    assert _names(page)[0] == "Local box" and page.title.text() == "Local box"
     assert [row["env"] for row in _users(files["users"])][:2] == ["localhost:8069"] * 2
 
 
@@ -368,9 +373,10 @@ def test_project_buttons_ask_the_window(page):
     """Projects are the window's (one folder each): the page only asks."""
     asked = []
     page.project_action.connect(asked.append)
-    for button in page.project_row.findChildren(type(page.add_env_button)):
-        button.setEnabled(True)
-        button.click()
+    assert page.project_button.menu().actions()   # what the Project… button offers
+    for action in page.project_actions:
+        action.setEnabled(True)
+        action.trigger()
     assert asked == ["add", "rename", "export", "delete"]
 
 
@@ -437,7 +443,7 @@ def test_the_tables_rows_are_one_height(page, qapp):
     page.show()
     qapp.processEvents()
     heights = {table.verticalHeader().defaultSectionSize()
-               for table in (page.table, page.variables, page.users)}
+               for table in (page.variables, page.users)}
     assert len(heights) == 1
 
 
@@ -466,17 +472,6 @@ def test_a_cell_editor_is_the_cell_exactly(page, qapp):
         table.closePersistentEditor(item)
         table.setFocus()
         qapp.processEvents()
-
-
-def test_the_list_has_a_search_box_over_every_column(page, qapp):
-    page.show()
-    qapp.processEvents()
-    header = page.table.horizontalHeader()
-    for column in range(page.table.columnCount()):
-        box = page.search_row.box(column)
-        assert box is not None and box.isVisible()
-        assert box.x() == header.sectionViewportPosition(column)
-        assert box.width() == header.sectionSize(column) + 1
 
 
 def test_url_is_marked_reserved(page):
@@ -519,3 +514,39 @@ def test_a_row_not_named_yet_just_goes(page):
     page.variables.setCurrentCell(1, 0)
     page.remove_variable()
     assert page.variables.rowCount() == 1 and _env(page, LOCAL).virtual
+
+
+def test_an_environment_needs_no_url_it_may_hold_variables_only(qapp, dispose):
+    from cms_gui.pages.environmentdialog import EnvironmentDialog
+    dialog = EnvironmentDialog(None, "Shop", taken_names=["Local"])
+    dialog.name.setText("Shop Jira")
+    assert dialog.problems() == []
+    assert dialog.result_values() == ("Shop Jira", "")
+    dialog.name.setText("local")
+    assert dialog.problems() == ["Shop already has an environment called local."]
+    dispose(dialog)
+
+
+def test_users_are_left_out_of_an_environment_that_holds_variables_only(page, monkeypatch):
+    class Form:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def result_values(self):
+            return "Shop Jira", ""
+
+    monkeypatch.setattr(page_module, "EnvironmentDialog", Form)
+    page.add_environment()
+    assert page.name_edit.text() == "Shop Jira"
+    users = page.tabs.indexOf(page.users_tab)
+    assert not page.tabs.isTabVisible(users)
+    assert page.kind_tag.text() == "Variables only"
+    # A url makes it a place windows open in: its users come in.
+    page.variables.item(0, 1).setText("http://localhost:8069")
+    assert page.tabs.isTabVisible(users) and page.kind_tag.text() == "Opens windows"
+    _pick(page, "demo")
+    assert page.tabs.isTabVisible(users)            # no url, but it has an account
+    assert page.tabs.tabText(users) == "Users · 1"

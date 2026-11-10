@@ -1,10 +1,12 @@
 """Environments page: each environment's variables and the users who sign in
 there, the way Postman keeps environments.
 
-On the left, the environments of a project; on the right, the one chosen: its
-name, its variables - ``url`` first, where its windows open, written with the
-others if it likes (``http://localhost:{{port}}/web``) - and its users with the
-scenarios each runs there.
+Laid out as Integrations -> Jira is: the environment on screen is the heading,
+tagged with what kind it is, the others are a picker at the right, and what it
+holds is on tabs - its variables (``url`` first, where its windows open, written
+with the others if it likes: ``http://localhost:{{port}}/web``), its users with
+the scenarios each runs there, and its settings. An environment without a url
+or accounts holds variables only, and has no Users tab.
 
 Environments and their variables live in launch-projects.json
 (:mod:`cms_gui.launchprojectsfile`); users live in users.json, filed under the
@@ -18,12 +20,13 @@ first change writes it down. Projects are folders of environments.
 """
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFrame,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFrame,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
-                               QPushButton, QScrollArea, QStackedWidget,
+                               QPushButton, QScrollArea, QStackedWidget, QTabWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import launchprojectsfile as lpf, launchvars, search, theme, usersfile, widgets
+from .. import (icons, launchprojectsfile as lpf, launchvars, search, theme, usersfile,
+                widgets)
 from .environmentdialog import EnvironmentDialog, UsersPicker, opens_text
 
 #: What an empty cell says (the table recipe's dash).
@@ -42,12 +45,8 @@ class EnvironmentsPage(QWidget):
     #: "add", "rename", "export" or "delete" - done to the window's project.
     project_action = Signal(str)
 
-    HEADERS = ["Environment", "Users"]
     VARIABLE_HEADERS = ["Variable", "Value"]
     USER_HEADERS = ["Role", "Login", "Scenarios"]
-
-    #: The width of the list of environments beside the editor.
-    LIST_WIDTH = 300
 
     def __init__(self, settings, parent=None, registry=None):
         super().__init__(parent)
@@ -65,9 +64,10 @@ class EnvironmentsPage(QWidget):
         self._filling = False
         self._developer = False
 
-        # Scrolled, as Launch Sessions is: the list, the variables and the
-        # users stacked are taller than a laptop screen, and a page that cannot
-        # scroll makes the whole window refuse to fit.
+        # Laid out as Integrations -> Jira is: the environment on screen as the
+        # heading with what kind it is, the picker of the others
+        # at the right, and what it holds on tabs below. Scrolled, as Launch
+        # Sessions is: a window that cannot scroll refuses to fit a laptop.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = QScrollArea()
@@ -75,45 +75,63 @@ class EnvironmentsPage(QWidget):
         self.scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         column = QVBoxLayout(body)
-        column.setContentsMargins(24, 20, 24, 20)
-        column.setSpacing(6)
-        self.wording = widgets.Phrasing()
-        column.addWidget(widgets.heading("Environments"))
-        column.addWidget(self.wording.text(
-            widgets.lede(""),
-            "An environment is a name and its variables: url is where its windows "
-            "open, and can use the others as {{name}}. Its users are the accounts "
-            "that sign in there, each with the scenarios it runs there.",
-            "An environment is a name and its variables: url is passed as --url, "
-            "with {{name}} filled from the others. Its users are the users.json rows "
-            "filed under its account key, which is passed as --env."))
-        column.addSpacing(12)
+        column.setContentsMargins(24, 18, 24, 14)
+        column.setSpacing(4)
 
         # The project is the window's, picked in its top bar: what is done to
         # it is asked for here and done there (project_action).
-        add_project = QPushButton("+ Project")
-        add_project.setToolTip("A new, empty project, in a folder of its own")
-        add_project.clicked.connect(lambda: self.project_action.emit("add"))
-        self.rename_project_button = QPushButton("Rename project…")
-        self.rename_project_button.setProperty("variant", "ghost")
-        self.rename_project_button.clicked.connect(
-            lambda: self.project_action.emit("rename"))
-        self.export_project_button = QPushButton("Export project…")
-        self.export_project_button.setProperty("variant", "ghost")
+        self.project_button = QPushButton("Project…")
+        self.project_button.setObjectName("environmentsProject")
+        self.project_button.setProperty("variant", "ghost")
+        self.project_button.setToolTip("This project: a new one, rename, export or delete")
+        project_menu = QMenu(self.project_button)
+        self.add_project_button = project_menu.addAction(
+            "New project…", lambda: self.project_action.emit("add"))
+        self.add_project_button.setToolTip("A new, empty project, in a folder of its own")
+        self.rename_project_button = project_menu.addAction(
+            "Rename project…", lambda: self.project_action.emit("rename"))
+        self.export_project_button = project_menu.addAction(
+            "Export project…", lambda: self.project_action.emit("export"))
         self.export_project_button.setToolTip("Everything in this project to a file: "
                                               "environments, users and cycles")
-        self.export_project_button.clicked.connect(
-            lambda: self.project_action.emit("export"))
-        self.delete_project_button = QPushButton("Delete project…")
-        self.delete_project_button.setProperty("variant", "ghost")
+        project_menu.addSeparator()
+        self.delete_project_button = project_menu.addAction(
+            "Delete project…", lambda: self.project_action.emit("delete"))
         self.delete_project_button.setToolTip("Take it off the list; its folder stays")
-        self.delete_project_button.clicked.connect(
-            lambda: self.project_action.emit("delete"))
-        project_row = widgets.row(add_project, self.rename_project_button,
-                                  self.export_project_button,
-                                  self.delete_project_button, None)
-        self.project_row = project_row
-        column.addWidget(project_row)
+        project_menu.setToolTipsVisible(True)
+        self.project_button.setMenu(project_menu)
+        self.project_actions = [self.add_project_button, self.rename_project_button,
+                                self.export_project_button, self.delete_project_button]
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        self.title = widgets.heading("Environments")
+        header.addWidget(self.title)
+        self.kind_tag = widgets.Tag("", "neutral")
+        self.kind_tag.setVisible(False)
+        header.addWidget(self.kind_tag, 0, Qt.AlignVCenter)
+        header.addStretch(1)
+        self.picker_label = QLabel("Environment")
+        self.picker_label.setProperty("role", "muted")
+        header.addWidget(self.picker_label)
+        self.picker = widgets.capped(QComboBox(), 260)
+        self.picker.setObjectName("environmentPicker")
+        self.picker.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.picker.setMinimumContentsLength(12)
+        self.picker.setPlaceholderText("No environment yet")
+        self.picker.setAccessibleName("Environment")
+        self.picker.activated.connect(self._env_picked)
+        header.addWidget(self.picker)
+        self.add_env_button = QPushButton("Environment")
+        icons.button(self.add_env_button, "plus", "Environment")
+        self.add_env_button.setToolTip("A new environment of this project")
+        self.add_env_button.clicked.connect(self.add_environment)
+        header.addWidget(self.add_env_button)
+        # In the heading's own row: a row of its own above it was a strip of
+        # empty page for one quiet button.
+        header.addWidget(self.project_button)
+        column.addLayout(header)
+
         # The file cannot be read: said above what it would have changed, and
         # nothing here is changeable until it reads.
         self.registry_problem = QLabel("")
@@ -121,14 +139,6 @@ class EnvironmentsPage(QWidget):
         self.registry_problem.setWordWrap(True)
         self.registry_problem.setVisible(False)
         column.addWidget(self.registry_problem)
-        column.addSpacing(6)
-
-        panes = QHBoxLayout()
-        panes.setSpacing(16)
-        panes.addWidget(self._list_pane(), 0)
-        panes.addWidget(self._editor_pane(), 1)
-        column.addLayout(panes, 1)
-
         # Addresses the old "URL override" column saved and nothing ever
         # applied. Switching them on unasked would move where runs open, so each
         # is offered instead - and the block is not there at all without one.
@@ -138,90 +148,56 @@ class EnvironmentsPage(QWidget):
         self.legacy_rows.setSpacing(4)
         column.addWidget(self.legacy_box)
         self.legacy_box.setVisible(False)
+        column.addSpacing(6)
+
+        self.editor_stack = QStackedWidget()
+        self.editor_stack.addWidget(self._empty_pane())
+        self.editor_stack.addWidget(self._editor_pane())
+        column.addWidget(self.editor_stack, 1)
         self.scroll.setWidget(body)
         outer.addWidget(self.scroll)
 
     # -- building -------------------------------------------------------------
-    def _list_pane(self):
+    def _empty_pane(self):
+        """No environment in the project: the one thing to do, as Integrations
+        says "No Jira connection yet"."""
         pane = QWidget()
-        pane.setFixedWidth(self.LIST_WIDTH)
         column = QVBoxLayout(pane)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(6)
-        panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
-        self.table = widgets.Table(0, len(self.HEADERS), reclick_clears=False)
-        self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.setMinimumHeight(320)
-        self.table.itemSelectionChanged.connect(self._env_picked)
-        self.search_row = widgets.SearchRow(self.table)
-        self.search_row.changed.connect(self._searched)
-        self._env_note = widgets.empty_note(
-            self.table, "No environments in this project yet - + Environment adds "
-                        "one, or File -> Import brings them from another project.")
-        panel.layout().addWidget(self.table)
-        column.addWidget(panel, 1)
-        self.add_env_button = QPushButton("+ Environment")
-        self.add_env_button.clicked.connect(self.add_environment)
-        column.addWidget(widgets.row(self.add_env_button, None))
+        column.setContentsMargins(0, 10, 0, 0)
+        column.setSpacing(10)
+        self.empty_state = widgets.empty_zone(
+            "No environments in this project yet",
+            "An environment is a name and its variables. With a url it is where "
+            "windows open and its users sign in; without one it holds variables "
+            "for whatever reads them. File -> Import brings them from another project.")
+        column.addWidget(self.empty_state)
+        self.empty_add_button = QPushButton("Add environment")
+        self.empty_add_button.setProperty("variant", "primary")
+        self.empty_add_button.clicked.connect(self.add_environment)
+        column.addWidget(self.empty_add_button, 0, Qt.AlignHCenter)
+        column.addStretch(1)
         return pane
 
+    def _tab(self):
+        """A tab's page and the column to fill, spaced as Jira's tabs are."""
+        page = QWidget()
+        column = QVBoxLayout(page)
+        column.setContentsMargins(0, 14, 0, 0)
+        column.setSpacing(8)
+        return page, column
+
     def _editor_pane(self):
-        panel = widgets.BlueprintPanel()
-        self.editor_stack = QStackedWidget()
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("environmentTabs")
 
-        empty = QWidget()
-        empty_column = QVBoxLayout(empty)
-        empty_column.setContentsMargins(0, 0, 0, 0)
-        self.empty_state = widgets.empty_zone(
-            "No environment selected",
-            "Choose one on the left to see its variables and users, or add one "
-            "with + Environment.")
-        empty_column.addWidget(self.empty_state)
-        empty_column.addStretch(1)
-        self.editor_stack.addWidget(empty)
-
-        editor = QWidget()
-        outer = QVBoxLayout(editor)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(10)
-        # Name, variables, users: each on its own faint ground, as the groups
-        # of Advanced on Launch Sessions are, so they read apart without boxes.
-        self._sections = []
-        column = self._section(outer)
-        self.name_edit = QLineEdit()
-        self.name_edit.editingFinished.connect(self._rename_environment)
-        self.duplicate_button = QPushButton("Duplicate…")
-        self.duplicate_button.setToolTip("A copy with the same variables and users, "
-                                         "signing in afresh in profiles of its own")
-        self.duplicate_button.clicked.connect(self.duplicate_environment)
-        self.export_env_button = QPushButton("Export…")
-        self.export_env_button.setToolTip("This environment to a file, with its users")
-        self.export_env_button.clicked.connect(
-            lambda: self.export_requested.emit({"environments": [self._env_id]}))
-        self.delete_env_button = QPushButton("Delete…")
-        self.delete_env_button.setProperty("variant", "ghost")
-        self.delete_env_button.clicked.connect(self.delete_environment)
-        name_row = widgets.row(widgets.field("Name", self.name_edit),
-                               self.duplicate_button, self.export_env_button,
-                               self.delete_env_button)
-        name_row.layout().setStretch(0, 1)
-        widgets.level_with(self.name_edit, name_row, self.duplicate_button,
-                           self.export_env_button, self.delete_env_button)
-        column.addWidget(name_row)
-        # Developer wording only: what the launcher is given for it.
-        self.key_label = widgets.mono("")
-        self.key_label.setVisible(False)
-        column.addWidget(self.key_label)
-
-        column = self._section(outer)
-        column.addWidget(widgets.kicker("Variables"))
+        page, column = self._tab()
+        self.wording = widgets.Phrasing()
+        column.addWidget(self.wording.text(
+            widgets.lede(""),
+            "url is where its windows open, and can use the others as {{name}}. "
+            "Leave it empty for an environment that only holds variables.",
+            "url is passed as --url, with {{name}} filled from the others; "
+            "the account key below is passed as --env."))
         variables_panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.variables = widgets.Table(0, len(self.VARIABLE_HEADERS),
                                        reclick_clears=False)
@@ -265,10 +241,17 @@ class EnvironmentsPage(QWidget):
         self.variables.installEventFilter(self)
         self.variables.setContextMenuPolicy(Qt.CustomContextMenu)
         self.variables.customContextMenuRequested.connect(self._variable_menu)
+        column.addStretch(1)
+        self.variables_tab = page
+        self.tabs.addTab(page, "Variables")
 
-        column = self._section(outer)
-        self.users_kicker = widgets.kicker("Users")
-        column.addWidget(self.users_kicker)
+        # Users belong to an environment windows open in - with a url or
+        # accounts - and the tab is left out for one that holds variables only
+        # (lpf.launchable).
+        page, column = self._tab()
+        column.addWidget(widgets.lede(
+            "The accounts that sign in here, each with the scenarios it runs here. "
+            "Double-click Scenarios to change them."))
         users_panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.users = widgets.Table(0, len(self.USER_HEADERS))
         self.users.setHorizontalHeaderLabels(self.USER_HEADERS)
@@ -304,23 +287,39 @@ class EnvironmentsPage(QWidget):
         self.remove_users_button.clicked.connect(self.remove_users)
         column.addWidget(widgets.row(self.add_users_button, self.remove_users_button,
                                      None))
-        outer.addStretch(1)
-        for section in self._sections:
-            widgets.see_through(section)
-        self.editor_stack.addWidget(editor)
-        panel.layout().addWidget(self.editor_stack)
-        return panel
+        column.addStretch(1)
+        self.users_tab = page
+        self.tabs.addTab(page, "Users")
 
-    def _section(self, outer):
-        """A group of the editor on its own faint ground; its layout to fill."""
-        frame = QFrame()
-        frame.setProperty("role", "section")
-        self._sections.append(frame)
-        column = QVBoxLayout(frame)
-        column.setContentsMargins(12, 10, 12, 12)
-        column.setSpacing(6)
-        outer.addWidget(frame)
-        return column
+        page, column = self._tab()
+        self.name_edit = QLineEdit()
+        self.name_edit.setMaximumWidth(420)
+        self.name_edit.editingFinished.connect(self._rename_environment)
+        column.addWidget(widgets.field(
+            "Name", self.name_edit, "What it is called here, in Launch Sessions and in "
+            "a Jira connection's Variables from. Renaming keeps its users' profiles."))
+        # Developer wording only: what the launcher is given for it.
+        self.key_label = widgets.mono("")
+        self.key_label.setVisible(False)
+        column.addWidget(self.key_label)
+        self.duplicate_button = QPushButton("Duplicate…")
+        self.duplicate_button.setToolTip("A copy with the same variables and users, "
+                                         "signing in afresh in profiles of its own")
+        self.duplicate_button.clicked.connect(self.duplicate_environment)
+        self.export_env_button = QPushButton("Export…")
+        self.export_env_button.setToolTip("This environment to a file, with its users")
+        self.export_env_button.clicked.connect(
+            lambda: self.export_requested.emit({"environments": [self._env_id]}))
+        self.delete_env_button = QPushButton("Delete…")
+        self.delete_env_button.setProperty("variant", "ghost")
+        self.delete_env_button.clicked.connect(self.delete_environment)
+        column.addSpacing(6)
+        column.addWidget(widgets.row(self.duplicate_button, self.export_env_button,
+                                     self.delete_env_button, None))
+        column.addStretch(1)
+        self.settings_tab = page
+        self.tabs.addTab(page, "Settings")
+        return self.tabs
 
     def set_developer_mode(self, enabled):
         self._developer = bool(enabled)
@@ -374,35 +373,32 @@ class EnvironmentsPage(QWidget):
         return names
 
     def _fill_list(self):
+        """The picker, from the files as they are now; the chosen one kept."""
         self._envs = self._all_environments()
-        counts = {}
-        for row in self._user_rows:
-            counts[row.env] = counts.get(row.env, 0) + 1
-        self.table.blockSignals(True)
-        self.table.setRowCount(len(self._envs))
-        for row, env in enumerate(self._envs):
-            self._set(self.table, row, 0, env.name)
-            users = counts.get(env.account_key, 0) if not self._users_error \
-                else env.accounts
-            self._set(self.table, row, 1, str(users) if users else NONE,
-                      color=None if users else theme.NEUTRAL[600],
-                      align=Qt.AlignRight | Qt.AlignVCenter)
-        self.table.blockSignals(False)
-        self.search_row.apply()
         ids = [env.id for env in self._envs]
         if self._env_id not in ids:
             self._env_id = ids[0] if ids else ""
-        self._select_in_list(self._env_id)
+        projects = {env.project_id for env in self._envs}
+        self.picker.blockSignals(True)
+        self.picker.clear()
+        for env in self._envs:
+            self.picker.addItem(self._picker_label(env, len(projects) > 1), env.id)
+        self.picker.setCurrentIndex(self.picker.findData(self._env_id))
+        self.picker.setEnabled(bool(self._envs))
+        self.picker.blockSignals(False)
         self._show_editor()
 
+    def _picker_label(self, env, by_project):
+        """Its name - with its folder's when more than one folder has some."""
+        if not by_project:
+            return env.name
+        project = self.registry.project(env.project_id)
+        return "%s  ·  %s" % (project.name if project else env.project_id, env.name)
+
     def _select_in_list(self, env_id):
-        self.table.blockSignals(True)
-        self.table.clearSelection()
-        for row, env in enumerate(self._envs):
-            if env.id == env_id:
-                self.table.selectRow(row)
-                break
-        self.table.blockSignals(False)
+        self.picker.blockSignals(True)
+        self.picker.setCurrentIndex(self.picker.findData(env_id))
+        self.picker.blockSignals(False)
 
     def _set(self, table, row, col, text, mono=False, color=None, editable=False,
              align=None):
@@ -426,17 +422,11 @@ class EnvironmentsPage(QWidget):
                 return env
         return None
 
-    def _env_picked(self):
-        rows = self.table.selectionModel().selectedRows() \
-            if self.table.selectionModel() else []
-        row = rows[0].row() if rows else -1
-        if 0 <= row < len(self._envs) and self._envs[row].id != self._env_id:
-            self._env_id = self._envs[row].id
+    def _env_picked(self, _index=None):
+        env_id = self.picker.currentData() or ""
+        if env_id and env_id != self._env_id:
+            self._env_id = env_id
             self._show_editor()
-
-    def _searched(self):
-        self._env_note.say_filtered("Nothing here matches the search."
-                                    if self.search_row.searching() else "")
 
     def address_for(self, env_id):
         """The url set for an environment; "" when it follows its origin."""
@@ -447,7 +437,9 @@ class EnvironmentsPage(QWidget):
     def _show_editor(self):
         env = self._selected_env()
         self.editor_stack.setCurrentIndex(1 if env is not None else 0)
+        self.title.setText(env.name if env is not None else "Environments")
         if env is None:
+            self.kind_tag.setVisible(False)
             self._update_buttons()
             return
         if not self.name_edit.hasFocus() or self.name_edit.text() != env.name:
@@ -456,7 +448,23 @@ class EnvironmentsPage(QWidget):
         self._fill_variables(env)
         self._show_opens(env)
         self._fill_users(env)
+        self._show_users_section(env)
         self._update_buttons()
+
+    def _show_users_section(self, env):
+        """Users belong to an environment windows open in: one with a url, or
+        one that has accounts already. Typing a url brings the tab in. The tag
+        beside the name says which of the two it is."""
+        opens = lpf.launchable(env, len(self._members))
+        self.tabs.setTabVisible(self.tabs.indexOf(self.users_tab),
+                                bool(self._users_error) or opens)
+        self.kind_tag.set("Opens windows", "accent") if opens else \
+            self.kind_tag.set("Variables only", "neutral")
+        self.kind_tag.setVisible(True)
+        self.kind_tag.setToolTip(
+            "It has a url or accounts: Launch Sessions offers it." if opens else
+            "No url and no accounts: it holds variables for whatever reads them - "
+            "a Jira connection's predefined query, say.")
 
     def _show_key(self, env):
         self.key_label.setText("--env %s" % env.account_key if env is not None else "")
@@ -499,6 +507,7 @@ class EnvironmentsPage(QWidget):
         template = env.address or env.origin
         message, bad = opens_text(template, env.variables)
         self.opens.setText(message)
+        self.opens.setVisible(bool(message))
         self.opens.setProperty("role", "error" if bad else "mono")
         self.opens.style().unpolish(self.opens)
         self.opens.style().polish(self.opens)
@@ -525,8 +534,9 @@ class EnvironmentsPage(QWidget):
             item.setToolTip("The scenarios it runs here with \"each account's own "
                             "list\": ids, or tag:name, comma-separated. Double-click "
                             "to change.")
-        self.users_kicker.setText("USERS · %d" % len(self._members)
-                                  if self._members else "USERS")
+        self.tabs.setTabText(self.tabs.indexOf(self.users_tab),
+                             "Users · %d" % len(self._members) if self._members
+                             else "Users")
         self._filling = False
         self._fit(self.users, 3, 10)
         self.users_problem.setText(
@@ -555,6 +565,7 @@ class EnvironmentsPage(QWidget):
         self.remove_users_button.setEnabled(users_ok and bool(self._selected_members()))
         self.users.setEnabled(not self._users_error)
         self.add_env_button.setEnabled(readable)
+        self.empty_add_button.setEnabled(readable)
         workspace = self.settings.project_id == lpf.WORKSPACE
         self.rename_project_button.setEnabled(not workspace)
         self.delete_project_button.setEnabled(not workspace)
@@ -680,6 +691,7 @@ class EnvironmentsPage(QWidget):
         if env is not None:
             self._show_opens(env)
             self._show_key(env)
+            self._show_users_section(env)
         self._update_buttons()
 
     def add_variable(self, name=""):
@@ -1018,9 +1030,10 @@ class EnvironmentsPage(QWidget):
             for env in self._envs]
 
     def show_found(self, env_id):
-        for row, env in enumerate(self._envs):
+        for env in self._envs:
             if env.id == env_id or env.name == env_id:
-                self.table.selectRow(row)
-                self.table.scrollToItem(self.table.item(row, 0))
+                self._env_id = env.id
+                self._select_in_list(env.id)
+                self._show_editor()
                 return True
         return False
