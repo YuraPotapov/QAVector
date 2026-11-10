@@ -177,9 +177,12 @@ class IntegrationsPage(QWidget):
             done([], "%s cannot be searched." % provider)
             return
 
-        def answered(hits, error=None):
-            done([one._replace(target=(provider, one.target)) for one in hits or []
-                  if isinstance(one, search.Hit)], error)
+        def answered(hits, error=None, within=""):
+            found = [one._replace(target=(provider, one.target)) for one in hits or []
+                     if isinstance(one, search.Hit)]
+            # ``within`` only when the search was bounded: a caller that knows
+            # nothing of bounds is answered as it always was.
+            done(found, error, within) if within else done(found, error)
 
         view.search_remote(query, answered)
 

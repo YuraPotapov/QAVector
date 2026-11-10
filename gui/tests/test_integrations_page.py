@@ -88,6 +88,11 @@ class FakeCore:
             return {"ok": True, "app": dict(document, secret_set=True)}
         if command == "activity":
             return {"ok": True, "activity": list(self.answers.get("activity_rows") or [])}
+        if command == "scope":
+            answer = self.answers.get("scope")
+            if callable(answer):
+                return answer(document)
+            return answer or {"ok": True, "scope": "", "problems": []}
         operation = args[2]
         answer = self.answers.get(operation)
         if callable(answer):
@@ -615,13 +620,14 @@ def test_settings_are_saved_with_the_connection_and_change_nothing_else(make):
     page = make(core)
     tab = page.jira.settings_tab
     assert not tab.save.isEnabled()
-    tab.project.setText("qa")
-    tab.project.textEdited.emit("qa")
+    tab.minutes.setValue(5)
     tab.save.click()
     args, document = core.calls[-1]
     assert args == ("save",) and "token" not in document
-    assert document["connection"]["settings"] == {"default_project": "QA",
-                                                  "refresh_minutes": 0}
+    # Default project is gone: the predefined query says which projects.
+    assert document["connection"]["settings"] == {"refresh_minutes": 5,
+                                                  "predefined_query": "",
+                                                  "variables_from": ""}
 
 
 def test_refreshing_on_a_timer_is_off_unless_a_connection_says_so(make, qapp):
@@ -1646,8 +1652,8 @@ def test_page_shutdown_cannot_reopen_an_integration_window(make):
 def test_discarded_settings_do_not_stay_dirty_in_a_project_without_connections(make):
     page = make()
     tab = page.jira.settings_tab
-    tab.project.setText('CHANGED')
-    tab.project.textEdited.emit('CHANGED')
+    tab.query.setText('project = CHANGED')
+    tab.query.textEdited.emit('project = CHANGED')
     assert page.has_unsaved()
     page.set_core(FakeCore(connections=[]))
     assert not page.has_unsaved()
@@ -1711,3 +1717,137 @@ def test_a_found_issue_is_shown_under_filters_it_matches(make):
     # Not on the list's first page: at the top, and opened.
     assert page.jira.issues.rows()[0]["key"] == "QA-500"
     assert core.calls[-1][0] == ("call", "product-team", "issue")
+
+
+# -- the predefined query -----------------------------------------------------
+def _environments_file(settings, tmp_path):
+    import json
+    path = tmp_path / "launch-projects.json"
+    path.write_text(json.dumps({"version": 2, "projects": [{
+        "id": "p1", "name": "Shop", "environments": [
+            {"id": "staging", "name": "Staging", "variables": {"jira_project": "QA"}},
+            {"id": "prod", "name": "Production", "variables": {}}]}]}))
+    settings.launch_projects_path = str(path)
+    return path
+
+
+def _resolving(document):
+    if "{{board}}" in document["predefined_query"]:
+        return {"ok": True, "scope": "", "problems": ["Environment Staging does not "
+                                                      "define {{board}}."]}
+    return {"ok": True, "problems": [],
+            "scope": document["predefined_query"].replace("{{jira_project}}", '"QA"')}
+
+
+def test_variables_come_from_an_environment_of_the_project(make, settings, tmp_path):
+    _environments_file(settings, tmp_path)
+    page = make(FakeCore())
+    combo = page.jira.settings_tab.variables_from
+    assert [combo.itemText(index) for index in range(combo.count())] == \
+        ["None", "Staging", "Production"]
+    assert combo.currentData() == ""
+
+
+def test_the_query_is_previewed_by_the_core_and_jira_is_not_asked(make, settings,
+                                                                   tmp_path, qapp):
+    _environments_file(settings, tmp_path)
+    core = FakeCore(scope=_resolving)
+    page = make(core)
+    asked = core.asked()
+    tab = page.jira.settings_tab
+    tab.query.setText("project = {{jira_project}}")
+    tab.query.textEdited.emit(tab.query.text())
+    tab.variables_from.setCurrentIndex(tab.variables_from.findData("staging"))
+    tab.variables_from.activated.emit(tab.variables_from.currentIndex())
+    tab._preview_timer.timeout.emit()
+    assert core.calls[-1] == (("scope",), {"predefined_query": "project = {{jira_project}}",
+                                           "variables_from": "staging"})
+    assert tab.comes_to.text() == 'Comes to:  project = "QA"'
+    assert not tab.scope_problem.isVisibleTo(tab)
+    assert core.asked() == asked
+    tab.query.setText("project = {{board}}")
+    tab.query.textEdited.emit(tab.query.text())
+    tab._preview_timer.timeout.emit()
+    assert tab.scope_problem.isVisibleTo(tab) and "{{board}}" in tab.scope_problem.text()
+    assert not tab.comes_to.isVisibleTo(tab)
+    tab.save.click()
+    args, document = core.calls[-1]
+    assert args == ("save",)
+    assert document["connection"]["settings"]["predefined_query"] == "project = {{board}}"
+    assert document["connection"]["settings"]["variables_from"] == "staging"
+
+
+def test_an_empty_query_asks_the_core_nothing(make):
+    core = FakeCore()
+    page = make(core)
+    page.jira.settings_tab._preview_timer.timeout.emit()
+    assert not any(args[0] == "scope" for args, _doc in core.calls)
+
+
+def test_a_chosen_environment_that_is_gone_is_kept_and_said(make, settings, tmp_path):
+    _environments_file(settings, tmp_path)
+    connection = _connection(settings={"default_project": "", "refresh_minutes": 0,
+                                       "predefined_query": "project = {{jira_project}}",
+                                       "variables_from": "gone"})
+    page = make(FakeCore([connection], scope=_resolving))
+    combo = page.jira.settings_tab.variables_from
+    assert combo.currentData() == "gone"
+    assert combo.currentText() == "gone (not in this project)"
+
+
+def test_the_list_carries_no_scope_label(make):
+    # Asked for (2026-11-10): the predefined query is said in Settings only.
+    core = FakeCore(search={"ok": True, "result": {"rows": [_row("QA-1")], "cursor": None,
+                                                   "scope": 'project = "QA"'}})
+    page = make(core)
+    assert not hasattr(page.jira.issues, "scope_note")
+    assert not any("Within:" in label.text()
+                   for label in page.jira.issues.findChildren(jira_module.QLabel))
+
+
+def test_a_scope_that_cannot_be_used_points_to_settings(make, qapp):
+    core = FakeCore(search={"ok": False, "kind": "scope",
+                            "error": "Connection 'Product team': Environment Staging does "
+                                     "not define {{board}}."})
+    page = make(core)
+    issues = page.jira.issues
+    assert issues.problem.isVisibleTo(page)
+    assert "{{board}}" in issues.problem_text.text()
+    assert issues.problem_action.text() == "Open Settings"
+    issues.problem_action.click()
+    assert page.jira.tabs.currentWidget() is page.jira.settings_tab
+    assert page.jira.tag.text() == "Query not ready"
+
+
+def test_a_new_scope_drops_what_was_read_within_the_old_one(make):
+    core = FakeCore()
+    page = make(core)
+    assert page.jira.cache["product-team"].loaded_at is not None
+    tab = page.jira.settings_tab
+    tab.query.setText("project = QA")
+    tab.query.textEdited.emit(tab.query.text())
+    tab.save.click()
+    assert "product-team" not in page.jira.cache or \
+        page.jira.cache["product-team"].loaded_at is None
+
+
+
+def test_a_project_chosen_beforehand_loads_its_types_once_the_dialog_shows(qapp, dispose):
+    from cms_gui.pages.jiradialogs import CreateIssueDialog
+    asked = []
+    dialog = CreateIssueDialog(None, [("QA", "Quality")], "QA")
+    dialog.meta_requested.connect(lambda request, done: asked.append(request))
+    assert asked == []
+    dialog.show()
+    qapp.processEvents()
+    assert dialog.project.currentData() == "QA" and asked == [{"project": "QA"}]
+    dispose(dialog)
+
+
+def test_a_bounded_search_says_its_bounds_with_nothing_found(make):
+    core = FakeCore(search={"ok": True, "result": {"rows": [], "cursor": None,
+                                                   "scope": 'project = "QA"'}})
+    page = make(core)
+    heard = []
+    page.jira.search_remote("1296", lambda *answer: heard.append(answer))
+    assert heard == [([], "", 'project = "QA"')]

@@ -9,6 +9,7 @@ its own - the page decides when to ask, and asks only for what is on screen.
 
 import re
 
+from integrations import scope
 from integrations.jira import adf, query
 from integrations.jira.client import CLOUD, JiraError, Session, api
 
@@ -84,6 +85,11 @@ def projects(get, connection, request):
         found = answer if isinstance(answer, list) else []
     rows = [{"key": str(one.get("key") or ""), "name": str(one.get("name") or "")}
             for one in found if isinstance(one, dict) and one.get("key")]
+    within = scope.project_keys(connection.get("scope"))
+    if within:
+        # The predefined query names its projects: the others are not the
+        # project's to filter by or to create in.
+        rows = [one for one in rows if one["key"].upper() in within]
     return {"projects": sorted(rows, key=lambda one: one["name"].lower())}
 
 
@@ -110,23 +116,29 @@ def jql(request, connection=None, picked=()):
     statuses, "assigned to me", and the search text, which is an issue key or
     words. With none of them the list is bounded by :data:`UNFILTERED`.
 
+    The connection's ``scope`` - its predefined query, resolved - is ANDed
+    with either, always: it is the part of Jira that belongs to the project,
+    and nothing typed or picked reaches past it.
+
     ``picked`` are the keys Jira's own quick search found for the text (see
     :func:`picked`): words alone miss "1334" for QA-1334 - an issue's key is
     not text to Jira - and the start of a word.
     """
     order = query.ordering(str(request.get("order") or ""))
+    within = (connection or {}).get("scope") or ""
     written = str(request.get("jql") or "").strip()
     if written:
-        if re.search(r"\border\s+by\b", written, re.IGNORECASE):
-            return written
-        return "%s ORDER BY %s" % (written, order)
-    clauses = []
-    project = request.get("project")
-    if project in (None, "") and connection is not None and not request.get("everywhere"):
-        # ``everywhere``: looking for an issue rather than at a list, so the
-        # connection's default project does not narrow it.
-        project = (connection.get("settings") or {}).get("default_project", "")
-    for clause in (query.projects_clause(project or ""),
+        # Checked whole before it is ANDed: a typed ")" too many would
+        # otherwise close the scope's bracket and reach past it.
+        body, tail = scope.clause(written, "The JQL")
+        if within:
+            body = scope.anded(within, body, "The JQL")
+        return ("%s %s" % (body, tail or "ORDER BY %s" % order)).strip()
+    limit = scope.bracketed(within)
+    clauses = [limit] if limit else []
+    # Which projects the connection reaches is its predefined query's to say;
+    # a list nobody filtered is every issue within it.
+    for clause in (query.projects_clause(request.get("project") or ""),
                    query.statuses_clause(request.get("status") or "")):
         if clause:
             clauses.append(clause)
@@ -146,7 +158,8 @@ def jql(request, connection=None, picked=()):
 
 
 def search(get, connection, request):
-    """One page of the list: ``{rows, cursor, jql}``.
+    """One page of the list: ``{rows, cursor, jql, scope}`` - ``scope`` the
+    connection's predefined query as it was ANDed, for the page to say.
 
     ``size`` rows from ``cursor`` (a page of :data:`PAGE_ROWS` by default).
     Refresh asks again from the start for as many rows as are on screen, which
@@ -155,7 +168,7 @@ def search(get, connection, request):
     flavour = connection["flavour"]
     wanted = _bounded(request.get("size"), PAGE_ROWS, MOST_ROWS)
     text = str(request.get("text") or "").strip()
-    found = (picked(get, flavour, text)
+    found = (picked(get, flavour, text, connection.get("scope") or "")
              if text and not request.get("jql") and not ISSUE_KEY.match(text) else [])
     question = jql(request, connection, found)
     rows, cursor = [], request.get("cursor") or None
@@ -181,18 +194,28 @@ def search(get, connection, request):
                 and typed.lower() in str(exc).lower()):
             # A key typed into the search that no issue has: no rows, not an
             # error - the same answer a word nothing contains gets.
-            return {"rows": [], "cursor": None, "jql": question}
+            return {"rows": [], "cursor": None, "jql": question,
+                    "scope": connection.get("scope") or ""}
         raise
-    return {"rows": rows[:wanted], "cursor": cursor, "jql": question}
+    return {"rows": rows[:wanted], "cursor": cursor, "jql": question,
+            "scope": connection.get("scope") or ""}
 
 
-def picked(get, flavour, text):
+def picked(get, flavour, text, within=""):
     """Keys of the issues Jira's own quick search finds for ``text`` - by part
     of a key ("1334", "QA-13") or the start of a word - as its search box
-    does. Empty when that search is not there or fails: the words still go."""
+    does. Empty when that search is not there or fails: the words still go.
+
+    ``within`` is the connection's predefined query, handed to that search as
+    its ``currentJQL``: it gives only so many keys, and asked across the whole
+    site those can all be other projects' - "1296" is a number in every one -
+    leaving none for the project the list is bound to.
+    """
+    params = {"query": text, "showSubTasks": "true", "showSubTaskParent": "true"}
+    if within:
+        params["currentJQL"] = scope.bracketed(within)[1:-1]
     try:
-        raw = get("/rest/api/%s/issue/picker" % api(flavour),
-                  {"query": text, "showSubTasks": "true", "showSubTaskParent": "true"})
+        raw = get("/rest/api/%s/issue/picker" % api(flavour), params)
     except JiraError:
         return []
     keys = []

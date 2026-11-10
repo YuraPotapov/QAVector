@@ -1890,7 +1890,9 @@ class MainWindow(QMainWindow):
                              secrets_path=self.settings.cycle_secrets_path,
                              memory_path=self.settings.cycle_memory_path,
                              runs_path=self.settings.cycle_runs_path,
-                             integrations_path=self.settings.integrations_path)
+                             integrations_path=self.settings.integrations_path,
+                             environments_path=lpf.resolve_path(
+                                 self.settings.launch_projects_path))
 
     def _adopt_launch_projects(self):
         """Once: the projects Launch Sessions had become projects of their own
@@ -2615,9 +2617,10 @@ class MainWindow(QMainWindow):
             done([], "That page is not there any more.")
             return
 
-        def answered(hits, error=None):
-            done([one._replace(section=source.section) for one in hits or []
-                  if isinstance(one, search.Hit)], error)
+        def answered(hits, error=None, within=""):
+            found = [one._replace(section=source.section) for one in hits or []
+                     if isinstance(one, search.Hit)]
+            done(found, error, within) if within else done(found, error)
 
         page.search_source(source.key, query, answered)
 

@@ -40,7 +40,12 @@ AUTHS = ("basic", "bearer", "oauth")
 
 #: What a connection's own settings are, with their defaults.
 #: ``refresh_minutes`` 0 means the page never refreshes on its own.
-SETTINGS = {"default_project": "", "refresh_minutes": 0}
+#: (A ``default_project`` of earlier builds is dropped: it narrowed the list
+#: unseen beside the predefined query, which says the same thing in the open.)
+#: ``predefined_query`` is ANDed with every query the connection makes, its
+#: ``{{variables}}`` read from the environment ``variables_from`` names (see
+#: :mod:`integrations.scope`).
+SETTINGS = {"refresh_minutes": 0, "predefined_query": "", "variables_from": ""}
 
 #: The fields that say where and as whom; changing one makes a past check moot.
 ACCOUNT = ("site", "flavour", "auth", "email", "verify_tls", "cloud_id", "gateway")
@@ -81,7 +86,9 @@ def normalize(entry):
     # Written by an earlier build of this page: a setting for one kind of user
     # of the connection, which the connection has no business knowing about.
     settings.pop("cycle_writes", None)
-    settings["default_project"] = str(settings.get("default_project") or "").strip()
+    settings.pop("default_project", None)
+    for key in ("predefined_query", "variables_from"):
+        settings[key] = str(settings.get(key) or "").strip()
     entry.update({
         "id": str(entry.get("id") or "").strip(),
         "provider": str(entry.get("provider") or "jira").strip(),
@@ -110,7 +117,7 @@ def normalize(entry):
         entry.pop("gateway", None)
     entry.pop("token", None)               # never stored here, whatever was sent
     entry.pop("token_set", None)           # an answer about the store, not a field
-    for runtime in ("renew", "log", "api"):  # what credentials() adds for a caller
+    for runtime in ("renew", "log", "api", "scope"):  # what credentials() adds
         entry.pop(runtime, None)
     return entry
 
@@ -408,21 +415,35 @@ class Unavailable(Exception):
         self.kind = kind
 
 
-def credentials(connection_id, path=None, secrets_path=None):
+def credentials(connection_id, path=None, secrets_path=None, environments_path=None,
+                scoped=True):
     """A connection with what a client needs to reach its service now.
 
     The connection's own fields, plus ``token`` (good now - refreshed first if
     it was signed in through Atlassian and about to run out), ``api`` (where
     requests go, when that is not the site itself), ``renew`` (a call that gives
     a token good at that later moment, for whoever holds on to this past an
-    hour) and ``log`` (the connections file, for :mod:`integrations.activity`).
-    Raises :class:`Unavailable`.
+    hour), ``log`` (the connections file, for :mod:`integrations.activity`) and
+    ``scope`` (its predefined query with the variables put in, "" for none;
+    read from ``environments_path``, by default the project's environments
+    beside the connections file). Raises :class:`Unavailable`; ``scoped``
+    False is for a caller that makes no query - a sign-in check - and leaves
+    the scope out rather than refusing over it.
     """
     entry = get(connection_id, path)
     if entry is None:
         raise Unavailable("No connection %r in this project. Add it in Integrations "
                           "-> Jira -> Connections." % connection_id)
-    found = dict(entry, log=resolve_path(path))
+    from integrations import scope as scope_mod
+    environments = environments_path or scope_mod.default_environments_path(
+        resolve_path(path))
+    try:
+        scope = scope_mod.resolve(entry.get("settings"), environments) if scoped else ""
+    except scope_mod.ScopeError as exc:
+        # Refused rather than asked without it: a scope that is not there must
+        # not read as "every project".
+        raise Unavailable("Connection %r: %s" % (entry["name"], exc), "scope")
+    found = dict(entry, log=resolve_path(path), scope=scope)
     if entry["auth"] == "oauth":
         from integrations import oauth
 

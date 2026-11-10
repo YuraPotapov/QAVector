@@ -1070,7 +1070,7 @@ def _plan_document(source):
 
 
 def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=None,
-                      source=None, integrations_path=None):
+                      source=None, integrations_path=None, environments_path=None):
     """Serve one --cycle-watch* call: print JSON, then exit.
 
     ``--cycle-watch=CYCLE[:TRIGGER]`` asks the queue a trigger watches what is
@@ -1119,7 +1119,8 @@ def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=N
             cycle = loader.load_cycle(cycle_id, cycles_dir)
             from cycle import connections as connections_mod
             connections, refused = connections_mod.load(
-                cycle, None, integrations_path, secrets_path, dict(os.environ))
+                cycle, None, integrations_path, secrets_path, dict(os.environ),
+                environments_path=environments_path)
             if refused:
                 raise ValueError("; ".join(refused))
             cancel = CancelToken()
@@ -1293,7 +1294,7 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                    jobs=None, control=False, reports_dir=None,
                    secrets_path=None, memory_path=None, only=None,
                    start_from="", resume="", reuse_from="", subject=None, action="", mode=None,
-                   launcher=None, integrations_path=None):
+                   launcher=None, integrations_path=None, environments_path=None):
     """Run one cycle to completion. Returns the exit code.
 
     Handled before the Chrome launch loop, because a cycle opens no windows of
@@ -1366,7 +1367,8 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
     if not refusal:
         from cycle import connections as connections_mod
         connections, refused = connections_mod.load(
-            cycle, variables, integrations_path, secrets_path)
+            cycle, variables, integrations_path, secrets_path,
+            environments_path=environments_path)
         if refused:
             refusal = "; ".join(refused)
     if refusal:
@@ -1727,7 +1729,7 @@ def _bad_option_message(arg, config_path):
                "--cycle-secret-list", "--cycle-secret-set",
                "--cycle-secret-copy", "--cycle-secret-export",
                "--cycle-secret-delete", "--cycle-secrets-file",
-               "--integrations-file",
+               "--integrations-file", "--environments-file",
                "--cycle-memory-show", "--cycle-memory-forget",
                "--cycle-memory-file", "--cycle-runs-dir", "--cycle-watch",
                "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove",
@@ -3792,6 +3794,9 @@ write a report. The steps that do not depend on each other run at the same time.
   --integrations-file=PATH  The project's connections (integrations.json). A
                             Jira step naming `connection:` reads its site and
                             account there, and its token from the secrets store.
+  --environments-file=PATH  The project's environments (launch-projects.json),
+                            whose variables a connection's predefined query
+                            uses (default: beside --integrations-file).
   --integrations COMMAND    Connections and their operations, as JSON. Use
                             --integrations --help for the commands.
 
@@ -4060,6 +4065,7 @@ def main():
     watch_command = None  # --cycle-watch / --cycle-watch-seen: JSON, then exit
     secrets_file = None   # --cycle-secrets-file: the store (None = the default)
     integrations_file = None  # --integrations-file: the project's connections
+    environments_file = None  # --environments-file: its environments' variables
     users_filter = None   # None = launch every user in the config
     env_name = None       # --env=NAME; None = every environment
     recorder = None       # --recorder: record a scenario from a live window
@@ -4366,6 +4372,9 @@ def main():
         elif arg.startswith("--integrations-file="):
             integrations_file = os.path.abspath(os.path.expanduser(
                 arg.split("=", 1)[1].strip()))
+        elif arg.startswith("--environments-file="):
+            environments_file = os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip()))
         elif arg.startswith("--cycle-plugin-action="):
             plugin_action = arg.split("=", 1)[1].strip()
         elif arg.startswith("--cycle-run="):
@@ -4598,7 +4607,7 @@ def main():
                             options=subject_options)
     if watch_command:
         run_watch_command(watch_command, cycles_dir, secrets_file, memory_file,
-                          flow_source, integrations_file)
+                          flow_source, integrations_file, environments_file)
     if cycle_command:
         # --from= is shared with --flow-save: one flag, one meaning - the JSON
         # document this write is being given.
@@ -4616,6 +4625,7 @@ def main():
                                 reports_dir=reports_dir,
                                 secrets_path=secrets_file,
                                 integrations_path=integrations_file,
+                                environments_path=environments_file,
                                 memory_path=memory_file,
                                 only=cycle_only, start_from=cycle_from, action=cycle_action,
                                 resume=cycle_resume, reuse_from=cycle_reuse, mode=cycle_mode,

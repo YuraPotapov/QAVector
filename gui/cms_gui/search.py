@@ -379,7 +379,12 @@ class SearchPopup(widgets.FloatingPanel):
             "failed": ("Failed", "bad", (asked or {}).get("error") or source.detail),
         }.get(state, ("%d found" % len(hits), "neutral", source.detail)
               if hits else ("None found", "neutral",
-                            'Nothing in %s matches "%s"' % (source.title, query)))
+                            'Nothing in %s matches "%s"%s' % (
+                                source.title, query,
+                                # What the source searched within, when it was
+                                # bounded: "nothing" is then nothing *there*.
+                                " within %s" % asked["within"]
+                                if asked and asked.get("within") else "")))
         offer = Hit(source.section, 'Search %s for "%s"' % (source.title, query), detail,
                     status, tone, "", Ask(source.section, source.key), False)
         return Group(key, [offer] + hits)
@@ -395,11 +400,11 @@ class SearchPopup(widgets.FloatingPanel):
         asked = {"query": query, "state": "searching", "hits": [], "error": ""}
         self._asked[key] = asked
 
-        def done(hits, error=None):
+        def done(hits, error=None, within=""):
             if self._asked.get(key) is not asked or self.field.text().strip() != query:
                 return  # another query, or asked again since: not this answer
             found = [one for one in hits or [] if isinstance(one, Hit)]
-            asked.update(hits=found, error=str(error or ""),
+            asked.update(hits=found, error=str(error or ""), within=str(within or ""),
                          state="failed" if error and not found else "done")
             on_offer = isinstance(self._payload(self.results.currentRow()), Hit) and \
                 self._payload(self.results.currentRow()).target == target

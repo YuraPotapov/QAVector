@@ -6,7 +6,7 @@ sends it to the core in a file, and every answer says only whether one is set.
 Nothing on these tabs asks Jira anything except Test.
 """
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog,
@@ -732,13 +732,27 @@ class ActivityTab(QWidget):
 
 # -- Settings -----------------------------------------------------------------
 class SettingsTab(QWidget):
-    """The chosen connection's own settings."""
+    """The chosen connection's own settings.
+
+    The predefined query is shown as it comes to while it is typed: the core
+    resolves it (``preview_requested``) from the environments file alone -
+    Jira is not asked - so the page never has a second copy of the rules.
+    """
 
     save_requested = Signal(dict, object)
+    #: ``({"predefined_query", "variables_from"}, done(payload))``.
+    preview_requested = Signal(dict, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.connection = None
+        #: ``() -> [(environment id, label)]``: the project's environments,
+        #: given by whoever holds the project's paths.
+        self.environments = lambda: []
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(350)
+        self._preview_timer.timeout.connect(self._preview)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 14, 0, 0)
         outer.setSpacing(8)
@@ -756,15 +770,34 @@ class SettingsTab(QWidget):
         column.setSpacing(10)
         self.title = widgets.heading("", "h2")
         column.addWidget(self.title)
-        self.project = QLineEdit()
-        self.project.setProperty("mono", "true")
-        self.project.setPlaceholderText("Any project")
-        self.project.setMaximumWidth(260)
-        self.project.textEdited.connect(self._changed)
+        self.query = QLineEdit()
+        self.query.setObjectName("jiraPredefinedQuery")
+        self.query.setProperty("mono", "true")
+        self.query.setPlaceholderText("project = {{jira_project}}")
+        self.query.setMaximumWidth(520)
+        self.query.textEdited.connect(self._query_changed)
         column.addWidget(widgets.field(
-            "Default project", self.project,
-            "A project key, such as QA. The issue list shows only it when no project "
-            "is picked."))
+            "Predefined query", self.query,
+            "JQL that every query of this connection is ANDed with - the list, a typed "
+            "query, Ctrl+K, cycle steps. {{name}} is a variable of the environment "
+            "below, put in as a quoted value. Empty: the whole site."))
+        self.variables_from = widgets.capped(QComboBox(), 320)
+        self.variables_from.setObjectName("jiraVariablesFrom")
+        self.variables_from.setAccessibleName("Variables from")
+        self.variables_from.activated.connect(self._query_changed)
+        column.addWidget(widgets.field(
+            "Variables from", self.variables_from,
+            "The environment whose variables the query uses. Add a variable such as "
+            "jira_project to it on the Environments page."))
+        self.comes_to = QLabel("")
+        self.comes_to.setObjectName("jiraScopePreview")
+        self.comes_to.setProperty("role", "mono")
+        self.comes_to.setWordWrap(True)
+        self.comes_to.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.comes_to.setVisible(False)
+        column.addWidget(self.comes_to)
+        self.scope_problem = _problem()
+        column.addWidget(self.scope_problem)
         self.minutes = QSpinBox()
         self.minutes.setRange(0, 240)
         self.minutes.setSpecialValueText("Never")
@@ -798,13 +831,63 @@ class SettingsTab(QWidget):
         if connection is None:
             return
         settings = connection.get("settings") or {}
-        for widget in (self.project, self.minutes):
+        for widget in (self.minutes, self.query, self.variables_from):
             widget.blockSignals(True)
         self.title.setText(connection.get("name") or connection.get("id"))
-        self.project.setText(settings.get("default_project") or "")
         self.minutes.setValue(int(settings.get("refresh_minutes") or 0))
-        for widget in (self.project, self.minutes):
+        self.query.setText(settings.get("predefined_query") or "")
+        self._fill_environments(settings.get("variables_from") or "")
+        for widget in (self.minutes, self.query, self.variables_from):
             widget.blockSignals(False)
+        self._preview_timer.start()
+
+    def _fill_environments(self, chosen):
+        """The project's environments, read again - one may have been added
+        since - with the chosen one kept even when it is gone, so saving
+        something else does not quietly forget it."""
+        self.variables_from.clear()
+        self.variables_from.addItem("None", "")
+        try:
+            found = list(self.environments() or [])
+        except Exception:                   # noqa: BLE001 - offered as none
+            found = []
+        for env_id, label in found:
+            self.variables_from.addItem(label, env_id)
+        if chosen and self.variables_from.findData(chosen) < 0:
+            self.variables_from.addItem("%s (not in this project)" % chosen, chosen)
+        self.variables_from.setCurrentIndex(max(0, self.variables_from.findData(chosen)))
+
+    def scope_settings(self):
+        return {"predefined_query": self.query.text().strip(),
+                "variables_from": self.variables_from.currentData() or ""}
+
+    def _query_changed(self, *_args):
+        self._changed()
+        self._preview_timer.start()
+
+    def _preview(self):
+        """What the query comes to, said under it - by the core, from the
+        environments file only."""
+        if self.connection is None:
+            return
+        wanted = self.scope_settings()
+        if not wanted["predefined_query"]:
+            self._show_preview({"ok": True, "scope": "", "problems": []}, wanted)
+            return
+        self.preview_requested.emit(
+            wanted, lambda payload, wanted=wanted: self._show_preview(payload, wanted))
+
+    def _show_preview(self, payload, wanted):
+        if wanted != self.scope_settings():
+            return                          # typed on since: a newer one is coming
+        problems = list(payload.get("problems") or [])
+        if not payload.get("ok"):
+            problems = problems or [payload.get("error") or "Could not be checked."]
+        scope = payload.get("scope") or ""
+        self.comes_to.setText("Comes to:  %s" % scope if scope else "")
+        self.comes_to.setVisible(bool(scope) and not problems)
+        self.scope_problem.setText(" ".join(problems))
+        self.scope_problem.setVisible(bool(problems))
 
     def _changed(self, *_args):
         self.save.setEnabled(self.connection is not None)
@@ -815,9 +898,11 @@ class SettingsTab(QWidget):
             return
         entry = dict(self.connection)
         entry.pop("token_set", None)
-        entry["settings"] = dict(entry.get("settings") or {},
-                                 default_project=self.project.text().strip().upper(),
-                                 refresh_minutes=self.minutes.value())
+        settings = dict(entry.get("settings") or {})
+        settings.pop("default_project", None)   # gone: the predefined query says it
+        entry["settings"] = dict(settings,
+                                 refresh_minutes=self.minutes.value(),
+                                 **self.scope_settings())
         self.save.setEnabled(False)
 
         def done(payload):

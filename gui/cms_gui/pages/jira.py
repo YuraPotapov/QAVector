@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QComp
                                QStyle, QStyledItemDelegate, QTabWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
-from .. import background, core as core_mod, icons, search, theme, widgets
+from .. import (background, core as core_mod, icons, launchprojectsfile as lpf, search,
+               theme, widgets)
 from .jiraconnections import ActivityTab, ConnectionsTab, SettingsTab
 from .jiradialogs import split_labels
 from .jiradoc import DescriptionEditor
@@ -60,7 +61,13 @@ HEALTH = {
                     "then Refresh."),
     "no_token": ("No token", "warn", "This connection has no token. Set it in Connections."),
     "busy": ("Busy", "warn", "Jira asked to slow down. Try again in a minute."),
+    "scope": ("Query not ready", "warn",
+              "The connection's predefined query cannot be used yet. Fix it in Settings."),
 }
+
+#: Where the button beside a failure takes the person, by kind of failure.
+FIX_IN = {"signin": "Open Connections", "no_token": "Open Connections",
+          "scope": "Open Settings"}
 
 
 # -- small things -------------------------------------------------------------
@@ -1282,6 +1289,7 @@ class IssuesTab(QWidget):
     refresh_requested = Signal()
     issue_opened = Signal(dict)
     connections_requested = Signal()
+    settings_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1341,7 +1349,7 @@ class IssuesTab(QWidget):
         problem_row.addWidget(self.problem_text, 1)
         self.problem_action = QPushButton("Open Connections")
         self.problem_action.setProperty("variant", "ghost")
-        self.problem_action.clicked.connect(self.connections_requested)
+        self.problem_action.clicked.connect(self._problem_clicked)
         problem_row.addWidget(self.problem_action)
         self.problem.setVisible(False)
         outer.addWidget(self.problem)
@@ -1592,6 +1600,12 @@ class IssuesTab(QWidget):
         self.problem_action.setVisible(bool(action))
         self.problem.setVisible(bool(text))
 
+    def _problem_clicked(self):
+        if self.problem_action.text() == "Open Settings":
+            self.settings_requested.emit()
+        else:
+            self.connections_requested.emit()
+
     def offer(self, title, detail, button, callback, loadable=False):
         """A whole-tab state with one thing to do: no connection, no token, not
         loaded. Shown instead of the list and the detail. ``loadable`` keeps the
@@ -1724,6 +1738,8 @@ class JiraView(QWidget):
         self.issues.issue_opened.connect(self.open_issue)
         self.issues.connections_requested.connect(
             lambda: self.tabs.setCurrentWidget(self.connections_tab))
+        self.issues.settings_requested.connect(
+            lambda: self.tabs.setCurrentWidget(self.settings_tab))
         self.issues.projects.wanted.connect(lambda: self._choices("projects"))
         self.issues.statuses.wanted.connect(lambda: self._choices("statuses"))
         self.issues.detail.earlier_requested.connect(self.earlier_comments)
@@ -1747,6 +1763,8 @@ class JiraView(QWidget):
         self.connections_tab.sign_in_requested.connect(self.sign_in)
         self.connections_tab.app_requested.connect(self.open_app)
         self.settings_tab.save_requested.connect(self.save_connection)
+        self.settings_tab.preview_requested.connect(self.preview_scope)
+        self.settings_tab.environments = self.environments
 
         self.ticker = QTimer(self)
         self.ticker.setInterval(30000)
@@ -2039,8 +2057,7 @@ class JiraView(QWidget):
             self.issues.detail.clear()
         kind = self.health.get(connection["id"])
         if kind in HEALTH and HEALTH[kind][2]:
-            self.issues.say(HEALTH[kind][2],
-                            "Open Connections" if kind in ("signin", "no_token") else "")
+            self.issues.say(HEALTH[kind][2], FIX_IN.get(kind, ""))
         self._show_footer()
 
     def _show_footer(self):
@@ -2110,7 +2127,7 @@ class JiraView(QWidget):
             kind = self._heard(connection_id, payload)
             if not payload.get("ok"):
                 self.issues.say(payload.get("error") or "Jira did not answer.",
-                                "Open Connections" if kind in ("signin", "no_token") else "")
+                                FIX_IN.get(kind, ""))
                 return
             result = payload.get("result") or {}
             listed = result.get("list") or {}
@@ -2139,7 +2156,7 @@ class JiraView(QWidget):
             kind = self._heard(connection_id, payload)
             if not payload.get("ok"):
                 self.issues.say(payload.get("error") or "Jira did not answer.",
-                                "Open Connections" if kind in ("signin", "no_token") else "")
+                                FIX_IN.get(kind, ""))
                 if cache.loaded_at is None:
                     self.issues.show_rows([], False)
                     self.issues.note.say("Nothing loaded. Refresh asks again.")
@@ -2500,8 +2517,10 @@ class JiraView(QWidget):
         connection = self.current()
         if connection is None:
             return
-        default = self.issues.projects.value() or (connection.get("settings") or {}).get(
-            "default_project", "")
+        # The project the list is filtered by, or the only one the connection's
+        # predefined query reaches.
+        default = self.issues.projects.value() or (projects[0][0] if len(projects) == 1
+                                                   else "")
         dialog = CreateIssueDialog(self, projects, default)
         dialog.meta_requested.connect(lambda request, done: self._call(
             "create_meta", lambda core, cancel: core.integrations(
@@ -2570,12 +2589,14 @@ class JiraView(QWidget):
         if self.core is None or not ready:
             done([], "No Jira connection has a token.")
             return
-        answers = {}
+        answers, scopes = {}, {}
 
         def answered(connection, payload):
             kind = self._heard(connection["id"], payload)
             if payload.get("ok"):
-                rows = (payload.get("result") or {}).get("rows") or []
+                result = payload.get("result") or {}
+                rows = result.get("rows") or []
+                scopes[connection["id"]] = result.get("scope") or ""
                 for row in rows:
                     self._found[(connection["id"], row.get("key"))] = dict(row)
                 answers[connection["id"]] = ([_issue_hit(row, connection["id"],
@@ -2587,7 +2608,9 @@ class JiraView(QWidget):
             if len(answers) == len(ready):
                 hits = [found for one in ready for found in answers[one["id"]][0]]
                 errors = [answers[one["id"]][1] for one in ready if answers[one["id"]][1]]
-                done(hits, "" if hits or not errors else errors[0])
+                # Said with "nothing found": the search was bounded by these.
+                within = "; ".join(scopes[one["id"]] for one in ready if scopes.get(one["id"]))
+                done(hits, "" if hits or not errors else errors[0], within)
 
         for connection in ready:
             self._call("found:%s" % connection["id"],
@@ -2666,6 +2689,8 @@ class JiraView(QWidget):
                 self.health.pop(saved.get("id"), None)
                 if _moved(self.connections, saved):
                     self.cache.pop(saved.get("id"), None)
+                    # The projects offered come from the old answer too.
+                    self.issues.projects.reset()
                 self._set_connections(others, pick=saved.get("id"))
                 self._arm_auto()
             if done is not None:
@@ -2674,6 +2699,26 @@ class JiraView(QWidget):
         self._call("save", lambda core, cancel: core.integrations(
             "save", document=document, cancel=cancel),
                    answered, quiet=True)
+
+    def environments(self):
+        """``[(id, label)]`` of the project's environments, for a predefined
+        query's variables: the file the core is given, read here - a local
+        file, Jira is not asked."""
+        path = getattr(self.core, "environments_path", "") or lpf.resolve_path(
+            self.settings.launch_projects_path)
+        try:
+            projects = lpf.load(path)
+        except lpf.LaunchProjectsError:
+            return []
+        named = len([one for one in projects if one.environments]) > 1
+        return [(env.id, "%s  ·  %s" % (project.name, env.name) if named else env.name)
+                for project in projects for env in project.environments]
+
+    def preview_scope(self, settings, done):
+        """What a predefined query comes to - the core resolves it from the
+        environments file; Jira is not asked."""
+        self._call("scope", lambda core, cancel: core.integrations(
+            "scope", document=dict(settings), cancel=cancel), done, quiet=True)
 
     def test_connection(self, connection_id, done=None):
         def answered(payload):
@@ -2752,9 +2797,16 @@ def _done_text(operation, result):
 
 
 def _moved(connections, saved):
-    """Whether a save changed where or as whom: what was loaded is someone else's."""
+    """Whether a save changed where, as whom or within what: what was loaded
+    is someone else's."""
     before = next((one for one in connections if one.get("id") == saved.get("id")), None)
     if before is None:
         return False
-    return any(before.get(key) != saved.get(key)
-               for key in ("site", "flavour", "auth", "email", "verify_tls"))
+    if any(before.get(key) != saved.get(key)
+           for key in ("site", "flavour", "auth", "email", "verify_tls")):
+        return True
+    # Another predefined query is another part of Jira: the list read within
+    # the old one is not this one's.
+    old, new = before.get("settings") or {}, saved.get("settings") or {}
+    return any(old.get(key, "") != new.get(key, "")
+               for key in ("predefined_query", "variables_from"))

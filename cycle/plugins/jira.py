@@ -43,6 +43,7 @@ from cycle import jira_report, registry
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
 from domain.cycle import Artifact
 from cycle import connections as binding
+from integrations import scope
 from integrations.jira import query
 from integrations.jira.adf import flatten as _flatten, to_text as _body  # noqa: F401
 from integrations.jira.client import (CLOUD, REQUEST_TIMEOUT, SERVER,  # noqa: F401
@@ -192,6 +193,10 @@ class JiraIssues(CyclePlugin):
             field("api", "API address",
                   hint="Filled in by a connection signed in with Atlassian, whose "
                        "requests go through Atlassian's API gateway. Leave empty."),
+            field("scope", "Connection scope",
+                  hint="Filled in by a connection with a predefined query: "
+                       "ANDed with whatever this step asks, so it never reads "
+                       "past the project's part of Jira. Leave empty."),
         ),
         outputs=(
             output("issues", "list",
@@ -267,7 +272,7 @@ class JiraIssues(CyclePlugin):
             # would quietly answer with whatever happened to be newest.
             if not pinned and not any(
                     str(settings.get(key) or "").strip()
-                    for key in ("status", "project", "jql")):
+                    for key in ("status", "project", "jql", "scope")):
                 found.append("everyone needs Statuses, Projects or Extra JQL "
                              "to say which issues.")
         elif not pinned and not str(settings.get("user") or "").strip():
@@ -322,15 +327,22 @@ class JiraIssues(CyclePlugin):
         limit = int(self.setting(step.settings, "limit", 50))
 
         issue = str(self.setting(step.settings, "issue", "") or "").strip()
-        if issue:
-            query = 'key = "%s"' % _escape(issue)
-        else:
-            query = jql_for(str(self.setting(step.settings, "user", "") or ""),
-                            self.setting(step.settings, "role", "any"),
-                            str(self.setting(step.settings, "jql", "") or ""),
-                            str(self.setting(step.settings, "project", "") or ""),
-                            str(self.setting(step.settings, "order", "") or ""),
-                            str(self.setting(step.settings, "status", "") or ""))
+        within = str(self.setting(step.settings, "scope", "") or "")
+        try:
+            if issue:
+                query = _scoped('key = "%s"' % _escape(issue), within)
+            else:
+                query = jql_for(str(self.setting(step.settings, "user", "") or ""),
+                                self.setting(step.settings, "role", "any"),
+                                _scoped(str(self.setting(step.settings, "jql", "") or ""),
+                                        within),
+                                str(self.setting(step.settings, "project", "") or ""),
+                                str(self.setting(step.settings, "order", "") or ""),
+                                str(self.setting(step.settings, "status", "") or ""))
+        except scope.ScopeError as exc:
+            # Not asked at all: a query that could reach past the connection's
+            # predefined one is refused, never sent without it.
+            return registry.failed(str(exc))
         description_limit = int(self.setting(step.settings, "description_limit", 0) or 0)
         subtasks = self.setting(step.settings, "subtasks", FULL)
         rich_comments = {}
@@ -461,7 +473,8 @@ def _peek(settings, limit=20):
                   find_gateway=settings.get("flavour", CLOUD) == CLOUD)
     flavour = settings.get("flavour", CLOUD)
     query = jql_for(str(settings.get("user") or ""), settings.get("role", "any"),
-                    str(settings.get("jql") or ""), str(settings.get("project") or ""),
+                    _scoped(str(settings.get("jql") or ""), str(settings.get("scope") or "")),
+                    str(settings.get("project") or ""),
                     str(settings.get("order") or ""),
                     str(settings.get("status") or ""))
     raw = _search(get, flavour, query, int(limit), CancelToken())
@@ -471,6 +484,20 @@ def _peek(settings, limit=20):
         found.append({"key": issue["key"], "title": issue["summary"],
                       "status": issue["status"], "url": issue["url"]})
     return found
+
+
+def _scoped(clause, within):
+    """``clause`` ANDed with a connection's predefined query, when it has one.
+
+    The query is the project's part of Jira, so it bounds even a pinned
+    issue: a key from another project is not this project's to read. The
+    clause is checked whole first (``integrations.scope.anded``), so an extra
+    JQL with a ")" too many cannot close the scope's bracket. Raises
+    ``ScopeError``, a ValueError.
+    """
+    if not str(within or "").strip():
+        return (clause or "").strip()
+    return scope.anded(within, clause, "Extra JQL")
 
 
 def _search(get, flavour, query_, limit, cancel):

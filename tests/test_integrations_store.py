@@ -243,3 +243,11 @@ def test_the_export_command_writes_tokens_only_into_an_owner_only_file(paths, tm
     assert TOKEN not in printed
     assert oct(os.stat(target).st_mode & 0o777) == "0o600"
     assert json.loads(target.read_text())["connections"][0]["token"] == TOKEN
+
+
+
+def test_a_default_project_of_an_earlier_build_is_dropped():
+    entry = store.normalize({"id": "x", "name": "X", "site": "https://x.example.invalid",
+                             "settings": {"default_project": "QA", "refresh_minutes": 5}})
+    assert entry["settings"] == {"refresh_minutes": 5, "predefined_query": "",
+                                 "variables_from": ""}

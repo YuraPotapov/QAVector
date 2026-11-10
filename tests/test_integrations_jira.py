@@ -55,7 +55,7 @@ def jira():
 def _connection(site, flavour="cloud", **settings):
     return {"id": "product-team", "provider": "jira", "name": "Product team",
             "site": site, "flavour": flavour, "auth": "basic", "email": EMAIL,
-            "verify_tls": True, "settings": dict({"default_project": ""}, **settings)}
+            "verify_tls": True, "settings": dict(settings)}
 
 
 def _call(name, server, request=None, flavour="cloud", **settings):
@@ -79,13 +79,10 @@ def test_the_jql_a_list_request_stands_for(request_, expected):
     assert operations.jql(request_) == expected
 
 
-def test_the_default_project_narrows_a_list_nobody_filtered():
+def test_a_default_project_of_an_earlier_build_narrows_nothing():
+    # Gone in favour of the predefined query, which says it where it is seen.
     connection = {"settings": {"default_project": "QA"}}
-    assert operations.jql({}, connection) == 'project = "QA" ORDER BY updated DESC'
-
-
-def test_looking_for_an_issue_is_not_narrowed_to_the_default_project():
-    connection = {"settings": {"default_project": "QA"}}
+    assert operations.jql({}, connection) == operations.jql({})
     assert operations.jql({"text": "web-7", "everywhere": True}, connection) == \
         'key = "WEB-7" ORDER BY updated DESC'
 

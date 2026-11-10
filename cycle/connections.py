@@ -27,7 +27,9 @@ import os
 from cycle import variables
 
 #: What a connection stands for in a step's settings.
-FIELDS = ("site", "flavour", "auth", "email", "token", "verify_tls", "api")
+#: ``scope`` is the connection's predefined query, resolved: a step that names a
+#: connection is bounded by it and cannot set it itself.
+FIELDS = ("site", "flavour", "auth", "email", "token", "verify_tls", "api", "scope")
 
 #: Plugins that change something through a connection, and what the
 #: integration's log calls that change. Reads are not logged.
@@ -89,7 +91,8 @@ def named_by(cycle, run_variables=None, env=None):
     return ids, found
 
 
-def load(cycle, run_variables=None, path=None, secrets_path=None, env=None):
+def load(cycle, run_variables=None, path=None, secrets_path=None, env=None,
+         environments_path=None):
     """``({id: connection with its credentials}, problems)`` for one run.
 
     Only the connections the cycle's steps name are read, and each one must be
@@ -103,7 +106,8 @@ def load(cycle, run_variables=None, path=None, secrets_path=None, env=None):
     connections = {}
     for connection_id in ids:
         try:
-            connections[connection_id] = store.credentials(connection_id, path, secrets_path)
+            connections[connection_id] = store.credentials(
+                connection_id, path, secrets_path, environments_path)
         except (store.Unavailable, store.StoreError) as exc:
             found.append(str(exc))
     return connections, found

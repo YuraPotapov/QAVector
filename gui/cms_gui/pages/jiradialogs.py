@@ -127,8 +127,15 @@ class CreateIssueDialog(QDialog):
         self.create.setEnabled(False)
         self.create.clicked.connect(self._create)
         column.addLayout(row)
-        index = self.project.findData(project) if project else -1
-        if index > 0:
+        # Chosen once the dialog is shown, not here: choosing asks for the
+        # project's issue types, and whoever opens the dialog connects to
+        # meta_requested only after building it - asked now, nobody would hear.
+        self._preselect = self.project.findData(project) if project else -1
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        index, self._preselect = self._preselect, -1
+        if index > 0 and self.project.currentIndex() <= 0:
             self.project.setCurrentIndex(index)
 
     def _say(self, text):

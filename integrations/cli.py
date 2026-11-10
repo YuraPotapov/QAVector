@@ -28,9 +28,14 @@ printed: the only thing anybody is told about it is ``token_set``.
                                   "service"} - a developer's settings
     sign-in [--from=F]            sign in through the browser; F may name a
                                   connection to sign in again: {"connection"}
+    scope --from=F                what a predefined query comes to, with its
+                                  variables put in - asks nothing of Jira:
+                                  {"predefined_query", "variables_from"}
 
 Options, anywhere on the line: ``--integrations-file=PATH`` (the project's
-connections) and ``--cycle-secrets-file=PATH`` (the store their tokens are in).
+connections), ``--cycle-secrets-file=PATH`` (the store their tokens are in) and
+``--environments-file=PATH`` (the project's environments, whose variables a
+connection's predefined query may use; by default beside the connections).
 """
 
 import json
@@ -56,13 +61,14 @@ def main(argv=None):
         else:
             words.append(arg)
     unknown = sorted(set(options) - {"--integrations-file", "--cycle-secrets-file", "--from",
-                                     "--to"})
+                                     "--to", "--environments-file"})
     if unknown:
         return _usage("Unknown option %s." % ", ".join(unknown))
     if not words:
         return _usage("A command is needed.")
     path = _path(options.get("--integrations-file"))
     secrets_path = _path(options.get("--cycle-secrets-file"))
+    environments = _path(options.get("--environments-file"))
     command, rest = words[0], words[1:]
     try:
         handler = COMMANDS[command]
@@ -72,7 +78,8 @@ def main(argv=None):
         if command == "export":
             payload = _export(rest, options.get("--to") or "", path, secrets_path)
         else:
-            payload = handler(rest, options.get("--from") or "", path, secrets_path)
+            payload = handler(rest, options.get("--from") or "", path, secrets_path,
+                              environments=environments)
     except _Usage as exc:
         return _usage(str(exc))
     except Exception as exc:  # noqa: BLE001 - the report IS the error report
@@ -118,13 +125,13 @@ def _one(rest, what):
 
 
 # -- commands -----------------------------------------------------------------
-def _list(rest, source, path, secrets_path):
+def _list(rest, source, path, secrets_path, environments=None):
     from integrations import store
     return {"ok": True, "path": store.resolve_path(path),
             "connections": store.describe(path, secrets_path)}
 
 
-def _save(rest, source, path, secrets_path):
+def _save(rest, source, path, secrets_path, environments=None):
     from integrations import store
     if not source:
         raise _Usage("save needs --from=FILE with the connection.")
@@ -136,11 +143,18 @@ def _save(rest, source, path, secrets_path):
     if problems:
         return {"ok": False, "kind": "invalid", "problems": problems,
                 "error": " ".join(problems)}
-    return {"ok": True, "connection": dict(entry, token_set=store.has_token(
-        entry["id"], secrets_path))}
+    from integrations import scope
+    settings = entry.get("settings") or {}
+    # Saved all the same - the variable may be added to the environment next -
+    # but said now rather than at the first query.
+    warnings = scope.missing(settings.get("predefined_query"), settings.get("variables_from"),
+                             environments or scope.default_environments_path(
+                                 store.resolve_path(path)))
+    return {"ok": True, "warnings": warnings, "connection": dict(
+        entry, token_set=store.has_token(entry["id"], secrets_path))}
 
 
-def _delete(rest, source, path, secrets_path):
+def _delete(rest, source, path, secrets_path, environments=None):
     from integrations import store
     connection_id = _one(rest, "delete")
     if not store.remove(connection_id, path, secrets_path):
@@ -149,10 +163,10 @@ def _delete(rest, source, path, secrets_path):
     return {"ok": True, "id": connection_id}
 
 
-def _test(rest, source, path, secrets_path):
+def _test(rest, source, path, secrets_path, environments=None):
     from integrations import store
     connection_id = _one(rest, "test")
-    answer = _call(connection_id, "test", {}, path, secrets_path)
+    answer = _call(connection_id, "test", {}, path, secrets_path, environments)
     # Remembered, so the Connections table can say when it last worked -
     # only for a test somebody asked for, never for an ordinary read.
     entry = store.get(connection_id, path)
@@ -165,20 +179,23 @@ def _test(rest, source, path, secrets_path):
     return answer
 
 
-def _call_command(rest, source, path, secrets_path):
+def _call_command(rest, source, path, secrets_path, environments=None):
     if len(rest) != 2:
         raise _Usage("call needs a connection id and an operation.")
-    return _call(rest[0], rest[1], _document(source), path, secrets_path)
+    return _call(rest[0], rest[1], _document(source), path, secrets_path, environments)
 
 
-def _call(connection_id, operation, request, path, secrets_path):
+def _call(connection_id, operation, request, path, secrets_path, environments=None):
     """One operation, its failure turned into something a page can show."""
     from integrations import store, PROVIDERS
     from integrations.jira import operations
     from integrations.jira.client import JiraError
 
     try:
-        connection = store.credentials(connection_id, path, secrets_path)
+        # A sign-in check asks no query, so a predefined query that does not
+        # resolve yet must not stop it.
+        connection = store.credentials(connection_id, path, secrets_path, environments,
+                                       scoped=operation != "test")
     except store.Unavailable as exc:
         return {"ok": False, "kind": "no_token" if exc.kind == "app" else exc.kind,
                 "error": str(exc)}
@@ -240,7 +257,7 @@ def _export(rest, target, path, secrets_path):
     return {"ok": True, "ids": [one["id"] for one in found["connections"]]}
 
 
-def _import(rest, source, path, secrets_path):
+def _import(rest, source, path, secrets_path, environments=None):
     from integrations import store
     if not source:
         raise _Usage("import needs --from=FILE with the connections.")
@@ -249,17 +266,17 @@ def _import(rest, source, path, secrets_path):
     return {"ok": True, "said": store.merge(document, mode, path, secrets_path)}
 
 
-def _activity(rest, source, path, secrets_path):
+def _activity(rest, source, path, secrets_path, environments=None):
     from integrations import activity
     return {"ok": True, "activity": activity.read(path)}
 
 
-def _app(rest, source, path, secrets_path):
+def _app(rest, source, path, secrets_path, environments=None):
     from integrations import oauth
     return {"ok": True, "app": oauth.app(path, secrets_path)}
 
 
-def _app_save(rest, source, path, secrets_path):
+def _app_save(rest, source, path, secrets_path, environments=None):
     from integrations import oauth
     if not source:
         raise _Usage("app-save needs --from=FILE with the app.")
@@ -273,7 +290,7 @@ def _app_save(rest, source, path, secrets_path):
     return {"ok": True, "app": oauth.app(path, secrets_path)}
 
 
-def _sign_in(rest, source, path, secrets_path):
+def _sign_in(rest, source, path, secrets_path, environments=None):
     """Sign in through the browser; stopped by SIGTERM, which is how the page's
     Cancel ends this process."""
     import signal
@@ -306,7 +323,19 @@ def _sign_in(rest, source, path, secrets_path):
             "pending": found["pending"]}
 
 
-COMMANDS = {"list": _list, "save": _save, "delete": _delete, "test": _test,
+def _scope(rest, source, path, secrets_path, environments=None):
+    """A connection's predefined query as it would be ANDed: for a page to
+    show while it is typed. Reads the environments file only."""
+    from integrations import scope, store
+    settings = _document(source)
+    where = environments or scope.default_environments_path(store.resolve_path(path))
+    try:
+        return {"ok": True, "scope": scope.resolve(settings, where), "problems": []}
+    except scope.ScopeError as exc:
+        return {"ok": True, "scope": "", "problems": [str(exc)]}
+
+
+COMMANDS = {"scope": _scope, "list": _list, "save": _save, "delete": _delete, "test": _test,
             "call": _call_command, "app": _app, "app-save": _app_save,
             "sign-in": _sign_in, "activity": _activity, "export": _export,
             "import": _import}

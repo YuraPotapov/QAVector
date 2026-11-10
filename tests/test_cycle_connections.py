@@ -323,3 +323,80 @@ def test_the_integrations_package_knows_nothing_of_cycles():
             stripped = line.strip()
             if stripped.startswith(("from cycle", "import cycle")):
                 assert stripped in allowed, "%s: %s" % (source.name, stripped)
+
+
+# -- the connection's predefined query ----------------------------------------
+def test_a_run_is_bounded_by_the_connection_s_scope(jira, tmp_path):
+    server = jira()
+    connection = dict(_connection(server.site), scope='project = "QA"')
+    run = run_cycle(_cycle(READ), str(tmp_path / "run"),
+                    connections={"product-team": connection})
+    assert run.steps["queue"].status == SUCCESS, run.steps["queue"].message
+    posted = [one.body["jql"] for one in server.seen if one.method == "POST"]
+    assert posted and ' AND ((project = "QA")) ORDER BY ' in posted[0]
+
+
+def test_a_pinned_issue_is_bounded_by_the_scope_too(jira, tmp_path):
+    server = jira()
+    connection = dict(_connection(server.site), scope='project = "QA"')
+    step = dict(READ, **{"with": dict(READ["with"], issue="QA-1")})
+    run_cycle(_cycle(step), str(tmp_path / "run"),
+              connections={"product-team": connection})
+    posted = [one.body["jql"] for one in server.seen if one.method == "POST"]
+    assert posted[0].startswith('(project = "QA") AND (key = "QA-1")')
+
+
+def test_extra_jql_that_would_reach_past_the_scope_fails_and_asks_nothing(jira, tmp_path):
+    server = jira()
+    connection = dict(_connection(server.site), scope='project = "QA"')
+    step = dict(READ, **{"with": dict(READ["with"],
+                                      jql="status = Open) OR (project is not EMPTY")})
+    run = run_cycle(_cycle(step), str(tmp_path / "run"),
+                    connections={"product-team": connection})
+    assert run.steps["queue"].status == FAILED
+    assert "closes a bracket" in run.steps["queue"].message
+    assert server.seen == []
+
+
+def test_a_step_cannot_set_the_scope_beside_its_connection():
+    found = registry.get("jira.issues").problems(dict(READ["with"], scope="project = X"))
+    assert any(one.startswith("Give Connection or scope, not both") for one in found)
+
+
+def test_a_listener_is_bounded_by_the_scope(jira, tmp_path):
+    server = jira()
+    connection = dict(_connection(server.site), scope='project = "QA"')
+    watch.check(_listening(READ), memory_path=str(tmp_path / "m.json"),
+                connections={"product-team": connection})
+    posted = [one.body["jql"] for one in server.seen if one.method == "POST"]
+    assert ' AND ((project = "QA")) ORDER BY ' in posted[0]
+
+
+def test_a_real_run_reads_the_scope_from_the_environments_file(
+        tmp_path, monkeypatch, capsys, jira):
+    server = jira()
+    integrations, secrets = str(tmp_path / "integrations.json"), str(tmp_path / "s.json")
+    store.upsert({"name": "Product team", "site": server.site, "email": EMAIL,
+                  "settings": {"predefined_query": "project = {{jira_project}}",
+                               "variables_from": "staging"}},
+                 integrations, secrets, new_token=TOKEN)
+    environments = tmp_path / "envs.json"
+    environments.write_text(json.dumps({"version": 2, "projects": [{
+        "id": "p", "name": "Shop", "environments": [
+            {"id": "staging", "name": "Staging", "variables": {"jira_project": "QA"}}]}]}))
+    cycles = tmp_path / "cycles"
+    cycles.mkdir()
+    (cycles / "c.yaml").write_text(
+        "id: c\nsteps:\n  - id: queue\n    plugin: jira.issues\n    with:\n"
+        "      connection: product-team\n      user: currentUser()\n"
+        "      comments: false\n      attachments: none\n      subtasks: none\n",
+        encoding="utf-8")
+    code, out = _launcher(monkeypatch, capsys, "--cycle-run=c",
+                          "--cycles-dir=%s" % cycles,
+                          "--cycle-runs-dir=%s" % (tmp_path / "runs"),
+                          "--integrations-file=%s" % integrations,
+                          "--cycle-secrets-file=%s" % secrets,
+                          "--environments-file=%s" % environments)
+    assert code == 0, out.err
+    posted = [one.body["jql"] for one in server.seen if one.method == "POST"]
+    assert ' AND ((project = "QA")) ORDER BY ' in posted[0]

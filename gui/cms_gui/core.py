@@ -247,7 +247,8 @@ class Core:
     def __init__(self, script=None, interpreter=None, config=None,
                  log_sources=None, flows_dir=None, cycles_dir=None,
                  secrets_path="",
-                 memory_path="", runs_path="", integrations_path=""):
+                 memory_path="", runs_path="", integrations_path="",
+                 environments_path=""):
         auto_script, auto_python = autodetect()
         self.script = script or auto_script
         if not needs_interpreter(self.script):
@@ -288,6 +289,9 @@ class Core:
         # The project's connections. Their tokens are in the secrets store, so
         # this travels wherever that one does - see secrets_flag().
         self.integrations_path = integrations_path or ""
+        # The project's environments: a connection's predefined query may use
+        # their variables, so wherever the connections go, this goes too.
+        self.environments_path = environments_path or ""
 
     def memory_flag(self):
         """``--cycle-memory-file=`` - and ``--cycle-runs-dir=`` - as a list,
@@ -305,14 +309,18 @@ class Core:
                 + self.integrations_flag())
 
     def integrations_flag(self):
-        """``--integrations-file=`` as a list, empty when nobody has set one.
+        """``--integrations-file=`` (and ``--environments-file=``, whose
+        variables a connection's predefined query uses) as a list, empty when
+        nobody has set one.
 
         Part of :meth:`secrets_flag` as well: a connection's token is in the
         secrets store, so a run or a listener told where the store is must be
         told where the connections are, or a step naming one finds nothing.
         """
-        return (["--integrations-file=" + self.integrations_path]
-                if self.integrations_path else [])
+        return ((["--integrations-file=" + self.integrations_path]
+                 if self.integrations_path else [])
+                + (["--environments-file=" + self.environments_path]
+                   if self.environments_path else []))
 
     def integrations(self, *args, document=None, timeout=120, cancel=None):
         """``--integrations COMMAND ...``: one JSON answer, never a token in argv.

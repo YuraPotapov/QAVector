@@ -419,3 +419,13 @@ def test_with_no_source_set_up_nothing_is_offered(asking):
     QTest.keyClicks(asking.field, "qa-500")
     assert "JIRA" not in _rows(asking)
     assert asking.empty.text() == 'Nothing matches "qa-500".'
+
+
+def test_nothing_found_says_what_the_search_was_bounded_by(asking):
+    QTest.keyClicks(asking.field, "1296")
+    asking._move_to(asking.results.count() - 1, -1)
+    QTest.keyClick(asking.field, Qt.Key_Return)
+    asking.asked[-1][2]([], None, 'project = "QA"')
+    row = asking.results.itemWidget(asking.results.item(asking.results.count() - 1))
+    assert row.tag.text() == "None found"
+    assert row.detail.text() == 'Nothing in Jira matches "1296" within project = "QA"'
