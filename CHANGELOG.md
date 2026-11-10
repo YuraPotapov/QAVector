@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.62] - 2026-11-10
+
 ### Added
 - **Browser prompts** (Launch → Advanced; `--quiet-browser`): what Chrome may
   not show over the page or ask, a checkbox each - saving passwords, cards and
