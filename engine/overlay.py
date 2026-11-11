@@ -172,8 +172,8 @@ class ExecutionOverlay:
         # What the stepping controls show (engine.stepping): nothing until a
         # scenario says it can be paused.
         self._stepping = {"live": False, "scenario": None, "paused": False,
-                          "cursor": 0, "last": 0, "reason": "", "breakpoints": [],
-                          "keys": hud_keys({})}
+                          "cursor": 0, "last": 0, "reason": "", "copy": False,
+                          "breakpoints": [], "keys": hud_keys({})}
         self._copy_shown = None     # the copy laid over the page now, by path
 
     # -- execution hooks ---------------------------------------------------
@@ -339,17 +339,25 @@ class ExecutionOverlay:
         self._status["state"] = "Paused"
         self._stepping.update(paused=True, cursor=cursor, last=last, reason=reason)
         self._show_copy(view, cursor)
+        # Whether a copy is over the page now. Looking at an earlier step
+        # without one - the page could not be copied there, or no history is
+        # kept - the window shows the live page, and the HUD has to say so
+        # rather than call it the page after that step.
+        self._stepping["copy"] = self._copy_shown is not None
         self._push()
 
     def step_resumed(self, cursor):
         self._status["state"] = "Running"
-        self._stepping.update(paused=False, cursor=cursor, last=cursor)
+        self._stepping.update(paused=False, cursor=cursor, last=cursor, copy=False)
         self._show_copy(None, cursor)
         self._push()
 
     def _show_copy(self, view, cursor):
         # Sent when it changes, by its own call, never with every push - and of
         # its resources only what the page does not hold yet (overlay_copy).
+        # Steps that left the page alone share one copy (engine.history), so
+        # going over them changes nothing here: the HUD names the step on the
+        # copy's strip itself, from the cursor every push carries.
         if view == self._copy_shown:
             return
         copy = None

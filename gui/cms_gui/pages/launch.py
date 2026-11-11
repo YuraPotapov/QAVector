@@ -559,8 +559,10 @@ class LaunchSessionsPage(QWidget):
             "the page as it was after an earlier step: on the Run page, and laid\n"
             "over the live page in the window, which stays as the run left it.\n"
             "The copies are temporary: each scenario's go as it ends, and nothing\n"
-            "reaches the report. Taking one costs up to about half a second on a\n"
-            "heavy page and a few megabytes of disk for as long as it is kept.\n"
+            "reaches the report. Most are light - the page's content alone, a few\n"
+            "hundredths of a second after the page has settled - and a full one,\n"
+            "up to about half a second and a few megabytes on a heavy page, is\n"
+            "taken when a page opens or brings in new pictures or styles.\n"
             "Off: Back still chooses where to go on from, without the page.\n"
             "Only with the execution overlay on: pausing and stepping are done\n"
             "through it, so a run without it simply runs.")

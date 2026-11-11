@@ -758,7 +758,11 @@ A run started from the GUI with the execution overlay on (Launch → Advanced;
 `--execution-overlay`) can be paused between steps and stepped over - from the
 Run page, or from the HUD in the window. Without the overlay the run is taken as
 one nobody means to step into and simply runs: no pauses, no page copies. A step
-that is running is never cut short: a pause lands after it.
+that is running is never cut short: a pause lands after it. The end of a scenario
+is a place to stop like any other: a pause asked for during the last step, or a
+single step onto it, leaves the scenario waiting on the page it ends with - the
+steps before it still there to go back over - and going a step at a time carries
+on into the next scenario, stopping before its first step.
 
 | | Key | |
 |---|---|---|
@@ -779,6 +783,26 @@ left it. **Continuing from an earlier step N runs step N+1 and everything after 
 again, on the live page as it is now.** That can repeat what those steps did in
 the application, which is why the result says so: `result.json` lists each such
 return under `interventions`, and the Run page marks the scenario "stepped back".
+A step that left the page alone - a check, a wait that found what it looked for
+at once - shares the copy of the step before it; one that had to wait gets a copy
+of its own, with what it waited for on it. A step whose page could not be copied
+says so in the HUD and on
+the Run page instead of showing the live page as if it were that step's.
+
+Most copies are light: the page's content with what was typed into it, shown
+with the styles, fonts and pictures of the last full copy of the same page. A
+full copy - Chrome's own archive of the page, some ten times the time and the
+size - is taken when a page opens, when it fetches a picture, a font or a
+stylesheet, while it holds a frame, and whenever a light one could not be shown
+truthfully; nothing has to be chosen. A full copy also carries what Chrome's
+archive leaves out - the page's fonts, so its icons are there, and its
+stylesheets as the server sent them - and every copy is shown scrolled to where
+the page was.
+
+**A pause is on record too.** A paused window is yours to use, so `result.json`
+lists every pause under `pauses` (`after_step`, `reason`, `at`, `ms`) and the Run
+page marks the scenario "paused". The time a scenario stood paused is not counted
+as its own: `duration_ms` leaves it out and `paused_ms` says how much it was.
 
 *Pause when a step fails* (`--pause-on-failure`) stops at a failed step instead
 of ending the scenario: go back and continue to run steps again, or continue from

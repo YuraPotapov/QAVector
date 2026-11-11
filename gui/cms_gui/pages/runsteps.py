@@ -24,6 +24,22 @@ from .. import icons, widgets
 ACTIONS = (("back", "back"), ("pause", "pause"), ("step", "step-one"),
            ("forward", "forward"))
 
+#: Puts a copy where the page had been scrolled to - "top,left" on each element
+#: that was, shadow roots included. The HUD in the window does the same.
+RESTORE_SCROLL_JS = """(function () {
+  var roots = [document];
+  for (var i = 0; i < roots.length; i++) {
+    roots[i].querySelectorAll('*').forEach(function (el) {
+      if (el.shadowRoot) roots.push(el.shadowRoot);
+      var at = el.getAttribute('data-qav-scroll');
+      if (!at) return;
+      at = at.split(',');
+      el.scrollTop = parseFloat(at[0]) || 0;
+      el.scrollLeft = parseFloat(at[1]) || 0;
+    });
+  }
+})();"""
+
 
 def describe(step, total=0):
     """``(headline, the line under it)`` for a window's stepping state."""
@@ -31,6 +47,12 @@ def describe(step, total=0):
         return "Running", "Pause stops it after the step it is on"
     cursor, last = step.get("cursor") or 0, step.get("last") or 0
     of = " of %d" % total if total else ""
+    if cursor < last and not step.get("view") and step.get("pending") is None:
+        # No copy of that step: the window shows the live page, and so says
+        # its HUD - not "the page after step N", which it is not.
+        return ((("After step %d" % cursor) if cursor else "Before step 1")
+                + ": no copy of the page",
+                "This is the live page. Continue runs step %d again, on it" % (cursor + 1))
     if cursor < last:
         return (("The page after step %d" % cursor) if cursor else
                 "The page before step 1",
@@ -39,7 +61,11 @@ def describe(step, total=0):
         return ("Step %d%s failed" % (last, of),
                 "Go back to run steps again; continue ends the scenario")
     head = ("Paused after step %d%s" % (last, of)) if last else "Paused before step 1%s" % of
-    return head, "At a breakpoint" if step.get("reason") == "breakpoint" else ""
+    if step.get("reason") == "breakpoint":
+        return head, "At a breakpoint"
+    if total and last >= total:
+        return head, "The last step: continue finishes the scenario"
+    return head, ""
 
 
 class StepBar(QWidget):
@@ -166,8 +192,21 @@ class CopyPane(QWidget):
             self.preview.setAccessibleName("Copy of the page")
             self.stack.addWidget(self.preview)
             self.skeleton = widgets.Skeleton(self.preview, "lines")
-            self.preview.loadFinished.connect(lambda _ok: self.skeleton.stop())
+            self.preview.loadFinished.connect(self._loaded)
         return self.preview
+
+    def _loaded(self, _ok):
+        """The copy is drawn: put it where the page had been scrolled to.
+
+        The core writes that on the copy (engine.history.SCROLL_ATTR) and the
+        copy runs no script of its own - the preview has them switched off -
+        so it is done from here, in a world of ours, which that switch does
+        not reach.
+        """
+        self.skeleton.stop()
+        from PySide6.QtWebEngineCore import QWebEngineScript
+
+        self.preview.page().runJavaScript(RESTORE_SCROLL_JS, QWebEngineScript.ApplicationWorld)
 
     def show_step(self, session, step):
         """``session`` is RunState's session dict; its ``step`` says what to show."""

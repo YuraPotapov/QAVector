@@ -314,3 +314,102 @@ def test_a_check_or_a_wait_shares_the_copy_of_the_step_before(make):
     gate.after_step(1, changes_page=False)
     assert copied == ["step_001.mhtml"]
     assert gate._copies.has(2)
+
+
+def test_a_wait_that_really_waited_gets_a_copy_of_its_own(make):
+    # What it waited for was not on the page the step before left: sharing
+    # that copy, "after the wait" showed the page without it.
+    gate, person, _told = make(copies=True)
+    copied = []
+    original = person.page_copy
+
+    def page_copy(path):
+        copied.append(os.path.basename(path))
+        return original(path)
+
+    person.page_copy = page_copy
+    gate.before_step(0)
+    gate.after_step(0, changes_page=True)
+    gate.before_step(1)
+    gate.after_step(1, changes_page=False, took_ms=20)       # found at once: shared
+    gate.before_step(2)
+    gate.after_step(2, changes_page=False, took_ms=stepping.WAITED_MS + 400)
+    assert copied == ["step_001.mhtml", "step_003.mhtml"]
+    assert gate._copies.view(2) == gate._copies.view(1) != gate._copies.view(3)
+
+
+def test_going_on_takes_back_a_back_asked_while_running(make):
+    # Back while a step runs, then Continue before the step ends: nothing is
+    # left waiting to move the cursor at some later pause.
+    gate, _person, told = make(gui("continue"))
+    walk(gate, 2)
+    gate.put({"command": "back"})
+    gate.put({"command": "continue"})
+    for index in range(2, 6):
+        assert gate.before_step(index) == index
+        gate.after_step(index)
+    gate.put({"command": "pause"})
+    assert gate.before_step(6) == 6               # not 5: no step runs twice
+    assert told.said == [("paused", 6, 6, "pause", None), ("resumed", 6)]
+
+
+# -- the end of a scenario is a boundary too ---------------------------------------
+def test_a_pause_asked_during_the_last_step_waits_at_the_end(make):
+    gate, person, told = make(gui("continue"))
+    walk(gate, 3)
+    gate.put({"command": "pause"})
+    assert gate.at_end(3) is None                 # held, then let the scenario finish
+    assert told.said == [("paused", 3, 3, "pause", None), ("resumed", 3)]
+    assert person.waits == 1
+
+
+def test_nobody_asked_and_the_end_does_not_wait(make):
+    gate, person, _told = make()
+    walk(gate, 3)
+    assert gate.at_end(3) is None and person.waits == 0
+
+
+def test_stepping_back_from_the_end_runs_the_last_steps_again(make):
+    gate, _person, _told = make(gui("back"), gui("back"), gui("continue"))
+    walk(gate, 3)
+    gate.put({"command": "pause"})
+    assert gate.at_end(3) == 1
+
+
+def test_a_step_at_a_time_stops_after_the_last_step_and_before_the_next_scenario(make):
+    gate, person, told = make(gui("step"), gui("step"), gui("step"), gui("continue"))
+    gate.put({"command": "pause"})
+    assert gate.before_step(0) == 0               # paused, Step
+    gate.after_step(0)
+    assert gate.at_end(1) is None                 # paused at the end, Step: finish
+    gate.start("next")
+    assert gate.before_step(0) == 0               # and paused again before its first
+    assert [(one[1], one[3]) for one in told.said if one[0] == "paused"] == [
+        (0, "pause"), (1, "step"), (0, "step")]
+    gate.after_step(0)
+    assert gate.before_step(1) == 1               # ...Step, then Continue: runs on
+    assert person.waits == 4
+
+
+# -- what a pause leaves behind ------------------------------------------------------
+def test_every_pause_is_kept_for_the_result_and_a_new_scenario_starts_clean(make):
+    gate, _person, _told = make(gui("continue"), gui("back"), gui("continue"))
+    walk(gate, 2)
+    gate.put({"command": "pause"})
+    gate.before_step(2)
+    gate.put({"command": "breakpoints", "indices": [2]})
+    gate.before_step(2)
+    assert [(one["after_step"], one["reason"]) for one in gate.pauses] == [
+        (2, "pause"), (2, "breakpoint")]
+    assert all(one["ms"] >= 0 and one["at"] for one in gate.pauses)
+    gate.start("next")
+    assert gate.pauses == []
+
+
+def test_a_failed_step_is_copied_only_when_its_failure_pauses(make):
+    for failures, copied in ((False, False), (True, True)):
+        gate, _person, _told = make(gui("continue"), failures=failures, copies=True)
+        gate.before_step(0)
+        gate.after_step(0, failed=True)
+        assert gate._copies.has(1) is copied
+        assert gate.last == 1                     # the step was taken either way

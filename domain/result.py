@@ -41,6 +41,12 @@ class FlowResult:
     # steps ran twice on the same page, so a pass with any of these is a pass
     # somebody helped along, and says so.
     interventions: list = field(default_factory=list)
+    # Each time the scenario stood paused: {"after_step", "reason", "at", "ms"}.
+    # A paused window is let go for the person to use, so a pass with any of
+    # these is not a run nobody touched. ``duration_ms`` leaves the paused time
+    # out; ``paused_ms`` is how much that was.
+    pauses: list = field(default_factory=list)
+    paused_ms: float = 0.0
 
     @property
     def ok(self):

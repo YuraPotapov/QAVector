@@ -152,6 +152,26 @@ def test_screen_each_numbers_screenshots(tmp_path):
                                 "screenshot_003.png"}
 
 
+def test_steps_taken_back_lose_their_pictures(tmp_path):
+    # Somebody stepped back to after step 2 and the run went on from there
+    # (engine.stepping): steps 3 and 4 are to be taken again. The second time
+    # the scenario gets no further than step 3 - and step 4's picture from the
+    # first pass must not stay beside a result that never lists step 4.
+    r = Reporter(ReportConfig.from_cli(level="screen", screen="start,each,finish"),
+                 str(tmp_path), FakeAdapter())
+    r.capture_start()
+    for index in range(4):
+        r.capture_step(index)
+    r.rewind(2)
+    assert _files(tmp_path) == {"screenshot_start.png", "screenshot_001.png",
+                                "screenshot_002.png"}
+    r.capture_step(2)
+    r.finalize(_flow(), failed=True)
+    assert _files(tmp_path) == {"screenshot_start.png", "screenshot_001.png",
+                                "screenshot_002.png", "screenshot_003.png",
+                                "screenshot_finish.png"}
+
+
 def test_complete_report_on_failure_uses_finish_name(tmp_path):
     # Spec "Complete report": all artifacts, default screen point = finish
     r = Reporter(ReportConfig.from_cli(level="console,dom,result,screen,url"),

@@ -405,13 +405,30 @@
       var st = this._stepping || {};
       if (cursor >= (st.last || 0)) {
         this.showCopy(null, "");                 // the live page is underneath
-      } else if (this._copy) {
-        this._copy._strip.textContent = this._caption(cursor) + " - on its way";
+      } else {
+        this._paintStrip();
       }
     },
 
     _caption: function (cursor) {
       return cursor ? "Copy of the page after step " + cursor : "Copy of the page before step 1";
+    },
+
+    // The strip over a copy: which step it is the page of. Said from the
+    // cursor here, not sent with the copy - steps that left the page alone
+    // share one copy, and going over them sends nothing but where the cursor is.
+    _paintStrip: function () {
+      var layer = this._copy, st = this._stepping || {};
+      if (!layer || !st.paused) return;
+      var waiting = !!this._pending;
+      layer._strip.textContent = this._caption(this._cursor()) +
+          (waiting ? " - on its way" : " - the live page is underneath");
+      var keys = st.keys || {};
+      if (!waiting && keys.back && keys.forward) {
+        var hint = elem("span");
+        hint.textContent = keys.back.text + " / " + keys.forward.text + " move between steps";
+        layer._strip.appendChild(hint);
+      }
     },
 
     _keyText: function (action) {
@@ -447,6 +464,11 @@
       if (!paused) {
         head = "Running";
         sub = "Pause" + this._keyText("pause") + " stops after this step";
+      } else if (looking && !st.copy && !this._pending) {
+        // No copy of that step: what the window shows is the live page, and
+        // calling it the page after the step would be showing the wrong one.
+        head = (cursor ? "After step " + cursor : "Before step 1") + ": no copy of the page";
+        sub = "This is the live page. Continue runs step " + (cursor + 1) + " again, on it";
       } else if (looking) {
         head = cursor ? "The page after step " + cursor : "The page before step 1";
         sub = "Continue runs step " + (cursor + 1) + " again, on the live page";
@@ -455,7 +477,8 @@
         sub = "Go back to run steps again; continue ends the scenario";
       } else {
         head = last ? "Paused after step " + last + of : "Paused before step 1" + of;
-        sub = st.reason === "breakpoint" ? "At a breakpoint" : "";
+        sub = st.reason === "breakpoint" ? "At a breakpoint"
+            : (total && last >= total) ? "The last step: continue finishes the scenario" : "";
       }
       this._sLabel.firstChild.textContent = head;
       this._sLabel.lastChild.textContent = sub;
@@ -599,6 +622,24 @@
               e.preventDefault();
             } catch (err) {}
           }, { passive: false });
+          // A copy is drawn from the top; where the page had been scrolled to
+          // is written on it (data-qav-scroll, "top,left") and put back here,
+          // once it is laid out - the copy runs no script of its own to do it.
+          frame.addEventListener("load", function () {
+            try {
+              var roots = [frame.contentDocument];
+              for (var i = 0; i < roots.length; i++) {
+                roots[i].querySelectorAll("*").forEach(function (el) {
+                  if (el.shadowRoot) roots.push(el.shadowRoot);
+                  var at = el.getAttribute("data-qav-scroll");
+                  if (!at) return;
+                  at = at.split(",");
+                  el.scrollTop = parseFloat(at[0]) || 0;
+                  el.scrollLeft = parseFloat(at[1]) || 0;
+                });
+              }
+            } catch (err) {}
+          });
           layer.appendChild(strip);
           layer.appendChild(frame);
           layer._strip = strip; layer._frame = frame;
@@ -606,13 +647,9 @@
           this._copy = layer;
         }
         html = this._resolve(html);
+        // The caption sent with it, until the push that follows says where
+        // the cursor is - from then on the strip is painted from that.
         layer._strip.textContent = caption || "";
-        var keys = this._stepping.keys || {};
-        if (keys.back && keys.forward) {
-          var hint = elem("span");
-          hint.textContent = keys.back.text + " / " + keys.forward.text + " move between steps";
-          layer._strip.appendChild(hint);
-        }
         layer._frame.srcdoc = html;
         return true;
       } catch (e) { return false; }
@@ -675,6 +712,7 @@
           this._pending = null;
         }
         this._renderStepping(stepping, pr.total);
+        this._paintStrip();
         this._paintProgress();
         if (comp.status) this._renderStatus(state.status);
         if (comp.progress) this._renderProgress(state.progress);

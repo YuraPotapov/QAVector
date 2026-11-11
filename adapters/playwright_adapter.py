@@ -9,6 +9,7 @@ tests) without the package installed.
 
 import contextlib
 import logging
+import re
 import time
 
 from adapters.base import BrowserAdapter
@@ -58,7 +59,16 @@ _COPY_PREPARE_JS = r"""(pixels) => {
   const keep = (el, name) => undo.push([el, name, el.getAttribute(name)]);
   const roots = [document];
   for (let i = 0; i < roots.length; i++) {
-    roots[i].querySelectorAll('*').forEach(el => { if (el.shadowRoot) roots.push(el.shadowRoot); });
+    roots[i].querySelectorAll('*').forEach(el => {
+      if (el.shadowRoot) roots.push(el.shadowRoot);
+      // How far each thing was scrolled: a copy is drawn from the top, and a
+      // form scrolled down to the tab a step opened showed its heading instead.
+      // Whoever shows the copy puts these back (engine/hud.js, the Run page).
+      if (el.scrollTop || el.scrollLeft) {
+        keep(el, 'data-qav-scroll');
+        el.setAttribute('data-qav-scroll', el.scrollTop + ',' + el.scrollLeft);
+      }
+    });
   }
   roots.forEach(root => {
     root.querySelectorAll('input').forEach(el => {
@@ -84,6 +94,228 @@ _COPY_PREPARE_JS = r"""(pixels) => {
   });
   window.__qavCopyUndo = undo;
   return undo.length;
+}"""
+
+# page_light_copy(): the page's DOM alone, with what tells whether the last full
+# copy's stylesheets, fonts and pictures still answer for it. Chrome's own copy
+# writes every stylesheet out again each time - most of what a copy of a heavy
+# page takes, for megabytes that are the same as a step ago - where the DOM is
+# a tenth of the size and a tenth of the time. ``base`` is what this answered
+# when that full copy was taken (None: only say what the page is like). The DOM
+# is written only when the page itself can tell a light copy would be true:
+#   - the same document (a new one has none of the marks left on this one);
+#   - no frames: what is in one is not in this document's DOM;
+#   - the linked stylesheets as they were, by address and number of rules -
+#     a rule put into one by script is in no file to read it from;
+#   - no stylesheet adopted by a shadow root, and no picture chosen from a
+#     srcset: neither is written out in a way a copy can show.
+# A <style> element whose rules were put in by script has its rules sent
+# beside the DOM, and so have the stylesheets the document adopted; ``uses`` is
+# every picture the page shows, for engine.history to look for in the full
+# copy. The HUD's own shadow root is left out, as engine.history cuts it out
+# of a full copy.
+_LIGHT_COPY_JS = r"""([pixels, base]) => {
+  const hud = '__exec_hud_host__';
+  const top = document.documentElement;
+  const roots = [];
+  (function walk(root) {
+    root.querySelectorAll('*').forEach(el => {
+      if (el.shadowRoot && el.id !== hud) { roots.push(el.shadowRoot); walk(el.shadowRoot); }
+    });
+  })(document);
+  const seen = window.__qavSeen || (window.__qavSeen = new WeakMap());
+  if (!window.__qavDoc) window.__qavDoc = Date.now() + '-' + Math.random();
+  const linked = [], dynamic = {}, marked = [], uses = new Set();
+  let why = '', n = 0;
+  const scan = root => {
+    for (const sheet of root.styleSheets) {
+      let count = -1;
+      try { count = sheet.cssRules.length; } catch (e) {}
+      const node = sheet.ownerNode;
+      if (node && node.tagName === 'STYLE') {
+        // Rules put in through the CSSOM are not in the element's text.
+        const text = node.textContent;
+        let was = seen.get(node);
+        if (!was || was.len !== text.length) {
+          let own = -1;
+          try { const probe = new CSSStyleSheet(); probe.replaceSync(text); own = probe.cssRules.length; }
+          catch (e) {}
+          was = {len: text.length, count: own};
+          seen.set(node, was);
+        }
+        if (count >= 0 && was.count !== count) {
+          marked.push(node);
+          dynamic[n++] = [...sheet.cssRules].map(rule => rule.cssText).join('\n');
+        }
+      } else {
+        linked.push([sheet.href || '', count]);
+      }
+    }
+    root.querySelectorAll('img, input[type=image], video[poster], image').forEach(el => {
+      let address = '';
+      if (el.tagName === 'IMG') {
+        if (el.srcset || el.closest('picture')) why = why || 'a picture chosen from a srcset';
+        if (el.complete && el.naturalWidth) address = el.currentSrc || el.src;
+      } else if (el.tagName === 'INPUT') {
+        address = el.src;
+      } else if (el.tagName === 'VIDEO') {
+        address = el.poster;
+      } else {
+        const href = el.getAttribute('href') || el.getAttribute('xlink:href');
+        try { address = href ? new URL(href, document.baseURI).href : ''; } catch (e) {}
+      }
+      if (address && !/^(data|about|javascript):/i.test(address)) uses.add(address);
+    });
+  };
+  scan(document);
+  roots.forEach(root => {
+    scan(root);
+    if (root.adoptedStyleSheets && root.adoptedStyleSheets.length) {
+      why = why || 'a stylesheet adopted by a shadow root';
+    }
+  });
+  if (document.querySelector('iframe, frame, object, embed')) why = why || 'a frame';
+  roots.forEach(root => {
+    if (root.querySelector('iframe, frame, object, embed')) why = why || 'a frame';
+  });
+  if (!top.getHTML) why = why || 'a browser that cannot write shadow roots out';
+  const out = {doc: window.__qavDoc, linked: linked, uses: [...uses], html: null, why: why};
+  if (!base) { out.why = why || 'no full copy to read it against'; return out; }
+  if (base.doc !== out.doc) out.why = 'a new document';
+  else if (!why && JSON.stringify(base.linked) !== JSON.stringify(linked)) {
+    out.why = 'a stylesheet changed';
+  }
+  if (out.why) return out;
+  marked.forEach((node, index) => node.setAttribute('data-qav-style', String(index)));
+  (__PREPARE__)(pixels);
+  try {
+    const open = top.cloneNode(false).outerHTML.replace(/<\/html>\s*$/i, '');
+    const doctype = document.doctype ? '<!DOCTYPE ' + document.doctype.name + '>' : '';
+    out.html = doctype + open + top.getHTML({shadowRoots: roots}) + '</html>';
+    out.url = document.baseURI;
+    out.dynamic = dynamic;
+    out.adopted = (document.adoptedStyleSheets || []).map(
+        sheet => [...sheet.cssRules].map(rule => rule.cssText).join('\n'));
+  } finally {
+    (__RESTORE__)();
+    marked.forEach(node => node.removeAttribute('data-qav-style'));
+  }
+  return out;
+}"""
+
+# The requests a full copy has to be taken after: what they bring - a picture
+# a stylesheet names and no element does, a font - is in no DOM to find it by.
+_COPY_RESOURCE_TYPES = ("image", "stylesheet", "font", "media")
+
+# page_copy(): what Chrome's archive leaves out or gets wrong, read by the page
+# itself from its own cache and put into the archive beside Chrome's parts.
+#   - Fonts. An archive holds none: every icon drawn with a font - Odoo's
+#     whole toolbar - was a blank in the copy.
+#   - Linked stylesheets, as the server sent them. Chrome writes a stylesheet
+#     back out of its parsed rules, and a rule that sets a shorthand through a
+#     variable and then one of its parts comes out with nothing after the
+#     colons: Odoo's form fields lost their border rule and showed the
+#     browser's own. Only a stylesheet with as many rules as when the page was
+#     first looked at: one script has added to is in no file, and stays Chrome's.
+# ``have`` is what the adapter holds already - a page's stylesheet is megabytes,
+# fetched and sent once. Answers ``{use: [address], add: [[address, type,
+# base64]]}``: everything the archive should carry, and what of it is new.
+_SERVED_JS = r"""async (have) => {
+  const held = new Set(have || []);
+  const first = window.__qavFirst || (window.__qavFirst = {});
+  const faces = window.__qavFaces || (window.__qavFaces = new WeakMap());
+  const clean = value => String(value || '').replace(/["']/g, '').trim().toLowerCase();
+  const weight = value => ({normal: '400', bold: '700', '': '400'})[clean(value)] || clean(value);
+  const source = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)(?:\s*format\(\s*["']?([^"')]+)["']?\s*\))?/g;
+  const usable = /^(woff2|woff|truetype|opentype|collection)(-variations)?$/;
+  const sheets = [], fonts = [];
+  const read = sheet => {
+    let rules;
+    try { rules = sheet.cssRules; } catch (e) { return; }
+    const linked = sheet.href && !(sheet.ownerNode && sheet.ownerNode.tagName === 'STYLE');
+    if (linked) {
+      if (!(sheet.href in first)) first[sheet.href] = rules.length;
+      if (first[sheet.href] === rules.length) sheets.push(sheet.href);
+    }
+    let known = faces.get(sheet);
+    if (!known || known.count !== rules.length) {
+      known = {count: rules.length, faces: [], imported: []};
+      const base = sheet.href || document.baseURI;
+      (function walk(list) {
+        for (const rule of list) {
+          if (rule instanceof CSSFontFaceRule) {
+            const urls = [];
+            const text = rule.style.getPropertyValue('src');
+            let found;
+            source.lastIndex = 0;
+            while ((found = source.exec(text))) {
+              const format = (found[4] || '').toLowerCase();
+              if (format && !usable.test(format)) continue;
+              try { urls.push(new URL(found[1] || found[2] || found[3], base).href); } catch (e) {}
+            }
+            known.faces.push({family: clean(rule.style.getPropertyValue('font-family')),
+                              weight: weight(rule.style.getPropertyValue('font-weight')),
+                              style: clean(rule.style.getPropertyValue('font-style')) || 'normal',
+                              urls: urls});
+          } else if (rule instanceof CSSImportRule) {
+            if (rule.styleSheet) known.imported.push(rule.styleSheet);
+          } else if (rule.cssRules && !(rule instanceof CSSStyleRule)) {
+            walk(rule.cssRules);
+          }
+        }
+      })(rules);
+      faces.set(sheet, known);
+    }
+    known.imported.forEach(read);
+    known.faces.forEach(face => fonts.push(face));
+  };
+  const roots = [document];
+  for (let i = 0; i < roots.length; i++) {
+    roots[i].querySelectorAll('*').forEach(el => { if (el.shadowRoot) roots.push(el.shadowRoot); });
+    for (const sheet of roots[i].styleSheets) read(sheet);
+  }
+  // The files of the fonts the page has drawn with: of each face in use, the
+  // source the browser took - the one it is known to have fetched, or the
+  // first it can read.
+  const loaded = [...document.fonts].filter(font => font.status === 'loaded');
+  const wanted = new Map();
+  sheets.forEach(address => wanted.set(address, 'text/css'));
+  let count = 0;
+  for (const face of fonts) {
+    if (!face.urls.length || count >= 40) continue;
+    if (!loaded.some(font => clean(font.family) === face.family &&
+                             weight(font.weight) === face.weight &&
+                             (clean(font.style) || 'normal') === face.style)) continue;
+    const address = face.urls.find(one => performance.getEntriesByName(one).length) || face.urls[0];
+    if (!wanted.has(address)) { wanted.set(address, ''); count++; }
+  }
+  const text = buffer => {
+    const bytes = new Uint8Array(buffer);
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      out += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(out);
+  };
+  const guess = address => {
+    const found = /\.(woff2|woff|ttf|otf)(?:[?#]|$)/i.exec(address);
+    return found ? 'font/' + found[1].toLowerCase() : 'application/octet-stream';
+  };
+  const out = {use: [...wanted.keys()], add: []};
+  await Promise.all([...wanted].filter(([address]) => !held.has(address)).map(
+      async ([address, kind]) => {
+        try {
+          const answer = await fetch(address, {cache: 'force-cache',
+                                               signal: AbortSignal.timeout(4000)});
+          if (!answer.ok) return;
+          const said = (answer.headers.get('content-type') || '').split(';')[0].trim();
+          const body = await answer.arrayBuffer();
+          if (body.byteLength > 16 * 1024 * 1024) return;
+          const type = said && said !== 'application/octet-stream' ? said : guess(address);
+          out.add.push([address, kind || type, text(body)]);
+        } catch (e) {}
+      }));
+  return out;
 }"""
 
 # overlay_copy(): how much of a copy's resources goes in one call into the page.
@@ -198,6 +430,13 @@ class PlaywrightAdapter(BrowserAdapter):
         # Counts the page's own requests starting and ending: settle() tells a
         # quiet page from one that has just been busy by whether it moved.
         self._net_events = 0
+        # page_light_copy(): the pictures, fonts and stylesheets asked for
+        # since the last full copy of the page - see _COPY_RESOURCE_TYPES.
+        self._copy_fetched = set()
+        self._light_js = None
+        # page_copy(): the fonts and stylesheets read from the page so far, by
+        # address, each as the archive part it becomes (see _SERVED_JS).
+        self._served = {}
         # doc_capture(): the elements of the steps already on the guide's page,
         # by selector, so they are measured again in one call, not one each.
         self._doc_handles = {}
@@ -252,6 +491,9 @@ class PlaywrightAdapter(BrowserAdapter):
 
     def _on_request(self, request):
         try:
+            if (request.resource_type in _COPY_RESOURCE_TYPES
+                    and not request.url.startswith(("data:", "blob:"))):
+                self._copy_fetched.add(request)
             if request.resource_type in _LONG_LIVED_TYPES:
                 return
             if any(part in request.url for part in _LONG_LIVED_PATHS):
@@ -544,9 +786,72 @@ class PlaywrightAdapter(BrowserAdapter):
                 page.evaluate(_COPY_RESTORE_JS)
             except Exception as exc:
                 log.debug("page_copy: could not put the page back: %s", exc)
+        data = self._with_served(data)
         with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(data)
+        # Whatever was asked for before this copy is in it - but for what is
+        # still on its way, which the copy was taken without.
+        self._copy_fetched &= self._in_flight
         return True
+
+    def _with_served(self, archive):
+        """``archive`` with the page's fonts and its stylesheets as the server
+        sent them added as parts of their own - see _SERVED_JS. Marked, so
+        engine.history takes such a part over Chrome's of the same address.
+        Whatever goes wrong, the archive is Chrome's as it was."""
+        try:
+            answer = self._page.evaluate(_SERVED_JS, list(self._served)) or {}
+            boundary = re.search(r'boundary="?([^";\r\n]+)"?', archive[:4000])
+            end = archive.rfind("\r\n--%s--" % boundary.group(1)) if boundary else -1
+            if end < 0:
+                return archive
+            for address, kind, body in answer.get("add") or ():
+                if "\r" in address or "\n" in address:
+                    continue
+                self._served[address] = (
+                    "Content-Type: %s\r\nContent-Transfer-Encoding: base64\r\n"
+                    "Content-Location: %s\r\nX-Qav-As: served\r\n\r\n%s"
+                    % (kind, address,
+                       "\r\n".join(body[at:at + 76] for at in range(0, len(body), 76))))
+            # Every archive has a boundary of its own, so it is put before
+            # each part here and not kept with it.
+            mark = "\r\n--%s\r\n" % boundary.group(1)
+            parts = [mark + self._served[address] for address in answer.get("use") or ()
+                     if address in self._served]
+            return archive[:end] + "".join(parts) + archive[end:]
+        except Exception as exc:
+            log.debug("page_copy: nothing added to the archive: %s", exc)
+            return archive
+
+    def page_light_copy(self, base=None):
+        """What a light copy of the page is made of - see _LIGHT_COPY_JS.
+
+        ``base`` is ``{"doc", "linked"}`` as this answered when the last full
+        copy was taken. The answer always says what the page is like (``doc``,
+        ``linked``, ``uses``); its ``html`` is the DOM, there only when a light
+        copy would be true, and ``why`` says why not otherwise. A picture or a
+        font asked for since the full copy is a reason by itself - nothing in
+        the DOM would show it missing - and the DOM is then not written at
+        all. None when the page cannot be asked.
+        """
+        from engine.history import PIXELS_ATTR    # lazy, like playwright itself
+
+        if self._light_js is None:
+            self._light_js = (_LIGHT_COPY_JS.replace("__PREPARE__", _COPY_PREPARE_JS)
+                              .replace("__RESTORE__", _COPY_RESTORE_JS))
+        fetched = len(self._copy_fetched)
+        try:
+            answer = self._page.evaluate(
+                self._light_js, [PIXELS_ATTR, None if fetched else base])
+        except Exception as exc:
+            log.debug("page_light_copy failed: %s", exc)
+            return None
+        if not isinstance(answer, dict):
+            return None
+        if fetched and base:
+            answer["html"] = None
+            answer["why"] = "%d new picture(s), font(s) or stylesheet(s)" % fetched
+        return answer
 
     def overlay_commands(self):
         """Take what the person asked of the HUD - see engine.stepping."""

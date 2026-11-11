@@ -1419,6 +1419,76 @@ def test_stop_while_paused_ends_the_scenario_as_stopped(monkeypatch, tmp_path):
     assert result.status == ERROR and result.error == "stopped at step 1 of 3"
 
 
+def test_a_pause_asked_during_the_last_step_holds_the_finished_scenario(monkeypatch,
+                                                                         tmp_path):
+    # Asked while the last step ran, the pause used to be lost: the scenario
+    # ended, its copies went, and nobody saw the page it left.
+    _plan(monkeypatch, 2)
+    monkeypatch.setattr(runner.artifacts, "scenario_dir", lambda *a: str(tmp_path))
+
+    class LastMoment(_SteppedAdapter):
+        def click(self, selector, timeout=None):
+            super().click(selector, timeout)
+            if self.clicks == 2:
+                self.gate.put({"command": "pause"})
+
+    adapter = LastMoment(["back", "continue"])
+    gate = runner.stepping.StepGate("dev-agent", adapter, runner.NullOverlay(), live=True)
+    adapter.gate = gate
+    ctx = runner.RunContext(user={"login": "agent", "class": "Agent"},
+                            env={"origin": "http://x", "url": "http://x"})
+    result = runner._run_scenario(adapter, "s", "dev-agent", None, {}, ctx, str(tmp_path),
+                                  gate=gate)
+    # Held at the end, back one, on: the last step ran a second time.
+    assert adapter.clicks == 3 and result.status == PASS
+    assert [(one["after_step"], one["back_to_step"]) for one in result.interventions] == [
+        (2, 1)]
+
+
+def test_a_step_at_a_time_after_going_back_runs_the_step_asked_for(monkeypatch, tmp_path):
+    # Back over the failure, then Step: the failed step runs again at once. It
+    # used to pause a second time before running anything.
+    result, adapter = _stepped(monkeypatch, tmp_path, 3, ["back", "step", "continue"],
+                               fails={2}, failures=True)
+    assert result.status == PASS and adapter.clicks == 4
+    assert adapter.script == []
+
+
+def test_a_pause_is_written_into_the_result_and_its_time_is_not_the_scenario_s(
+        monkeypatch, tmp_path):
+    _plan(monkeypatch, 3)
+    monkeypatch.setattr(runner.artifacts, "scenario_dir", lambda *a: str(tmp_path))
+
+    class Thinking(_SteppedAdapter):
+        def idle(self, seconds):
+            time.sleep(0.25)
+            super().idle(seconds)
+
+    adapter = Thinking(["continue"])
+    gate = runner.stepping.StepGate("dev-agent", adapter, runner.NullOverlay(), live=True)
+    adapter.gate = gate
+    gate.put({"command": "breakpoints", "scenario": "s", "indices": [1]})
+    ctx = runner.RunContext(user={"login": "agent", "class": "Agent"},
+                            env={"origin": "http://x", "url": "http://x"})
+    result = runner._run_scenario(adapter, "s", "dev-agent", None, {}, ctx, str(tmp_path),
+                                  gate=gate)
+    assert result.status == PASS and result.interventions == []
+    assert [(one["after_step"], one["reason"]) for one in result.pauses] == [(1, "breakpoint")]
+    assert result.paused_ms >= 250
+    assert result.duration_ms < 200               # the quarter second is not in it
+
+
+def test_a_run_nobody_paused_has_no_pauses(monkeypatch, tmp_path):
+    _no_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner.artifacts, "scenario_dir", lambda *a: str(tmp_path))
+    ctx = runner.RunContext(user={"login": "agent", "class": "Agent"},
+                            env={"origin": "http://x", "url": "http://x"})
+    _plan(monkeypatch, 2)
+    result = runner._run_scenario(_SteppedAdapter([]), "s", "dev-agent", None, {}, ctx,
+                                  str(tmp_path))
+    assert result.status == PASS and result.pauses == [] and result.paused_ms == 0
+
+
 # ----------------------------------------------------- server logs in a report
 def test_a_scenarios_report_gets_the_lines_from_its_own_window(monkeypatch, tmp_path):
     """The slice must start when the SCENARIO did, not when the window opened.

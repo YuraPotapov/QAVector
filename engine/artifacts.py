@@ -17,6 +17,7 @@ must never mask the real result.
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass
 
@@ -273,9 +274,21 @@ class Reporter:
 
     def rewind(self, first):
         """Steps from ``first`` on are run again (engine.stepping): the guide
-        forgets what it wrote for them, so it does not describe them twice."""
+        forgets what it wrote for them, so it does not describe them twice -
+        and the pictures taken after them go. A step that runs again is
+        pictured again; one the run never gets back to - it fails earlier the
+        second time - would otherwise keep, beside a result that does not
+        list it, the picture of a page from the first pass."""
         if self._doc is not None:
             _safe(lambda: self._doc.rewind(first), "guide")
+        _safe(lambda: self._forget_shots(first), "screenshots")
+
+    def _forget_shots(self, first):
+        # screenshot_004.png is the page after step index 3 (capture_step).
+        for name in os.listdir(self._out):
+            found = re.fullmatch(r"screenshot_(\d{3})\.png", name)
+            if found and int(found.group(1)) > first:
+                os.remove(os.path.join(self._out, name))
 
     def finalize(self, flow_result, failed):
         """Write the finish screenshot and the outcome's report artifacts."""

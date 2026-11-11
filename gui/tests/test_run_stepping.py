@@ -89,10 +89,52 @@ def test_the_bar_says_the_same_as_the_overlay_in_the_window():
     assert runsteps.describe({"paused": True, "cursor": 3, "last": 3,
                               "reason": "breakpoint"}, 4) == (
         "Paused after step 3 of 4", "At a breakpoint")
-    assert runsteps.describe({"paused": True, "cursor": 1, "last": 3}, 4) == (
+    assert runsteps.describe({"paused": True, "cursor": 1, "last": 3, "view": "/v/1"},
+                             4) == (
         "The page after step 1", "Continue runs step 2 again, on the live page")
     assert runsteps.describe({"paused": True, "cursor": 2, "last": 2,
                               "reason": "failure"}, 4)[0] == "Step 2 of 4 failed"
+    # A step that left no copy: the window shows the live page, and both say so.
+    assert runsteps.describe({"paused": True, "cursor": 1, "last": 3}, 4) == (
+        "After step 1: no copy of the page",
+        "This is the live page. Continue runs step 2 again, on it")
+    assert runsteps.describe({"paused": True, "cursor": 0, "last": 3}, 4)[0] == (
+        "Before step 1: no copy of the page")
+    # ...but not while the copy the person went to is still on its way.
+    assert runsteps.describe({"paused": True, "cursor": 1, "last": 3, "pending": 1},
+                             4)[0] == "The page after step 1"
+    # Paused at the end - a pause asked for during the last step.
+    assert runsteps.describe({"paused": True, "cursor": 4, "last": 4}, 4) == (
+        "Paused after step 4 of 4", "The last step: continue finishes the scenario")
+
+
+def test_a_pause_is_counted_and_its_time_is_not_the_scenario_s():
+    from cms_gui.pages.run import _took
+
+    state = RunState()
+    session = _run(state)
+    run = session["runs"]["order"]
+    run["started"] = 1000.0
+    state.handle({"kind": "step.paused", "session": "shop-alice", "ts": 1010.0,
+                  "cursor": 3, "last": 3, "reason": "pause", "view": None})
+    state.handle({"kind": "step.paused", "session": "shop-alice", "ts": 1030.0,
+                  "cursor": 2, "last": 3, "reason": "pause", "view": "/v/2"})   # a move
+    assert run["pauses"] == 1
+    assert _took(run, now=1050.0) == _took(dict(run, ended=1010.0))   # the clock stands
+    state.handle({"kind": "step.resumed", "session": "shop-alice", "ts": 1070.0, "cursor": 2})
+    assert run["paused_s"] == 60.0 and "paused_since" not in run
+    assert _took(dict(run, ended=1080.0)) == _took({"started": 1000.0, "ended": 1020.0})
+
+
+def test_a_scenario_stopped_while_paused_ends_its_pause():
+    state = RunState()
+    session = _run(state)
+    run = session["runs"]["order"]
+    state.handle({"kind": "step.paused", "session": "shop-alice", "ts": 1010.0,
+                  "cursor": 3, "last": 3, "reason": "pause", "view": None})
+    state.handle({"kind": "flow.end", "session": "shop-alice", "ts": 1015.0,
+                  "status": "error", "passed": 3, "total": 4})
+    assert run["paused_s"] == 5.0 and "paused_since" not in run
 
 
 # -- the controls -------------------------------------------------------------------
@@ -208,6 +250,34 @@ def test_the_copy_pane_is_there_while_paused_and_says_where_the_live_page_is(qap
     assert page.copy_pane._empty_title.text() == "The page is in the browser window"
 
 
+def test_a_copy_is_put_where_the_page_had_been_scrolled_to(qapp, dispose):
+    # The copy runs no script - the preview has them off - so the pane does it
+    # once the copy is drawn, in a world of its own that the switch leaves alone.
+    from PySide6.QtWebEngineCore import QWebEngineScript
+
+    pane = runsteps.CopyPane()
+    ran, stopped = [], []
+
+    class Page:
+        def runJavaScript(self, script, world):
+            ran.append((script, world))
+
+    class Preview:
+        def page(self):
+            return Page()
+
+    class Skeleton:
+        def stop(self):
+            stopped.append(True)
+
+    pane.preview, pane.skeleton = Preview(), Skeleton()
+    pane._loaded(True)
+    assert stopped and len(ran) == 1
+    assert "data-qav-scroll" in ran[0][0] and "scrollTop" in ran[0][0]
+    assert ran[0][1] == QWebEngineScript.ApplicationWorld
+    dispose(pane)
+
+
 def test_a_step_with_no_copy_says_why_rather_than_showing_nothing(qapp, dispose):
     state = RunState()
     page = RunPage(state)
@@ -254,6 +324,42 @@ def test_each_press_shows_at_once_and_a_late_answer_does_not_pull_it_back(qapp, 
     assert session["step"]["cursor"] == 1
     _paused(state, cursor=1, last=3, view="/v/1")             # and to the last
     assert session["step"]["cursor"] == 1 and session["step"]["pending"] is None
+
+
+def test_a_press_the_core_never_answers_does_not_stay_on_its_way(qapp, dispose):
+    # The command was lost, or the window's own HUD moved the cursor somewhere
+    # else in the same moment: after a while the page shows where the core is.
+    from cms_gui import runner
+
+    state = RunState()
+    page = RunPage(state)
+    session = _run(state)
+    _paused(state, cursor=3, last=3)
+    page.refresh()
+    page.step("back")
+    _paused(state, cursor=1, last=3, view="/v/1")             # the core went elsewhere
+    assert session["step"]["cursor"] == 2 and session["step"]["pending"] == 2
+    state._pending_over("shop-alice", 1)                      # an older press's timer
+    assert session["step"]["pending"] == 2
+    state._pending_over("shop-alice", 2)
+    assert session["step"]["pending"] is None and session["step"]["cursor"] == 1
+    assert runner.PENDING_S == 15.0                           # as the HUD gives its own
+    dispose(page)
+
+
+def test_a_refused_move_is_not_on_its_way(qapp, dispose):
+    state = RunState()
+    page = RunPage(state)
+    session = _run(state)
+    _paused(state, cursor=3, last=3)
+    page.refresh()
+    page.step("back")
+    assert session["step"]["pending"] == 2
+    state.handle({"kind": "scenario.control.refused", "session": "shop-alice",
+                  "command": "scenario.cursor", "reason": "no scenario is running in shop-alice"})
+    assert session["step"]["pending"] is None and session["step"]["cursor"] == 3
+    assert session["step"]["refused"]
+    dispose(page)
 
 
 def test_looking_back_the_bar_shows_the_step_looked_at(qapp):

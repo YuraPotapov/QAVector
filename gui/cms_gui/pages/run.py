@@ -76,12 +76,17 @@ def format_duration(seconds):
 
 
 def _took(run, now=None):
-    """How long one scenario took, or has taken so far. "" before it starts."""
+    """How long one scenario took, or has taken so far. "" before it starts.
+
+    The time it stood paused is left out, as result.json leaves it out: the
+    clock stands while it is paused and goes on from there.
+    """
     started = run.get("started")
     if not started:
         return ""
-    ended = run.get("ended") or (now if now is not None else time.time())
-    return format_duration(ended - started)
+    ended = (run.get("ended") or run.get("paused_since")
+             or (now if now is not None else time.time()))
+    return format_duration(max(0.0, ended - started - (run.get("paused_s") or 0.0)))
 
 
 def _mark(status):
@@ -529,7 +534,10 @@ class _ScenarioHeader:
         # A pass somebody helped along - stepped back, and had steps run again
         # on the same page - says so beside the time, as result.json does.
         again = run.get("rewound") or 0
-        painted = (status, counts, took, again)
+        # And one that was only paused says that: a paused window is the
+        # person's to use, so it is not a run nobody touched either.
+        pauses = run.get("pauses") or 0
+        painted = (status, counts, took, again, pauses)
         if painted == self._painted:
             return
         if self._painted is None or self._painted[0] != status:
@@ -537,9 +545,18 @@ class _ScenarioHeader:
             self.mark.setPixmap(icons.pixmap(name, 13, colour))
             _restyle(self.label, status=status)
         self.label.setText("%s%s" % (self.scenario, counts))
-        self.took.setText(took + ("   stepped back" if again else ""))
-        self.took.setToolTip("Somebody stepped back and the run went on from there: "
-                             "some steps ran twice on the same page." if again else "")
+        note = "   stepped back" if again else "   paused" if pauses else ""
+        self.took.setText(took + note)
+        if again:
+            tip = ("Somebody stepped back and the run went on from there: "
+                   "some steps ran twice on the same page.")
+        elif pauses:
+            tip = ("Paused %s. The window was free to use meanwhile; the time it "
+                   "stood paused is not counted." % ("once" if pauses == 1 else
+                                                     "%d times" % pauses))
+        else:
+            tip = ""
+        self.took.setToolTip(tip)
         self._painted = painted
 
 

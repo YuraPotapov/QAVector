@@ -141,11 +141,15 @@ def _make_overlay(overlay_components, adapter, session_name=None, collapsed=Fals
     its single ``overlay.*`` call site; when neither is, this is a no-op object
     and nothing downstream has to test for it.
     """
+    # The event stream first: its line is written in microseconds, where the
+    # HUD's turn is a call into the page - and laying a copy over it, on a
+    # first step back, the best part of a second the GUI then waited out
+    # before it heard where the cursor was.
     observers = []
-    if overlay_components:
-        observers.append(ExecutionOverlay(overlay_components, adapter, collapsed=collapsed))
     if events.enabled():
         observers.append(events.EventObserver(session_name))
+    if overlay_components:
+        observers.append(ExecutionOverlay(overlay_components, adapter, collapsed=collapsed))
     if not observers:
         return NullOverlay()
     if len(observers) == 1:
@@ -941,9 +945,14 @@ def _run_scenario(adapter, scenario_id, session_name, flows_dir, selectors, ctx,
         _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter,
                    gate, result)
     finally:
+        # Before the gate lets go of the scenario: every pause, for the result.
+        # A paused window is the person's to use, so a pass that was paused
+        # says so - and the time it stood still is theirs, not the scenario's.
+        result.pauses = list(gate.pauses)
         gate.finish()
 
-    result.duration_ms = (time.time() - started) * 1000
+    result.paused_ms = float(sum(one["ms"] for one in result.pauses))
+    result.duration_ms = max(0.0, (time.time() - started) * 1000 - result.paused_ms)
     reporter.finalize(result, failed=result.status != PASS)
     passed = sum(1 for s in result.steps if s.status == PASS)
     overlay.flow_end(result.status, passed, len(steps))
@@ -957,7 +966,21 @@ def _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter, gat
     there (engine.stepping), from that earlier step again. ``result.steps`` holds
     one entry for each step taken so far, so taking steps back drops theirs."""
     index = 0
-    while index < len(steps):
+    # The gate has just said to run this very step - the person went back and
+    # on from here - so it is not asked a second time: asked again, somebody
+    # going a step at a time was stopped before the step they had asked for.
+    told = False
+    while True:
+        if index >= len(steps):
+            # The end is a boundary like any other: somebody who asked for a
+            # pause during the last step, or is going a step at a time, finds
+            # the scenario waiting on the page it leaves - and can step back
+            # from there (engine.stepping.StepGate.at_end).
+            again = gate.at_end(index)
+            if again is None:
+                return
+            _rewind(result, overlay, reporter, gate, again, index)
+            index, told = again, True
         if _stopping(session_name):
             # Stop has to bite BETWEEN STEPS, not merely between scenarios. A
             # forty-step flow whose remaining steps each time out at 30 s takes
@@ -965,13 +988,17 @@ def _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter, gat
             # that time the GUI's Stop looks like it did nothing at all.
             _stopped(result, scenario_id, "stopped at step %d of %d", index, len(steps))
             return
-        again = gate.before_step(index)
-        if again is None:
-            _stopped(result, scenario_id, "stopped at step %d of %d", index, len(steps))
-            return
-        if again != index:
-            _rewind(result, overlay, reporter, gate, again, index)
-            index = again
+        if told:
+            told = False
+        else:
+            again = gate.before_step(index)
+            if again is None:
+                _stopped(result, scenario_id, "stopped at step %d of %d", index,
+                         len(steps))
+                return
+            if again != index:
+                _rewind(result, overlay, reporter, gate, again, index)
+                index = again
         step = steps[index]
         # The guide pictures a step that acts BEFORE it does - the page as the
         # reader will find it, the element still there to point at - and before
@@ -982,7 +1009,9 @@ def _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter, gat
         result.steps.append(step_result)
         overlay.step_end(index, step_result.status, step_result.attempts, step_result.message)
         reporter.step_ended(index, step, step_result)
-        gate.after_step(index, step.action in artifacts.CHANGES_PAGE)
+        gate.after_step(index, step.action in artifacts.CHANGES_PAGE,
+                        failed=step_result.status != PASS,
+                        took_ms=step_result.duration_ms)
         if step_result.status != PASS:
             if _stopping(session_name):
                 # The window was closed under this step. Report what happened
@@ -993,7 +1022,7 @@ def _run_steps(adapter, steps, scenario_id, session_name, overlay, reporter, gat
             again = gate.after_failure(index)
             if again is not None:
                 _rewind(result, overlay, reporter, gate, again, index + 1)
-                index = again
+                index, told = again, True
                 continue
             result.status = step_result.status
             result.error = "%s(%s): %s" % (

@@ -514,6 +514,39 @@ def test_the_copy_of_a_page_is_sent_once_and_taken_away_on_going_on(monkeypatch)
     assert stepping["paused"] is False and stepping["cursor"] == stepping["last"] == 1
 
 
+def test_the_hud_is_told_whether_a_copy_is_over_the_page(monkeypatch):
+    # Looking at a step that left no copy, the window shows the live page: the
+    # HUD must be able to say so instead of calling it the page after that step.
+    from engine import history
+
+    copy = ("<html>the page after step 1</html>", [])
+    monkeypatch.setattr(history, "lookup", lambda view: copy if view == "/v/1" else None)
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    ov.step_paused(1, 3, "pause", "/v/1")
+    assert adapter.renders[-1]["stepping"]["copy"] is True
+    ov.step_paused(2, 3, "pause", None)            # that step could not be copied
+    assert adapter.renders[-1]["stepping"]["copy"] is False
+    ov.step_paused(1, 3, "pause", "/v/gone")       # or its copy is gone since
+    assert adapter.renders[-1]["stepping"]["copy"] is False
+    ov.step_paused(1, 3, "pause", "/v/1")
+    ov.step_resumed(1)
+    assert adapter.renders[-1]["stepping"]["copy"] is False
+
+
+def test_steps_sharing_a_copy_send_it_once_and_still_say_where_the_cursor_is(monkeypatch):
+    from engine import history
+
+    copy = ("<html>one page for three steps</html>", [])
+    monkeypatch.setattr(history, "lookup", lambda view: copy)
+    ov, adapter = _overlay()
+    ov.flow_start(_tree(), role="Admin")
+    for cursor in (3, 2, 1):
+        ov.step_paused(cursor, 4, "pause", "/v/1")
+    assert len(adapter.copies) == 1
+    assert [one["stepping"]["cursor"] for one in adapter.renders[-3:]] == [3, 2, 1]
+
+
 def test_keys_are_read_as_the_page_sees_them():
     keys = hud_keys({"back": "Alt+Left", "step": "Ctrl+Shift+N", "pause": "Ctrl++",
                      "forward": "Ctrl+K, Ctrl+F"})

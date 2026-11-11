@@ -10,10 +10,13 @@ back. Every position has a copy of its page while the run lives
 **What can be asked**, by the GUI over ``--control`` or by the HUD in the page:
 
 * ``pause`` - stop at the next boundary between steps. A step that is running
-  is never cut short, just as Stop does not cut one short.
+  is never cut short, just as Stop does not cut one short. The end of the
+  scenario is a boundary too: asked for during the last step, the pause is
+  there, on the page the scenario leaves, before its copies go.
 * ``continue`` - go on. From the live page that is the next step; after
   stepping back to ``N`` it is step ``N+1``, run against the live page as it is.
-* ``step`` - go on for one step, then stop again.
+* ``step`` - go on for one step, then stop again - after the last step as
+  after any other, and from there before the first step of the next scenario.
 * ``back`` / ``forward`` / ``cursor`` - move the cursor. ``forward`` on the live
   page is a step. Asked while the scenario runs, they pause it first.
 * ``breakpoints`` - the steps of a scenario to stop before, by index.
@@ -24,6 +27,10 @@ page that has already been through those steps once. That was the person's
 decision (2026-11-09), knowing it can repeat what the steps did, and it is why
 the runner writes every such return into the result as an intervention: a pass
 that needed one is not the same as a pass.
+
+**A pause is said too.** A paused window is let go, and the person can do
+anything in it; so every pause is kept (``pauses``) for the runner to write
+into the result, and the time it took is not counted as the scenario's.
 
 **Threads.** Commands arrive on the launcher's control thread and are only
 queued there. Everything else happens on the session's own thread, the one
@@ -39,11 +46,24 @@ cycle, from a terminal or shown without its HUD goes exactly as it always did.
 import collections
 import logging
 import threading
+import time
 
 log = logging.getLogger("flowengine.stepping")
 
-#: How often a paused scenario looks for what it has been asked.
+#: How often a paused scenario looks for what it has been asked - and how
+#: often for a few seconds after it was asked something: presses come in runs,
+#: and each waited out most of a slow look before it showed. Every look is a
+#: call into the page, which a scenario paused for an hour should not make
+#: twenty-five times a second.
 POLL_S = 0.15
+POLL_BUSY_S = 0.04
+BUSY_FOR_S = 5.0
+
+#: A check or a wait that took this long was waiting for the page, not just
+#: looking at it: the page is not as the step before left it, and gets a copy
+#: of its own (:meth:`StepGate.after_step`). One that finds what it looks for
+#: at once takes a few hundredths of a second.
+WAITED_MS = 150
 
 COMMANDS = ("pause", "continue", "step", "back", "forward", "cursor", "breakpoints", "keys")
 
@@ -131,6 +151,10 @@ class StepGate:
         self._moved = False            # the cursor moved since it was last said
         self._once = False             # one step, then pause
         self._deferred = []            # moves asked for while running
+        self._asked_at = 0.0           # when something was last asked (POLL_BUSY_S)
+        #: Every pause of the scenario under way, for its result:
+        #: ``{"after_step", "reason", "at", "ms"}``.
+        self.pauses = []
 
     @classmethod
     def off(cls):
@@ -164,7 +188,10 @@ class StepGate:
         self.scenario = scenario_id
         self._settle = settle
         self.cursor = self.last = 0
-        self._once = False
+        # Going a step at a time is not reset: the step after one scenario's
+        # last is the next one's first, and that scenario must not run off
+        # to its end because the one before it happened to finish.
+        self.pauses = []
         history = self._options.history
         if self.live and history is not None:
             self._copies = history.scenario(self.session, scenario_id)
@@ -194,17 +221,44 @@ class StepGate:
             return index
         return self._hold(reason)
 
-    def after_step(self, index, changes_page=True):
+    def at_end(self, total):
+        """Every one of the ``total`` steps has run. With a pause asked for, or
+        going a step at a time, the scenario waits here - on the page it
+        leaves, its copies still there to step back over. An index is where to
+        run again from; None lets the scenario finish.
+
+        Without this the last step was the one boundary nothing could stop
+        at: a pause asked for during it was lost, and stepping through a
+        scenario ended with the scenario gone and the next one running.
+        """
+        if not self.live:
+            return None
+        self._take()
+        if not (self._once or self._wanted):
+            return None
+        again = self._hold("step" if self._once else "pause")
+        if again is None or again >= total:
+            return None
+        return again
+
+    def after_step(self, index, changes_page=True, failed=False, took_ms=0):
         """Step ``index`` has run, whatever came of it: copy the page it left.
 
         A step that leaves the page as it was - a check, a wait, a service -
         shares the copy of the step before it (``changes_page`` False), rather
-        than paying a second on a heavy page for the same picture.
+        than paying a second on a heavy page for the same picture. But one
+        that took ``took_ms`` of any length was waiting for the page to
+        change, and it did: sharing, the copy "after the wait" was the page
+        without what had been waited for. And a step that ``failed`` is copied
+        only when its failure pauses: otherwise the scenario ends there and
+        nobody can go back to look.
         """
         if not self.live:
             return
         self.last = self.cursor = index + 1
-        if changes_page or self._copies is None:
+        if failed and not self._options.pause_on_failure:
+            return
+        if changes_page or took_ms >= WAITED_MS or self._copies is None:
             self._copy(index + 1)
         elif not self._copies.same_as(index + 1, index):
             self._copy(index + 1)
@@ -233,6 +287,9 @@ class StepGate:
         self._announce()
         log.info("Paused %s step %d of %s (%s)", "after" if self.last else "before",
                  self.last or 1, self.scenario, reason)
+        pause = {"after_step": self.last, "reason": reason,
+                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ms": 0}
+        began = time.monotonic()
         go = None
         try:
             while go is None:
@@ -240,9 +297,12 @@ class StepGate:
                     return None
                 go = self._take()
                 if go is None:
-                    self._adapter.idle(POLL_S)
+                    busy = time.monotonic() - self._asked_at < BUSY_FOR_S
+                    self._adapter.idle(POLL_BUSY_S if busy else POLL_S)
         finally:
             self.paused = False
+            pause["ms"] = round((time.monotonic() - began) * 1000)
+            self.pauses.append(pause)
             if unlocked:
                 self._adapter.lock_input(True)
         if go == "step":
@@ -265,6 +325,8 @@ class StepGate:
             self._queue.clear()
         if self._adapter is not None:
             asked.extend(self._adapter.overlay_commands())
+        if asked:
+            self._asked_at = time.monotonic()
         for position, message in enumerate(asked):
             go = self._apply(message)
             if go:
@@ -288,7 +350,12 @@ class StepGate:
         elif command == "continue":
             if self.paused:
                 return "continue"
+            # Going on takes back whatever was asked of the next pause: a Back
+            # pressed while running and then thought better of stayed waiting,
+            # moved the cursor at some later pause nobody connected it with -
+            # and continuing from there ran a step a second time.
             self._wanted = self._once = False
+            self._deferred = []
         elif command == "step":
             if self.paused:
                 return "step"

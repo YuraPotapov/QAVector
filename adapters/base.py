@@ -163,6 +163,12 @@ class BrowserAdapter(ABC):
         has no picture of that step."""
         return False
 
+    def page_light_copy(self, base=None):
+        """What a light copy of the page would be made of - see
+        ``PlaywrightAdapter.page_light_copy`` and engine.history. None, the
+        default, for an adapter that takes none: every copy is then a full one."""
+        return None
+
     def overlay_commands(self):
         """What the person asked of the HUD since the last call: a list of
         ``{"command": ...}`` dicts, oldest first. Empty by default."""

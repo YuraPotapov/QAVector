@@ -19,7 +19,7 @@ import signal
 import sys
 import time
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QProcess, QTimer, Signal
 
 from . import cycleresult
 
@@ -56,6 +56,10 @@ CYCLE_STAGES = 400
 # "stopping" is deliberately not among them: it has been told to go, and both
 # the Stop menu and the rail's count are about what is still there to stop.
 LIVE_STATES = ("launching", "launched", "attached", "running", "paused")
+
+#: How long a step the person went to is shown before the core has said it got
+#: there (RunState.go_to). The HUD in the window gives its own the same.
+PENDING_S = 15.0
 
 
 def launch_kind(argv):
@@ -1013,6 +1017,14 @@ class RunState(QObject):
         session = self._session(name)
         step = session["step"]
         cursor = int(event.get("cursor") or 0)
+        if not step.get("paused"):
+            # A pause begins - the event comes again for every move of the
+            # cursor. Counted, and its time kept out of how long the scenario
+            # took, as result.json does (domain.result.FlowResult.pauses).
+            run = session["runs"].get(session.get("scenario_key"))
+            if run is not None:
+                run["pauses"] = run.get("pauses", 0) + 1
+                run["paused_since"] = event.get("ts") or time.time()
         step.update(paused=True, last=int(event.get("last") or 0),
                     reason=event.get("reason") or "", view=event.get("view"),
                     view_cursor=cursor, refused="")
@@ -1030,14 +1042,51 @@ class RunState(QObject):
             return
         session["step"].update(cursor=cursor, pending=cursor)
         self.changed.emit()
+        # ...but not for ever. An answer that never comes - the command was
+        # lost, or the window's own HUD moved the cursor elsewhere in the same
+        # moment - left this page saying "on its way" at a step the core was
+        # not on, and Continue then went on from somewhere else than shown.
+        # With this object as the timer's context: gone with it.
+        if QCoreApplication.instance() is not None:
+            QTimer.singleShot(int(PENDING_S * 1000), self,
+                              lambda: self._pending_over(name, cursor))
+
+    def _pending_over(self, name, cursor):
+        """The core has not said it got to ``cursor``: show where it is."""
+        session = self.sessions.get(name)
+        if session is None:
+            return
+        step = session["step"]
+        if step.get("pending") == cursor and step.get("paused"):
+            self._where_the_core_is(step)
+            self.changed.emit()
+
+    @staticmethod
+    def _where_the_core_is(step):
+        """Drop where the person went and show the last place the core said
+        it was - the step the copy on show belongs to."""
+        step["pending"] = None
+        if step.get("view_cursor") is not None:
+            step["cursor"] = step["view_cursor"]
 
     def _on_step_resumed(self, event, name):
         session = self._session(name)
         cursor = int(event.get("cursor") or 0)
         session["step"].update(paused=False, cursor=cursor, last=cursor, view=None,
                                view_cursor=None, pending=None)
+        self._pause_over(session, event)
         if session["state"] == "paused":
             session["state"] = "running"
+
+    @staticmethod
+    def _pause_over(session, event):
+        """The pause under way, if any, has ended: its length joins the time
+        the scenario stood still (see pages.run._took)."""
+        run = session["runs"].get(session.get("scenario_key"))
+        since = run.pop("paused_since", None) if run is not None else None
+        if since:
+            run["paused_s"] = run.get("paused_s", 0.0) + max(
+                0.0, (event.get("ts") or time.time()) - since)
 
     def _on_steps_rewound(self, event, name):
         """Steps taken back, to be run again: not run as far as anyone can tell."""
@@ -1053,7 +1102,11 @@ class RunState(QObject):
 
     def _on_scenario_control_refused(self, event, name):
         if name in self.sessions:
-            self.sessions[name]["step"]["refused"] = event.get("reason") or ""
+            step = self.sessions[name]["step"]
+            step["refused"] = event.get("reason") or ""
+            # Refused, the cursor did not move: nothing is on its way.
+            if step.get("pending") is not None:
+                self._where_the_core_is(step)
 
     def _on_step_retry(self, event, name):
         session = self._session(name)
@@ -1063,6 +1116,7 @@ class RunState(QObject):
     def _on_flow_end(self, event, name):
         session = self._session(name)
         session["step"].update(paused=False, view=None, cursor=0, last=0)
+        self._pause_over(session, event)      # stopped while paused
         status = event.get("status", "")
         session["flows"].append({"scenario": session.get("scenario", ""),
                                  "status": status,

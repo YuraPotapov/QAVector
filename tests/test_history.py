@@ -222,8 +222,289 @@ def test_a_step_that_leaves_the_page_as_it_was_shares_the_copy_before_it(tmp_pat
     adapter = CopyingAdapter()
     copies.capture(adapter, 0)
     assert copies.same_as(1, 0) and adapter.copied == ["step_000.mhtml"]
+    # One page for both: going from one to the other is the copy already on
+    # show, with nothing to make, send or draw - and nothing written twice.
+    assert copies.same_as(2, 1) and copies.view(2) == copies.view(1) == copies.view(0)
+    assert copies.view(0).endswith("step_000.html")
+    assert not [name for name in os.listdir(copies.dir) if "step_001" in name]
+    assert not copies.same_as(4, 3)          # nothing to share
+
+
+def test_forgetting_a_step_that_shared_a_copy_keeps_the_copy(tmp_path):
+    copies = history.RunHistory(base=str(tmp_path)).scenario("s", "x")
+    copies.capture(CopyingAdapter(), 0)
+    copies.same_as(1, 0)
+    copies.forget_from(1)
+    assert copies.has(0) and not copies.has(1)
+    assert copies.view(1) is None and copies.view(0).endswith("step_000.html")
+    # Taken for itself the second time, it is a page of its own.
+    copies.capture(CopyingAdapter(), 1)
     assert copies.view(1).endswith("step_001.html")
-    assert not copies.same_as(3, 2)          # nothing to share
+
+
+def test_a_page_made_from_a_copy_since_taken_again_is_not_kept(tmp_path, monkeypatch):
+    # The worker is still making step 1's page when the scenario goes on from
+    # an earlier step and step 1 is run - and copied - again.
+    import threading
+
+    copies = history.RunHistory(base=str(tmp_path)).scenario("s", "x")
+    adapter = CopyingAdapter()
+    copies.capture(adapter, 0)
+    copies.capture(adapter, 1)
+    reading, go_on = threading.Event(), threading.Event()
+    convert = history.convert
+
+    def slow(raw, store=None, known=None):
+        made = convert(raw, store, known)
+        reading.set()
+        go_on.wait(5)
+        return made
+
+    monkeypatch.setattr(history, "convert", slow)
+    copies.prepare([1])
+    assert reading.wait(5)
+    monkeypatch.setattr(history, "convert", convert)
+    copies.forget_from(1)
+    with open(copies.path(1), "wb") as handle:
+        handle.write(MHTML.replace(b"typed by the scenario", b"typed the second time"))
+    with copies._lock:
+        copies._taken += 1
+        copies._stamps[1] = copies._taken
+        copies._positions.add(1)
+    go_on.set()
+    copies._worker.shutdown(wait=True)
+    with open(copies.view(1), encoding="utf-8") as handle:
+        assert "typed the second time" in handle.read()
+
+
+# -- light copies ------------------------------------------------------------------
+SITE = "http://shop.example.invalid"
+LIGHT = ('<!DOCTYPE html><html lang="en"><head>'
+         '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'">'
+         '<link rel="stylesheet" href="/web/css/app.css">'
+         '<style id="own" data-qav-style="0">h1 { color: red; }</style></head><body>'
+         '<img src="/web/img/logo.png" srcset="/web/img/logo@2x.png 2x">'
+         '<input id="name" value="%s"><noscript><p>turn scripts on</p></noscript>'
+         '<script>alert(1)</script>'
+         '<my-widget><template shadowrootmode="open"><style>b { color: red }</style>'
+         '<b>shadow</b></template></my-widget>'
+         '<div id="__exec_hud_host__" aria-hidden="true"></div></body></html>')
+
+
+def _light(typed="typed later", **more):
+    return dict({"html": LIGHT % typed, "url": SITE + "/web/form",
+                 "dynamic": {"0": "h1 { color: blue; }\n.new { background: url(\"img/bg.png\"); }"},
+                 "adopted": ["form { outline: 4px solid green; }"]}, **more)
+
+
+def test_a_light_copy_is_read_against_the_full_copy_s_parts():
+    store, known = {}, {}
+    full_html, full_names = history.convert(MHTML, store, known)
+    html, names = history.convert_light(
+        _light(), history._by_address(history._parts(MHTML)), store, known)
+    assert 'value="typed later"' in html
+    # The same stylesheet and picture as the full copy named, by the same names.
+    assert set(names) <= set(full_names) and len(names) >= 2
+    assert "shop.example.invalid" not in html and "/web/css/app.css" not in html
+    # What a DOM holds and a copy must not.
+    for gone in ("srcset", "noscript", "turn scripts on", "alert(1)", "Content-Security-Policy",
+                 "__exec_hud_host__", "data-qav-style"):
+        assert gone not in html
+    # The rules script put into the page's own style, not the text it began with -
+    # and a picture they name is read against the page.
+    assert "color: blue" in html and "color: red; }</style></head>" not in html
+    assert ".new { background: url(qavres:" in html
+    # The adopted stylesheet comes after everything else; shadow styles stay.
+    assert html.index("outline: 4px solid green") > html.index("<my-widget>")
+    assert "<style>b { color: red }</style><b>shadow</b>" in html
+
+
+def test_a_page_s_own_style_names_its_pictures_from_the_page():
+    # Chrome files a <style> under cid: with its url() as the page wrote it.
+    # Read against the cid: address, the picture was never found.
+    archive = MHTML.replace(b"h1 { color: red; }",
+                            b'h1 { background: url("/web/img/bg.png"); }')
+    assert archive != MHTML
+    store = {}
+    html, _names = history.convert(archive, store)
+    own = _body(store, html, html.split('href="')[1])
+    assert own.startswith("h1 { background: url(qavres:")
+    # ...and recognised in the next copy, it is still read from the page.
+    known = {}
+    assert history.convert(archive, store, known) == history.convert(archive, store, known)
+
+
+class LightAdapter(CopyingAdapter):
+    """Takes light copies as a browser does: the page says what it is like,
+    and writes its DOM when a full copy of the same document was taken."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+        self.typed = "typed later"
+        self.say = {}
+
+    def page_light_copy(self, base=None):
+        self.asked.append(base)
+        facts = {"doc": "d1", "linked": [[SITE + "/web/css/app.css", 1001]],
+                 "uses": [SITE + "/web/img/logo.png"], "html": None, "why": ""}
+        facts.update(self.say)
+        if not base:
+            facts["why"] = facts["why"] or "no full copy to read it against"
+        elif base["doc"] != facts["doc"]:
+            facts["why"] = "a new document"
+        if not facts["why"]:
+            facts.update(_light(self.typed))
+        return facts
+
+
+def _light_history(tmp_path):
+    copies = history.RunHistory(base=str(tmp_path)).scenario("s", "x")
+    adapter = LightAdapter()
+    return copies, adapter
+
+
+def test_the_first_copy_is_full_and_the_ones_after_it_are_light(tmp_path):
+    copies, adapter = _light_history(tmp_path)
+    for position in range(3):
+        assert copies.capture(adapter, position)
+    assert adapter.copied == ["step_000.mhtml"]             # one archive, two DOMs
+    assert copies.kinds == {"full": 1, "light": 2}
+    assert sorted(name for name in os.listdir(copies.dir) if name.startswith("step")) == [
+        "step_000.mhtml", "step_001.json", "step_002.json"]
+    # The page asked what it was like when the archive was taken is what the
+    # next copies are checked against.
+    assert adapter.asked[0] is None and adapter.asked[1]["doc"] == "d1"
+    with open(copies.view(2), encoding="utf-8") as handle:
+        page = handle.read()
+    assert 'value="typed later"' in page and "qavres:" not in page
+    named = [part.split('"')[0] for part in page.split('"res/')[1:]]
+    assert named and all(os.path.exists(os.path.join(copies.dir, "res", one)) for one in named)
+    html, resources = history.lookup(copies.view(2))
+    assert "qavres:" in html and resources
+
+
+def test_a_light_copy_showing_a_picture_the_full_copy_lacks_is_a_full_copy(tmp_path):
+    copies, adapter = _light_history(tmp_path)
+    copies.capture(adapter, 0)
+    adapter.say = {"uses": [SITE + "/web/img/logo.png#top", SITE + "/web/img/new.png"]}
+    copies.capture(adapter, 1)
+    assert adapter.copied == ["step_000.mhtml", "step_001.mhtml"]
+    assert copies.reasons == {"no full copy to read it against": 1,     # the first
+                              "a picture the full copy does not hold": 1}
+    adapter.say = {"uses": [SITE + "/web/img/logo.png#top"]}      # part of one it holds
+    copies.capture(adapter, 2)
+    assert copies.kinds == {"full": 2, "light": 1}
+
+
+def test_the_page_saying_why_not_is_a_full_copy_and_the_next_are_read_against_it(tmp_path):
+    copies, adapter = _light_history(tmp_path)
+    copies.capture(adapter, 0)
+    adapter.say = {"why": "3 new picture(s), font(s) or stylesheet(s)"}
+    copies.capture(adapter, 1)
+    adapter.say = {"doc": "d2"}                                   # the page was left
+    copies.capture(adapter, 2)
+    adapter.say = {"doc": "d2"}
+    copies.capture(adapter, 3)
+    assert adapter.copied == ["step_000.mhtml", "step_001.mhtml", "step_002.mhtml"]
+    assert copies._lights[3][0] == 2
+    assert copies.reasons == {"no full copy to read it against": 1,
+                              "new picture(s), font(s) or stylesheet(s)": 1,
+                              "a new document": 1}
+
+
+def test_going_back_past_the_full_copy_takes_another(tmp_path):
+    copies, adapter = _light_history(tmp_path)
+    for position in range(4):
+        copies.capture(adapter, position)
+    copies.forget_from(2)                    # the full copy at 0 stays
+    copies.capture(adapter, 2)
+    assert adapter.copied == ["step_000.mhtml"]
+    copies.forget_from(0)                    # ...and here it goes
+    assert not [name for name in os.listdir(copies.dir) if name.startswith("step")]
+    copies.capture(adapter, 0)
+    copies.capture(adapter, 1)
+    assert adapter.copied == ["step_000.mhtml", "step_000.mhtml"]
+    assert copies.view(1).endswith("step_001.html")
+
+
+def test_a_step_that_changed_nothing_shares_a_light_copy_too(tmp_path):
+    copies, adapter = _light_history(tmp_path)
+    copies.capture(adapter, 0)
+    copies.capture(adapter, 1)
+    assert copies.same_as(2, 1) and copies.view(2) == copies.view(1)
+    assert copies.view(1).endswith("step_001.html")
+
+
+def test_an_adapter_that_takes_no_light_copies_gets_full_ones(tmp_path):
+    copies = history.RunHistory(base=str(tmp_path)).scenario("s", "x")
+    adapter = CopyingAdapter()
+    copies.capture(adapter, 0)
+    copies.capture(adapter, 1)
+    assert adapter.copied == ["step_000.mhtml", "step_001.mhtml"]
+    assert copies.kinds == {"full": 2}
+
+
+# -- reading an archive ---------------------------------------------------------
+def test_chrome_s_archive_is_read_as_the_standard_parser_reads_it():
+    direct = history._split(MHTML)
+    by_email = history._parts_by_email(MHTML)
+    assert len(direct) == len(by_email) == 6
+    for ours, theirs in zip(direct, by_email):
+        assert history._body(ours) == theirs["body"]
+        assert [ours[key] for key in ("location", "cid", "type", "charset")] == [
+            theirs[key] for key in ("location", "cid", "type", "charset")]
+
+
+def test_an_archive_not_shaped_like_chrome_s_is_still_read():
+    # Bare line ends, as no browser writes them: the standard parser's job.
+    html, names = history.convert(MHTML.replace(b"\r\n", b"\n"))
+    assert "typed by the scenario" in html and names
+
+
+def test_a_boundary_s_text_inside_a_part_does_not_end_it():
+    page = (b'Content-Type: multipart/related; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/html\r\nContent-Location: http://x.invalid/\r\n\r\n"
+            b"<p style=\"color: var(--b)\">--b in a line</p>\r\n"
+            b"--bold starts a line\r\n--b--not the end\r\n<i>still the page</i>\r\n--b--\r\n")
+    html = history.convert(page)[0]
+    assert "--b in a line</p>" in html and "--bold starts a line" in html
+    assert "--b--not the end" in html and html.rstrip().endswith("<i>still the page</i>")
+    assert len(history._split(page)) == 1
+
+
+def test_a_part_seen_before_is_recognised_and_gives_the_same_page():
+    store, known = {}, {}
+    first = history.convert(MHTML, store, known)
+    read = []
+    body = history._body
+
+    def counting(part):
+        if "body" not in part:
+            read.append(part["type"])
+        return body(part)
+
+    history._body = counting
+    try:
+        again = history.convert(MHTML, store, known)
+    finally:
+        history._body = body
+    assert again == first == history.convert(MHTML, {})
+    # Only the page itself was decoded: the stylesheets, the pictures and the
+    # frame are the ones the first copy held.
+    assert read == ["text/html"]
+
+
+def test_a_stylesheet_whose_picture_changed_is_read_again():
+    store, known = {}, {}
+    history.convert(MHTML, store, known)
+    other = base64.b64encode(b"\x89PNG\r\n\x1a\nother").decode("ascii")
+    # bg.png holds something else now; app.css, byte for byte the same, does not
+    # name the same picture any more.
+    changed = MHTML.replace(("bg.png\r\n\r\n" + PNG).encode("ascii"),
+                            ("bg.png\r\n\r\n" + other).encode("ascii"))
+    assert changed != MHTML
+    assert history.convert(changed, store, known) == history.convert(changed, {})
 
 
 def test_steps_are_made_ready_in_the_background(tmp_path):
