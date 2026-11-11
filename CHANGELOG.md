@@ -16,6 +16,53 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.65] - 2026-11-11
+
+### Added
+- **A pause is on record.** A paused window is free to use, so `result.json`
+  lists every pause under `pauses` (`after_step`, `reason`, `at`, `ms`) and the
+  Run page marks the scenario *paused*. The time it stood paused is not the
+  scenario's: `duration_ms` leaves it out and `paused_ms` says how much it was.
+- **The end of a scenario is a place to stop.** A pause asked for during the
+  last step, or a single step onto it, waits on the page the scenario ends
+  with, its earlier steps still there to go back over; going a step at a time
+  carries on into the next scenario and stops before its first step.
+
+### Changed
+- **Live history costs a tenth of what it did.** A full copy of the page is
+  taken once per page; after it a step keeps only the page's content, shown
+  with the styles, fonts and pictures of that full copy - about 40 ms and a
+  quarter of a megabyte instead of 0.3-0.4 s and several. A full copy is taken
+  again when a page opens, fetches a picture, a font or a stylesheet, holds a
+  frame, or could not be shown truthfully otherwise. On a heavy page twelve
+  steps went from 7.3 s to 4.8 s, and the history on disk from 29 MB to 5 MB.
+- **Copies look like the page.** A copy carries the page's fonts, so its icons
+  are there (Odoo's toolbar was blank), its stylesheets as the server sent
+  them (Odoo's form fields came out underlined), a page's own `<style>` keeps
+  its pictures, and every copy is shown scrolled to where the page was.
+- Stepping back is faster: a copy is read in about 20 ms instead of 160, a
+  check or a wait that changed nothing shares the copy before it without
+  drawing it again, and presses are picked up more often for a few seconds
+  after one is made.
+- A step with no copy says so in the HUD and on the Run page - *After step N:
+  no copy of the page* - instead of showing the live page under that step's
+  name.
+- A failed step is copied only when *Pause when a step fails* is on.
+
+### Fixed
+- A pause asked for during the last step of the last scenario was lost.
+- After going back, *Step* ran the step asked for only on the second press.
+- A copy being made ready in the background while its step was run again
+  could show the page of the first pass.
+- A Back pressed while running and then taken back by Continue moved the
+  cursor at a later pause, and a step ran twice.
+- A wait that had to wait shared the copy of the step before it, without what
+  it waited for; it gets a copy of its own now.
+- The Run page could stay on *On its way* when the core never answered a move;
+  after 15 s, or at once when the move is refused, it shows where the run is.
+- Pictures of steps taken back stayed in the report beside a result that no
+  longer listed those steps.
+
 ## [0.16.64] - 2026-11-10
 
 ### Added
