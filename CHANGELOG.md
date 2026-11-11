@@ -16,6 +16,26 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.66] - 2026-11-11
+
+### Added
+- **Jira comments can be replied to, edited and deleted.** Each comment on an
+  opened issue has a menu with *Reply*, *Edit* and *Delete*. *Edit* turns the
+  comment into an editor where it stands - with its formatting on Cloud, as
+  the text it was typed in on Server - with Save (Ctrl+S) and Cancel (Esc).
+  If the comment was changed in Jira since it was opened, the edit is refused
+  rather than written over it. *Delete* asks first. Whether an account may
+  edit or delete a comment is Jira's to say, and its reason is shown under
+  the comment. Jira's comments have no threads, so *Reply* quotes the start
+  of the comment and mentions its author in the comment box.
+- **Files with a comment.** *Attach* beside *Post comment* picks files to go
+  with it; each can be taken off before posting, and files alone make a
+  comment. They are uploaded to the issue first and named at the end of the
+  comment - as links on Cloud, as Jira's own `!picture!` and `[^file]` on
+  Server. If an upload fails, no comment is posted and the message says which
+  files stayed attached.
+- The Activity tab records comment edits and deletions.
+
 ## [0.16.65] - 2026-11-11
 
 ### Added
