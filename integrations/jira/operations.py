@@ -394,13 +394,27 @@ def _comments(get, flavour, key, start, size):
     page = get("/rest/api/%s/issue/%s/comment" % (api(flavour), key),
                {"startAt": start, "maxResults": size, "orderBy": "-created"})
     raw = (page.get("comments") or [])[:size]
-    items = [{"id": str(one.get("id") or ""),
-              "author": _person(one.get("author")),
-              "created": one.get("created") or "",
-              "html": adf.to_html(one.get("body")) if one.get("body") else ""}
-             for one in raw if isinstance(one, dict)]
+    items = [_comment(one, flavour) for one in raw if isinstance(one, dict)]
     return {"items": items, "start": start,
             "total": int(page.get("total") or len(items))}
+
+
+def _comment(raw, flavour):
+    """One comment: to read, and what its editor starts from - on Cloud the
+    document it can hold and what it would lose, on Server the text as typed.
+    ``author_id`` is only for an @-mention in a reply; it is never shown."""
+    body = raw.get("body")
+    doc, lost = adf.editable(body) if flavour == CLOUD else (None, [])
+    created = raw.get("created") or ""
+    updated = raw.get("updated") or created
+    return {"id": str(raw.get("id") or ""),
+            "author": _person(raw.get("author")),
+            "author_id": account_of(raw.get("author"), flavour),
+            "created": created, "updated": updated,
+            "edited": bool(updated and created and updated != created),
+            "html": adf.to_html(body) if body else "",
+            "text": adf.to_text(body, flavour),
+            "doc": doc, "lost": lost}
 
 
 def _attachment(raw):

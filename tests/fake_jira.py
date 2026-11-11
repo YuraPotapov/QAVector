@@ -3,7 +3,8 @@
 It checks what QAVector sends and what it makes of what comes back, and claims
 nothing about Jira itself. ``answers`` maps a path prefix - optionally preceded
 by a method, ``"PUT /rest/api/3/issue/QA-1"`` - to a payload, ``(status,
-payload)``, or a callable ``(request) -> payload``. Bytes are served as a file.
+payload)``, or a callable ``(request) -> payload`` that may also answer
+``(status, payload)``. Bytes are served as a file.
 """
 
 import json
@@ -43,6 +44,8 @@ class FakeJira(object):
                 status, value = payload if isinstance(payload, tuple) else (200, payload)
                 if callable(value):
                     value = value(request)
+                    if isinstance(value, tuple):
+                        status, value = value
                 binary = isinstance(value, bytes)
                 data = value if binary else (b"" if value is None
                                              else json.dumps(value).encode("utf-8"))

@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import QDialog, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from cms_gui import theme, widgets
 from cms_gui.pages import jira as jira_module
@@ -115,7 +115,8 @@ class FakeCore:
         if operation == "comments":
             return {"ok": True, "result": {"comments": {"items": [], "total": 30,
                                                         "start": document["start"]}}}
-        if operation in ("transition", "comment", "edit", "assign", "attach"):
+        if operation in ("transition", "comment", "edit", "assign", "attach",
+                         "comment_edit", "comment_delete"):
             changed = {"transition": {"status": "Done", "category": "done"},
                        "assign": {"assignee": "Alex"},
                        "edit": dict(document.get("fields") or {})}.get(operation, {})
@@ -797,6 +798,204 @@ def test_a_comment_is_posted_once_typed_and_the_box_emptied(make):
             {"type": "paragraph", "content": [{"type": "text", "text": "Fixed on staging"}]}]}})
     assert detail.composer.toPlainText() == "" and not page.jira.has_unsaved()
     assert detail.note.text() == "Comment posted."
+
+
+CLOUD_COMMENT = {"id": "7", "author": "Olena O", "author_id": "acc-olena",
+                 "created": "2026-11-05T09:00:00.000+0000",
+                 "updated": "2026-11-05T09:00:00.000+0000", "edited": False,
+                 "html": "<p>Seen on staging</p>", "text": "Seen on staging",
+                 "doc": {"type": "doc", "version": 1, "content": [
+                     {"type": "paragraph", "content": [
+                         {"type": "text", "text": "Seen on staging"}]}]},
+                 "lost": []}
+
+
+def _commented(make, *comments, core=None):
+    items = list(comments or [CLOUD_COMMENT])
+    opened = _opened(make, core, comments={"items": items, "total": len(items), "start": 0})
+    QApplication.processEvents()
+    return opened
+
+
+def _type(editor, text):
+    """Typed, as a person would: the editor knows it was changed."""
+    editor.text.selectAll()
+    editor.text.insertPlainText(text)
+
+
+def _actions(view):
+    held = view.more.menu().actions()
+    return {one.text(): one for one in held if one.text()}, held
+
+
+def test_each_comment_offers_reply_edit_and_delete(make):
+    core, page, detail = _commented(make)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    assert sorted(actions) == ["Delete", "Edit", "Reply"]
+    assert view.more.isEnabled() and not view.buttons.isVisible()
+
+
+def test_a_comment_is_edited_where_it_stands_and_only_its_change_is_sent(make):
+    core, page, detail = _commented(make)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Edit"].trigger()
+    assert detail.comment_editing is view and view.editor.isVisible()
+    assert not view.text.isVisible() and not detail.edit.isEnabled()
+    assert not view.save.isEnabled(), "nothing changed yet"
+    _type(view.editor, "Seen on staging and prod")
+    assert view.save.isEnabled() and page.jira.has_unsaved()
+    view.save.click()
+    args, document = core.calls[-1]
+    assert args[-1] == "comment_edit"
+    assert document["key"] == "QA-142" and document["id"] == "7"
+    assert document["updated"] == CLOUD_COMMENT["updated"]
+    assert document["body"]["content"][0]["content"][0]["text"] == "Seen on staging and prod"
+    assert detail.comment_editing is None and detail.note.text() == "Comment saved."
+    assert not page.jira.has_unsaved()
+
+
+def test_a_refused_comment_edit_stays_open_with_jira_s_reason_under_it(make):
+    core, page, detail = _commented(make)
+    core.answers["comment_edit"] = {"ok": False, "kind": "forbidden",
+                                    "error": "You may not edit this comment."}
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Edit"].trigger()
+    _type(view.editor, "Mine")
+    view.save_key.activated.emit()
+    assert detail.comment_editing is view and view.editor.toPlainText() == "Mine"
+    assert view.problem.text() == "You may not edit this comment."
+    assert detail.problem.isHidden()
+
+
+def test_escape_puts_a_comment_edit_down_and_asks_only_when_changed(make, monkeypatch):
+    asked = []
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: asked.append(args[2]))
+    core, page, detail = _commented(make)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Edit"].trigger()
+    view.escape_key.activated.emit()
+    assert detail.comment_editing is None and asked == []
+    actions["Edit"].trigger()
+    _type(view.editor, "Mine")
+    view.escape_key.activated.emit()
+    assert asked == ["Discard your changes to the comment on QA-142?"]
+    assert detail.comment_editing is view
+
+
+def test_a_refresh_keeps_what_was_typed_in_a_comment(make):
+    core, page, detail = _commented(make)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Edit"].trigger()
+    _type(view.editor, "Mine")
+    detail.show_issue(dict(detail.issue))
+    assert detail.comment_editing is view and view.editor.toPlainText() == "Mine"
+    assert detail._comment_views == [view]
+
+
+def test_another_issue_mid_comment_edit_asks_first(make, monkeypatch):
+    answers = [False]
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: answers.pop(0))
+    core = FakeCore(issue=lambda document: {"ok": True, "result": {"issue": _issue(
+        document["key"], comments={"items": [CLOUD_COMMENT], "total": 1, "start": 0})}})
+    core, page, detail = _commented(make, core=core)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Edit"].trigger()
+    _type(view.editor, "Mine")
+    page.jira.issues.select_key("QA-139")
+    assert detail.issue["key"] == "QA-142" and detail.comment_editing is view
+
+
+def test_a_comment_is_deleted_only_once_agreed(make, monkeypatch):
+    answers = [False, True]
+    asked = []
+    monkeypatch.setattr(widgets, "confirm",
+                        lambda *args, **kw: asked.append(args[2]) or answers.pop(0))
+    core, page, detail = _commented(make)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Delete"].trigger()
+    assert "comment_delete" not in _ops(core)
+    actions["Delete"].trigger()
+    assert core.calls[-1] == (("call", "product-team", "comment_delete"),
+                              {"key": "QA-142", "id": "7"})
+    assert asked[0] == "Delete Olena O's comment on QA-142?"
+    assert detail.note.text() == "Comment deleted."
+
+
+def test_reply_quotes_the_comment_and_mentions_its_author_in_the_box(make):
+    core, page, detail = _commented(make)
+    detail.composer.setPlainText("Before")
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Reply"].trigger()
+    content = detail.composer.document()["content"]
+    assert [one["type"] for one in content] == ["paragraph", "blockquote", "paragraph"]
+    assert content[1]["content"][0]["content"][0]["text"] == "Seen on staging"
+    assert content[2]["content"][0] == {"type": "mention",
+                                        "attrs": {"id": "acc-olena", "text": "@Olena O"}}
+    assert detail.post.isEnabled()
+    assert not [args for args, _doc in core.calls if args[-1] == "mentionable"]
+
+
+def test_a_server_reply_is_jira_s_own_markup(make):
+    server = _connection(flavour="server")
+    comment = dict(CLOUD_COMMENT, doc=None, author_id="olena", text="x " * 150)
+    core = FakeCore(connections=[server], issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", comments={"items": [comment], "total": 1, "start": 0})}})
+    core, page, detail = _opened(make, core)
+    view, = detail._comment_views
+    actions, _held = _actions(view)
+    actions["Reply"].trigger()
+    text = detail.composer.toPlainText()
+    assert text.startswith("{quote}x x") and text.endswith("…{quote}\n[~olena] ")
+    assert len(text) < jira_module.QUOTE_CHARS + 40
+
+
+def test_files_go_with_a_comment_and_may_be_taken_off_first(make, monkeypatch, tmp_path):
+    shots = []
+    for name in ("one.png", "two.log"):
+        path = tmp_path / name
+        path.write_bytes(b"data")
+        shots.append(str(path))
+    monkeypatch.setattr(widgets, "pick_paths", lambda *args, **kw: list(shots))
+    core, page, detail = _opened(make)
+    assert not detail.post.isEnabled()
+    detail.add_files.click()
+    assert detail.pending == shots and detail.post.isEnabled(), "files alone may be posted"
+    assert page.jira.has_unsaved()
+    assert detail.pending_box.count() == 2
+    detail._drop_pending(shots[1])
+    assert detail.pending == shots[:1]
+    detail.post.click()
+    args, document = core.calls[-1]
+    assert args[-1] == "comment" and document["files"] == shots[:1]
+    assert detail.pending == [] and detail.pending_box.count() == 0
+    assert not page.jira.has_unsaved()
+
+
+def test_a_failed_comment_keeps_its_files(make, monkeypatch, tmp_path):
+    path = tmp_path / "one.png"
+    path.write_bytes(b"data")
+    monkeypatch.setattr(widgets, "pick_paths", lambda *args, **kw: [str(path)])
+    core, page, detail = _opened(make)
+    core.answers["comment"] = {"ok": False, "kind": "error", "error": "too big"}
+    detail.add_files.click()
+    detail.composer.setPlainText("See")
+    detail.post.click()
+    assert detail.pending == [str(path)] and detail.problem.text() == "too big"
+
+
+def test_while_the_issue_is_edited_comments_cannot_be(make):
+    core, page, detail = _commented(make)
+    detail.edit.click()
+    view, = detail._comment_views
+    assert not view.more.isEnabled()
 
 
 # -- editing in place ---------------------------------------------------------

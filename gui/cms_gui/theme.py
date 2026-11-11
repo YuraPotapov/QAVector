@@ -816,6 +816,12 @@ QLabel[role="initials"] {{
 }}
 QFrame#jiraDetailBody {{ background: {surface}; border: none; }}
 QToolButton#jiraMore::menu-indicator {{ image: none; width: 0; }}
+/* A comment, its Save/Cancel and a file waiting to go with the next one sit
+   on the detail's own ground; the comment's menu is a mark, not a box. */
+QWidget#jiraComment, QWidget#jiraCommentButtons, QWidget#jiraPendingFile {{
+    background: transparent;
+}}
+QToolButton#jiraCommentMore::menu-indicator {{ image: none; width: 0; }}
 QFrame#jiraDetail QPlainTextEdit {{ background: {bg}; border: 1px solid {divider}; }}
 /* An issue being edited: its summary keeps the size it is read at. */
 QLineEdit#jiraSummaryEdit {{ font-family: {heading}; font-size: 17px; font-weight: 600; }}

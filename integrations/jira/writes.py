@@ -12,6 +12,7 @@ a file is fetched only from the connection's own site.
 
 import mimetypes
 import os
+import urllib.parse
 
 from integrations.jira import adf
 from integrations.jira.client import CLOUD, JiraError, api
@@ -89,9 +90,75 @@ def transition(get, connection, request):
 def comment(get, connection, request):
     """Post a comment: text, or on Cloud a document from the editor - with its
     formatting and mentions - checked by :func:`adf.clean` before it is sent.
-    On Server a mention is written in the text, as ``[~username]``."""
+    On Server a mention is written in the text, as ``[~username]``.
+
+    ``files`` are paths to attach with it. Every one is checked before
+    anything is sent; then each is attached to the issue and the comment
+    names them at its end - on Server as Jira's own ``!picture!`` and
+    ``[^file]``, on Cloud as links. If a file fails, no comment is posted,
+    and the files attached before it stay on the issue, which is said.
+    """
     key = _key(request)
-    given = request.get("body")
+    files = [_upload_file(one) for one in request.get("files") or []]
+    body = _body(request.get("body"), connection, allow_empty=bool(files))
+    attached = []
+    for path, name in files:
+        try:
+            attached.append(_attach(get, connection, key, path, name))
+        except JiraError as error:
+            if not attached:
+                raise
+            raise JiraError("%s was not attached, so the comment was not posted: %s. "
+                            "Already attached to %s: %s." % (
+                                name, error, key,
+                                ", ".join(one["filename"] for one in attached)),
+                            getattr(error, "status", 0))
+    if attached:
+        body = _naming(body, attached, connection, get.site)
+    get("/rest/api/%s/issue/%s/comment" % (_version(connection), key), body={"body": body})
+    summary = "%s: comment" % key
+    if attached:
+        summary += " with %s" % ", ".join(one["filename"] for one in attached)
+    return dict(_after(get, connection, key), summary=summary)
+
+
+def comment_edit(get, connection, request):
+    """Change one comment's body. ``updated`` is when the comment was last
+    changed as the editor saw it: if Jira's is different, somebody changed it
+    since, and the edit is refused rather than written over theirs. Whether
+    this account may edit it is Jira's to say."""
+    key = _key(request)
+    number = _comment_id(request)
+    path = "/rest/api/%s/issue/%s/comment/%s" % (_version(connection), key, number)
+    body = _body(request.get("body"), connection)
+    seen = str(request.get("updated") or "")
+    now = str(get(path).get("updated") or "")
+    if seen and now and seen != now:
+        raise Refused("This comment was changed in Jira after you opened %s. Reload it, "
+                      "and make your change again." % key, "conflict")
+    get(path, body={"body": body}, method="PUT")
+    return dict(_after(get, connection, key), summary="%s: comment edited" % key)
+
+
+def comment_delete(get, connection, request):
+    """Delete one comment. Whether this account may is Jira's to say."""
+    key = _key(request)
+    number = _comment_id(request)
+    get("/rest/api/%s/issue/%s/comment/%s" % (_version(connection), key, number),
+        method="DELETE")
+    return dict(_after(get, connection, key), summary="%s: comment deleted" % key)
+
+
+def _comment_id(request):
+    number = str(request.get("id") or "").strip()
+    if not number.isdigit():
+        raise Refused("A comment id is needed.")
+    return number
+
+
+def _body(given, connection, allow_empty=False):
+    """A comment body in the shape the flavour takes: a document from the
+    editor on Cloud, checked by :func:`adf.clean`, or text."""
     if isinstance(given, dict):
         if connection["flavour"] != CLOUD:
             raise Refused("A formatted comment is for Jira Cloud; this is Server.")
@@ -99,15 +166,47 @@ def comment(get, connection, request):
             body = adf.clean(given)
         except ValueError as error:
             raise Refused(str(error))
-        if body is None:
+        if body is None and not allow_empty:
             raise Refused("A comment needs some words.")
-    else:
-        text = str(given or "").strip()
-        if not text:
+        return body
+    text = str(given or "").strip()
+    if not text:
+        if not allow_empty:
             raise Refused("A comment needs some words.")
-        body = adf.from_text(text, connection["flavour"])
-    get("/rest/api/%s/issue/%s/comment" % (_version(connection), key), body={"body": body})
-    return dict(_after(get, connection, key), summary="%s: comment" % key)
+        return None
+    return adf.from_text(text, connection["flavour"])
+
+
+#: Characters that end Server's ``!picture!`` / ``[^file]`` early: a file
+#: named with one is linked by address instead.
+_WIKI_STOPS = frozenset("!|[]^{}\n\r")
+
+
+def _naming(body, attached, connection, site):
+    """``body`` with the files just attached named at its end."""
+    if connection["flavour"] != CLOUD:
+        lines = []
+        for one in attached:
+            name = one["filename"]
+            if set(name) & _WIKI_STOPS:
+                lines.append("[%s|%s]" % (name.replace("|", "").replace("]", ""),
+                                          one["url"]))
+            elif one["mime"].startswith("image/"):
+                lines.append("!%s|thumbnail!" % name)
+            else:
+                lines.append("[^%s]" % name)
+        return "\n\n".join(part for part in ((body or "").rstrip(), "\n".join(lines))
+                             if part)
+    content = [{"type": "text", "text": "Attached: "}]
+    for index, one in enumerate(attached):
+        if index:
+            content.append({"type": "text", "text": ", "})
+        content.append({"type": "text", "text": one["filename"],
+                        "marks": [{"type": "link", "attrs": {"href": one["url"]}}]})
+    document = body or {"type": "doc", "version": 1, "content": []}
+    document = dict(document, content=list(document.get("content") or [])
+                    + [{"type": "paragraph", "content": content}])
+    return document
 
 
 # -- editing ------------------------------------------------------------------
@@ -293,19 +392,44 @@ def create(get, connection, request):
 # -- files --------------------------------------------------------------------
 def attach(get, connection, request):
     key = _key(request)
-    path = os.path.abspath(os.path.expanduser(str(request.get("path") or "")))
+    path, name = _upload_file(request.get("path"))
+    _attach(get, connection, key, path, name)
+    return dict(_after(get, connection, key), summary="%s: attached %s" % (key, name))
+
+
+def _upload_file(given):
+    """``(path, name)`` of a file the page may upload - refused before
+    anything is sent when it is missing or too big."""
+    path = os.path.abspath(os.path.expanduser(str(given or "")))
     if not os.path.isfile(path):
         raise Refused("There is no file at %s." % path)
     size = os.path.getsize(path)
     if size > UPLOAD_BYTES:
         raise Refused("%s is %d MB; the page uploads up to %d MB. Attach it in Jira."
                       % (os.path.basename(path), size // 2 ** 20, UPLOAD_BYTES // 2 ** 20))
+    return path, os.path.basename(path)
+
+
+def _attach(get, connection, key, path, name):
+    """Upload one file to the issue: ``{id, filename, mime, url}`` of what
+    Jira made of it, ``url`` being where a person opens it on the site."""
     with open(path, "rb") as handle:
         data = handle.read()
-    name = os.path.basename(path)
-    get.upload("/rest/api/%s/issue/%s/attachments" % (_version(connection), key), name, data,
-               mimetypes.guess_type(name)[0] or "application/octet-stream")
-    return dict(_after(get, connection, key), summary="%s: attached %s" % (key, name))
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    made = get.upload("/rest/api/%s/issue/%s/attachments" % (_version(connection), key),
+                      name, data, mime)
+    first = made[0] if isinstance(made, list) and made and isinstance(made[0], dict) else {}
+    number = str(first.get("id") or "")
+    filename = str(first.get("filename") or name)
+    return {"id": number, "filename": filename, "mime": str(first.get("mimeType") or mime),
+            "url": "%s/secure/attachment/%s/%s" % (site_of(get), number,
+                                                    urllib.parse.quote(filename))
+            if number else "%s/browse/%s" % (site_of(get), key)}
+
+
+def site_of(get):
+    """The site a person opens in a browser - never the API gateway."""
+    return str(getattr(get, "site", "") or "").rstrip("/")
 
 
 def download(get, connection, request):
@@ -333,10 +457,12 @@ def download(get, connection, request):
 
 #: Operation name -> function. Every one of these changes something in Jira,
 #: except the two that only say what a change may be.
-OPERATIONS = {"transition": transition, "comment": comment, "edit_meta": edit_meta,
+OPERATIONS = {"transition": transition, "comment": comment, "comment_edit": comment_edit,
+              "comment_delete": comment_delete, "edit_meta": edit_meta,
               "edit": edit, "assignable": assignable, "assign": assign,
               "create_meta": create_meta, "create": create, "attach": attach,
               "download": download}
 
 #: The ones that change Jira - what the activity log records.
-CHANGES = ("transition", "comment", "edit", "assign", "create", "attach")
+CHANGES = ("transition", "comment", "comment_edit", "comment_delete", "edit", "assign",
+           "create", "attach")

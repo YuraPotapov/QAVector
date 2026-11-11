@@ -21,6 +21,16 @@ from integrations.jira.operations import session                        # noqa: 
 from fake_jira import FakeJira                                          # noqa: E402
 
 TOKEN = "tok-write-not-a-real-one"
+
+
+class _Next(object):
+    """Answers in turn: a payload, or ``(status, payload)``."""
+
+    def __init__(self, replies):
+        self.replies = replies
+
+    def __call__(self, request):
+        return next(self.replies)
 EMAIL = "you@yourcompany.example"
 
 
@@ -124,6 +134,122 @@ def test_an_empty_comment_is_not_sent(jira):
     with pytest.raises(writes.Refused):
         _do("comment", server, {"key": "QA-1", "body": "  "})
     assert server.seen == []
+
+
+def _shot(tmp_path, name="empty-state.png", data=b"\x89PNG data"):
+    path = tmp_path / name
+    path.write_bytes(data)
+    return str(path)
+
+
+def test_files_go_first_and_the_cloud_comment_links_them_at_its_end(jira, tmp_path):
+    server = jira(**{
+        "POST /rest/api/3/issue/QA-1/attachments": lambda request: [
+            {"id": "11" if b"empty-state" in request.body else "12",
+             "filename": "empty-state.png" if b"empty-state" in request.body else "run.log",
+             "mimeType": "image/png" if b"empty-state" in request.body else "text/plain"}],
+        "POST /rest/api/3/issue/QA-1/comment": {"id": "9"}})
+    answer = _do("comment", server, {"key": "QA-1", "body": "See these",
+                                     "files": [_shot(tmp_path),
+                                               _shot(tmp_path, "run.log", b"log")]})
+    sent = _writes(server)
+    assert [one[1] for one in sent] == ["/rest/api/3/issue/QA-1/attachments"] * 2 + [
+        "/rest/api/3/issue/QA-1/comment"]
+    body = sent[-1][2]["body"]
+    assert body["content"][0]["content"][0]["text"] == "See these"
+    named = body["content"][-1]["content"]
+    assert [one["text"] for one in named] == ["Attached: ", "empty-state.png", ", ", "run.log"]
+    assert named[1]["marks"][0]["attrs"]["href"] == (
+        server.site + "/secure/attachment/11/empty-state.png")
+    assert answer["summary"] == "QA-1: comment with empty-state.png, run.log"
+
+
+def test_a_server_comment_names_its_files_in_jira_s_own_markup(jira, tmp_path):
+    server = jira(**{
+        "POST /rest/api/2/issue/QA-1/attachments": lambda request: [
+            {"id": "11", "filename": "shot.png", "mimeType": "image/png"}
+            if b"shot.png" in request.body else
+            {"id": "12", "filename": "odd!name.txt", "mimeType": "text/plain"}
+            if b"odd" in request.body else
+            {"id": "13", "filename": "run.log", "mimeType": "text/plain"}],
+        "POST /rest/api/2/issue/QA-1/comment": {"id": "9"}})
+    _do("comment", server, {"key": "QA-1", "body": "",
+                            "files": [_shot(tmp_path, "shot.png"),
+                                      _shot(tmp_path, "run.log"),
+                                      _shot(tmp_path, "odd!name.txt")]}, flavour="server")
+    assert _writes(server)[-1][2] == {"body": "!shot.png|thumbnail!\n[^run.log]\n"
+                                      "[odd!name.txt|%s/secure/attachment/12/odd%%21name.txt]"
+                                      % server.site}
+
+
+def test_a_missing_file_stops_the_comment_before_anything_is_sent(jira, tmp_path):
+    server = jira()
+    with pytest.raises(writes.Refused):
+        _do("comment", server, {"key": "QA-1", "body": "x",
+                                "files": [_shot(tmp_path), str(tmp_path / "none.png")]})
+    assert server.seen == []
+
+
+def test_a_failed_upload_posts_no_comment_and_names_what_stayed_attached(jira, tmp_path):
+    replies = iter([[{"id": "11", "filename": "empty-state.png"}],
+                    (413, {"errorMessages": ["too big for this project"]})])
+    server = jira(**{"POST /rest/api/3/issue/QA-1/attachments": _Next(replies),
+                     "POST /rest/api/3/issue/QA-1/comment": {"id": "9"}})
+    with pytest.raises(writes.JiraError) as caught:
+        _do("comment", server, {"key": "QA-1", "body": "x",
+                                "files": [_shot(tmp_path), _shot(tmp_path, "run.log")]})
+    assert "run.log was not attached" in str(caught.value)
+    assert "Already attached to QA-1: empty-state.png" in str(caught.value)
+    assert [one[1] for one in _writes(server)] == ["/rest/api/3/issue/QA-1/attachments"] * 2
+
+
+def test_files_alone_make_a_comment_but_nothing_at_all_does_not(jira, tmp_path):
+    server = jira(**{"POST /rest/api/3/issue/QA-1/attachments": [{"id": "11"}],
+                     "POST /rest/api/3/issue/QA-1/comment": {"id": "9"}})
+    _do("comment", server, {"key": "QA-1", "body": {"type": "doc", "content": []},
+                            "files": [_shot(tmp_path)]})
+    assert _writes(server)[-1][2]["body"]["content"][0]["content"][0]["text"] == "Attached: "
+    with pytest.raises(writes.Refused):
+        _do("comment", server, {"key": "QA-1", "body": "", "files": []})
+
+
+COMMENT = "/rest/api/3/issue/QA-1/comment/7"
+
+
+def test_a_comment_is_edited_in_place_and_the_issue_read_back(jira):
+    server = jira(**{"GET " + COMMENT: {"id": "7", "updated": "2026-11-07T10:00:00.000+0000"},
+                     "PUT " + COMMENT: {"id": "7"}})
+    answer = _do("comment_edit", server, {"key": "QA-1", "id": "7", "body": "Better",
+                                          "updated": "2026-11-07T10:00:00.000+0000"})
+    (method, path, body), = _writes(server)
+    assert (method, path) == ("PUT", COMMENT) and body["body"]["type"] == "doc"
+    assert answer["summary"] == "QA-1: comment edited" and answer["issue"]["key"] == "QA-1"
+
+
+def test_a_comment_edit_over_somebody_else_s_change_is_refused(jira):
+    server = jira(**{"GET " + COMMENT: {"id": "7", "updated": "2026-11-07T11:00:00.000+0000"}})
+    with pytest.raises(writes.Refused) as caught:
+        _do("comment_edit", server, {"key": "QA-1", "id": "7", "body": "Better",
+                                     "updated": "2026-11-07T10:00:00.000+0000"})
+    assert caught.value.kind == "conflict" and _writes(server) == []
+
+
+def test_a_comment_is_deleted_and_a_bad_id_is_not_sent(jira):
+    server = jira(**{"DELETE " + COMMENT: (204, None)})
+    answer = _do("comment_delete", server, {"key": "QA-1", "id": "7"})
+    assert _writes(server) == [("DELETE", COMMENT, b"")]
+    assert answer["summary"] == "QA-1: comment deleted"
+    with pytest.raises(writes.Refused):
+        _do("comment_delete", server, {"key": "QA-1", "id": "../7"})
+
+
+def test_jira_refusing_a_comment_edit_is_its_own_words(jira):
+    server = jira(**{"GET " + COMMENT: {"id": "7"},
+                     "PUT " + COMMENT: (403, {"errorMessages": [
+                         "You do not have the permission to edit this comment."]})})
+    with pytest.raises(writes.JiraError) as caught:
+        _do("comment_edit", server, {"key": "QA-1", "id": "7", "body": "x"})
+    assert "permission to edit this comment" in str(caught.value)
 
 
 # -- editing ------------------------------------------------------------------

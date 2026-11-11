@@ -1707,6 +1707,12 @@ def pick_path(parent, title, start="", directory=False, save=False):
     return chosen or ""
 
 
+def pick_paths(parent, title, start=""):
+    """Several files at once, in the platform's own chooser - see :func:`pick_path`."""
+    chosen, _filter = QFileDialog.getOpenFileNames(parent, title, start_dir(start))
+    return list(chosen or [])
+
+
 def heading(text, role="h1"):
     label = QLabel(text)
     label.setProperty("role", role)

@@ -221,6 +221,31 @@ def test_an_opened_issue_is_one_read_and_its_newest_comments(jira):
     assert EMAIL not in json.dumps(detail)
 
 
+def test_a_comment_brings_what_its_editor_and_a_reply_start_from(jira):
+    answers = _issue_answers()
+    answers["/rest/api/3/issue/QA-142/comment"] = {"total": 1, "comments": [
+        {"id": "7", "author": {"displayName": "Olena O", "accountId": "acc-7",
+                               "emailAddress": EMAIL},
+         "created": "2026-11-05T09:00:00.000+0000",
+         "updated": "2026-11-05T09:30:00.000+0000", "body": RICH}]}
+    one = _call("issue", jira(**answers), {"key": "QA-142"})["issue"]["comments"]["items"][0]
+    assert one["author_id"] == "acc-7" and one["edited"] is True
+    assert one["updated"] == "2026-11-05T09:30:00.000+0000"
+    assert one["doc"]["content"][0]["type"] == "bulletList" and one["lost"] == []
+    assert one["text"].endswith("one")
+    assert EMAIL not in json.dumps(one)
+
+
+def test_a_server_comment_is_edited_as_the_text_it_was_typed_in(jira):
+    server = jira(**{"/rest/api/2/issue/QA-1/comment": {"total": 1, "comments": [
+        {"id": "7", "author": {"displayName": "Olena O", "name": "olena"},
+         "created": "2026-11-05T09:00:00.000+0000",
+         "updated": "2026-11-05T09:00:00.000+0000", "body": "*bold* [~maksym]"}]}})
+    one = _call("comments", server, {"key": "QA-1"}, flavour="server")["comments"]["items"][0]
+    assert one["text"] == "*bold* [~maksym]" and one["doc"] is None
+    assert one["author_id"] == "olena" and one["edited"] is False
+
+
 def test_a_description_with_a_list_is_marked_as_more_than_text(jira):
     server = jira(**_issue_answers(RICH))
     detail = _call("issue", server, {"key": "QA-142"})["issue"]

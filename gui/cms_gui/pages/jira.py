@@ -14,12 +14,13 @@ reaches this process.
 """
 
 import datetime
+import os
 import re
 import threading
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QKeySequence, QPen,
-                           QShortcut)
+                           QShortcut, QTextCursor)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QCompleter,
                                QDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -483,6 +484,225 @@ def _open_web(url):
         QDesktopServices.openUrl(QUrl(url))
 
 
+#: How much of a comment a reply quotes.
+QUOTE_CHARS = 200
+
+
+class CommentView(QWidget):
+    """One comment: to read, and - from its menu - to reply to, to edit where
+    it stands, or to delete. Whether this account may edit or delete it is
+    Jira's to say; the page does not guess."""
+
+    reply_requested = Signal(dict)
+    #: Edit was picked: the issue decides whether editing may begin.
+    edit_requested = Signal(object)
+    delete_requested = Signal(dict)
+    #: ``{id, updated, body}`` of an edit to send.
+    save_requested = Signal(dict)
+    #: Editing was put down, nothing sent.
+    put_down = Signal(object)
+    people_wanted = Signal(str)
+
+    def __init__(self, comment, parent=None):
+        super().__init__(parent)
+        self.setObjectName("jiraComment")
+        self.comment = dict(comment)
+        self.editor = None
+        self._baseline = ""
+        self._busy = False
+        box = QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.mark = Initials(comment.get("author") or "")
+        head.addWidget(self.mark)
+        self.author = _label(comment.get("author") or "Someone")
+        head.addWidget(self.author)
+        self.when = _label("", "muted")
+        head.addWidget(self.when)
+        head.addStretch(1)
+        self.more = QToolButton()
+        self.more.setObjectName("jiraCommentMore")
+        icons.button(self.more, "more", "")
+        self.more.setAccessibleName("Comment actions")
+        self.more.setToolTip("Reply, edit or delete")
+        self.more.setPopupMode(QToolButton.InstantPopup)
+        self.more.setProperty("menuglyph", "false")
+        self.more.setProperty("variant", "icon")
+        menu = QMenu(self.more)
+        self.reply_action = menu.addAction("Reply", self._reply)
+        self.edit_action = menu.addAction("Edit", lambda: self.edit_requested.emit(self))
+        menu.addSeparator()
+        self.delete_action = menu.addAction("Delete", self._delete)
+        self.more.setMenu(menu)
+        head.addWidget(self.more, 0, Qt.AlignTop)
+        box.addLayout(head)
+        self.text = _Rich()
+        box.addWidget(self.text)
+        # Editing: made when Edit is picked, so a page of comments carries no
+        # editors nobody asked for.
+        self.edit_box = QVBoxLayout()
+        self.edit_box.setSpacing(6)
+        box.addLayout(self.edit_box)
+        self.lost = _label("", "hint", wrap=True)
+        self.lost.setVisible(False)
+        box.addWidget(self.lost)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.save = QPushButton("Save")
+        self.save.setProperty("variant", "primary")
+        self.save.setToolTip("Send the changed comment to Jira (Ctrl+S)")
+        self.save.clicked.connect(self._save)
+        buttons.addWidget(self.save)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.setToolTip("Put the changes down; nothing is sent (Esc)")
+        self.cancel.clicked.connect(lambda: self.put_down.emit(self))
+        buttons.addWidget(self.cancel)
+        buttons.addStretch(1)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        self.buttons = QWidget()
+        self.buttons.setObjectName("jiraCommentButtons")
+        self.buttons.setLayout(buttons)
+        self.buttons.setVisible(False)
+        box.addWidget(self.buttons)
+        self.problem = _label("", "error", wrap=True)
+        self.problem.setVisible(False)
+        box.addWidget(self.problem)
+        self.save_key = QShortcut(QKeySequence.Save, self, self._save)
+        self.save_key.setContext(Qt.WidgetWithChildrenShortcut)
+        self.save_key.setEnabled(False)
+        self.escape_key = QShortcut(QKeySequence(Qt.Key_Escape), self,
+                                    lambda: self.put_down.emit(self))
+        self.escape_key.setContext(Qt.WidgetWithChildrenShortcut)
+        self.escape_key.setEnabled(False)
+        self.show_comment(comment)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
+            icons.button(self.more, "more", "")
+
+    def show_comment(self, comment):
+        """The comment as Jira holds it now. One being edited keeps what was
+        typed; the edit is still compared with the comment as it was."""
+        if self.editor is None:
+            self.comment = dict(comment)
+        self.mark.set(comment.get("author") or "")
+        self.author.setText(comment.get("author") or "Someone")
+        self.when.setText(ago(comment.get("created")) + ("  ·  edited"
+                                                          if comment.get("edited") else ""))
+        self.when.setToolTip(str(comment.get("updated") or comment.get("created") or ""))
+        self.text.setText(comment.get("html") or "")
+
+    def editing(self):
+        return self.editor is not None
+
+    def begin_edit(self, plain):
+        """The comment's text becomes an editor where it stands: with its
+        formatting on Cloud, as the text it was typed in on Server."""
+        if self.editor is not None:
+            return
+        self.editor = DescriptionEditor(name="Comment", placeholder="", shortest=64)
+        self.editor.people_wanted.connect(self.people_wanted)
+        self.editor.changed.connect(self._changed)
+        self.editor.set_plain(plain)
+        if plain:
+            self._baseline = self.comment.get("text") or ""
+            self.editor.setPlainText(self._baseline)
+        else:
+            self.editor.set_document(self.comment.get("doc"))
+        self.edit_box.addWidget(self.editor)
+        self.editor.show()
+        lost = list(self.comment.get("lost") or [])
+        self.lost.setText("This comment has %s that this editor cannot keep. Saving a "
+                          "change leaves them out." % _listed(lost) if lost else "")
+        self.lost.setVisible(bool(lost))
+        self.text.setVisible(False)
+        self.buttons.setVisible(True)
+        self.problem.setVisible(False)
+        self.save_key.setEnabled(True)
+        self.escape_key.setEnabled(True)
+        self.set_busy(self._busy)
+        self.editor.setFocus()
+
+    def stop_edit(self):
+        if self.editor is None:
+            return
+        focused = QApplication.focusWidget()
+        inside = focused is not None and self.isAncestorOf(focused)
+        editor, self.editor = self.editor, None
+        editor.hide()
+        editor.deleteLater()
+        self.lost.setVisible(False)
+        self.problem.setVisible(False)
+        self.buttons.setVisible(False)
+        self.text.setVisible(True)
+        self.save_key.setEnabled(False)
+        self.escape_key.setEnabled(False)
+        if inside:
+            self.more.setFocus()
+
+    def body(self):
+        """The edit to send, or None when nothing changed."""
+        if self.editor is None:
+            return None
+        if self.editor.is_plain():
+            text = self.editor.toPlainText()
+            return text if text.strip() != self._baseline.strip() else None
+        return self.editor.changed_document()
+
+    def set_busy(self, busy, actions=True):
+        """Waiting on Jira, or something else on the issue is being edited:
+        what may be pressed."""
+        self._busy = busy
+        self.more.setEnabled(not busy and actions and self.editor is None)
+        if self.editor is not None:
+            self.editor.setReadOnly(busy)
+            self.cancel.setEnabled(not busy)
+            self.save.setEnabled(not busy and self._sendable())
+            self.save.setText("Saving…" if busy else "Save")
+
+    def say(self, text):
+        self.problem.setText(text)
+        self.problem.setVisible(bool(text))
+
+    def _sendable(self):
+        return (self.body() is not None and self.editor is not None
+                and bool(self.editor.toPlainText().strip()))
+
+    def _changed(self):
+        self.problem.setVisible(False)
+        self.save.setEnabled(not self._busy and self._sendable())
+
+    def _save(self):
+        if self.editor is None or self._busy:
+            return
+        if self.body() is None:
+            self.put_down.emit(self)
+            return
+        if not self._sendable():
+            return
+        self.save_requested.emit({"id": self.comment.get("id"),
+                                  "updated": self.comment.get("updated") or "",
+                                  "body": self.body()})
+
+    def _reply(self):
+        self.reply_requested.emit(dict(self.comment))
+
+    def _delete(self):
+        self.delete_requested.emit(dict(self.comment))
+
+
+def quoted(comment, limit=QUOTE_CHARS):
+    """The start of a comment, as a reply quotes it: one line, cut at a word."""
+    text = " ".join(str(comment.get("text") or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return cut + "…"
+
+
 # -- one issue ----------------------------------------------------------------
 class IssueDetail(QFrame):
     """The opened issue: what the core read of it, and what can be done to it.
@@ -507,8 +727,17 @@ class IssueDetail(QFrame):
     attach_requested = Signal()
     #: An attachment to save: ``{id, filename, url, ...}``.
     download_requested = Signal(dict)
-    #: A comment to post: a document, or on Server text.
+    #: A comment to post: ``{body, files}`` - a document, or on Server text,
+    #: and the paths of files to attach with it.
     comment_requested = Signal(object)
+    #: ``{key, id, updated, body}`` of a comment edit to send.
+    comment_save_requested = Signal(dict)
+    #: ``{key, id}`` of a comment to delete - asked about already.
+    comment_delete_requested = Signal(dict)
+    #: Files to go with the next comment are wanted.
+    files_wanted = Signal()
+    #: Editing a comment began.
+    comment_edit_started = Signal()
     #: People to mention are wanted: "" for the first read, else a name.
     people_wanted = Signal(str)
 
@@ -524,6 +753,12 @@ class IssueDetail(QFrame):
         self._rewrite = False
         self._partial = False
         self._working = False
+        #: The comment being edited, if one is; and every comment shown.
+        self.comment_editing = None
+        self._comment_views = []
+        #: Files to attach with the next comment.
+        self.pending = []
+        self._plain = False
         frame = QVBoxLayout(self)
         frame.setContentsMargins(0, 0, 0, 0)
         frame.setSpacing(0)
@@ -727,12 +962,22 @@ class IssueDetail(QFrame):
         self.composer.changed.connect(self._composing)
         self.composer.people_wanted.connect(self._want_people)
         layout.addWidget(self.composer)
+        self.pending_box = QVBoxLayout()
+        self.pending_box.setSpacing(2)
+        layout.addLayout(self.pending_box)
         bottom = QHBoxLayout()
+        bottom.setSpacing(8)
         self.post = QPushButton("Post comment")
         self.post.setEnabled(False)
-        self.post.clicked.connect(
-            lambda: self.comment_requested.emit(self.composer.body()))
+        self.post.clicked.connect(self._post)
         bottom.addWidget(self.post)
+        self.add_files = QPushButton("Attach")
+        icons.button(self.add_files, "attach", "Attach")
+        self.add_files.setObjectName("jiraCommentAttach")
+        self.add_files.setToolTip("Files to attach with this comment; they are uploaded "
+                                  "to the issue and linked from the comment")
+        self.add_files.clicked.connect(self.files_wanted)
+        bottom.addWidget(self.add_files)
         bottom.addStretch(1)
         layout.addLayout(bottom)
         self.problem = _label("", "error", wrap=True)
@@ -766,13 +1011,16 @@ class IssueDetail(QFrame):
             icons.button(self.more, "more", "")
             icons.button(self.edit, "edit", "Edit")
             icons.button(self.attach, "attach", "Add")
+            icons.button(self.add_files, "attach", "Attach")
             self.priority.set_variant("neutral")
+            self._fill_pending()
             if self.issue is not None:
                 self._fill_files(self.issue.get("attachments") or [], False)
 
     # -- what it shows --------------------------------------------------------
     def clear(self):
         self._stop_editing()
+        self._stop_comment()
         self.issue = None
         self.skeleton.stop()
         self.stack.setCurrentIndex(0)
@@ -788,6 +1036,7 @@ class IssueDetail(QFrame):
 
     def unavailable(self, key, text):
         self._stop_editing()
+        self._stop_comment()
         self.skeleton.stop()
         self.issue = None
         self.gone_title.setText("%s is not available" % key)
@@ -797,6 +1046,9 @@ class IssueDetail(QFrame):
     def say(self, text):
         """What went wrong: under Save while editing, under the issue otherwise."""
         self.skeleton.stop()
+        if self.comment_editing is not None:
+            self.comment_editing.say(text)
+            return
         shown = self.edit_problem if self.editing is not None else self.problem
         shown.setText(text)
         shown.setVisible(bool(text))
@@ -807,9 +1059,11 @@ class IssueDetail(QFrame):
         issue as it was when Edit was pressed."""
         if self.editing is not None and issue.get("key") != self.editing.get("key"):
             self._stop_editing()
+        if issue.get("key") != (self.issue or {}).get("key"):
+            self._stop_comment()
         if issue.get("key") != self._people_of:
             self._people_of, self._people = issue.get("key"), []
-            for editor in (self.composer, self.rich_edit):
+            for editor in self._editors():
                 editor.forget_people()
         if not partial:
             self.skeleton.stop()
@@ -899,12 +1153,18 @@ class IssueDetail(QFrame):
             widget.setVisible(visible)
         self.status.setEnabled(not busy and not self._partial
                                and bool(self.status.menu().actions()))
-        self.edit.setEnabled(not busy and not self._partial)
+        commenting = self.comment_editing is not None
+        self.edit.setEnabled(not busy and not self._partial and not commenting)
         self.more.setEnabled(not busy)
         self.attach.setEnabled(not busy and not editing)
         self.post.setEnabled(not busy and not editing
-                             and bool(self.composer.toPlainText().strip()))
+                             and (bool(self.composer.toPlainText().strip())
+                                  or bool(self.pending)))
+        self.add_files.setEnabled(not busy and not editing)
         self.composer.setReadOnly(busy)
+        for view in self._comment_views:
+            view.set_busy(busy, actions=not editing and not commenting
+                          and not self._partial)
         for widget in (self.summary_edit, self.labels_edit, self.description_edit,
                        self.rich_edit):
             widget.setReadOnly(busy)
@@ -1027,8 +1287,18 @@ class IssueDetail(QFrame):
             fields["assignee"] = assignee
         return fields
 
+    def editing_key(self):
+        """The key of the issue being edited, or of the one whose comment is."""
+        if self.editing is not None:
+            return self.editing.get("key")
+        if self.comment_editing is not None:
+            return (self.issue or {}).get("key")
+        return None
+
     def has_changes(self):
-        return bool(self.changes())
+        """An issue edit or a comment edit with something typed in it."""
+        return bool(self.changes()) or (self.comment_editing is not None
+                                        and self.comment_editing.body() is not None)
 
     def _edited(self, *_args):
         if self.editing is not None:
@@ -1100,19 +1370,23 @@ class IssueDetail(QFrame):
             self.show_issue(self.issue)
 
     def may_put_down(self):
-        """Stop editing if nothing was changed, or the person agrees to drop
-        what was. False: they want to keep editing."""
-        if self.editing is None:
+        """Stop editing - the issue or a comment - if nothing was changed, or
+        the person agrees to drop what was. False: they want to keep editing."""
+        if self.editing is None and self.comment_editing is None:
             return True
         if self._working:
             return False
+        key = (self.editing or self.issue or {}).get("key", "this issue")
+        what = "your changes to %s" % key if self.editing is not None else \
+            "your changes to the comment on %s" % key
         if self.has_changes() and not widgets.confirm(
-                self, "Discard changes",
-                "Discard your changes to %s?" % self.editing.get("key", "this issue"),
+                self, "Discard changes", "Discard %s?" % what,
                 "Nothing was sent to Jira.", agree="Discard", refuse="Keep editing",
                 kind="warn"):
             return False
         self.put_down()
+        self._stop_comment()
+        self._apply_mode()
         return True
 
     def _escape(self):
@@ -1135,13 +1409,21 @@ class IssueDetail(QFrame):
     # -- people to mention ------------------------------------------------------
     def set_cloud(self, cloud):
         """Cloud takes a comment with its formatting; Server takes text."""
+        self._plain = not cloud
         self.composer.set_plain(not cloud)
+
+    def _editors(self):
+        """Every editor that may mention someone: they share one read of people."""
+        editors = [self.composer, self.rich_edit]
+        if self.comment_editing is not None and self.comment_editing.editor is not None:
+            editors.append(self.comment_editing.editor)
+        return editors
 
     def _want_people(self, query):
         """An editor wants people. The first read for an issue is shared: the
         other editor gets the answer too, and does not ask again."""
         if not query and self._people:
-            for editor in (self.composer, self.rich_edit):
+            for editor in self._editors():
                 editor.set_people(self._people)
             return
         self.people_wanted.emit(query)
@@ -1152,12 +1434,12 @@ class IssueDetail(QFrame):
             return
         known = {one["id"] for one in self._people}
         self._people += [one for one in people or [] if one.get("id") not in known]
-        for editor in (self.composer, self.rich_edit):
+        for editor in self._editors():
             editor.set_people(self._people, query)
 
     def people_failed(self, key):
         if key == self._people_of:
-            for editor in (self.composer, self.rich_edit):
+            for editor in self._editors():
                 editor.people_failed()
 
     def add_earlier(self, page):
@@ -1197,6 +1479,12 @@ class IssueDetail(QFrame):
             self.files.addWidget(holder)
 
     def _fill_comments(self, comments, partial):
+        """The comments, oldest at the top. One being edited stays as it is -
+        what was typed in it is kept through a Refresh."""
+        kept = self.comment_editing
+        if kept is not None:
+            self.comments.removeWidget(kept)
+        self._comment_views = []
         _empty_layout(self.comments)
         items = list(comments.get("items") or [])
         total = int(comments.get("total") or len(items))
@@ -1204,29 +1492,187 @@ class IssueDetail(QFrame):
         hidden = max(0, total - len(items))
         self.earlier.setVisible(bool(hidden))
         self.earlier.setText("Show earlier comments (%d)" % hidden)
+        if kept is not None and not any(one.get("id") == kept.comment.get("id")
+                                        for one in items):
+            # Deleted in Jira meanwhile: there is nothing left to edit.
+            self.comment_editing = None
+            kept.hide()
+            kept.deleteLater()
+            kept = None
+            self.tell("The comment you were editing was deleted in Jira.")
         if not items:
             if not partial:
                 self.comments.addWidget(_label("No comments yet.", "muted"))
             return
         # Newest first from the core; read top to bottom as a conversation.
         for one in reversed(items):
-            box = QVBoxLayout()
-            box.setSpacing(4)
-            head = QHBoxLayout()
-            head.setSpacing(6)
-            head.addWidget(Initials(one.get("author") or ""))
-            head.addWidget(_label(one.get("author") or "Someone"))
-            when = _label(ago(one.get("created")), "muted")
-            when.setToolTip(str(one.get("created") or ""))
-            head.addWidget(when)
-            head.addStretch(1)
-            box.addLayout(head)
-            text = _Rich()
-            text.setText(one.get("html") or "")
-            box.addWidget(text)
+            if kept is not None and one.get("id") == kept.comment.get("id"):
+                view = kept
+                view.show_comment(one)
+            else:
+                view = CommentView(one)
+                view.reply_requested.connect(self.reply_to)
+                view.edit_requested.connect(self._edit_comment)
+                view.delete_requested.connect(self._delete_comment)
+                view.save_requested.connect(self._save_comment)
+                view.put_down.connect(self._put_down_comment)
+                view.people_wanted.connect(self._want_people)
+            self._comment_views.append(view)
+            self.comments.addWidget(view)
+        self._apply_mode()
+
+    # -- one comment ----------------------------------------------------------
+    def _edit_comment(self, view):
+        """Edit picked on a comment: it becomes an editor where it stands.
+        One thing is edited at a time - the issue, or one comment."""
+        if self._working or self.editing is not None or self.issue is None:
+            return
+        if self.comment_editing is not None and self.comment_editing is not view:
+            if not self.may_put_down():
+                return
+        self.comment_editing = view
+        view.begin_edit(self._plain or view.comment.get("doc") is None)
+        self.tell("")
+        self._apply_mode()
+        self.comment_edit_started.emit()
+
+    def _put_down_comment(self, view):
+        if view is not self.comment_editing or self._working:
+            return
+        if view.body() is not None and not widgets.confirm(
+                self, "Discard changes",
+                "Discard your changes to the comment on %s?"
+                % (self.issue or {}).get("key", "this issue"),
+                "Nothing was sent to Jira.", agree="Discard", refuse="Keep editing",
+                kind="warn"):
+            return
+        self._stop_comment()
+        self._apply_mode()
+
+    def _stop_comment(self):
+        view, self.comment_editing = self.comment_editing, None
+        if view is not None:
+            view.stop_edit()
+
+    def comment_done(self):
+        """The edit was taken: the comment shows as Jira holds it now."""
+        view = self.comment_editing
+        self._stop_comment()
+        if view is not None and self.issue is not None:
+            for one in (self.issue.get("comments") or {}).get("items") or []:
+                if one.get("id") == view.comment.get("id"):
+                    view.show_comment(one)
+                    view.comment = dict(one)
+        self._apply_mode()
+
+    def _save_comment(self, request):
+        if self.issue is None or self._working:
+            return
+        self.comment_save_requested.emit(dict(request, key=self.issue.get("key")))
+
+    def _delete_comment(self, comment):
+        if self.issue is None or self._working:
+            return
+        who = comment.get("author") or "this"
+        if not widgets.confirm(
+                self, "Delete comment",
+                "Delete %s comment on %s?" % ("%s's" % who if comment.get("author")
+                                              else who, self.issue.get("key", "")),
+                "It is deleted in Jira, for everyone. This cannot be undone.",
+                agree="Delete", refuse="Keep it", kind="warn"):
+            return
+        self.comment_delete_requested.emit({"key": self.issue.get("key"),
+                                            "id": comment.get("id")})
+
+    def reply_to(self, comment):
+        """Reply: the comment's start quoted and its author mentioned, at the
+        end of whatever is already in the box, with the cursor after them.
+        Jira's comments have no threads; this is how a reply reads there."""
+        quote = quoted(comment)
+        name = comment.get("author") or ""
+        account = comment.get("author_id") or ""
+        if self.composer.is_plain():
+            parts = [self.composer.toPlainText().rstrip()]
+            if quote:
+                parts.append("{quote}%s{quote}" % quote)
+            parts.append(("[~%s] " % account) if account else "")
+            self.composer.setPlainText("\n".join(part for part in parts if part)
+                                       + ("" if account else "\n"))
+        else:
+            before = (self.composer.document().get("content") or []) \
+                if self.composer.toPlainText().strip() else []
+            added = []
+            if quote:
+                added.append({"type": "blockquote", "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": quote}]}]})
+            line = []
+            if account:
+                line = [{"type": "mention", "attrs": {"id": account, "text": "@" + name}},
+                        {"type": "text", "text": " "}]
+            added.append({"type": "paragraph", "content": line})
+            self.composer.set_document({"type": "doc", "version": 1,
+                                        "content": list(before) + added})
+        self.composer.text.moveCursor(QTextCursor.End)
+        self.composer.setFocus()
+        self.scroll.ensureWidgetVisible(self.composer)
+        self._apply_mode()
+
+    # -- files with the next comment -------------------------------------------
+    def add_pending(self, paths):
+        known = set(self.pending)
+        self.pending += [one for one in paths if one and one not in known]
+        self._fill_pending()
+        self._apply_mode()
+
+    def _drop_pending(self, path):
+        self.pending = [one for one in self.pending if one != path]
+        self._fill_pending()
+        self._apply_mode()
+
+    def _fill_pending(self):
+        _empty_layout(self.pending_box)
+        for path in self.pending:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            mark = QLabel()
+            mark.setPixmap(icons.pixmap("attach", 16, theme.NEUTRAL[600]))
+            row.addWidget(mark)
+            name = os.path.basename(path)
+            shown = widgets.elided_mono(name, Qt.ElideMiddle)
+            shown.setToolTip(path)
+            row.addWidget(shown, 1)
+            try:
+                size = _size(os.path.getsize(path))
+            except OSError:
+                size = "not found"
+            row.addWidget(_label(size, "muted"))
+            drop = QToolButton()
+            drop.setProperty("variant", "icon")
+            icons.button(drop, "close", "")
+            drop.setAccessibleName("Remove %s" % name)
+            drop.setToolTip("Do not attach %s" % name)
+            drop.clicked.connect(lambda _c=False, chosen=path: self._drop_pending(chosen))
+            row.addWidget(drop)
             holder = QWidget()
-            holder.setLayout(box)
-            self.comments.addWidget(holder)
+            holder.setObjectName("jiraPendingFile")
+            holder.setLayout(row)
+            self.pending_box.addWidget(holder)
+
+    def _post(self):
+        if self._working:
+            return
+        if not self.composer.toPlainText().strip() and not self.pending:
+            return
+        self.comment_requested.emit({"body": self.composer.body(),
+                                     "files": list(self.pending)})
+
+    def posted(self):
+        """The comment was taken: the box and its files are emptied."""
+        self.composer.clear()
+        self.pending = []
+        self._fill_pending()
+        self._apply_mode()
 
     # -- the more menu --------------------------------------------------------
     def _open_in_jira(self):
@@ -1747,6 +2193,7 @@ class JiraView(QWidget):
         detail = self.issues.detail
         detail.transition_requested.connect(self.move_issue)
         detail.edit_started.connect(self.edit_issue)
+        detail.comment_edit_started.connect(self._comment_edit_started)
         detail.save_requested.connect(self.save_edit)
         detail.assignee_edit.wanted.connect(self.find_people)
         detail.assign_requested.connect(self.assign_issue)
@@ -1754,6 +2201,9 @@ class JiraView(QWidget):
         detail.attach_requested.connect(self.attach_file)
         detail.download_requested.connect(self.save_file)
         detail.comment_requested.connect(self.post_comment)
+        detail.comment_save_requested.connect(self.save_comment)
+        detail.comment_delete_requested.connect(self.delete_comment)
+        detail.files_wanted.connect(self.pick_comment_files)
         detail.people_wanted.connect(self.find_mentionable)
         self.activity.wanted.connect(self.load_activity)
         self._activity_stale = True
@@ -1947,7 +2397,7 @@ class JiraView(QWidget):
         it was opened through: leaving that puts the edit down, or - if the
         person would rather keep it - puts the picker back."""
         detail = self.issues.detail
-        if (detail.editing is not None and self.picker.currentData() != self._editing_on
+        if (detail.editing_key() and self.picker.currentData() != self._editing_on
                 and not detail.may_put_down()):
             self.picker.setCurrentIndex(max(0, self.picker.findData(self._editing_on)))
             return False
@@ -2196,7 +2646,7 @@ class JiraView(QWidget):
         if connection is None or not key:
             return
         detail = self.issues.detail
-        editing = (detail.editing or {}).get("key")
+        editing = detail.editing_key()
         if editing and editing != key and not detail.may_put_down():
             # Keep editing: the row picked goes back to the one being edited.
             self.issues.select_key(editing, emit=False)
@@ -2292,6 +2742,7 @@ class JiraView(QWidget):
     def has_unsaved(self):
         """Drafts and settings that leaving the project would lose."""
         return (bool(self.issues.detail.composer.toPlainText().strip())
+                or bool(self.issues.detail.pending)
                 or self.issues.detail.has_changes()
                 or self.settings_tab.save.isEnabled())
 
@@ -2361,6 +2812,11 @@ class JiraView(QWidget):
             dialog.deleteLater()
 
         self._write("transition", request, then, note="Moving %s…" % issue.get("key", ""))
+
+    def _comment_edit_started(self):
+        connection = self.current()
+        if connection is not None:
+            self._editing_on = connection["id"]
 
     def edit_issue(self):
         """Editing began: read what this account may change on the issue - one
@@ -2447,15 +2903,43 @@ class JiraView(QWidget):
             "call", connection["id"], "mentionable", document={"key": key, "query": query},
             cancel=cancel), done, quiet=True)
 
-    def post_comment(self, body):
+    def post_comment(self, comment):
+        """Post a comment - ``{body, files}``; a bare body is one without files."""
         issue = self.issues.detail.issue or {}
+        if not isinstance(comment, dict) or "body" not in comment:
+            comment = {"body": comment, "files": []}
+        request = {"key": issue.get("key"), "body": comment.get("body")}
+        files = list(comment.get("files") or [])
+        if files:
+            request["files"] = files
 
         def then(payload):
             if payload.get("ok"):
-                self.issues.detail.composer.clear()
+                self.issues.detail.posted()
 
-        self._write("comment", {"key": issue.get("key"), "body": body}, then,
-                    note="Posting…")
+        self._write("comment", request, then,
+                    note="Uploading %d file%s and posting…" % (
+                        len(files), "" if len(files) == 1 else "s") if files else "Posting…")
+
+    def save_comment(self, request):
+        """Send a comment edit. Taken, the comment shows as it is now; refused -
+        changed meanwhile, or not this account's to change - it stays open with
+        what was typed, and Jira's reason under it."""
+        def then(payload):
+            if payload.get("ok"):
+                self.issues.detail.comment_done()
+
+        self._write("comment_edit", request, then, note="Saving the comment…")
+
+    def delete_comment(self, request):
+        self._write("comment_delete", request, note="Deleting the comment…")
+
+    def pick_comment_files(self):
+        issue = self.issues.detail.issue or {}
+        paths = widgets.pick_paths(self, "Files to attach with a comment on %s"
+                                   % issue.get("key", ""))
+        if paths:
+            self.issues.detail.add_pending(paths)
 
     def attach_file(self):
         issue = self.issues.detail.issue or {}
@@ -2791,6 +3275,7 @@ def _done_text(operation, result):
     issue = result.get("issue") or {}
     return {"transition": "Moved to %s." % (issue.get("status") or "its new status"),
             "comment": "Comment posted.", "edit": "Saved.",
+            "comment_edit": "Comment saved.", "comment_delete": "Comment deleted.",
             "assign": "Assigned to %s." % (issue.get("assignee") or "nobody"),
             "attach": "File attached.", "create": "%s created." % issue.get("key", "Issue"),
             }.get(operation, "")

@@ -19,7 +19,8 @@ from .. import icons, theme, widgets
 PRODUCTS = (("Jira Cloud", "cloud"), ("Jira Server or Data Center", "server"))
 #: How the log names what was done.
 OPERATIONS = {"transition": "Status", "comment": "Comment", "edit": "Edit",
-              "assign": "Assignee", "create": "Create", "attach": "File"}
+              "assign": "Assignee", "create": "Create", "attach": "File",
+              "comment_edit": "Comment edit", "comment_delete": "Comment delete"}
 
 AUTHS = (("Sign in with Atlassian", "oauth"), ("Email and API token", "basic"),
          ("Personal access token", "bearer"))
