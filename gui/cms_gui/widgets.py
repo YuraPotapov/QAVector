@@ -629,8 +629,11 @@ class CheckList(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText(placeholder)
         self.search.textChanged.connect(self.set_filter)
-        self.search.setVisible(searchable)
         column.addWidget(self.search)
+        # Only once it is in the layout: shown while it had no parent, it was a
+        # window of its own for a moment - on X11 an empty one flashed on the
+        # desktop at every start.
+        self.search.setVisible(searchable)
 
         self.list = QListWidget()
         self.list.setSelectionMode(QListWidget.NoSelection)

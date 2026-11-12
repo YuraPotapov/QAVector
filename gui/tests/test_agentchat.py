@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QWidget
 
 from cms_gui import widgets
 from cms_gui.pages import agentchat
@@ -348,7 +348,7 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     composer = chat.composer
     assert composer.settings() == {"connection": "claude", "folder": "/home/someone/src/shop",
                                    "mode": "edit", "model": "opus",
-                                   "plan": False}
+                                   "effort": "", "plan": False}
     # With one agent, in one folder: neither changes once it has begun.
     assert not composer.connection.isEnabled() and not composer.folder.isEnabled()
     assert not composer.browse.isEnabled()
@@ -404,11 +404,11 @@ def test_the_first_message_makes_the_conversation_and_takes_the_first_turn(make,
     assert _say(chat, QUESTION)
     args, document = next(call for call in core.calls if call[0][0] == "session-new")
     assert document == {"connection": "claude", "folder": str(tmp_path), "mode": "read",
-                        "model": "", "plan": False, "restrictions": {}, "skills": []}
+                        "model": "", "effort": "", "plan": False, "restrictions": {}, "skills": []}
     (turn,) = FakeTurn.made
     assert turn.started and turn.session_id == chat.current["id"]
     assert turn.document == {"message": QUESTION, "mode": "read", "model": "",
-                               "plan": False}
+                               "effort": "", "plan": False}
     # Shown at once, as on its way - and the box is free for the next thought.
     assert chat.feed.waiting() == [("SENDING", QUESTION)]
     assert chat.composer.draft() == "" and chat.composer.stop.isVisible()
@@ -467,7 +467,7 @@ def test_the_mode_and_model_chosen_go_with_the_turn(make):
     chat.composer.model.set_value("opus")
     _say(chat, "run the tests")
     assert FakeTurn.made[0].document == {"message": "run the tests", "mode": "full",
-                                         "model": "opus", "plan": False}
+                                         "model": "opus", "effort": "", "plan": False}
 
 
 def test_a_message_written_while_the_agent_answers_waits_its_turn(make):
@@ -530,7 +530,7 @@ def test_a_first_message_that_could_not_be_said_leaves_no_conversation_behind(ma
     assert chat.composer.note.property("bad") == "true"
     # What was chosen for it is still chosen.
     assert chat.composer.settings() == {"connection": "claude", "folder": str(tmp_path),
-                                        "mode": "edit", "model": "", "plan": False}
+                                        "mode": "edit", "model": "", "effort": "", "plan": False}
     assert chat.composer.folder.isEnabled()
 
 
@@ -804,7 +804,7 @@ def test_the_next_conversation_starts_from_the_last_one_s_choices(make, settings
     assert memory["folders"] == [str(other), str(tmp_path)]
     chat.new_button.click()
     assert chat.composer.settings() == {"connection": "second", "folder": str(other),
-                                        "mode": "edit", "model": "", "plan": False}
+                                        "mode": "edit", "model": "", "effort": "", "plan": False}
     assert [chat.composer.folder.itemText(index)
             for index in range(chat.composer.folder.count())] == [str(other), str(tmp_path)]
 
@@ -938,7 +938,7 @@ def test_queued_messages_keep_the_access_and_model_chosen_when_submitted(make):
     chat.composer.model.set_value("opus")
     first.finish()
     assert FakeTurn.made[1].document == {"message": "read this", "mode": "read",
-                                         "model": "sonnet", "plan": False}
+                                         "model": "sonnet", "effort": "", "plan": False}
 
 
 def test_a_late_conversation_read_does_not_replace_new_or_its_draft(make, monkeypatch):
@@ -1259,3 +1259,50 @@ def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):
     dialog.close()
     chat.new_button.click()                          # nothing used, nothing changed yet
     assert chat.usage.text() == "" and chat.changes_button.isHidden()
+
+
+def test_effort_is_chosen_from_the_program_s_levels_and_goes_with_the_turn(make):
+    """The levels come from the core's kinds, read once when the chat is first
+    in front; Default leaves it to the connection, else to the program."""
+    session = _session(effort="high")
+    other = _session("20261110-090000-aaaaaa", "Other")
+    core = FakeCore(sessions=[session, other], events={session["id"]: _events(),
+                                                       other["id"]: _events()})
+    chat = make(core).agents.chat
+    assert [args for args, _doc in core.calls if args[0] == "kinds"] == [("kinds",)]
+    chat.table.selectRow(0)
+    effort = chat.composer.effort
+    assert [effort.itemText(index) for index in range(effort.count())] == [
+        "Default", "low", "medium", "high", "xhigh", "max"]
+    assert effort.currentData() == "high"           # the conversation's own
+    chat.table.selectRow(1)
+    assert chat.composer.effort.currentData() == ""  # not the one shown before
+    effort.setCurrentIndex(effort.findData("max"))
+    assert _say(chat, "think hard")
+    assert FakeTurn.made[-1].document["effort"] == "max"
+    assert "effort max" in chat.composer.context_summary.text()
+
+
+def test_a_row_taken_out_of_the_feed_never_becomes_a_window(qapp, dispose):
+    """A row put in the layout is shown when the event loop next gets to it;
+    a tool's row replaced by its result in the same pass would be shown with
+    no parent - an empty window flashing on the desktop at every opening.
+    Whatever the feed takes out is hidden for good before it goes."""
+    from PySide6.QtWidgets import QApplication
+    holder = QWidget()
+    feed = ChatFeed(holder)
+    holder.show()
+    dropped = []
+    keep = feed._drop
+
+    def drop(widget):
+        dropped.append(widget)
+        keep(widget)
+
+    feed._drop = drop
+    feed.load(_events())                            # the tool's row is replaced
+    assert dropped and all(widget.isHidden() for widget in dropped)
+    qapp.processEvents()
+    assert [one for one in QApplication.topLevelWidgets()
+            if one.isVisible() and type(one).__name__ in ("StageRow", "_Row")] == []
+    dispose(holder)

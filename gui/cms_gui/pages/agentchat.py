@@ -486,6 +486,11 @@ class ChatFeed(QScrollArea):
         self._drop(old)
 
     def _drop(self, widget):
+        # Hidden first, and for good: a row put in the layout is shown when
+        # the event loop next gets to it, and one taken out before that - a
+        # tool's row replaced by its result while a conversation is laid out -
+        # would be shown without a parent, a window of its own, until deleted.
+        widget.hide()
         self._column.removeWidget(widget)
         widget.setParent(None)
         widget.deleteLater()
@@ -611,6 +616,14 @@ class Composer(QFrame):
         self.model.setMinimumWidth(160)
         self.model.setMaximumWidth(240)
         self.model.currentIndexChanged.connect(lambda _index: self._summarize())
+        # How hard the model is asked to think: the levels the connection's
+        # program has, as the core says them (``kinds``); blank is the
+        # connection's own, else the program's.
+        self._kinds = []
+        self._effort_wanted = ""
+        self.effort = widgets.capped(QComboBox(), 150)
+        self.effort.setAccessibleName("Effort")
+        self.effort.currentIndexChanged.connect(lambda _index: self._summarize())
         self.stop = QPushButton("Stop")
         self.stop.setToolTip("Stop the agent. What it has done until now stands.")
         self.stop.clicked.connect(self.stop_requested)
@@ -621,7 +634,8 @@ class Composer(QFrame):
         self.skills_button.setToolTip("Hand the agent skills from the library")
         self.skills_button.clicked.connect(self.skills_requested)
         self.how = widgets.row(_caption("AGENT"), self.connection, 6,
-                               _caption("MODEL"), self.model, None, self.skills_button)
+                               _caption("MODEL"), self.model, 6, _caption("EFFORT"), self.effort,
+                               None, self.skills_button)
         self.where = widgets.row(_caption("FOLDER"), self.folder, self.browse, self.restrict)
         self.where.layout().setStretchFactor(self.folder, 1)
         options_layout.addWidget(self.how)
@@ -736,6 +750,9 @@ class Composer(QFrame):
         self.plan.setChecked(bool(chosen.get("plan")))
         self.plan.blockSignals(False)
         self.model.set_value(chosen.get("model") or "")
+        # Another conversation's: what it was set to, not what was on screen.
+        self._effort_wanted = chosen.get("effort") or ""
+        self.effort.clear()
         self.set_skills(chosen.get("skills") or [])
         self._restrictions = dict(chosen.get("restrictions") or {})
         # A conversation is with one agent in one folder: its CLI keeps it
@@ -771,6 +788,9 @@ class Composer(QFrame):
         model = self.model.value()
         if model:
             parts.append(self.model.currentText())
+        effort = self.effort.currentData() if hasattr(self, "effort") else ""
+        if effort:
+            parts.append("effort " + effort)
         if self._skills:
             parts.append("%d skill%s" % (len(self._skills), "s" if len(self._skills) != 1 else ""))
         if self._restrictions:
@@ -805,7 +825,8 @@ class Composer(QFrame):
         return {"connection": self.connection.currentData() or "",
                 "folder": os.path.abspath(os.path.expanduser(folder)) if folder else "",
                 "mode": dict(MODES)[self.mode.current()],
-                "model": self.model.value(), "plan": self.plan.isChecked()}
+                "model": self.model.value(), "effort": self.effort.currentData() or "",
+                "plan": self.plan.isChecked()}
 
     def set_work(self, mode, plan):
         """What the next turn is asked with, as a card in the feed decided it."""
@@ -827,7 +848,32 @@ class Composer(QFrame):
                      else "Use Claude Code settings")
         self.model.set_context((chosen, connection.get("kind"), connection.get("binary")),
                                inherited)
+        self._fill_efforts(connection)
         self._summarize()
+
+    def set_kinds(self, kinds):
+        """The agent programs the core knows - for the effort levels each has."""
+        self._kinds = list(kinds or [])
+        self._say_model()
+
+    def _fill_efforts(self, connection):
+        kind = next((one for one in self._kinds if one.get("kind") == connection.get("kind")), {})
+        wanted = self._effort_wanted
+        if self.effort.count():
+            wanted = self.effort.currentData() if self.effort.currentData() is not None else wanted
+        levels = list(kind.get("efforts") or [])
+        if wanted and wanted not in levels:
+            levels.append(wanted)               # chosen before, kept as it was
+        self.effort.blockSignals(True)
+        self.effort.clear()
+        self.effort.addItem("From connection: " + connection["effort"]
+                            if connection.get("effort") else "Default", "")
+        for level in levels:
+            self.effort.addItem(level, level)
+        self.effort.setCurrentIndex(max(0, self.effort.findData(wanted)))
+        self.effort.blockSignals(False)
+        self.effort.setToolTip("How hard the model is asked to think. Default leaves it to "
+                               "the connection, else to the program's own settings.")
 
     def _folder_changed(self, _text):
         self._sync_restrictions()
@@ -1221,9 +1267,14 @@ class ChatTab(QWidget):
         self._show_new()
 
     def shown(self):
-        """The tab is in front: read the conversations, once."""
+        """The tab is in front: read the conversations, once - and the agent
+        programs' effort levels, a look along PATH that starts nothing."""
         if not self._loaded:
             self.load_sessions()
+        if not self.composer._kinds:
+            self.ask("chat-kinds", lambda core, cancel: core.agents("kinds", cancel=cancel),
+                     lambda payload: payload.get("ok") and self.composer.set_kinds(
+                         payload.get("kinds") or []))
 
     def running(self):
         return bool(self.turns)
@@ -1523,7 +1574,7 @@ class ChatTab(QWidget):
     def _message(self, text, files):
         chosen = self.composer.settings()
         document = {"message": text, "mode": chosen["mode"], "model": chosen["model"],
-                    "plan": chosen["plan"]}
+                    "effort": chosen["effort"], "plan": chosen["plan"]}
         if files:
             document["attachments"] = list(files)
         return document
@@ -1624,7 +1675,7 @@ class ChatTab(QWidget):
         if document is None:
             chosen = self.composer.settings() if self._showing(session_id) else {}
             document = {"message": text}
-            for key in ("mode", "model", "plan"):
+            for key in ("mode", "model", "effort", "plan"):
                 if key in chosen:
                     document[key] = chosen[key]
         turn = self.turn_factory(self.core(), session_id, document, self)

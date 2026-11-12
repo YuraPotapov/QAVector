@@ -676,6 +676,7 @@ class StageList(QScrollArea):
         """Take the first ``count`` rows off the column and out of the layout."""
         for row in self._rows[:count]:
             self._column.removeWidget(row)
+            row.hide()                      # not a window of its own when shown late
             row.setParent(None)
             row.deleteLater()
         del self._rows[:count]

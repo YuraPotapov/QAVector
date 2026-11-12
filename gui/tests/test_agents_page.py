@@ -250,12 +250,14 @@ def _texts(table, row):
 
 # -- what is asked ----------------------------------------------------------------
 def test_showing_the_page_reads_two_lists_and_starts_no_program(make):
-    """The connections, and the conversations of the tab in front: both files."""
+    """The connections, and the conversations of the tab in front: both files -
+    and where the agent programs are, for their effort levels: a look along
+    PATH."""
     core = FakeCore()
     page = make(core)
     assert page.stack.currentWidget() is page.agents
     assert page.agents.tabs.currentWidget() is page.agents.chat
-    assert core.asked() == ["list", "sessions"]
+    assert core.asked() == ["list", "sessions", "kinds"]
 
 
 def test_coming_back_asks_nothing_and_the_activity_is_read_when_its_tab_is_opened(make, qapp):
@@ -264,9 +266,9 @@ def test_coming_back_asks_nothing_and_the_activity_is_read_when_its_tab_is_opene
     page.hide()
     page.show()
     qapp.processEvents()
-    assert core.asked() == ["list", "sessions"]
+    assert core.asked() == ["list", "sessions", "kinds"]
     page.agents.tabs.setCurrentWidget(page.agents.activity)
-    assert core.asked() == ["list", "sessions", "activity"]
+    assert core.asked() == ["list", "sessions", "kinds", "activity"]
     assert page.agents.activity.table.rowCount() == 1
 
 
@@ -571,8 +573,9 @@ def test_adding_through_the_tab_asks_where_the_programs_are_once(make, monkeypat
     monkeypatch.setattr(ConnectionDialog, "exec", exec_)
     core = FakeCore(connections=[])
     page = make(core)
+    before = core.asked().count("kinds")            # the chat's, for effort levels
     page.agents.connections_tab.add_button.click()
-    assert core.asked().count("kinds") == 1 and "test" not in core.asked()
+    assert core.asked().count("kinds") == before + 1 and "test" not in core.asked()
     assert seen == [("Blank uses /home/someone/.local/bin/claude, where Claude Code is on "
                      "PATH now.", "Claude Code")]
 

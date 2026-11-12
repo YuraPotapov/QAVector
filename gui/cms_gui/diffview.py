@@ -228,6 +228,7 @@ class DiffView(QWidget):
         found = found or {}
         for section in self.sections:
             self._files.removeWidget(section)
+            section.hide()                  # not a window of its own when shown late
             section.setParent(None)
             section.deleteLater()
         self.sections = []

@@ -97,7 +97,7 @@ class ConnectionsTab(QWidget):
     check_requested = Signal(dict, object)
     models_requested = Signal(dict, object)
 
-    HEADERS = ("Name", "Agent", "Program", "Model", "Status")
+    HEADERS = ("Name", "Agent", "Program", "Defaults", "Status")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -337,11 +337,14 @@ class ConnectionDialog(QDialog):
         self.model.requested.connect(lambda done: self.models_requested.emit(self.entry(), done))
         self.binary.textChanged.connect(self._model_context)
         column.addWidget(widgets.field(
-            "Model", self.model,
-            "Open the list to read the models offered by this program. "
-            "No prompt is sent; conversations may choose a different model."))
+            "Default model", self.model,
+            "What a conversation or a cycle step that chooses no model is run with. "
+            "Open the list to read the models this program offers - no prompt is sent."))
         self.effort = QComboBox()
-        column.addWidget(widgets.field("Effort", self.effort))
+        column.addWidget(widgets.field(
+            "Default effort", self.effort,
+            "How hard the model is asked to think when a conversation or a step "
+            "does not say. The program's own choice leaves it to its settings."))
         self.check = QPushButton("Check")
         self.check.setToolTip("Ask the program who it is signed in as. Nothing is saved.")
         self.check.clicked.connect(self._check)

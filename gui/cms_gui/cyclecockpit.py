@@ -603,6 +603,7 @@ class Cockpit(QWidget):
             for actions in previous.values():
                 self.actions_layout.removeWidget(actions)
                 if actions not in current.values():
+                    actions.hide()          # not a window of its own when shown late
                     actions.setParent(None)
                     actions.deleteLater()
             for actions in current.values():
@@ -628,6 +629,7 @@ class Cockpit(QWidget):
         if context != self._questions_context:
             for actions in self.question_actions.values():
                 self.questions_layout.removeWidget(actions)
+                actions.hide()              # not a window of its own when shown late
                 actions.setParent(None)
                 actions.deleteLater()
             self.question_actions = {}

@@ -1235,3 +1235,26 @@ def test_opened_details_never_hang_over_the_row_below_when_the_table_shrinks(qap
     qapp.processEvents()
     below = table.visualRect(table.model().index(2, 1))
     assert detail.geometry().bottom() < below.top()
+
+
+def test_a_check_list_never_shows_its_search_as_a_window_of_its_own(qapp):
+    """Shown before the layout had taken it, the search box was a window for a
+    moment: on X11 an empty one flashed on the desktop at every start. Every
+    widget shown while it had no parent is caught as the call returns."""
+    import sys
+    from PySide6.QtWidgets import QWidget
+    shown = []
+
+    def watch(frame, event, arg):
+        if event == "c_return" and getattr(arg, "__name__", "") in ("setVisible", "show"):
+            widget = getattr(arg, "__self__", None)
+            if isinstance(widget, QWidget) and widget.parent() is None and widget.isVisible():
+                shown.append(type(widget).__name__)
+
+    sys.setprofile(watch)
+    try:
+        widgets.CheckList(placeholder="Search…")
+        widgets.CheckList(searchable=False)
+    finally:
+        sys.setprofile(None)
+    assert shown == []

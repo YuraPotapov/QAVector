@@ -1840,6 +1840,7 @@ class ServicesPage(QWidget):
             item = self._column.takeAt(self._blocks_from)
             widget = item.widget()
             if widget is not None:
+                widget.hide()               # not a window of its own when shown late
                 widget.setParent(None)
                 widget.deleteLater()
         self._blocks = {}

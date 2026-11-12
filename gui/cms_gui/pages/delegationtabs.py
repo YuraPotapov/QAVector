@@ -354,6 +354,7 @@ class ChangesTab(_Shown):
         opened = {sid for sid, section in self.sections.items() if section.is_expanded()}
         for section in self.sections.values():
             self.list.removeWidget(section)
+            section.hide()                  # not a window of its own when shown late
             section.setParent(None)
             section.deleteLater()
         self.sections = {}
