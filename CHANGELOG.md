@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.67] - 2026-11-12
+
 ### Added
 - **Integrations → Agents.** Agent programs - Claude Code for now - are an
   integration of their own, set once for every project. Four tabs:
