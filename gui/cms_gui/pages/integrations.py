@@ -95,6 +95,12 @@ class IntegrationsPage(QWidget):
                       for provider, name, _description in PROVIDERS}
         for provider, host in self.hosts.items():
             host.docked.connect(lambda provider=provider: self._returned(provider))
+        # A Jira issue handed to an agent: the one thing that knows both, added
+        # to Jira's opened issue from here, where both views are. Jira knows
+        # nothing of it, nor the agents of Jira.
+        from ..delegation import Delegation
+        self.delegation = Delegation(self.jira, self.agents, settings, self._show_conversation)
+        self.jira.add_issue_extension(self.delegation)
         QApplication.instance().aboutToQuit.connect(self.shutdown)
         self._fill()
         self._restore()
@@ -220,6 +226,12 @@ class IntegrationsPage(QWidget):
     def _back_to_catalog(self):
         self.show_catalog()
         self.return_to_main_requested.emit()
+
+    def _show_conversation(self, session_id=None):
+        """The agents' chat in front - on a conversation, when one is named."""
+        self.open_provider("agents")
+        if session_id:
+            self.agents.open_session(session_id)
 
     def open_provider(self, provider):
         if provider in self.hosts:

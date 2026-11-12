@@ -72,6 +72,25 @@ Search (Ctrl+K) asks every provider, and a provider answers for itself:
 - `show_found(target)`: put a hit's target on screen (an issue on its tab,
   read as a click on it would) and return whether it could.
 
+## Adding to another provider's items
+
+A provider never builds in what another one does with its items: Jira's issue
+form has no agent button of its own. It offers a slot instead, and whatever
+uses both providers fills it from `IntegrationsPage`, where both views are.
+Jira's is `JiraView.add_issue_extension(extension)`. An extension has:
+
+- `attach(detail)`: called once. It adds a button to the issue's actions with
+  `detail.add_action(widget)` and tabs beside the issue with
+  `detail.add_tab(title, widget)`; `set_tab_title`, `show_tab` and
+  `current_tab` work on its tabs. The first tab makes the form tabbed, with the
+  issue's head above the tabs; with none added the form is as it was.
+- `show_issue(connection_id, issue, partial)`: every time an issue is shown -
+  `partial` while only what the list knew is there yet.
+- `clear()`: when no issue is.
+
+The Delegation bridge (`gui/cms_gui/delegation.py`) is the first: Jira issues
+handed to agents.
+
 `IntegrationsPage` files every target as `(provider, target)`, drops anything
 that is not a `search.Hit`, and opens the provider that showed the hit.
 

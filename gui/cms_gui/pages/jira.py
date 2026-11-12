@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QComp
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMenu, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
-                               QStyle, QStyledItemDelegate, QTabWidget, QToolButton,
+                               QStyle, QStyledItemDelegate, QTabBar, QTabWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import (background, core as core_mod, icons, launchprojectsfile as lpf, search,
@@ -740,6 +740,10 @@ class IssueDetail(QFrame):
     comment_edit_started = Signal()
     #: People to mention are wanted: "" for the first read, else a name.
     people_wanted = Signal(str)
+    #: An issue was shown (``issue``, ``partial``) - or none is any more. For
+    #: whatever was added to the form from outside (add_action, add_tab).
+    shown = Signal(dict, bool)
+    emptied = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -785,6 +789,14 @@ class IssueDetail(QFrame):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(12)
+        # The issue's head - its key, summary and what can be done to it - is
+        # a part of its own: when tabs are added beside the issue (add_tab) it
+        # stands above them, in view whichever tab is open.
+        self.head = QWidget()
+        head = QVBoxLayout(self.head)
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(12)
+        layout.addWidget(self.head)
 
         top = QHBoxLayout()
         self.key = widgets.elided_mono("", Qt.ElideRight)
@@ -795,16 +807,16 @@ class IssueDetail(QFrame):
         self.priority_edit.setAccessibleName("Priority")
         self.priority_edit.currentIndexChanged.connect(self._edited)
         top.addWidget(self.priority_edit, 0, Qt.AlignRight)
-        layout.addLayout(top)
+        head.addLayout(top)
         self.summary = _label("", "h2", wrap=True)
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        layout.addWidget(self.summary)
+        head.addWidget(self.summary)
         self.summary_edit = QLineEdit()
         self.summary_edit.setObjectName("jiraSummaryEdit")
         self.summary_edit.setAccessibleName("Summary")
         self.summary_edit.textChanged.connect(self._edited)
-        layout.addWidget(self.summary_edit)
+        head.addWidget(self.summary_edit)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -848,14 +860,21 @@ class IssueDetail(QFrame):
         menu.addSeparator()
         menu.addAction("Reload", self.reload_requested)
         self.more.setMenu(menu)
+        # What something outside Jira adds to an opened issue (add_action):
+        # beside Edit, before the menu of the rest.
+        self.slot = QWidget()
+        self.slot_row = QHBoxLayout(self.slot)
+        self.slot_row.setContentsMargins(0, 0, 0, 0)
+        self.slot_row.setSpacing(8)
+        actions.addWidget(self.slot)
         actions.addWidget(self.more)
         actions.addStretch(1)
-        layout.addLayout(actions)
+        head.addLayout(actions)
         # What went wrong with an edit, where the person is looking: under
         # Save, not past the comments.
         self.edit_problem = _label("", "error", wrap=True)
         self.edit_problem.setVisible(False)
-        layout.addWidget(self.edit_problem)
+        head.addWidget(self.edit_problem)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(18)
@@ -988,7 +1007,30 @@ class IssueDetail(QFrame):
         layout.addWidget(self.note)
         layout.addStretch(1)
         self.scroll.setWidget(body)
-        self.stack.addWidget(self.scroll)
+        # The issue's page: the issue - and the tabs something outside Jira
+        # adds beside it, when it adds any (add_tab).
+        self.page = QWidget()
+        page = QVBoxLayout(self.page)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
+        self.pinned = QWidget()
+        pinned = QVBoxLayout(self.pinned)
+        pinned.setContentsMargins(18, 16, 18, 8)
+        pinned.setSpacing(0)
+        self.pinned.setVisible(False)
+        page.addWidget(self.pinned)
+        self.tabs = QTabBar()
+        self.tabs.setObjectName("jiraIssueTabs")
+        self.tabs.setDrawBase(False)
+        self.tabs.setExpanding(False)
+        self.tabs.setVisible(False)
+        page.addWidget(self.tabs)
+        self.panes = QStackedWidget()
+        self.panes.addWidget(self.scroll)
+        page.addWidget(self.panes, 1)
+        self.tabs.currentChanged.connect(self.panes.setCurrentIndex)
+        self._added_tabs = []
+        self.stack.addWidget(self.page)
 
         gone = QWidget()
         column = QVBoxLayout(gone)
@@ -1017,6 +1059,42 @@ class IssueDetail(QFrame):
             if self.issue is not None:
                 self._fill_files(self.issue.get("attachments") or [], False)
 
+    # -- what others add to it -------------------------------------------------
+    def add_action(self, widget):
+        """Put ``widget`` - a button - in the issue's row of actions. It is
+        hidden while the issue is edited, as everything but Save and Cancel."""
+        self.slot_row.addWidget(widget)
+        self._apply_mode()
+        return widget
+
+    def add_tab(self, title, widget):
+        """Show ``widget`` on a tab of its own beside the issue. The first one
+        added makes the form tabbed: the issue's head moves above the tabs."""
+        if not self._added_tabs:
+            self.body.layout().removeWidget(self.head)
+            self.pinned.layout().addWidget(self.head)
+            self.pinned.setVisible(True)
+            self.tabs.addTab("Issue")
+            self.tabs.setVisible(True)
+        self._added_tabs.append(widget)
+        self.tabs.addTab(title)
+        self.panes.addWidget(widget)
+        return widget
+
+    def set_tab_title(self, widget, title):
+        """Say something new on an added tab - a count, say."""
+        if widget in self._added_tabs:
+            self.tabs.setTabText(1 + self._added_tabs.index(widget), title)
+
+    def show_tab(self, widget=None):
+        """Bring an added tab forward; None for the issue itself."""
+        self.tabs.setCurrentIndex(0 if widget is None else 1 + self._added_tabs.index(widget))
+
+    def current_tab(self):
+        """The added tab in front, or None while the issue itself is."""
+        index = self.tabs.currentIndex()
+        return self._added_tabs[index - 1] if index > 0 else None
+
     # -- what it shows --------------------------------------------------------
     def clear(self):
         self._stop_editing()
@@ -1024,6 +1102,7 @@ class IssueDetail(QFrame):
         self.issue = None
         self.skeleton.stop()
         self.stack.setCurrentIndex(0)
+        self.emptied.emit()
 
     def loading(self, row=None):
         """Show what the list already knows while the rest is read."""
@@ -1042,6 +1121,7 @@ class IssueDetail(QFrame):
         self.gone_title.setText("%s is not available" % key)
         self.gone_detail.setText(text)
         self.stack.setCurrentIndex(2)
+        self.emptied.emit()
 
     def say(self, text):
         """What went wrong: under Save while editing, under the issue otherwise."""
@@ -1096,6 +1176,7 @@ class IssueDetail(QFrame):
         self._fill_comments(issue.get("comments") or {}, partial)
         self._apply_mode()
         self.stack.setCurrentIndex(1)
+        self.shown.emit(dict(issue), bool(partial))
 
     def _fill_transitions(self, offered):
         menu = self.status.menu()
@@ -1140,6 +1221,7 @@ class IssueDetail(QFrame):
                  self.priority_edit: editing, self.labels_edit: editing,
                  self.assignee_edit: editing,
                  self.status: not editing, self.edit: not editing, self.more: not editing,
+                 self.slot: not editing and self.slot_row.count() > 0,
                  self.summary: not editing, self.labels: not editing,
                  self.assignee: not editing, self.assignee_mark: not editing,
                  self.priority: not editing and bool(self.priority.text()),
@@ -2205,6 +2287,10 @@ class JiraView(QWidget):
         detail.comment_delete_requested.connect(self.delete_comment)
         detail.files_wanted.connect(self.pick_comment_files)
         detail.people_wanted.connect(self.find_mentionable)
+        #: What outside Jira adds to an opened issue (add_issue_extension).
+        self.extensions = []
+        detail.shown.connect(self._issue_shown)
+        detail.emptied.connect(self._issue_emptied)
         self.activity.wanted.connect(self.load_activity)
         self._activity_stale = True
         self.connections_tab.save_requested.connect(self.save_connection)
@@ -2287,6 +2373,35 @@ class JiraView(QWidget):
         self._cancel_requests()
         for dialog in self.findChildren(QDialog):
             dialog.reject()
+
+    # -- what others add to an opened issue -----------------------------------
+    def add_issue_extension(self, extension):
+        """Let something outside Jira add to the opened issue - a button
+        beside Edit, a tab beside the issue - without Jira knowing what it is.
+
+        Whatever uses Jira adds itself; Jira adds nothing of anybody's. An
+        extension has three methods: ``attach(detail)``, called once, in which
+        it adds what it shows through the form's ``add_action`` and
+        ``add_tab``; ``show_issue(connection_id, issue, partial)``, called
+        whenever an issue is shown - ``partial`` while only what the list knew
+        is there yet; and ``clear()``, when none is.
+        """
+        self.extensions.append(extension)
+        extension.attach(self.issues.detail)
+        if self.issues.detail.issue is not None:
+            extension.show_issue(self._connection_id(), dict(self.issues.detail.issue),
+                                 self.issues.detail._partial)
+
+    def _connection_id(self):
+        return (self.current() or {}).get("id") or ""
+
+    def _issue_shown(self, issue, partial):
+        for extension in self.extensions:
+            extension.show_issue(self._connection_id(), issue, partial)
+
+    def _issue_emptied(self):
+        for extension in self.extensions:
+            extension.clear()
 
     def current(self):
         connection_id = self.picker.currentData()

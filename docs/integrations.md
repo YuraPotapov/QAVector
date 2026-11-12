@@ -318,6 +318,55 @@ write is not recorded as a file written. A conversation started by a cycle is
 shown read-only: it is the record of what that step did, not something to
 carry on.
 
+### Planning first
+
+With **Plan first** on, the turn plans instead of working: the agent looks
+through the folder with read tools only, whatever the access, and answers with
+its questions or with a plan. Each is a card in the conversation.
+
+- **Questions** come with the agent's options - one or several to pick, or an
+  answer of one's own on *Other*. *Send answers* is the next planning turn.
+- **A plan** has a box for comments. Select a part of the plan and press
+  *Quote selection* to put it in the box, so a comment says what it is about.
+  *Revise* sends the comments back for another version; the one before folds
+  under it. *Start: Edit* or *Start: Full* approves it - the comments go along
+  as notes - and the next turn works with that access.
+
+Only the newest card waits for an answer, and only while the conversation does.
+Turning *Plan first* on again goes back to planning at any point.
+
+Claude Code run without a terminal does not offer its own planning tools, so a
+planning turn asks for its answer through the program's `--json-schema`; the
+answer arrives as data, never as prose to be read apart.
+
+### What changed
+
+The conversation's folder is snapshot before and after each turn, and the
+difference is kept with the conversation. A turn that changed files says so in
+the conversation, with *View*; **Changes** beside the title opens the whole
+conversation's or one turn's, file by file, each folded until opened.
+
+It is the folder's difference over the turn: a change somebody else made there
+at the same time shows too. A repository nested in a plain folder is compared
+on its own. A plain folder is compared up to 20,000 files / 200 MB, a folder
+holding more than 20 repositories not at all; there, the files the agent wrote
+are listed instead.
+
+Snapshots run git against a git directory of the conversation's own, with no
+system or global configuration, and read the folder's repository only as
+objects: nothing in it is written, and nothing its configuration names - a
+filter, a file-system monitor, a diff driver - is run. QAVector's own data and
+private folders such as `.ssh` are never copied. The patches are kept as text
+in `<conversation>/changes/` and `turns/NNNN/`.
+
+### Tokens and context
+
+The conversation's header says how full the agent's context is and what the
+conversation has cost; each turn's last line says how full it was then, and its
+tokens are the header's tooltip. The cost is what the agent's program reports;
+for a conversation it continued, Claude Code reports the whole conversation so
+far, and each turn keeps its own share beside it.
+
 ## Agent connections
 
 **Integrations → Agents → Connections** lists the agent programs QAVector can
@@ -379,6 +428,31 @@ cost and how it ended. Double-click opens the conversation.
 The record is the conversations themselves, in `<project>/agent-sessions/`,
 owner-readable only; nothing is kept beside it to disagree with it.
 
+## Handing an issue to an agent
+
+An opened Jira issue has **Delegate…** beside Edit, and three tabs beside the
+issue.
+
+- **Delegate…** offers to carry on a conversation about the issue, or to begin
+  one. A new one starts in the agents' chat with the issue as its task - key,
+  summary, type, priority, status, link and description - and, when there were
+  conversations about it before, what they came to: the latest plan, the
+  answers given and what the agent said last. The text can be changed before
+  it is sent. The folder is the one the issue's Jira project was last worked
+  on in, else the last one agents worked in in this project; *Plan first* is on.
+- **Agent work** lists the conversations about the issue. A row opens into the
+  conversation as the chat shows it, read-only; *Open in chat* carries it on.
+- **Summary**: conversations, turns, time, tokens, how full each one's
+  context is, the cost where the agent's program reports it, the files changed.
+- **Changes**: each conversation's changes, folded until opened.
+
+Jira and the agents know nothing of each other. The bridge between them adds
+itself to the issue through a slot any part of QAVector can use (see
+[integration-windows.md](integration-windows.md)), and finds an issue's
+conversations by the key it gives them when it begins one -
+`jira:<connection>:<KEY>`, which the Agents integration matches exactly and
+never reads.
+
 ## Command line: agents
 
 ```sh
@@ -392,10 +466,11 @@ qavector-core --integrations agents COMMAND [--agents-file=PATH]
 | `list`, `save --from=F`, `delete ID` | The connections. |
 | `test ID` or `test --from=F` | Asks the program who is signed in; a saved one remembers the answer. |
 | `sign-in ID` | The command that signs the program in, for the caller to run. |
-| `sessions`, `session ID` | The conversations, and one with what was said in it. |
-| `session-new --from=F`, `session-set ID --from=F`, `session-delete ID` | Start, change, remove one. |
-| `send ID --from=F` | Take one turn. Prints a line per event as it happens and the answer last; SIGTERM stops the agent. |
-| `activity` | Every turn of every conversation, newest first. |
+| `sessions`, `session ID` | The conversations - `{"ref"}` narrows them to one source's key - and one with what was said in it. |
+| `session-new --from=F`, `session-set ID --from=F`, `session-delete ID` | Start, change, remove one. A source may give `ref` and `record`; `plan` makes the next turns plan. |
+| `send ID --from=F` | Take one turn; `"plan": true` makes it a planning turn. Prints a line per event as it happens and the answer last; SIGTERM stops the agent. |
+| `activity` | Every turn of every conversation, newest first; `{"ref"}` narrows it. |
+| `changes ID` | What changed in the conversation's folder, the whole of it or `{"turn": N}`. Runs nothing. |
 | `skills`, `skill-look --from=F`, `skill-add --from=F`, `skill-update NAME`, `skill-remove NAME` | The skills library. Look and Update are the only commands that reach the network. |
 
 `send` is the only command that asks a model anything.

@@ -16,6 +16,68 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Hand a Jira issue to an agent.** An opened issue has *Delegate…*: carry on
+  a conversation about it, or begin one in the agents' chat with the issue as
+  its task - its summary, facts, link and description, and, when there were
+  conversations about it before, what they came to (the latest plan, the
+  answers given, what the agent said last), all editable before it is sent.
+  The folder is the one the issue's project was last worked on in, else the
+  last one agents worked in; *Plan first* is on. Three tabs beside the issue
+  show the agents' work on it: **Agent work** (each conversation opens in
+  place, and goes on in the chat), **Summary** (conversations, turns, time,
+  tokens, how full each one's context is, the cost where the agent's program
+  reports it, the files changed) and **Changes** (each conversation's changes,
+  folded until opened). Jira and the agents know nothing of each other: the
+  bridge between them adds itself to the issue through a slot any other part
+  of QAVector could use too, and finds an issue's conversations by a key it
+  gives them.
+- **What an agent changed is kept, turn by turn.** The conversation's folder is
+  snapshot before and after each turn, and the difference - every file, as a
+  patch - is kept with the conversation: the turn's, and the whole
+  conversation's so far (`agents changes ID`). It is the folder's changes
+  during the turn, so an edit somebody else made meanwhile shows too. A
+  repository nested in a plain folder is compared on its own. A folder that is
+  not a repository is compared up to 20,000 files / 200 MB, and one holding
+  more than 20 repositories not at all; there, the files the agent wrote are
+  listed instead. Snapshots use QAVector's own git directory: nothing in the
+  folder's repository is written, and nothing its configuration names is run.
+  QAVector's own data and private folders such as `.ssh` are never copied.
+- **Plan first, in the agent chat.** With *Plan first* beside the access, the
+  agent looks through the folder changing nothing and answers with questions
+  or a plan, each a card in the conversation. Questions come with the agent's
+  options - one or several to pick, or an answer of one's own - and *Send
+  answers*. A plan has a box for comments; *Quote selection* puts a selected
+  part of the plan into it, so a comment says what it is about. *Revise*
+  sends the comments back for another version - the one before folds under
+  it - and *Start: Edit* or *Start: Full* approves it, comments going along as
+  notes. Only the newest card waits for an answer.
+- **Changes**, beside a conversation's title, opens what changed in its
+  folder - the whole conversation or one turn - file by file, each folded
+  until opened, added lines on green and removed on red. A turn that changed
+  files says so in the conversation, with *View*.
+- The conversation's header says how full the agent's context is and what the
+  conversation cost; each turn's last line adds its context; Activity has a
+  Context column, the tokens in its tooltip.
+- **Planning turns.** A turn can plan instead of work (`plan` on `send`,
+  `session-new` and `session-set`): the agent looks through the folder with
+  read tools only and answers with its questions - each with options - or
+  with a plan in Markdown, as data rather than prose. The conversation says
+  what it waits for (`phase`: questions, plan). Claude Code run without a
+  terminal does not offer its own planning tools, so QAVector asks for the
+  answer through the CLI's `--json-schema`.
+- Each agent turn keeps its tokens (input, from cache, output, thinking) and
+  how full the agent's context was at its end, against the model's window.
+- A conversation can be found by the key of whatever opened it (`ref`), and
+  says outright whether it is a record of turns taken elsewhere - a cycle
+  step's - or one to carry on.
+
+### Fixed
+- **A conversation's cost was overstated** from its second turn on: Claude Code
+  reports what the whole conversation has cost so far, and QAVector added
+  those totals up. Each turn now keeps its own cost beside the reported
+  total; conversations recorded by 0.16.67-0.16.68 are put right when read.
+
 ## [0.16.68] - 2026-11-12
 
 ### Fixed

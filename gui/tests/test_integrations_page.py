@@ -2050,3 +2050,80 @@ def test_a_bounded_search_says_its_bounds_with_nothing_found(make):
     heard = []
     page.jira.search_remote("1296", lambda *answer: heard.append(answer))
     assert heard == [([], "", 'project = "QA"')]
+
+
+# -- what others add to an opened issue -------------------------------------------
+class Extension:
+    """Something outside Jira that adds a button and a tab to an opened issue."""
+
+    def __init__(self):
+        from PySide6.QtWidgets import QLabel, QPushButton
+        self.button = QPushButton("Do something")
+        self.tab = QLabel("Elsewhere")
+        self.seen = []
+
+    def attach(self, detail):
+        self.detail = detail
+        detail.add_action(self.button)
+        detail.add_tab("Elsewhere", self.tab)
+
+    def show_issue(self, connection_id, issue, partial):
+        self.seen.append((connection_id, issue.get("key"), partial))
+
+    def clear(self):
+        self.seen.append(None)
+
+
+@pytest.fixture
+def jira_alone(qapp, settings, dispose):
+    """Jira's view by itself: nothing outside it has added to its issues."""
+    views = []
+
+    def build():
+        view = jira_module.JiraView(settings)
+        view.resize(1200, 800)
+        view.set_core(FakeCore())
+        view.show()
+        qapp.processEvents()
+        views.append(view)
+        return view
+
+    yield build
+    for view in views:
+        dispose(view)
+
+
+def test_with_nothing_added_the_issue_form_is_as_it_was(jira_alone):
+    """No tabs, no room kept for a button: the head is in the issue's own
+    scrolling page, as it always was."""
+    jira = jira_alone()
+    jira.issues.select_key("QA-139")
+    detail = jira.issues.detail
+    assert detail.tabs.isHidden() and detail.pinned.isHidden() and detail.slot.isHidden()
+    assert detail.head.parent() is detail.body
+    assert jira.extensions == []
+
+
+def test_an_extension_adds_a_button_and_a_tab_and_hears_of_every_issue(jira_alone):
+    jira = jira_alone()
+    extension = Extension()
+    jira.add_issue_extension(extension)
+    detail = jira.issues.detail
+    assert not detail.tabs.isHidden() and not detail.pinned.isHidden()
+    assert [detail.tabs.tabText(index) for index in range(detail.tabs.count())] == [
+        "Issue", "Elsewhere"]
+    assert detail.head.parent() is detail.pinned           # in view on every tab
+    jira.issues.select_key("QA-139")
+    assert extension.seen[-2:] == [("product-team", "QA-139", True),
+                                   ("product-team", "QA-139", False)]
+    assert not detail.slot.isHidden() and extension.button.parent() is detail.slot
+    detail.show_tab(extension.tab)
+    assert detail.panes.currentWidget() is extension.tab and detail.current_tab() is extension.tab
+    detail.set_tab_title(extension.tab, "Elsewhere 2")
+    assert detail.tabs.tabText(1) == "Elsewhere 2"
+    detail.begin_edit()
+    assert detail.slot.isHidden()                          # editing: Save and Cancel only
+    detail.put_down()
+    assert not detail.slot.isHidden()
+    detail.clear()
+    assert extension.seen[-1] is None
