@@ -96,6 +96,13 @@ VAR_INK = "#1f5fbf"
 #: off the page, so groups read apart without boxes - and still lighter than
 #: an input in light, between page and input in dark, so fields keep showing.
 SECTION_BG = "#f7f7f9"
+#: A line a change added and one it took away (diffview), as a wash behind the
+#: line and the ink of its counts. Green has no other use in the theme - the
+#: "good" status is the accent - so a diff is the one place it means "added".
+DIFF_ADD_BG = "#e6f4ea"
+DIFF_ADD_INK = "#1f6f3a"
+DIFF_DEL_BG = "#fbe9e7"
+DIFF_DEL_INK = BAD
 
 # --- what a cycle step is ----------------------------------------------------
 # Keyed by the family of the plugin - the part of its id before the dot. A wash
@@ -149,6 +156,7 @@ def set_dark_mode(enabled: bool):
     global BG, SURFACE, TEXT, ACCENT, NEUTRAL, ACCENT_RAMP, DIVIDER, DIVIDER_STRONG, OK, WARN, BAD, BAD_TINT
     global WARN_TINT, MARK_TINT, MARK_INK, BAD_INK, WARN_INK, LOG_LEVEL, LOG_CRITICAL_BG
     global TAG_TINT, TAG_INK, VAR_INK, SECTION_BG
+    global DIFF_ADD_BG, DIFF_ADD_INK, DIFF_DEL_BG, DIFF_DEL_INK
     global SELECT_BG, SELECT_INK, SELECT_MUTED
     global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
 
@@ -168,6 +176,10 @@ def set_dark_mode(enabled: bool):
         
         BAD_TINT = "#4a2522" # Darker wash behind red marks
         WARN_TINT = "#3d3322"
+        DIFF_ADD_BG = "#1f3326"
+        DIFF_ADD_INK = "#7fcf95"
+        DIFF_DEL_BG = "#3d2322"
+        DIFF_DEL_INK = "#e8918a"
         MARK_TINT = ACCENT_RAMP[800]
         MARK_INK = ACCENT_RAMP[300]
         TAG_TINT = ACCENT_RAMP[800]
@@ -245,6 +257,10 @@ def set_dark_mode(enabled: bool):
         WARN_INK = WARN
         VAR_INK = "#1f5fbf"
         SECTION_BG = "#f7f7f9"
+        DIFF_ADD_BG = "#e6f4ea"
+        DIFF_ADD_INK = "#1f6f3a"
+        DIFF_DEL_BG = "#fbe9e7"
+        DIFF_DEL_INK = BAD
 
         PLUGIN_TINT = {
             "agent": "#efe9fb",
@@ -1005,6 +1021,24 @@ QLabel[role="msgkind"] {{
 QLabel[role="msgto"] {{ font-size: 12px; font-weight: 600; color: {text}; }}
 QLabel[role="msgmeta"] {{ font-family: {mono}; font-size: 10px; color: {n600}; }}
 QLabel[role="msgtext"] {{ font-size: 13px; color: {text}; }}
+/* What a planning agent asks and proposes: a card like a message, its stripe
+   amber while it waits for the person, and the accent once it is answered. */
+QFrame[role="agentcard"] {{
+    background: {surface}; border: 1px solid {divider};
+    border-left: 3px solid {warn};
+}}
+QFrame[role="agentcard"][settled="true"] {{ border-left-color: {n400}; }}
+QFrame[role="agentcard"] QLabel[role="cardquestion"] {{
+    font-size: 13px; font-weight: 600; color: {text};
+}}
+QFrame[role="agentcard"] QPlainTextEdit {{ background: {bg}; }}
+/* A diff: per file a line with its counts, then the patch itself. */
+QLabel[role="diffadded"] {{ font-family: {mono}; font-size: 11px; color: {diff_add_ink}; }}
+QLabel[role="diffremoved"] {{ font-family: {mono}; font-size: 11px; color: {diff_del_ink}; }}
+QPlainTextEdit[role="diff"] {{
+    font-family: {mono}; font-size: 12px; background: {bg};
+    border: 1px solid {divider};
+}}
 QLabel[role="msgdetail"] {{ font-size: 11px; color: {n700}; }}
 QLabel[role="msgdetail"][bad="true"] {{ color: {bad_ink}; }}
 /* The state as a pill: outlined while it is still on its way, filled once
@@ -1071,6 +1105,7 @@ def stylesheet():
         cell_v=CELL_INSET_V, cell_h=CELL_INSET_H,
         tb_bg=TITLEBAR_BG, tb_text=TITLEBAR_TEXT, tb_muted=TITLEBAR_MUTED,
         select_bg=SELECT_BG, select_ink=SELECT_INK, section=SECTION_BG,
+        diff_add_ink=DIFF_ADD_INK, diff_del_ink=DIFF_DEL_INK,
         chevron=_chevron(NEUTRAL[600]), chevron_off=_chevron(NEUTRAL[400]),
     )
 

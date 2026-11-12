@@ -75,9 +75,11 @@ class FakeTurn(QObject):
         for one in events:
             self.event.emit(dict(one))
 
-    def finish(self, state="completed", error=""):
-        """End the turn as the core would: the record changed, and says how."""
+    def finish(self, state="completed", error="", phase=""):
+        """End the turn as the core would: the record changed, and says how -
+        and, after a planning turn, what the conversation waits for."""
         session = self.core._session(self.session_id)
+        session["phase"] = phase
         session["turns"] = list(session.get("turns") or []) + [{"n": 1, "state": state}]
         session["title"] = session.get("title") or self.document["message"].splitlines()[0]
         session["mode"] = self.document.get("mode", session.get("mode"))
@@ -345,7 +347,8 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     assert chat.feed.kinds() == ["you", "thinking", "tool", "answer", "end"]
     composer = chat.composer
     assert composer.settings() == {"connection": "claude", "folder": "/home/someone/src/shop",
-                                   "mode": "edit", "model": "opus"}
+                                   "mode": "edit", "model": "opus",
+                                   "plan": False}
     # With one agent, in one folder: neither changes once it has begun.
     assert not composer.connection.isEnabled() and not composer.folder.isEnabled()
     assert not composer.browse.isEnabled()
@@ -401,10 +404,11 @@ def test_the_first_message_makes_the_conversation_and_takes_the_first_turn(make,
     assert _say(chat, QUESTION)
     args, document = next(call for call in core.calls if call[0][0] == "session-new")
     assert document == {"connection": "claude", "folder": str(tmp_path), "mode": "read",
-                        "model": "", "restrictions": {}, "skills": []}
+                        "model": "", "plan": False, "restrictions": {}, "skills": []}
     (turn,) = FakeTurn.made
     assert turn.started and turn.session_id == chat.current["id"]
-    assert turn.document == {"message": QUESTION, "mode": "read", "model": ""}
+    assert turn.document == {"message": QUESTION, "mode": "read", "model": "",
+                               "plan": False}
     # Shown at once, as on its way - and the box is free for the next thought.
     assert chat.feed.waiting() == [("SENDING", QUESTION)]
     assert chat.composer.draft() == "" and chat.composer.stop.isVisible()
@@ -463,7 +467,7 @@ def test_the_mode_and_model_chosen_go_with_the_turn(make):
     chat.composer.model.set_value("opus")
     _say(chat, "run the tests")
     assert FakeTurn.made[0].document == {"message": "run the tests", "mode": "full",
-                                         "model": "opus"}
+                                         "model": "opus", "plan": False}
 
 
 def test_a_message_written_while_the_agent_answers_waits_its_turn(make):
@@ -526,7 +530,7 @@ def test_a_first_message_that_could_not_be_said_leaves_no_conversation_behind(ma
     assert chat.composer.note.property("bad") == "true"
     # What was chosen for it is still chosen.
     assert chat.composer.settings() == {"connection": "claude", "folder": str(tmp_path),
-                                        "mode": "edit", "model": ""}
+                                        "mode": "edit", "model": "", "plan": False}
     assert chat.composer.folder.isEnabled()
 
 
@@ -618,6 +622,26 @@ def test_a_conversation_held_by_something_else_is_shown_not_carried_on(make):
     assert chat.sub.text().endswith("Cycle nightly · step review")
     chat.new_button.click()
     assert composer.text.isVisible() and not composer.closed.isVisible()
+
+
+def test_a_conversation_opened_elsewhere_to_talk_in_goes_on_here(make):
+    """The core says which conversations are records. One opened by another
+    part of QAVector - a task handed over - is carried on like a chat; a
+    record is read even though it says nothing but where it came from."""
+    talk = _session(source={"label": "Jira QA-1", "detail": "Login fails",
+                            "ref": "jira:work:QA-1", "record": False})
+    talk["record"] = False
+    kept = _session("20261110-090000-aaaaaa", "Kept",
+                    source={"label": "Jira QA-1", "record": True})
+    kept["record"] = True
+    core = FakeCore(sessions=[talk, kept], events={talk["id"]: _events(),
+                                                   kept["id"]: _events()})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    assert chat.composer.text.isVisible() and not chat.composer.closed.isVisible()
+    assert chat.sub.text().endswith("Jira QA-1")
+    chat.table.selectRow(1)
+    assert chat.composer.closed.isVisible() and not chat.composer.text.isVisible()
 
 
 def test_a_conversation_with_a_connection_since_removed_still_says_whom_it_was_with(make):
@@ -780,7 +804,7 @@ def test_the_next_conversation_starts_from_the_last_one_s_choices(make, settings
     assert memory["folders"] == [str(other), str(tmp_path)]
     chat.new_button.click()
     assert chat.composer.settings() == {"connection": "second", "folder": str(other),
-                                        "mode": "edit", "model": ""}
+                                        "mode": "edit", "model": "", "plan": False}
     assert [chat.composer.folder.itemText(index)
             for index in range(chat.composer.folder.count())] == [str(other), str(tmp_path)]
 
@@ -913,7 +937,8 @@ def test_queued_messages_keep_the_access_and_model_chosen_when_submitted(make):
     chat.composer.mode.set_current("Full")
     chat.composer.model.set_value("opus")
     first.finish()
-    assert FakeTurn.made[1].document == {"message": "read this", "mode": "read", "model": "sonnet"}
+    assert FakeTurn.made[1].document == {"message": "read this", "mode": "read",
+                                         "model": "sonnet", "plan": False}
 
 
 def test_a_late_conversation_read_does_not_replace_new_or_its_draft(make, monkeypatch):
@@ -1065,3 +1090,172 @@ def test_a_tool_without_an_outcome_is_not_marked_successful(qapp):
     stage = feed._rows[2][1].stage
     assert stage["status"] == "unknown" and stage["kind"] == "caution"
     assert "No result was received" in stage["detail"]
+
+
+# -- planning, and what changed ------------------------------------------------------
+QUESTIONS = {"type": "questions", "items": [
+    {"question": "Raise or return None?", "options": ["Raise", "Return None"],
+     "multiple": False},
+    {"question": "Which files?", "options": ["calc.py", "tests"], "multiple": True}]}
+PLAN = "# Plan\n\n1. Guard `divide()`.\n2. Test it."
+
+
+def _planned(*more, began=1794411900.0):
+    """A planning turn's record: asked, looked, answered with ``more``."""
+    found = [{"type": "user", "text": "Make divide safe", "mode": "read", "plan": True,
+              "at": began}] + list(more) + [
+        {"type": "completed", "text": "", "steps": 2, "cost_usd": 0.01, "at": began + 9}]
+    return [dict(one, seq=index + 1, turn=1) for index, one in enumerate(found)]
+
+
+def test_questions_are_a_card_that_answers_them_as_the_next_planning_turn(make):
+    session = _session(phase="questions", plan=True)
+    core = FakeCore(sessions=[session], events={session["id"]: _planned(QUESTIONS)})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    (card,) = chat.feed.cards()
+    assert chat.feed.kinds() == ["you", "questions", "end"]
+    assert not card.send.isHidden() and not card.send.isEnabled()
+    first, second = card.choices
+    first[0][0].click()                              # Raise
+    second[0][1].click()                             # tests
+    second[1].click()                                # and one of my own
+    second[2].setText("README")
+    assert card.send.isEnabled()
+    card.send.click()
+    (turn,) = FakeTurn.made
+    assert turn.document["plan"] is True and turn.document["mode"] == "read"
+    assert turn.document["message"] == (
+        "Answers to your questions:\n1. Raise or return None?\n   Raise\n"
+        "2. Which files?\n   tests; README")
+    assert card.send.isHidden()                      # one answer, then it is history
+    assert chat.composer.plan.isChecked()
+
+
+def test_a_plan_is_approved_with_the_access_chosen_and_the_comments_as_notes(make):
+    session = _session(phase="plan", plan=True)
+    core = FakeCore(sessions=[session],
+                    events={session["id"]: _planned({"type": "plan", "text": PLAN})})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    (card,) = chat.feed.cards()
+    assert card.kind.text() == "PLAN · VERSION 1" and card.said == PLAN
+    assert not card.start_edit.isHidden() and not card.revise_button.isEnabled()
+    card.comments.setPlainText("Keep the old message too.")
+    card.start_full.click()
+    (turn,) = FakeTurn.made
+    assert (turn.document["plan"], turn.document["mode"]) == (False, "full")
+    assert turn.document["message"] == ("The plan is approved. Carry it out.\n\nNotes:\n"
+                                        "Keep the old message too.")
+    assert not chat.composer.plan.isChecked()
+    assert chat.composer.settings()["mode"] == "full"
+
+
+def test_comments_quote_the_part_of_the_plan_they_are_about_and_send_it_back(make):
+    session = _session(phase="plan", plan=True)
+    core = FakeCore(sessions=[session],
+                    events={session["id"]: _planned({"type": "plan", "text": PLAN})})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    (card,) = chat.feed.cards()
+    cursor = card.text.textCursor()
+    found = card.text.document().find("Test it.")
+    cursor.setPosition(found.selectionStart())
+    cursor.setPosition(found.selectionEnd(), cursor.MoveMode.KeepAnchor)
+    card.text.setTextCursor(cursor)
+    card.quote.click()
+    card.comments.insertPlainText("Use pytest.")
+    card.revise_button.click()
+    (turn,) = FakeTurn.made
+    assert turn.document["plan"] is True
+    assert turn.document["message"] == "Revise the plan:\n\n> Test it.\nUse pytest."
+
+
+def test_a_revised_plan_folds_the_one_before_and_only_the_newest_waits(make):
+    session = _session(phase="plan", plan=True)
+    events = _planned({"type": "plan", "text": "# Plan one"})
+    events += [dict(one, seq=one["seq"] + len(events), turn=2) for one in
+               _planned({"type": "plan", "text": "# Plan two"}, began=1794412000.0)]
+    core = FakeCore(sessions=[session], events={session["id"]: events})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    old, new = chat.feed.cards()
+    assert (old.version, new.version) == (1, 2)
+    assert old.body.isHidden() and not old.fold.isHidden() and old.meta.text() == "revised below"
+    assert old.actions.isHidden() and not new.actions.isHidden()
+    old.fold.click()
+    assert not old.body.isHidden() and old.fold.text() == "Hide"
+
+
+def test_cards_wait_only_while_the_conversation_does_and_nobody_is_answering(make):
+    session = _session(phase="", plan=False)        # it moved on since the plan
+    core = FakeCore(sessions=[session],
+                    events={session["id"]: _planned({"type": "plan", "text": PLAN})})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    (card,) = chat.feed.cards()
+    assert card.actions.isHidden()
+    held = _session("20261110-090000-aaaaaa", "Cycle", phase="plan", record=True,
+                    source={"label": "Cycle nightly · step plan", "record": True})
+    core.sessions.append(held)
+    core.events[held["id"]] = _planned({"type": "plan", "text": PLAN})
+    chat.load_sessions()
+    chat.open_session(held["id"])
+    (card,) = chat.feed.cards()
+    assert card.actions.isHidden()                  # a record is read, not acted on
+
+
+def test_plan_first_goes_with_the_turn_and_is_the_next_conversation_s_choice(make):
+    chat = make().agents.chat
+    chat.composer.plan.setChecked(True)
+    assert _say(chat, "Make divide safe")
+    args, document = next(call for call in chat.host.core.calls if call[0][0] == "session-new")
+    assert document["plan"] is True
+    (turn,) = FakeTurn.made
+    assert turn.document["plan"] is True
+    turn.finish(phase="questions")
+    chat.new_button.click()
+    assert chat.composer.plan.isChecked()
+
+
+def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):
+    session = _session(turns=[{"n": 1, "state": "completed",
+                               "changes": {"files": 2, "added": 3, "removed": 1}}],
+                       context={"used": 24813, "window": 1000000}, cost_usd=0.25,
+                       tokens={"input": 10, "cache_read": 101029, "cache_write": 3948,
+                               "output": 2037})
+    patch = ("diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n"
+             "@@ -1,2 +1,4 @@\n def divide(a, b):\n+    if b == 0:\n+        raise ValueError\n"
+             "-    return a/b\n+    return a / b\n")
+    found = {"ok": True, "files": [
+        {"path": "calc.py", "status": "modified", "added": 3, "removed": 1, "binary": False},
+        {"path": "logo.png", "status": "added", "added": 0, "removed": 0, "binary": True}],
+        "patch": patch, "added": 3, "removed": 1, "truncated": False, "unkept": [],
+        "kept": "all"}
+    events = _events() + [{"type": "changes", "files": 2, "added": 3, "removed": 1,
+                           "kept": "all", "seq": 9, "turn": 1}]
+    core = FakeCore(sessions=[session], events={session["id"]: events},
+                    changes=lambda args, document: found)
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    assert chat.usage.text() == "context 25k of 1M · $0.25"
+    assert chat.usage.toolTip() == "Tokens so far: 105k in (101k cached) · 2k out"
+    line = chat.feed._rows[-1][1].body
+    assert line.said == "Changed 2 files · +3 -1"
+    line.view.click()
+    dialog = chat.changes_dialog
+    assert dialog.isVisible() and dialog.scope.currentData() == 1
+    assert core.calls[-1] == (("changes", session["id"]), {"turn": 1})
+    view = dialog.view
+    assert view.summary.text() == "2 files changed · +3 -1"
+    calc, logo = view.sections
+    assert calc.text is None                         # laid out only when opened
+    calc.set_expanded(True)
+    assert "+    if b == 0:" in calc.text.toPlainText()
+    logo.set_expanded(True)
+    assert logo.text.text() == "A binary file: what changed in it is not shown."
+    dialog.scope.setCurrentIndex(0)
+    assert core.calls[-1] == (("changes", session["id"]), {})
+    dialog.close()
+    chat.new_button.click()                          # nothing used, nothing changed yet
+    assert chat.usage.text() == "" and chat.changes_button.isHidden()

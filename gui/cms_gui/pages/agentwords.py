@@ -147,7 +147,8 @@ def clock_text(stamp):
 
 
 def end_text(event, started=None):
-    """What the last line of a turn adds to "Finished": steps, cost, how long."""
+    """What the last line of a turn adds to "Finished": steps, cost, how long,
+    and how full the agent's context was when it ended."""
     parts = []
     steps = event.get("steps")
     if isinstance(steps, int) and not isinstance(steps, bool):
@@ -158,4 +159,49 @@ def end_text(event, started=None):
     took = took_text(started, event.get("at")) if started is not None else ""
     if took:
         parts.append(took)
+    context = context_text(event.get("context"))
+    if context:
+        parts.append("context " + context)
     return " · ".join(parts)
+
+
+def count_text(number):
+    """A token count as it is read at a glance: 933, 12.3k, 1.2M."""
+    if not isinstance(number, int) or isinstance(number, bool) or number < 0:
+        return ""
+    if number < 1000:
+        return str(number)
+    if number < 1000000:
+        return ("%.1fk" % (number / 1000.0)).replace(".0k", "k") if number < 10000 \
+            else "%dk" % round(number / 1000.0)
+    return ("%.1fM" % (number / 1000000.0)).replace(".0M", "M")
+
+
+def context_text(context):
+    """How full the agent's context is: ``25k of 200k``, or the size alone."""
+    context = context or {}
+    used = count_text(context.get("used"))
+    if not used or not context.get("used"):
+        return ""
+    window = count_text(context.get("window")) if context.get("window") else ""
+    return "%s of %s" % (used, window) if window else used
+
+
+def tokens_total(tokens):
+    """Every token that went in and came out. Thinking is part of what came
+    out, so it is not counted again."""
+    tokens = tokens or {}
+    return sum(tokens.get(key) or 0 for key in ("input", "cache_read", "cache_write", "output"))
+
+
+def tokens_text(tokens):
+    """A turn's or a conversation's tokens: what went in - and how much of it
+    was read from the cache - and what came out."""
+    tokens = tokens or {}
+    taken = sum(tokens.get(key) or 0 for key in ("input", "cache_read", "cache_write"))
+    if not taken and not tokens.get("output"):
+        return ""
+    said = "%s in" % count_text(taken)
+    if tokens.get("cache_read"):
+        said += " (%s cached)" % count_text(tokens["cache_read"])
+    return "%s · %s out" % (said, count_text(tokens.get("output") or 0))

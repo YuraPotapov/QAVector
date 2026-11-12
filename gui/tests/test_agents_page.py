@@ -135,8 +135,11 @@ class FakeCore:
         if command == "activity":
             return {"ok": True, "activity": [dict(one) for one in self.turns]}
         if command == "sessions":
-            return {"ok": True, "sessions": [dict(one) for one in self.sessions],
-                    "total": len(self.sessions), "more": False}
+            # As the core matches a source's ref: exactly, or every one when none.
+            ref = (document or {}).get("ref")
+            found = [dict(one) for one in self.sessions
+                     if not ref or (one.get("source") or {}).get("ref") == ref]
+            return {"ok": True, "sessions": found, "total": len(found), "more": False}
         if command == "session":
             session = self._session(args[1])
             if session is None:
@@ -158,7 +161,10 @@ class FakeCore:
                                folder=document.get("folder"), mode=document.get("mode"),
                                model=document.get("model") or "",
                                restrictions=dict(document.get("restrictions") or {}),
-                               skills=list(document.get("skills") or []), turns=[])
+                               skills=list(document.get("skills") or []), turns=[],
+                               plan=bool(document.get("plan")), phase="", record=False,
+                               source=dict(document.get("source") or {"label": "Chat",
+                                                                      "detail": ""}))
             self.sessions.insert(0, session)
             return {"ok": True, "session": dict(session)}
         if command == "session-set":
@@ -685,17 +691,17 @@ def test_a_turn_s_row_says_when_who_where_and_how_it_went(make):
     table = view.activity.table
     assert _texts(table, 0) == [agents_module.when_text(1794411900.0), "Claude", "Chat",
                                 "/home/someone/src/shop", "read", "sonnet", "—", "42 s",
-                                "$0.04", "Done"]
+                                "—", "$0.04", "Done"]
     assert table.item(0, 0).toolTip() == ("Flaky login test\nDouble-click to read the "
                                           "conversation.")
     assert _texts(table, 1)[2:] == ["Cycle nightly · step review", "/home/someone/src/shop",
-                                    "edit", "CLI default", "2", "3 min 10 s", "—",
+                                    "edit", "CLI default", "2", "3 min 10 s", "—", "—",
                                     "Failed - Claude Code ended without an answer (exit 3)."]
     assert table.item(1, 2).toolTip() == "Run 20261111-1"
     # How many skills it was handed; which ones is a pointer away.
     assert table.item(1, 6).toolTip() == "odoo-review, test-writer"
-    assert table.item(1, 9).foreground().color() == QColor(theme.BAD_INK)
-    assert _texts(table, 2)[7:] == ["—", "—", "Running"]
+    assert table.item(1, 10).foreground().color() == QColor(theme.BAD_INK)
+    assert _texts(table, 2)[7:] == ["—", "—", "—", "Running"]
 
 
 def test_nothing_asked_yet_says_so(make, qapp):

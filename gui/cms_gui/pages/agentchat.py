@@ -23,22 +23,30 @@ is said next to an agent that just did something unexpected.
 import os
 
 from PySide6.QtCore import QEvent, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QTextDocument
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFrame, QHBoxLayout,
+from PySide6.QtGui import (QDesktopServices, QFont, QTextCharFormat, QTextCursor,
+                           QTextDocument, QTextFormat)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame,
+                               QHBoxLayout,
                                QHeaderView, QLabel, QPlainTextEdit, QPushButton,
                                QScrollArea, QSizePolicy, QTableWidgetItem, QTextBrowser,
                                QVBoxLayout, QWidget)
 
 from .. import icons, restrictions as restrictions_mod, stages, theme, widgets
+from ..diffview import ChangesDialog
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
-from .agentwords import ago_text, clock_text, end_text, folder_text, refused_text
+from .agentcards import ChangesLine, PlanCard, QuestionsCard
+from .agentwords import (ago_text, clock_text, context_text, cost_text, end_text, folder_text,
+                         refused_text, tokens_text)
 
 #: How much the agent may do in a turn, as the composer offers it. (label, mode)
 MODES = (("Read", "read"), ("Edit", "edit"), ("Full", "full"))
 MODE_MEANS = ("Read: it reads the folder and changes nothing. Edit: it also changes "
               "files. Full: it also runs commands - everything this account can do "
               "inside the folder's restrictions.")
+PLAN_MEANS = ("The agent first looks through the folder, changing nothing, and answers "
+              "with its questions or a plan. The work starts when you approve the plan, "
+              "with the access you choose then.")
 
 #: How many of a conversation's newest events are read when it is opened, and
 #: how many conversations the list reads.
@@ -60,7 +68,19 @@ CHAT = "Chat"
 
 
 def _is_chat(session):
-    return ((session or {}).get("source") or {}).get("label", CHAT) == CHAT
+    """Whether a conversation can be carried on here. The core says, as
+    ``record``: a conversation another part of QAVector opened to talk in - a
+    task handed over from Jira - goes on in the chat like any other; one that
+    only records turns taken elsewhere - a cycle step's - is read."""
+    session = session or {}
+    if "record" in session:
+        return not session["record"]
+    source = session.get("source") or {}
+    if "record" in source:
+        return not source["record"]
+    # Saved before a source could say so: a ref is what opens a conversation
+    # to talk in, and only the chat's own were carried on before that.
+    return bool(source.get("ref")) or source.get("label", CHAT) == CHAT
 
 
 # -- the feed -------------------------------------------------------------------
@@ -145,8 +165,26 @@ class AnswerText(QTextBrowser):
             "p, li { line-height: 140%%; } pre, code { font-family: %s; }" % theme.MONO_CSS)
         self.document().setMarkdown(
             self.said, QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
+        self._tame_headings()
         self.anchorClicked.connect(self._open)
         self._fit()
+
+    def _tame_headings(self):
+        """Headings an agent writes - a plan's sections - a step above the
+        text, not a page's title: a feed holds many of them. Markdown gives
+        each level a size of its own, which no stylesheet overrides."""
+        block = self.document().begin()
+        while block.isValid():
+            level = block.blockFormat().headingLevel()
+            if level:
+                cursor = QTextCursor(block)
+                cursor.movePosition(QTextCursor.StartOfBlock)
+                cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                shape = QTextCharFormat()
+                shape.setProperty(QTextFormat.FontSizeAdjustment, 1 if level == 1 else 0)
+                shape.setFontWeight(QFont.DemiBold)
+                cursor.mergeCharFormat(shape)
+            block = block.next()
 
     def loadResource(self, kind, url):          # noqa: N802 - Qt's own spelling
         return None                             # never a request, never a file read
@@ -202,6 +240,14 @@ class ChatFeed(QScrollArea):
 
     #: The person took the queued message at this index out of the queue.
     unqueued = Signal(int)
+    #: A planning card was acted on: answers sent, a plan sent back with
+    #: comments - each the message to send as the next planning turn.
+    answered = Signal(str)
+    revise = Signal(str)
+    #: A plan was approved: the access to work with, and the message.
+    approve = Signal(str, str)
+    #: What a turn changed was asked for: its number.
+    changes_wanted = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -214,6 +260,8 @@ class ChatFeed(QScrollArea):
         self._mode = "read"             # the access mode of the turn being shown
         self._began = None              # when the turn being shown began
         self._last_text = ""            # the last thing the agent said in it
+        self._cards = []                # planning cards, in order: the newest waits
+        self._actionable = False
         self._follow = True
         bar = self.verticalScrollBar()
         bar.valueChanged.connect(self._moved)
@@ -235,7 +283,7 @@ class ChatFeed(QScrollArea):
     def clear(self):
         for _kind, widget in self._rows:
             self._drop(widget)
-        self._rows, self._tools = [], {}
+        self._rows, self._tools, self._cards = [], {}, []
         self._began, self._last_text = None, ""
         self.set_waiting("", [])
         self._follow = True
@@ -282,7 +330,7 @@ class ChatFeed(QScrollArea):
         """What each row says, in order: a message, an answer, a stage's title."""
         found = []
         for kind, widget in self._rows:
-            if kind in ("you", "answer"):
+            if kind in ("you", "answer", "plan", "questions", "changes"):
                 found.append(widget.body.said)
             else:
                 found.append(widget.stage.get("title", ""))
@@ -294,12 +342,27 @@ class ChatFeed(QScrollArea):
     def at_bottom(self):
         return self._follow
 
+    def cards(self):
+        return list(self._cards)
+
+    def set_actionable(self, actionable):
+        """Whether the newest planning card waits for the person - the
+        conversation waits for its answer and nothing else is going on."""
+        self._actionable = bool(actionable)
+        for card in self._cards:
+            card.set_actionable(False)
+        if self._cards and self._actionable and not self._cards[-1].property("settled") == "true":
+            self._cards[-1].set_actionable(True)
+
     # -- events into rows -------------------------------------------------------
     def _take(self, event):
         kind = event.get("type")
         if kind == "user":
             self._began, self._last_text = event.get("at"), ""
             self._mode = event.get("mode") or self._mode
+            for card in self._cards:
+                if card.property("settled") != "true":
+                    card.settle()
             self._add("you", _Row({"kind": "result"},
                                   MessageCard(event.get("text"), clock_text(event.get("at")),
                                               attachments=event.get("attachments"))))
@@ -317,6 +380,38 @@ class ChatFeed(QScrollArea):
             self._returned(event)
         elif kind in ("completed", "failed", "stopped", "interrupted"):
             self._ended(event)
+        elif kind == "questions":
+            card = QuestionsCard(event.get("items"))
+            card.answered.connect(self.answered)
+            self._card("questions", card)
+        elif kind == "plan":
+            version = 1 + sum(1 for one in self._cards if isinstance(one, PlanCard))
+            for one in self._cards:
+                if isinstance(one, PlanCard) and not one.body.isHidden():
+                    one.supersede()
+            card = PlanCard(event.get("text"), version)
+            card.revise.connect(self.revise)
+            card.approve.connect(self.approve)
+            self._card("plan", card)
+        elif kind == "changes":
+            self._changed(event)
+
+    def _card(self, kind, card):
+        self._cards.append(card)
+        self._add(kind, _Row({"kind": "text"}, card))
+
+    def _changed(self, event):
+        if event.get("error"):
+            self._add("changes-error", stages.StageRow(
+                {"kind": "caution", "title": "What changed was not kept",
+                 "detail": str(event["error"])}))
+            return
+        if not event.get("files"):
+            return                      # nothing changed: nothing to say
+        line = ChangesLine(event)
+        turn = event.get("turn")
+        line.wanted.connect(lambda turn=turn: self.changes_wanted.emit(turn))
+        self._add("changes", _Row({"kind": "tool_result"}, line))
 
     def _answer(self, text):
         text = str(text or "").strip()
@@ -509,6 +604,9 @@ class Composer(QFrame):
         self.mode = widgets.Segmented([label for label, _mode in MODES])
         self.mode.setToolTip(MODE_MEANS)
         self.mode.changed.connect(lambda _label: self.chosen.emit())
+        self.plan = QCheckBox("Plan first")
+        self.plan.setToolTip(PLAN_MEANS)
+        self.plan.toggled.connect(lambda _on: self.chosen.emit())
         self.model = ModelPicker()
         self.model.setMinimumWidth(160)
         self.model.setMaximumWidth(240)
@@ -561,7 +659,7 @@ class Composer(QFrame):
             button.setStyleSheet("min-height: 30px; max-height: 30px; padding-top: 0px; padding-bottom: 0px;")
         for button in (self.stop, self.send_button):
             button.setFixedWidth(80)
-        self.footer = widgets.row(self.attach, 6, _caption("ACCESS"), self.mode,
+        self.footer = widgets.row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
                                   None, self.stop, self.send_button)
         outer.addWidget(self.footer)
         self.text.textChanged.connect(self._sync_send)
@@ -634,6 +732,9 @@ class Composer(QFrame):
         self.folder.blockSignals(False)
         labels = {mode: label for label, mode in MODES}
         self.mode.set_current(labels.get(chosen.get("mode"), MODES[0][0]), notify=False)
+        self.plan.blockSignals(True)
+        self.plan.setChecked(bool(chosen.get("plan")))
+        self.plan.blockSignals(False)
         self.model.set_value(chosen.get("model") or "")
         self.set_skills(chosen.get("skills") or [])
         self._restrictions = dict(chosen.get("restrictions") or {})
@@ -704,7 +805,16 @@ class Composer(QFrame):
         return {"connection": self.connection.currentData() or "",
                 "folder": os.path.abspath(os.path.expanduser(folder)) if folder else "",
                 "mode": dict(MODES)[self.mode.current()],
-                "model": self.model.value()}
+                "model": self.model.value(), "plan": self.plan.isChecked()}
+
+    def set_work(self, mode, plan):
+        """What the next turn is asked with, as a card in the feed decided it."""
+        labels = {value: label for label, value in MODES}
+        if mode in labels:
+            self.mode.set_current(labels[mode], notify=False)
+        self.plan.blockSignals(True)
+        self.plan.setChecked(bool(plan))
+        self.plan.blockSignals(False)
 
     def _connection_picked(self, _index):
         self._say_model()
@@ -862,6 +972,9 @@ class ChatTab(QWidget):
     connections_wanted = Signal()
     #: The library lacks the skill somebody wants: take them to add one.
     skills_wanted = Signal()
+    #: A conversation was begun, or one of its turns ended: its id. For
+    #: whatever shows conversations elsewhere and wants to read them again.
+    conversation_changed = Signal(str)
 
     #: What reads a turn as it happens. A test puts a stand-in here.
     turn_factory = AgentTurn
@@ -952,7 +1065,19 @@ class ChatTab(QWidget):
         column.addWidget(head)
         self.sub = widgets.ElidedLabel(mode=Qt.ElideMiddle)
         self.sub.setProperty("role", "muted")
-        column.addWidget(self.sub)
+        # How full the agent's context is and what the conversation cost - the
+        # two things worth knowing before saying more to it.
+        self.usage = QLabel("")
+        self.usage.setProperty("role", "muted")
+        self.changes_button = QPushButton("Changes")
+        self.changes_button.setProperty("variant", "ghost")
+        self.changes_button.setToolTip("What changed in the folder during this conversation, "
+                                       "file by file")
+        self.changes_button.clicked.connect(lambda: self.show_changes())
+        self.changes_dialog = None
+        sub_row = widgets.row(self.sub, self.usage, self.changes_button)
+        sub_row.layout().setStretchFactor(self.sub, 1)
+        column.addWidget(sub_row)
         self.earlier = QPushButton("Show the whole conversation")
         self.earlier.setProperty("variant", "ghost")
         self.earlier.setToolTip("Only its newest part is shown. Read the rest too.")
@@ -962,6 +1087,10 @@ class ChatTab(QWidget):
         frame = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.feed = ChatFeed()
         self.feed.unqueued.connect(self._unqueue)
+        self.feed.answered.connect(lambda said: self._card_turn(said, plan=True))
+        self.feed.revise.connect(lambda said: self._card_turn(said, plan=True))
+        self.feed.approve.connect(lambda mode, said: self._card_turn(said, plan=False, mode=mode))
+        self.feed.changes_wanted.connect(self.show_changes)
         self.feed_skeleton = widgets.Skeleton(self.feed, "lines")
         frame.layout().addWidget(self.feed, 1)
         self.composer = Composer()
@@ -1024,13 +1153,15 @@ class ChatTab(QWidget):
     def _remember_choices(self):
         if self.current is None:
             chosen = self.composer.settings()
-            self._remember(connection=chosen["connection"], mode=chosen["mode"])
+            self._remember(connection=chosen["connection"], mode=chosen["mode"],
+                           plan=chosen["plan"])
 
     def _defaults(self):
         """What a conversation not begun yet starts from: the last choices."""
         memory = self._memory()
         folders = [one for one in memory.get("folders") or [] if isinstance(one, str)]
         return {"connection": memory.get("connection") or "", "mode": memory.get("mode") or "read",
+                "plan": bool(memory.get("plan")),
                 "folder": folders[0] if folders else "", "model": "",
                 "restrictions": self._new_restrictions, "skills": self._new_skills}
 
@@ -1178,6 +1309,7 @@ class ChatTab(QWidget):
         if self._showing(session.get("id")):
             self.current = session
             self._head()                # a first turn gives it its name
+            self._sync_cards()
         self._fill()
 
     def _picked(self):
@@ -1226,6 +1358,10 @@ class ChatTab(QWidget):
         self.table.blockSignals(False)
         self.title.setText("New conversation")
         self.sub.setText("Nothing has been said yet")
+        # Nothing used, nothing changed: not the last conversation's figures.
+        self.usage.setText("")
+        self.usage.setToolTip("")
+        self.changes_button.setVisible(False)
         self.earlier.setVisible(False)
         self.feed.set_empty_text(NEW)
         self.feed.clear()
@@ -1298,7 +1434,49 @@ class ChatTab(QWidget):
         self.composer.set_session(session)
         self.composer.set_draft(self._drafts.get(session.get("id") or "", ""))
         self.composer.set_attachments(self._draft_files.get(session.get("id") or "", []))
+        self._sync_cards()
         self._fill()
+
+    def _sync_cards(self):
+        """The newest planning card waits for the person only while the
+        conversation does: it is carried on here, waits for answers or a word
+        on the plan, and the agent is not at work."""
+        session = self.current
+        self.feed.set_actionable(
+            session is not None and _is_chat(session) and self._key() not in self.turns
+            and session.get("phase") in ("questions", "plan"))
+
+    def _card_turn(self, text, plan, mode=None):
+        """A card in the feed was acted on: the next turn, as it said."""
+        if (self.current is None or not _is_chat(self.current) or self.core() is None
+                or self._key() in self.turns or self._creating):
+            return
+        self.composer.set_work(mode, plan)
+        document = self._message(text, [])
+        document["plan"] = bool(plan)
+        if mode:
+            document["mode"] = mode
+        self.feed.set_actionable(False)
+        self._start(self.current, text, document=document)
+
+    def show_changes(self, turn=None):
+        """What changed in the folder: the whole conversation's, or a turn's,
+        in a window beside the chat."""
+        session = self.current
+        if session is None:
+            return
+        session_id = session["id"]
+        turns = [one.get("n") for one in session.get("turns") or []
+                 if (one.get("changes") or {}).get("files")]
+
+        def read(number, done):
+            self.ask("changes", lambda core, cancel: core.agents(
+                "changes", session_id, document={"turn": number} if number else {},
+                cancel=cancel), done)
+
+        if self.changes_dialog is None:
+            self.changes_dialog = ChangesDialog(parent=self)
+        self.changes_dialog.show_for(session.get("title") or "Untitled", turns, read, turn)
 
     def _head(self):
         session = self.current or {}
@@ -1307,6 +1485,13 @@ class ChatTab(QWidget):
         self.sub.setText(" · ".join(part for part in (
             session.get("connection_name") or session.get("connection"),
             folder_text(session.get("folder")), "" if source == CHAT else source) if part))
+        context = context_text(session.get("context"))
+        cost = cost_text(session.get("cost_usd")) if session.get("turns") else ""
+        self.usage.setText(" · ".join(part for part in (
+            "context " + context if context else "", cost) if part))
+        tokens = tokens_text(session.get("tokens"))
+        self.usage.setToolTip("Tokens so far: %s" % tokens if tokens else "")
+        self.changes_button.setVisible(bool(session.get("turns")))
 
     def _waiting(self):
         key = self._key()
@@ -1337,7 +1522,8 @@ class ChatTab(QWidget):
 
     def _message(self, text, files):
         chosen = self.composer.settings()
-        document = {"message": text, "mode": chosen["mode"], "model": chosen["model"]}
+        document = {"message": text, "mode": chosen["mode"], "model": chosen["model"],
+                    "plan": chosen["plan"]}
         if files:
             document["attachments"] = list(files)
         return document
@@ -1388,12 +1574,57 @@ class ChatTab(QWidget):
         self.ask("session-new", lambda core, cancel: core.agents(
             "session-new", document=document), done)
 
+    def delegate(self, chosen, source, message, done=None):
+        """Open a conversation another part of QAVector hands a task to, and
+        say its first message - shown here, as any conversation is.
+
+        ``chosen`` is what the composer would say: ``connection``, ``folder``,
+        ``mode``, ``plan`` and ``title``; ``source`` who handed it over, with
+        the ``ref`` it finds its conversations by. Whatever is typed in the
+        composer for a new conversation stays as it was. ``done`` hears the
+        conversation, or an answer that is not ``ok``.
+        """
+        if self._creating or self.core() is None:
+            return False
+        document = {"connection": chosen.get("connection") or "",
+                    "folder": chosen.get("folder") or "", "mode": chosen.get("mode") or "read",
+                    "plan": bool(chosen.get("plan")), "model": "", "title": chosen.get("title") or "",
+                    "restrictions": dict(chosen.get("restrictions") or {}), "skills": [],
+                    "source": dict(source or {})}
+        first = {"message": message, "mode": document["mode"], "model": "",
+                 "plan": document["plan"]}
+        self._creating = True
+        self._sync()
+
+        def made(payload):
+            self._creating = False
+            self._sync()
+            if not payload.get("ok"):
+                if done is not None:
+                    done(payload)
+                return
+            session = payload.get("session") or {}
+            folders = [session.get("folder")] + [one for one in self._memory().get("folders")
+                                                 or [] if one != session.get("folder")]
+            self._remember(folders=folders[:RECENT_FOLDERS])
+            self._fresh.add(session.get("id"))
+            self.sessions.insert(0, session)
+            self._show(session, [], whole=True)
+            self._start(session, message, document=first)
+            self.conversation_changed.emit(session.get("id") or "")
+            if done is not None:
+                done(payload)
+
+        self.ask("session-new", lambda core, cancel: core.agents(
+            "session-new", document=document), made)
+        return True
+
     def _start(self, session, text, document=None):
         session_id = session["id"]
         if document is None:
             chosen = self.composer.settings() if self._showing(session_id) else {}
             document = {"message": text}
-            for key in ("mode", "model"):
+            for key in ("mode", "model", "plan"):
                 if key in chosen:
                     document[key] = chosen[key]
         turn = self.turn_factory(self.core(), session_id, document, self)
@@ -1402,6 +1633,8 @@ class ChatTab(QWidget):
                               self._answered(session_id, answer))
         self.turns[session_id] = turn
         self._terminal_seen.discard(session_id)
+        if self._showing(session_id):
+            self._sync_cards()
         self._sending[session_id] = dict(document)
         if self._showing(session_id):
             self._waiting()
@@ -1425,6 +1658,7 @@ class ChatTab(QWidget):
                 self._shown_seq = max(self._shown_seq, seq)
 
     def _answered(self, session_id, answer):
+        self.conversation_changed.emit(session_id)
         turn = self.turns.pop(session_id, None)
         if turn is not None:
             turn.deleteLater()

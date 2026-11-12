@@ -29,9 +29,9 @@ from .. import background, core as core_mod, search, theme, widgets
 from ..agentmodel import ModelPicker
 from .agentchat import ChatTab
 from .agentskills import SkillsTab
-from .agentwords import (KINDS, cost_text, folder_text, kind_name,  # noqa: F401
-                         model_text, program_text, result_text, status_text,
-                         took_text, when_text)
+from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F401
+                         folder_text, kind_name, model_text, program_text, result_text,
+                         status_text, tokens_text, tokens_total, took_text, when_text)
 
 #: Requests that change a file. One of these is never cancelled half way; its
 #: answer is dropped when the page it belonged to has moved on.
@@ -482,9 +482,10 @@ class ActivityTab(QWidget):
     """Every turn taken with an agent in this project, the newest first."""
 
     HEADERS = ("When", "Connection", "From", "Folder", "Mode", "Model", "Skills", "Took",
-               "Cost", "Result")
+               "Context", "Cost", "Result")
     SKILLS = 6
-    RESULT = 9
+    CONTEXT = 8
+    RESULT = 10
 
     #: The tab wants its rows: the project's own record, never an agent.
     wanted = Signal()
@@ -503,8 +504,8 @@ class ActivityTab(QWidget):
         panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.table = _table(self.HEADERS)
         self.table.horizontalHeader().setSectionResizeMode(self.RESULT, QHeaderView.Stretch)
-        for index, width in ((0, 142), (1, 100), (2, 140), (3, 150), (4, 58), (5, 90),
-                             (6, 58), (7, 84), (8, 76)):
+        for index, width in ((0, 134), (1, 100), (2, 124), (3, 126), (4, 52), (5, 84),
+                             (6, 58), (7, 74), (8, 96), (9, 64)):
             self.table.setColumnWidth(index, width)
         self.table.itemDoubleClicked.connect(self._open)
         self.search = widgets.SearchRow(self.table)
@@ -536,13 +537,17 @@ class ActivityTab(QWidget):
             source = one.get("source") or {}
             done = one.get("state") not in ("running", None, "")
             skills = [str(name) for name in one.get("skills") or []]
+            tokens = one.get("tokens") or {}
             values = (when_text(one.get("started")),
                       one.get("connection_name") or one.get("connection"),
-                      source.get("label"), folder_text(one.get("folder")), one.get("mode"),
+                      source.get("label"), folder_text(one.get("folder")),
+                      "plan" if one.get("plan") else one.get("mode"),
                       one.get("model") or "CLI default",
                       # How many it was handed; which ones is the cell's tooltip.
                       str(len(skills)) if skills else "",
                       took_text(one.get("started"), one.get("ended")) if done else "",
+                      # How full the agent's context was; the tokens are its tooltip.
+                      context_text(one.get("context")),
                       cost_text(one.get("cost_usd")), result_text(one))
             for column, value in enumerate(values):
                 item = _cell(value)
@@ -556,6 +561,9 @@ class ActivityTab(QWidget):
                     item.setToolTip(str(one.get("folder") or ""))
                 if column == self.SKILLS and skills:
                     item.setToolTip(", ".join(skills))
+                if column == self.CONTEXT and tokens:
+                    item.setToolTip("Tokens: %s in all - %s"
+                                    % (count_text(tokens_total(tokens)), tokens_text(tokens)))
                 if column == self.RESULT:
                     if one.get("state") in ("failed", "interrupted"):
                         item.setForeground(QColor(theme.BAD_INK))
@@ -715,6 +723,11 @@ class AgentsView(QWidget):
         """Show one conversation - asked for from the log, say."""
         self.tabs.setCurrentWidget(self.chat)
         self.chat.open_session(session_id)
+
+    def delegate(self, chosen, source, message, done=None):
+        """Begin a conversation something else hands a task to, in the chat."""
+        self.tabs.setCurrentWidget(self.chat)
+        return self.chat.delegate(chosen, source, message, done)
 
     def changeEvent(self, event):
         super().changeEvent(event)
