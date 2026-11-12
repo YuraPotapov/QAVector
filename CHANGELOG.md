@@ -16,6 +16,21 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.71] - 2026-11-12
+
+### Added
+- **Breadcrumbs in Integrations.** The agents' chat opened from a Jira issue -
+  by *Delegate…* or from the issue's *Agent work* - reads
+  *Integrations / Jira / KEY*, and each part leads back: *Jira* to the Jira
+  page, the issue's key to that issue, whatever Jira shows by then. Agents
+  opened any other way has the plain *Integrations* crumb.
+
+### Fixed
+- **"Moved to ON PROD." under an issue that was never moved.** The line under
+  an issue that says what was just done - *Moved to…*, *Comment posted.*,
+  *Saved to…* - stayed when another issue was opened, and read as done to it.
+  It is cleared when another issue is shown, or none.
+
 ## [0.16.70] - 2026-11-12
 
 ### Added
