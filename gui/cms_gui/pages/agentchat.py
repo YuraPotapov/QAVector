@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFrame, QH
 from .. import icons, restrictions as restrictions_mod, stages, theme, widgets
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
-from .agentwords import ago_text, clock_text, end_text, folder_text
+from .agentwords import ago_text, clock_text, end_text, folder_text, refused_text
 
 #: How much the agent may do in a turn, as the composer offers it. (label, mode)
 MODES = (("Read", "read"), ("Edit", "edit"), ("Full", "full"))
@@ -210,7 +210,8 @@ class ChatFeed(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._rows = []                 # (kind, widget) of what is on record
         self._waiting = []              # rows of what is not on record yet
-        self._tools = {}                # tool call id -> (index in _rows, stage)
+        self._tools = {}                # tool call id -> (index in _rows, stage, tool name)
+        self._mode = "read"             # the access mode of the turn being shown
         self._began = None              # when the turn being shown began
         self._last_text = ""            # the last thing the agent said in it
         self._follow = True
@@ -298,6 +299,7 @@ class ChatFeed(QScrollArea):
         kind = event.get("type")
         if kind == "user":
             self._began, self._last_text = event.get("at"), ""
+            self._mode = event.get("mode") or self._mode
             self._add("you", _Row({"kind": "result"},
                                   MessageCard(event.get("text"), clock_text(event.get("at")),
                                               attachments=event.get("attachments"))))
@@ -309,7 +311,7 @@ class ChatFeed(QScrollArea):
         elif kind == "tool.started":
             stage = {"kind": "tool", "title": event.get("title") or event.get("name") or "Tool",
                      "detail": event.get("detail") or "", "status": "running"}
-            self._tools[event.get("id")] = (len(self._rows), stage)
+            self._tools[event.get("id")] = (len(self._rows), stage, event.get("name") or "")
             self._add("tool", stages.StageRow(stage))
         elif kind == "tool.completed":
             self._returned(event)
@@ -327,7 +329,16 @@ class ChatFeed(QScrollArea):
         found = self._tools.pop(event.get("id"), None)
         if found is None:
             return
-        index, stage = found
+        index, stage, name = found
+        if event.get("refused"):
+            # Not a failure of the tool: the conversation did not allow it.
+            # Said in the access mode's terms rather than the program's, whose
+            # "requires approval" asks for something nobody here can give.
+            why = refused_text(self._mode, name, event.get("reason"))
+            self._replace(index, stages.StageRow(dict(
+                stage, status="done", kind="caution",
+                detail="\n".join(part for part in (stage["detail"], why) if part))))
+            return
         stage = dict(stage, status="done" if event.get("ok", True) else "failed")
         if not event.get("ok", True) and event.get("detail"):
             # What came back is worth a line only when it is why it failed.
@@ -337,7 +348,7 @@ class ChatFeed(QScrollArea):
 
     def _ended(self, event):
         # A call the agent never heard back from is not still running.
-        for index, stage in list(self._tools.values()):
+        for index, stage, _name in list(self._tools.values()):
             detail = "\n".join(part for part in (stage.get("detail"),
                                                  "No result was received for this tool.") if part)
             self._replace(index, stages.StageRow(dict(stage, status="unknown", kind="caution",

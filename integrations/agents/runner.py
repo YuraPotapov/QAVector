@@ -103,12 +103,21 @@ class Reader:
     def __init__(self, adapter):
         self.adapter = adapter
         self._writing = {}              # tool call id -> the path it asked to write
+        self._refused = {}              # tool call id -> why the program would not run it
 
     def events(self, line):
         found = []
         for event in self.adapter.events(line):
+            if event["type"] == "tool.refused":
+                # Folded into the call's own result, so a refusal is one row
+                # that says so rather than a failure and a note beside it.
+                self._refused[event.get("id")] = event.get("reason") or ""
+                continue
             if event["type"] == "tool.started" and event.get("writes"):
                 self._writing[event.get("id")] = event["writes"]
+            if event["type"] == "tool.completed" and event.get("id") in self._refused:
+                event = dict(event, ok=False, refused=True,
+                             reason=self._refused.pop(event.get("id")))
             found.append(event)
             if event["type"] == "tool.completed":
                 path = self._writing.pop(event.get("id"), None)

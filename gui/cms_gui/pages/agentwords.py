@@ -97,6 +97,28 @@ def result_text(turn):
     return "%s - %s" % (said, error) if error and turn.get("state") == "failed" else said
 
 
+#: The tools a narrower access mode leaves out, and the mode that has them.
+SHELL_TOOLS = ("Bash",)
+WRITING_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+def refused_text(mode, tool, reason=""):
+    """Why a call the agent made was not run, in the terms of the access mode.
+
+    The program's own reason reads as a request to approve, and nothing in a
+    conversation can approve a call - so the mode's words come first, and the
+    program's reason is kept only when the mode does not explain it.
+    """
+    if tool in SHELL_TOOLS and mode in ("read", "edit"):
+        return "Not allowed in %s: commands need Full access." % mode.capitalize()
+    if tool in WRITING_TOOLS and mode == "read":
+        return "Not allowed in Read: changing files needs Edit or Full access."
+    reason = " ".join(str(reason or "").split())
+    said = "Not run: the agent program would not run this without approval, " \
+           "which a conversation cannot give."
+    return "%s %s" % (said, reason) if reason else said
+
+
 def ago_text(stamp, now=None):
     """When a conversation was last used, the way a person says it."""
     try:

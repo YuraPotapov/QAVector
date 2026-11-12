@@ -535,14 +535,22 @@ def last_result(text):
 
 # -- one turn of a conversation ---------------------------------------------------
 #: What a conversation may let the agent do, narrowest first, and the tools
-#: that come to. Naming the tools is what holds it: with nobody at a terminal
-#: to ask, a tool that is not named is refused rather than waited for.
-#: ``full`` adds the shell, and with it everything the account can do inside
-#: whatever the folder's restrictions leave open.
+#: that come to. They are named twice: as the only tools the agent is shown
+#: (``--tools``) and as the ones it may use without asking (``--allowedTools``).
+#: Allowing alone would leave every other tool on offer, refused only when
+#: reached for - a Read conversation asked about git tried the shell three
+#: times before reading the file it could. ``full`` adds the shell, and with it
+#: everything the account can do inside whatever the folder's restrictions
+#: leave open.
 MODES = ("read", "edit", "full")
 _READ = ("Read", "Glob", "Grep")
 _EDIT = _READ + ("Edit", "Write", "MultiEdit")
 TOOLS = {"read": _READ, "edit": _EDIT, "full": _EDIT + ("Bash",)}
+
+#: No MCP servers in a turn. The CLI would otherwise bring in every server the
+#: account has - claude.ai connectors among them - though no tool of theirs is
+#: one a mode names, and their status notices end up in the agent's answer.
+NO_MCP = ("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}')
 
 #: Variables a turn must not inherit. ``CLAUDE_CODE_SIMPLE`` is the CLI's bare
 #: mode, in which it never reads its own sign-in - set in whatever started
@@ -569,7 +577,10 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
     """
     from qavector_agent_claude.command import tool_list
     argv = [binary, "-p", "--output-format", "stream-json", "--verbose"]
-    argv += tool_list("--allowedTools", TOOLS[mode] + (("Skill",) if skills_dir else ()))
+    tools = TOOLS[mode] + (("Skill",) if skills_dir else ())
+    argv += ["--tools", ",".join(tools)]
+    argv += tool_list("--allowedTools", tools)
+    argv += NO_MCP
     if skills_dir:
         argv += ["--plugin-dir", skills_dir]
     if attachments_dir:
@@ -652,6 +663,8 @@ def events(line):
         tool.started     id, name, title, detail - and ``writes``, the path,
                          for a tool that changes a file
         tool.completed   id, ok, detail
+        tool.refused     id, reason - the CLI would not run that call; its
+                         ``tool.completed`` follows, as a failure
         completed        text, steps, cost_usd, provider_session
         failed           the same, and error
 
@@ -668,6 +681,12 @@ def events(line):
     if kind in SKIPPED_TYPES or event.get("subtype") in SKIPPED_SUBTYPES:
         return []
     if kind == "system":
+        if event.get("subtype") == "permission_denied":
+            # Said apart from the call's own result, whose text reads as a
+            # question ("requires approval") nobody in a turn can answer.
+            return [{"type": "tool.refused", "id": str(event.get("tool_use_id") or ""),
+                     "reason": str(event.get("message") or event.get("decision_reason")
+                                   or "").strip()}]
         if event.get("subtype") != "init":
             return []
         return [{"type": "started", "model": str(event.get("model") or "").strip(),

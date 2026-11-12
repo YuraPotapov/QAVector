@@ -172,6 +172,29 @@ def test_a_tool_that_failed_says_what_came_back(qapp):
     assert stage["detail"] == "file_path: /repo/tests/test_login.py\nNo such file"
 
 
+@pytest.mark.parametrize("mode, name, said", [
+    ("read", "Bash", "Not allowed in Read: commands need Full access."),
+    ("edit", "Bash", "Not allowed in Edit: commands need Full access."),
+    ("read", "Write", "Not allowed in Read: changing files needs Edit or Full access."),
+    ("full", "Bash", "Not run: the agent program would not run this without approval, "
+                     "which a conversation cannot give. This command requires approval"),
+])
+def test_a_refused_call_says_what_the_mode_allows_not_that_it_awaits_approval(
+        qapp, mode, name, said):
+    feed = ChatFeed()
+    events = _events()
+    events[0] = dict(events[0], mode=mode)
+    events[3] = dict(events[3], name=name, title="git status", detail="command: git status")
+    events[5] = dict(events[5], ok=False, refused=True,
+                     reason="This command requires approval",
+                     detail="This command requires approval")
+    feed.load(events[:6])
+    stage = feed._rows[2][1].stage
+    # A caution, not a failure: nothing broke, the conversation did not allow it.
+    assert (stage["status"], stage["kind"]) == ("done", "caution")
+    assert stage["detail"] == "command: git status\n" + said
+
+
 @pytest.mark.parametrize("end, title, status", [
     ({"type": "failed", "error": "Claude Code ended without an answer (exit 3)."},
      "Failed", "failed"),

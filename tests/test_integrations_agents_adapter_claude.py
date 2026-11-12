@@ -184,7 +184,9 @@ def test_without_a_caller_json_is_just_what_was_said():
 def test_a_first_turn_names_the_conversation_and_a_later_one_continues_it():
     first = claude.turn_argv("/bin/claude", "read", session="abc")
     assert first == ["/bin/claude", "-p", "--output-format", "stream-json", "--verbose",
-                     "--allowedTools", "Read Glob Grep", "--session-id", "abc"]
+                     "--tools", "Read,Glob,Grep", "--allowedTools", "Read Glob Grep",
+                     "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                     "--session-id", "abc"]
     later = claude.turn_argv("/bin/claude", "read", session="abc", resume=True)
     assert later[-2:] == ["--resume", "abc"] and "--session-id" not in later
 
@@ -203,6 +205,28 @@ def test_each_mode_names_exactly_the_tools_it_allows():
     for mode in ("edit", "full"):
         argv = claude.turn_argv("claude", mode)
         assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_the_agent_is_shown_only_the_tools_its_mode_allows_and_no_mcp_servers():
+    """Allowed but not shown would leave the shell on offer in Read, refused
+    only once reached for; and the account's MCP servers - claude.ai
+    connectors among them - would bring their notices into the answer."""
+    for mode in claude.MODES:
+        argv = claude.turn_argv("claude", mode)
+        shown = argv[argv.index("--tools") + 1].split(",")
+        assert shown == argv[argv.index("--allowedTools") + 1].split() == list(claude.TOOLS[mode])
+        assert "--strict-mcp-config" in argv
+        assert argv[argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    with_skills = claude.turn_argv("claude", "read", skills_dir="/s")
+    assert with_skills[with_skills.index("--tools") + 1] == "Read,Glob,Grep,Skill"
+
+
+def test_a_refusal_is_read_as_its_own_event():
+    line = json.dumps({"type": "system", "subtype": "permission_denied", "tool_name": "Bash",
+                       "tool_use_id": "toolu_1", "decision_reason": "x",
+                       "message": "This command requires approval"})
+    assert claude.events(line) == [{"type": "tool.refused", "id": "toolu_1",
+                                    "reason": "This command requires approval"}]
 
 
 def test_model_and_effort_are_said_only_when_there_is_something_to_say():

@@ -308,9 +308,15 @@ files and limits the lock beside every Project folder sets. A folder with the
 network off cannot reach the model, so a message there is refused at once
 rather than left to retry.
 
-A write the access does not allow is refused by the program and is not
-recorded as a file written. A conversation started by a cycle is shown
-read-only: it is the record of what that step did, not something to carry on.
+The agent is shown only the tools its access allows - in Read it does not know
+it could run a command - and none of the MCP servers or claude.ai connectors
+the program's account has. A call the program still refuses is shown as a
+caution saying what the access allows ("Not allowed in Read: commands need
+Full access."); nothing in a conversation can approve a call, so the
+program's own "requires approval" is not repeated as if it could. A refused
+write is not recorded as a file written. A conversation started by a cycle is
+shown read-only: it is the record of what that step did, not something to
+carry on.
 
 ## Agent connections
 

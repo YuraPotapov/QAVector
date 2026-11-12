@@ -179,6 +179,10 @@ def test_a_write_the_cli_refused_is_not_recorded_as_a_file_written(world):
     assert "file.written" not in kinds
     completed = seen[kinds.index("tool.completed")]
     assert completed["ok"] is False and "permissions" in completed["detail"]
+    # The refusal is one event, the call's own, and says it was a refusal.
+    assert "tool.refused" not in kinds
+    assert completed["refused"] is True
+    assert completed["reason"] == "This command requires approval"
 
 
 def test_the_session_remembers_the_turn_and_takes_its_title_from_it(world):

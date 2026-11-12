@@ -66,7 +66,10 @@ say({"type": "assistant", "message": {"content": [
     {"type": "tool_use", "id": "tool-1", "name": "Write",
      "input": {"file_path": os.path.join(os.getcwd(), "notes.md"), "content": "x"}}]}})
 if "DENIED" in message:
-    # What the real CLI answers when the turn's tools do not include Write.
+    # What the real CLI answers when the turn's tools do not include Write:
+    # the refusal on a line of its own, then the call's result as an error.
+    say({"type": "system", "subtype": "permission_denied", "tool_name": "Write",
+         "tool_use_id": "tool-1", "message": "This command requires approval"})
     say({"type": "user", "message": {"content": [
         {"type": "tool_result", "tool_use_id": "tool-1", "is_error": True,
          "content": "Claude requested permissions to write, but you haven't granted it yet."}]}})
