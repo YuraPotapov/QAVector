@@ -21,8 +21,9 @@ is said next to an agent that just did something unexpected.
 """
 
 import os
+import time
 
-from PySide6.QtCore import QEvent, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QDesktopServices, QFont, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame,
@@ -37,7 +38,7 @@ from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
 from .agentcards import ChangesLine, PlanCard, QuestionsCard
 from .agentwords import (ago_text, clock_text, context_text, cost_text, end_text, folder_text,
-                         refused_text, tokens_text)
+                         refused_text, tokens_text, took_text)
 
 #: How much the agent may do in a turn, as the composer offers it. (label, mode)
 MODES = (("Read", "read"), ("Edit", "edit"), ("Full", "full"))
@@ -570,6 +571,22 @@ class Composer(QFrame):
         self.settings_button.setToolTip("Agent, model, skills, working folder and restrictions")
         self.context_row = widgets.row(self.context_summary, self.settings_button)
         self.context_row.layout().setStretchFactor(self.context_summary, 1)
+        # That the agent is at work, between the things it shows in the feed:
+        # a turn can think for minutes with nothing new above, and a still
+        # page read as a stopped one. A breathing dot and how long the turn
+        # has taken, quiet beside what the turn runs with.
+        self._working_since = None
+        self.working_dot = widgets.PulseDot()
+        self.working_dot.setToolTip("The agent is working on this turn")
+        self.working = QLabel()
+        self.working.setProperty("role", "muted")
+        self.working.setToolTip("The agent is working on this turn")
+        self._working_clock = QTimer(self)
+        self._working_clock.setInterval(1000)
+        self._working_clock.timeout.connect(self._tick)
+        for index, widget in enumerate((self.working_dot, self.working)):
+            self.context_row.layout().insertWidget(index, widget, 0, Qt.AlignVCenter)
+            widget.setVisible(False)
         outer.addWidget(self.context_row)
         self.options = QWidget()
         options_layout = QVBoxLayout(self.options)
@@ -901,13 +918,56 @@ class Composer(QFrame):
             self.mode.set_current(self.mode.current(), notify=False)
 
     # -- writing ----------------------------------------------------------------
-    def set_running(self, running):
+    def set_running(self, running, since=None):
+        """``since``: when the turn began, on ``time.monotonic()``'s clock -
+        what "Working" counts from; now, when not said."""
+        running = bool(running)
+        if running:
+            self._working_since = since if since is not None else (
+                self._working_since or time.monotonic())
+        else:
+            self._working_since = None
+        for widget in (self.working_dot, self.working):
+            widget.setVisible(running)
+        self._animate()
+        self._tick()
         self.stop.setVisible(bool(running))
         self.stop.setEnabled(True)
         self.send_button.setText("Queue" if running else "Send")
         self.text.setPlaceholderText(
             "The agent is answering - what you write now is sent when it finishes"
             if running else "Message - Enter sends, Shift+Enter starts a new line")
+
+    def working_text(self):
+        return self.working.text() if self._working_since is not None else ""
+
+    def _tick(self):
+        if self._working_since is None:
+            self.working.setText("")
+            return
+        took = took_text(self._working_since, time.monotonic())
+        self.working.setText("Working · %s  ·" % took)
+
+    def _animate(self):
+        """The dot breathes and the clock runs only while they can be seen:
+        an animation nobody sees is a timer waking the process for nothing."""
+        on = self._working_since is not None and self.isVisible()
+        if on:
+            self.working_dot.start()
+            if not self._working_clock.isActive():
+                self._working_clock.start()
+        else:
+            self.working_dot.stop()
+            self._working_clock.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._tick()
+        self._animate()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._animate()
 
     def attachments(self):
         return list(self._attachments)
@@ -1036,6 +1096,7 @@ class ChatTab(QWidget):
         self.connections = []
         self.current = None             # the conversation that is open, or None
         self.turns = {}                 # session id -> the turn being taken
+        self._turn_began = {}           # session id -> when it began (monotonic)
         self._sending = {}              # session id -> what is being handed over
         self._queued = {}               # session id -> what waits for the agent
         self._fresh = set()             # sessions made for a turn not yet recorded
@@ -1384,7 +1445,8 @@ class ChatTab(QWidget):
         nobody = not self.connections and (self.current is None)
         self.setup.setVisible(nobody)
         self.composer.setVisible(not nobody)
-        self.composer.set_running(self._key() in self.turns)
+        self.composer.set_running(self._key() in self.turns,
+                                  self._turn_began.get(self._key()))
         self.composer.stop.setEnabled(self._key() not in self._stopping)
         self.table.setEnabled(not self._creating)
         self.new_button.setEnabled(not self._creating)
@@ -1683,6 +1745,7 @@ class ChatTab(QWidget):
         turn.answered.connect(lambda answer, session_id=session_id:
                               self._answered(session_id, answer))
         self.turns[session_id] = turn
+        self._turn_began[session_id] = time.monotonic()
         self._terminal_seen.discard(session_id)
         if self._showing(session_id):
             self._sync_cards()
@@ -1711,6 +1774,7 @@ class ChatTab(QWidget):
     def _answered(self, session_id, answer):
         self.conversation_changed.emit(session_id)
         turn = self.turns.pop(session_id, None)
+        self._turn_began.pop(session_id, None)
         if turn is not None:
             turn.deleteLater()
         unsent = self._sending.pop(session_id, None)

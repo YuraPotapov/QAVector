@@ -431,6 +431,29 @@ def test_the_message_is_a_row_once_the_core_has_it_on_record(make):
     assert chat.table.item(0, 1).text() != "Answering"
 
 
+def test_a_breathing_dot_and_the_turn_s_time_say_the_agent_is_working(make, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(agentchat.time, "monotonic", lambda: clock[0])
+    chat = make(FakeCore()).agents.chat
+    composer = chat.composer
+    assert composer.working_dot.isHidden() and composer.working_text() == ""
+    _say(chat, QUESTION)
+    assert composer.working_dot.isVisible() and composer.working_dot.running()
+    assert composer.working_text() == "Working · 0 s  ·"
+    clock[0] += 75
+    composer._tick()
+    assert composer.working_text() == "Working · 1 min 15 s  ·"
+    # Off screen, nothing breathes or ticks; back on it, it goes on.
+    composer.hide()
+    assert not composer.working_dot.running() and not composer._working_clock.isActive()
+    composer.show()
+    assert composer.working_dot.running() and composer._working_clock.isActive()
+    FakeTurn.made[0].say(*_events())
+    FakeTurn.made[0].finish()
+    assert composer.working_dot.isHidden() and not composer.working_dot.running()
+    assert composer.working_text() == "" and not composer._working_clock.isActive()
+
+
 def test_enter_sends_and_shift_enter_starts_a_line(make):
     chat = make(FakeCore()).agents.chat
     box = chat.composer.text
