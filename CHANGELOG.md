@@ -16,6 +16,16 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.72] - 2026-11-12
+
+### Added
+- **The agent chat shows that the agent is working.** While a turn runs, the
+  composer's top line leads with a breathing dot and *Working · 34 s* - how
+  long the turn of the conversation shown has taken. Between the steps a turn
+  shows, the chat stood still and read as stopped until the answer came. The
+  dot and the clock stop when the chat is off screen, and go when the turn
+  ends.
+
 ## [0.16.71] - 2026-11-12
 
 ### Added
