@@ -211,6 +211,16 @@ def save(connections, path=None, apps_=None):
     payload = {"version": VERSION, "connections": [normalize(one) for one in connections]}
     if kept:
         payload["apps"] = kept
+    return write_private(path, payload)
+
+
+def write_private(path, payload):
+    """Write ``payload`` to ``path`` as JSON, atomically and owner-only.
+
+    Returns the path. Raises :class:`StoreError`. Shared by every file of
+    connections there is, so none of them is ever half written or readable by
+    another account.
+    """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
     temp = os.path.join(directory, ".%s.tmp" % os.path.basename(path))

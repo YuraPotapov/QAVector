@@ -561,3 +561,59 @@ def test_cancelling_integration_read_reaps_the_core_process(tmp_path):
         thread.join(5)
     assert not thread.is_alive()
     assert answers[0]['kind'] == 'cancelled'
+
+
+def _echoing_core(tmp_path, **paths):
+    """A core that answers with the command line it was given, and its --from."""
+    script = tmp_path / 'echo.py'
+    script.write_text(
+        'import json, sys\n'
+        'argv = sys.argv[1:]\n'
+        'source = next((one[7:] for one in argv if one.startswith("--from=")), "")\n'
+        'document = json.load(open(source)) if source else None\n'
+        'print(json.dumps({"ok": True, "argv": [one for one in argv\n'
+        '                  if not one.startswith("--from=")], "document": document}))\n')
+    return core_mod.Core(str(script), sys.executable, **paths)
+
+
+def test_agents_are_asked_through_integrations_with_both_their_paths(tmp_path):
+    """The connections are QAVector's and the conversations the project's: the
+    core is told where each is rather than left to a default in a checkout."""
+    core = _echoing_core(tmp_path, agents_path='/data/agents.json',
+                         agent_sessions_path='/data/shop/agent-sessions',
+                         secrets_path='/data/shop/cyclesecrets.json')
+    answer = core.agents('test', 'claude')
+    assert answer['argv'][:4] == ['--integrations', 'agents', 'test', 'claude']
+    assert '--agents-file=/data/agents.json' in answer['argv']
+    assert '--agent-sessions-dir=/data/shop/agent-sessions' in answer['argv']
+    assert answer['document'] is None
+
+
+def test_what_an_agents_command_is_given_goes_in_a_file_never_on_the_command_line(tmp_path):
+    core = _echoing_core(tmp_path, agents_path='/data/agents.json')
+    answer = core.agents('save', document={'connection': {'name': 'Claude Code'}})
+    assert answer['document'] == {'connection': {'name': 'Claude Code'}}
+    assert 'Claude Code' not in ' '.join(answer['argv'])
+    assert not any(one.startswith('--agent-sessions-dir') for one in answer['argv'])
+
+
+def test_a_run_is_told_where_the_agent_connections_and_conversations_are():
+    """An agent step may name a connection, and every call one makes is
+    recorded with the project's conversations - so a run is told both."""
+    core = core_mod.Core('/x/session_launcher.py', '/usr/bin/python3',
+                         secrets_path='/data/shop/cyclesecrets.json',
+                         agents_path='/data/agents.json',
+                         agent_sessions_path='/data/shop/agent-sessions',
+                         agent_skills_path='/data/agent-skills')
+    assert core.secrets_flag() == ['--cycle-secrets-file=/data/shop/cyclesecrets.json',
+                                   '--agents-file=/data/agents.json',
+                                   '--agent-sessions-dir=/data/shop/agent-sessions']
+
+
+def test_an_agents_command_names_each_path_once(tmp_path):
+    core = _echoing_core(tmp_path, agents_path='/data/agents.json',
+                         agent_sessions_path='/data/shop/agent-sessions',
+                         agent_skills_path='/data/agent-skills')
+    argv = core.agents('skills')['argv']
+    for flag in ('--agents-file=', '--agent-sessions-dir=', '--agent-skills-dir='):
+        assert sum(one.startswith(flag) for one in argv) == 1, flag

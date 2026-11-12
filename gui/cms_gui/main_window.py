@@ -1769,7 +1769,9 @@ class MainWindow(QMainWindow):
                               self.inventory.cycles, chosen,
                               secrets_included=True,
                               project_name=self._project(self.settings.project_id).name,
-                              connections=self._connections())
+                              connections=self._connections(),
+                              agent_connections=self._agents("list", "connections"),
+                              skills=self._agents("skills", "skills"))
         if dialog.exec() != QDialog.Accepted:
             return
         from PySide6.QtWidgets import QFileDialog
@@ -1788,7 +1790,9 @@ class MainWindow(QMainWindow):
                 transfer.cycles_part(self.inventory.cycles, chosen["cycles"],
                                      chosen["cycle_projects"], cycle_projects,
                                      secrets=self.core.cycle_secret_export),
-                transfer.connections_part(self.core, chosen["connections"]))
+                transfer.connections_part(self.core, chosen["connections"]),
+                transfer.agents_part(self.core, chosen["agent_connections"],
+                                     chosen["agent_skills"]))
             transfer.write(path, document)
         except (transfer.TransferError, core_mod.CoreError) as exc:
             widgets.warn(self, "Export", "Nothing was exported.", str(exc))
@@ -1803,6 +1807,15 @@ class MainWindow(QMainWindow):
         except (core_mod.CoreError, AttributeError):
             return []
         return list(answer.get("connections") or []) if answer.get("ok") else []
+
+    def _agents(self, command, key):
+        """The agent connections, or the skills library - files the core reads,
+        for Export and Import. No agent's program is started."""
+        try:
+            answer = self.core.agents(command)
+        except (core_mod.CoreError, AttributeError):
+            return []
+        return list(answer.get(key) or []) if answer.get("ok") else []
 
     def import_items(self, path=None):
         """File -> Import: an export file, or a single cycle file."""
@@ -1827,7 +1840,11 @@ class MainWindow(QMainWindow):
         cycle_ids = [row.get("id") for row in self.inventory.cycles]
         items = transfer.plan(document, self.launch_registry.projects, catalog, rows,
                               [project.name for project in cycle_projects], cycle_ids,
-                              [one.get("id") for one in self._connections()])
+                              [one.get("id") for one in self._connections()],
+                              [one.get("id") for one in self._agents("list", "connections")]
+                              if document["agent_connections"] else (),
+                              [one.get("name") for one in self._agents("skills", "skills")]
+                              if document["agent_skills"] else ())
         dialog = ImportDialog(self, path, document, items)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -1860,6 +1877,13 @@ class MainWindow(QMainWindow):
             except (transfer.TransferError, core_mod.CoreError) as exc:
                 said.append("Connections were not imported: %s" % exc)
             self.integrations.jira.list_connections()
+        if document["agent_connections"] or document["agent_skills"]:
+            try:
+                said.extend(transfer.apply_agents(document, mode, self.core))
+            except (transfer.TransferError, core_mod.CoreError) as exc:
+                said.append("Agent connections and skills were not imported: %s" % exc)
+            self.integrations.agents.list_connections()
+            self.integrations.agents.load_skills()
         widgets.output(self, "Import", "Imported from %s." % os.path.basename(path),
                        "\n".join(said))
         self._addresses_changed()
@@ -1892,7 +1916,10 @@ class MainWindow(QMainWindow):
                              runs_path=self.settings.cycle_runs_path,
                              integrations_path=self.settings.integrations_path,
                              environments_path=lpf.resolve_path(
-                                 self.settings.launch_projects_path))
+                                 self.settings.launch_projects_path),
+                             agents_path=self.settings.agents_path,
+                             agent_sessions_path=self.settings.agent_sessions_path,
+                             agent_skills_path=self.settings.agent_skills_path)
 
     def _adopt_launch_projects(self):
         """Once: the projects Launch Sessions had become projects of their own

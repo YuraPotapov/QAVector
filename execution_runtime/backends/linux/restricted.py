@@ -393,6 +393,28 @@ def launcher(bundle_directory=None, **kwargs):
     return RestrictedLauncher(directory, **kwargs)
 
 
+def prepare_command(effective, argv, cwd, env, folders=()):
+    """A command ready to start under resolved restrictions, tools included.
+
+    What everything that starts a restricted program does, in one place: find
+    the folders the program needs only because of the tool it is (its own
+    code, an agent CLI's sign-in - ``toolfolders``), add the ``folders`` the
+    caller itself needs it to see (``{"path", "access", "reason"}``), and hand
+    the lot to the launcher. ``cwd`` left empty is the project folder.
+    Returns a :class:`Prepared`; nothing here starts the program.
+    """
+    from execution_runtime import toolfolders
+    visible = []
+    if effective["files"] in ("read_write", "read_only"):
+        visible.append(effective["project_folder"])
+    visible += [one["path"] for one in effective["folders"]]
+    argv, tools = toolfolders.for_command(argv, env, visible=visible)
+    if effective["files"] in ("all", "none"):
+        tools = []
+    return launcher().prepare(effective, argv, cwd or effective["project_folder"], env,
+                              list(tools) + list(folders))
+
+
 def reset_capabilities():
     """Forget probed capabilities (tests, or after the user fixed something)."""
     with _CACHE_LOCK:

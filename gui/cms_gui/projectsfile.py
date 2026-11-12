@@ -40,10 +40,10 @@ Project = collections.namedtuple("Project", "id name folder")
 Paths = collections.namedtuple(
     "Paths", "users launch_projects launch_presets launch_drafts services log_sources "
              "flows cycles cycle_projects cycle_layout cycle_secrets cycle_memory "
-             "cycle_runs reports sessions history integrations",
-    # A file added after the rest, with nothing to point at in Workspace's
-    # search: the default keeps every caller that names the others working.
-    defaults=("",))
+             "cycle_runs reports sessions history integrations agent_sessions",
+    # Files added after the rest, with nothing to point at in Workspace's
+    # search: the defaults keep every caller that names the others working.
+    defaults=("", ""))
 
 #: The folders a new project starts with: what the launcher refuses to run
 #: without (a flows folder) and what it writes into.
@@ -83,7 +83,8 @@ def paths(folder):
                  cycle_memory=join("cyclememory.json"),
                  cycle_runs=join("cycle-runs"), reports=join("reports"),
                  sessions=join("user_sessions"), history=folder,
-                 integrations=join("integrations.json"))
+                 integrations=join("integrations.json"),
+                 agent_sessions=join("agent-sessions"))
 
 
 def make_folder(folder):

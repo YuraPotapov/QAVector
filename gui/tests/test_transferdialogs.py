@@ -133,3 +133,37 @@ def test_a_project_without_connections_shows_no_group_for_them(qapp, dispose):
         assert "Connections" not in groups
     finally:
         dispose(dialog)
+
+
+def test_agent_connections_and_skills_can_be_ticked_and_are_counted(qapp, dispose):
+    projects, catalog, rows, cycles = _setup()
+    dialog = ExportDialog(None, projects, catalog, rows, cycles, {},
+                          agent_connections=[{"id": "claude-code", "name": "Claude Code",
+                                              "binary": ""}],
+                          skills=[{"name": "odoo-review", "description": "Review Odoo."}])
+    try:
+        groups = [dialog.tree.topLevelItem(i).text(0)
+                  for i in range(dialog.tree.topLevelItemCount())]
+        assert groups[-2:] == ["Agent connections", "Skills"]
+        items = _items(dialog)
+        assert items["claude-code"].text(1) == "Found on PATH"
+        assert items["odoo-review"].text(1) == "Review Odoo."
+        items["claude-code"].setCheckState(0, Qt.Checked)
+        items["odoo-review"].setCheckState(0, Qt.Checked)
+        chosen = dialog.selection()
+        assert (chosen["agent_connections"], chosen["agent_skills"]) == (
+            ["claude-code"], ["odoo-review"])
+        assert dialog.summary.text() == "In the file: 1 agent connection, 1 skill"
+    finally:
+        dispose(dialog)
+
+
+def test_no_agents_and_no_skills_shows_no_group_for_them(qapp, dispose):
+    projects, catalog, rows, cycles = _setup()
+    dialog = ExportDialog(None, projects, catalog, rows, cycles, {})
+    try:
+        groups = [dialog.tree.topLevelItem(i).text(0)
+                  for i in range(dialog.tree.topLevelItemCount())]
+        assert "Agent connections" not in groups and "Skills" not in groups
+    finally:
+        dispose(dialog)

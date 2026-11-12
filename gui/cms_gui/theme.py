@@ -919,6 +919,12 @@ QFrame[role="composer"] {{
     background: {n100}; border: none; border-top: 1px solid {divider};
 }}
 QFrame[role="composer"] QPlainTextEdit {{ background: {bg}; }}
+/* Chat actions must remain readable on both themes. */
+QWidget#agentChat QPushButton[variant="ghost"] {{ color: {n800}; }}
+QWidget#agentChat QPushButton[variant="ghost"]:hover {{
+    background: {select_bg}; color: {select_ink};
+}}
+QWidget#agentChat QPushButton[variant="ghost"]:disabled {{ color: {n500}; }}
 /* Who the message goes to. A field, not a command: the page's own ink on the
    page's ground with a hairline, the name in the body face - the tool-button
    default is the condensed mono of RUN, which would make a step name read
@@ -1016,6 +1022,25 @@ QLabel[role="msgstate"][state="undelivered"],
 QLabel[role="msgstate"][state="rejected"] {{ color: {bad_ink}; background: {bad_tint}; }}
 QLabel[role="msgstate"][state="uncertain"],
 QLabel[role="msgstate"][state="unconfirmed"] {{ color: {warn_ink}; background: {warn_tint}; }}
+
+/* --- a conversation with an agent (pages/agentchat.py) -------------------- */
+/* What the agent said, in the page's own type on the feed's own ground: it is
+   the thing being read, so it gets no card - the person's messages have the
+   card, and the two are told apart at a glance. */
+QTextBrowser[role="answer"] {{
+    background: transparent; border: none; padding: 0; font-size: 13px; color: {text};
+}}
+/* A conversation's head: what it is called, then whom it is with and where. */
+QLabel[role="chattitle"] {{
+    font-family: {heading}; font-size: 15px; font-weight: 600; color: {text};
+}}
+/* The rows of choices over the box you write in, on the composer's own
+   ground rather than on patches of the page's. */
+QFrame[role="composer"] QWidget[seethrough="true"] {{ background: transparent; }}
+QLabel[role="composerlabel"] {{
+    font-family: {mono}; font-size: 10px; letter-spacing: 0.6px; color: {n600};
+    background: transparent;
+}}
 
 /* --- title bar ----------------------------------------------------------- */
 /* The window's own head, in place of the desktop's - see cms_gui/titlebar.py.

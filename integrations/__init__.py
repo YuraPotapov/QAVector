@@ -12,6 +12,9 @@ Layering:
     oauth      signing in through the browser, and keeping that sign-in fresh
     cli        ``qavector-core --integrations ...``, the GUI's only way in
     jira/      the first provider: client, document format, operations
+    agents/    the agent CLIs - Claude Code - set up once for the whole of
+               QAVector: their connections are not a project's, so they have
+               a file of their own and are no part of ``PROVIDERS`` below
 
 Four rules this package holds to:
 

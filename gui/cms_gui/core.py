@@ -248,8 +248,16 @@ class Core:
                  log_sources=None, flows_dir=None, cycles_dir=None,
                  secrets_path="",
                  memory_path="", runs_path="", integrations_path="",
-                 environments_path=""):
+                 environments_path="", agents_path="", agent_sessions_path="",
+                 agent_skills_path=""):
         auto_script, auto_python = autodetect()
+        # The agent connections and the skills library, which are QAVector's
+        # and the same for every project, and this project's conversations
+        # with agents. Only the agents commands are told any of them - see
+        # agents().
+        self.agents_path = agents_path or ""
+        self.agent_sessions_path = agent_sessions_path or ""
+        self.agent_skills_path = agent_skills_path or ""
         self.script = script or auto_script
         if not needs_interpreter(self.script):
             # A native executable runs itself, and no interpreter can change that -
@@ -316,11 +324,18 @@ class Core:
         Part of :meth:`secrets_flag` as well: a connection's token is in the
         secrets store, so a run or a listener told where the store is must be
         told where the connections are, or a step naming one finds nothing.
+
+        The agent connections and the project's conversations with agents go
+        the same way: an agent step may name a connection, and every call one
+        makes is recorded with the conversations.
         """
         return ((["--integrations-file=" + self.integrations_path]
                  if self.integrations_path else [])
                 + (["--environments-file=" + self.environments_path]
-                   if self.environments_path else []))
+                   if self.environments_path else [])
+                + (["--agents-file=" + self.agents_path] if self.agents_path else [])
+                + (["--agent-sessions-dir=" + self.agent_sessions_path]
+                   if self.agent_sessions_path else []))
 
     def integrations(self, *args, document=None, timeout=120, cancel=None):
         """``--integrations COMMAND ...``: one JSON answer, never a token in argv.
@@ -363,6 +378,58 @@ class Core:
         if not isinstance(payload, dict):
             raise CoreError("Integrations answered with something other than an object.")
         return payload
+
+    def agents(self, *args, document=None, timeout=120, cancel=None):
+        """``--integrations agents COMMAND ...``: one JSON answer.
+
+        The agent connections and this project's conversations, asked the way
+        every other integration is; only the two paths are its own.
+        """
+        # The connections file and the conversations come with every
+        # integrations command (integrations_flag); the library only here.
+        skills = (["--agent-skills-dir=" + self.agent_skills_path]
+                  if self.agent_skills_path else [])
+        return self.integrations("agents", *args, *skills, document=document,
+                                 timeout=timeout, cancel=cancel)
+
+    def _agents_flags(self):
+        return ((["--agents-file=" + self.agents_path] if self.agents_path else [])
+                + (["--agent-sessions-dir=" + self.agent_sessions_path]
+                   if self.agent_sessions_path else [])
+                + (["--agent-skills-dir=" + self.agent_skills_path]
+                   if self.agent_skills_path else []))
+
+    def agents_argv(self, *args, source=""):
+        """The command line of one ``agents`` command, for whoever runs it
+        itself: a turn prints a line per event as it happens, so its process is
+        read while it runs rather than waited for (``agentturn.AgentTurn``).
+
+        ``source`` is the ``--from`` file, which the caller writes and removes.
+        """
+        return (list(self.prefix) + ["--integrations", "agents"] + list(args)
+                + self._agents_flags() + (["--from=" + source] if source else []))
+
+    def agents_export(self, connection_ids, skill_names):
+        """Agent connections and skills, files and all, for an export file. The
+        core writes them into a file only this account can read; it is read
+        here and deleted."""
+        handle, temp = tempfile.mkstemp(prefix="cms-agents-", suffix=".json")
+        os.close(handle)
+        os.chmod(temp, 0o600)
+        try:
+            answer = self.agents("export", "--to=" + temp, document={
+                "connections": list(connection_ids), "skills": list(skill_names)})
+            if not answer.get("ok"):
+                raise CoreError(answer.get("error") or "the agents were not exported")
+            with open(temp, encoding="utf-8") as stream:
+                return json.load(stream)
+        except (OSError, ValueError) as exc:
+            raise CoreError("The agents could not be read back: %s" % exc) from exc
+        finally:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
 
     def integrations_export(self, ids):
         """Connections with their tokens, for an export file. The core writes
@@ -884,8 +951,11 @@ class Core:
         """
         target = "--cycle-plugin-action=%s:%s" % (plugin_id, action_key)
         try:
+            # Told where the agent connections are: a step that names one is
+            # asked about as a run would have it, with that connection's program.
             return self._with_document(target, settings or {},
-                                       prefix="cms-plugin-action-")
+                                       prefix="cms-plugin-action-",
+                                       extra=self.integrations_flag())
         except CoreError as exc:
             return {"ok": False, "summary": "Cannot ask the plugin",
                     "detail": str(exc), "argv": [], "problems": [str(exc)]}

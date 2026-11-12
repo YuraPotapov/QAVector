@@ -169,6 +169,10 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              # a run and a listener read - kept beside the secrets store that
              # holds their tokens, for the reason --cycle-secrets-file is here.
              "--integrations", "--integrations-file", "--environments-file",
+             # The agent connections and the project's agent sessions a run
+             # records its calls into - paths the GUI's settings give, as the
+             # connections file above.
+             "--agents-file", "--agent-sessions-dir",
              # The Plugins page's own command line, with a parser of its own.
              "--plugins",
              # The Inspector's Setup section: a plugin declares what it can be

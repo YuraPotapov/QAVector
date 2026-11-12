@@ -124,6 +124,52 @@ on the scale - fails its step, as a review without a risk does, rather than
 leaving later steps to run at whatever the CLI defaults to. The reference is
 checked when each step starts, against the level it became.
 
+### Naming an agent connection
+
+An agent connection is set once, for every project, in **Integrations → Agents
+→ Connections**: which program runs the agent, and the model and effort it is
+asked for by default. A step can name it instead of saying the program itself:
+
+```yaml
+- id: review
+  plugin: agent.review
+  with:
+    connection: claude-code       # instead of framework: claude_cli and claude:
+    task: Review the change for security problems.
+    # model: opus                 # optional: the step's own wins over the connection's
+```
+
+`agent.review`, `agent.edit`, `agent.implement` and `agent.merge` take it. The
+step then gives no `claude` and no `framework` other than `claude_cli`; giving
+both is refused, because two answers to "which program" leave a reader guessing
+which one ran. `connection` may read `${vars...}`, as a Jira step's may, and
+nothing a step works out later: which program runs is settled before the run
+starts.
+
+A blank `model` takes the connection's, and with none the CLI's own. `effort`
+works the same way. A worker framework (`crewai`, `autogen`) still needs its
+model written on the step: it has no default to fall back on.
+
+A run naming a connection that is not there is refused before its first step,
+with where to add it. Steps written the old way - `framework` and `claude` -
+keep working exactly as before; nothing in a cycle file is changed for you. In
+the step editor, an old step whose program matches a connection is offered
+**Use connection … instead**.
+
+### Every call on the record
+
+Every call a Claude step really makes - with a connection or without one - is
+also recorded in **Integrations → Agents**, so everything any agent was asked
+and did in the project is in one place. A step's calls are one conversation,
+shown read-only in **Chat** and listed in **Activity**, its source *Cycle … ·
+step …* and the run. The conversation holds what the agent was asked, what it
+did and how it ended; the run's own `prompt.md` and `stdout.log` are linked from
+it, not copied.
+
+A call replayed from its receipt on Resume was not made, and is not recorded
+again. A run not told where the project's conversations are (an older front
+end) records nothing and runs as before. Recording never fails a step.
+
 ## Git checkout
 
 Git must be installed and available on the core process's PATH.

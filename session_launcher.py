@@ -839,7 +839,7 @@ def _save_selectors(source, flows_dir=None):
     return flowfile.save_selectors(document["yaml"], flows_dir)
 
 
-def run_plugin_action(target, source):
+def run_plugin_action(target, source, agents_path=None):
     """Serve one --cycle-plugin-action call: print JSON, then exit.
 
     A plugin declares what it can be asked outside a run - is it signed in, can
@@ -871,6 +871,13 @@ def run_plugin_action(target, source):
         plugin = registry.get(plugin_id)
         if plugin is None:
             raise ValueError("no plugin called %r is installed" % plugin_id)
+        from cycle import connections as connections_mod
+        try:
+            # Asked about as a run would have it: the connection's program.
+            settings = connections_mod.expand_for_action(plugin, settings, agents_path)
+        except connections_mod.BindingError as exc:
+            _plugin_action_answer({"ok": False, "plugin": plugin_id, "action": key,
+                                   "summary": str(exc), "detail": "", "argv": []}, 0)
         answer = plugin.run_action(key, settings)
     except Exception as exc:  # noqa: BLE001 - the report IS the error report
         _plugin_action_answer({"ok": False, "plugin": plugin_id, "action": key,
@@ -1120,7 +1127,7 @@ def run_watch_command(command, cycles_dir=None, secrets_path=None, memory_path=N
             from cycle import connections as connections_mod
             connections, refused = connections_mod.load(
                 cycle, None, integrations_path, secrets_path, dict(os.environ),
-                environments_path=environments_path)
+                environments_path=environments_path, include_agents=False)
             if refused:
                 raise ValueError("; ".join(refused))
             cancel = CancelToken()
@@ -1294,7 +1301,8 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
                    jobs=None, control=False, reports_dir=None,
                    secrets_path=None, memory_path=None, only=None,
                    start_from="", resume="", reuse_from="", subject=None, action="", mode=None,
-                   launcher=None, integrations_path=None, environments_path=None):
+                   launcher=None, integrations_path=None, environments_path=None,
+                   agents_path=None, agent_sessions_path=None):
     """Run one cycle to completion. Returns the exit code.
 
     Handled before the Chrome launch loop, because a cycle opens no windows of
@@ -1368,7 +1376,8 @@ def run_cycle_mode(cycle_id, cycles_dir=None, flows_dir=None, variables=None,
         from cycle import connections as connections_mod
         connections, refused = connections_mod.load(
             cycle, variables, integrations_path, secrets_path,
-            environments_path=environments_path)
+            environments_path=environments_path, agents_path=agents_path,
+            agent_sessions=agent_sessions_path)
         if refused:
             refusal = "; ".join(refused)
     if refusal:
@@ -1729,7 +1738,8 @@ def _bad_option_message(arg, config_path):
                "--cycle-secret-list", "--cycle-secret-set",
                "--cycle-secret-copy", "--cycle-secret-export",
                "--cycle-secret-delete", "--cycle-secrets-file",
-               "--integrations-file", "--environments-file",
+               "--integrations-file", "--environments-file", "--agents-file",
+               "--agent-sessions-dir",
                "--cycle-memory-show", "--cycle-memory-forget",
                "--cycle-memory-file", "--cycle-runs-dir", "--cycle-watch",
                "--cycle-watch-seen", "--cycle-watch-plan", "--cycle-plan-remove",
@@ -3797,6 +3807,12 @@ write a report. The steps that do not depend on each other run at the same time.
   --environments-file=PATH  The project's environments (launch-projects.json),
                             whose variables a connection's predefined query
                             uses (default: beside --integrations-file).
+  --agents-file=PATH        The agent connections (agents.json), QAVector's
+                            own. An agent step naming `connection:` runs the
+                            program it says.
+  --agent-sessions-dir=PATH Where the project's conversations with agents are
+                            kept. Given, every call an agent step makes is
+                            recorded there, for Integrations -> Agents.
   --integrations COMMAND    Connections and their operations, as JSON. Use
                             --integrations --help for the commands.
 
@@ -4066,6 +4082,8 @@ def main():
     secrets_file = None   # --cycle-secrets-file: the store (None = the default)
     integrations_file = None  # --integrations-file: the project's connections
     environments_file = None  # --environments-file: its environments' variables
+    agents_file = None    # --agents-file: the agent connections, QAVector's own
+    agent_sessions_dir = None  # --agent-sessions-dir: where agent calls are recorded
     users_filter = None   # None = launch every user in the config
     env_name = None       # --env=NAME; None = every environment
     recorder = None       # --recorder: record a scenario from a live window
@@ -4375,6 +4393,12 @@ def main():
         elif arg.startswith("--environments-file="):
             environments_file = os.path.abspath(os.path.expanduser(
                 arg.split("=", 1)[1].strip()))
+        elif arg.startswith("--agents-file="):
+            agents_file = os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip()))
+        elif arg.startswith("--agent-sessions-dir="):
+            agent_sessions_dir = os.path.abspath(os.path.expanduser(
+                arg.split("=", 1)[1].strip()))
         elif arg.startswith("--cycle-plugin-action="):
             plugin_action = arg.split("=", 1)[1].strip()
         elif arg.startswith("--cycle-run="):
@@ -4594,7 +4618,7 @@ def main():
     # and neither should happen when the command line has a typo in it that
     # might be the very flag that was meant to narrow what runs.
     if plugin_action:
-        run_plugin_action(plugin_action, flow_source)
+        run_plugin_action(plugin_action, flow_source, agents_file)
     if secret_command:
         run_secret_command(secret_command, flow_source, secrets_file)
     if memory_command:
@@ -4626,6 +4650,8 @@ def main():
                                 secrets_path=secrets_file,
                                 integrations_path=integrations_file,
                                 environments_path=environments_file,
+                                agents_path=agents_file,
+                                agent_sessions_path=agent_sessions_dir,
                                 memory_path=memory_file,
                                 only=cycle_only, start_from=cycle_from, action=cycle_action,
                                 resume=cycle_resume, reuse_from=cycle_reuse, mode=cycle_mode,

@@ -47,7 +47,8 @@ class ExportDialog(QDialog):
     """Tick what goes in the file; :meth:`selection` says what was ticked."""
 
     def __init__(self, parent, projects, catalog, rows, cycle_rows, chosen=None,
-                 secrets_included=False, project_name="", connections=()):
+                 secrets_included=False, project_name="", connections=(),
+                 agent_connections=(), skills=()):
         super().__init__(parent)
         #: What the project on screen is called - its environments' group.
         self.project_name = project_name
@@ -56,6 +57,10 @@ class ExportDialog(QDialog):
         self.cycle_rows = [row for row in cycle_rows if row.get("id")]
         #: The project's integration connections: [{id, name, site, ...}].
         self.connections = [one for one in connections if one.get("id")]
+        #: QAVector's agent connections and skills library: [{id, name, ...}],
+        #: [{name, description, ...}].
+        self.agent_connections = [one for one in agent_connections if one.get("id")]
+        self.skills = [one for one in skills if one.get("name")]
         chosen = chosen or {}
         self.frame = widgets.dress(self)
         column = QVBoxLayout(self)
@@ -167,6 +172,18 @@ class ExportDialog(QDialog):
             for one in self.connections:
                 self._item(linked, "connection", one["id"], one.get("name") or one["id"],
                            one.get("site") or "", one["id"] in picked_connections)
+        if self.agent_connections:
+            agents = self._group("Agent connections")
+            picked = set(chosen.get("agent_connections") or ())
+            for one in self.agent_connections:
+                self._item(agents, "agent_connection", one["id"], one.get("name") or one["id"],
+                           one.get("binary") or "Found on PATH", one["id"] in picked)
+        if self.skills:
+            library = self._group("Skills")
+            picked = set(chosen.get("agent_skills") or ())
+            for one in self.skills:
+                self._item(library, "agent_skill", one["name"], one["name"],
+                           one.get("description") or "", one["name"] in picked)
         for index in range(self.tree.topLevelItemCount()):
             group = self.tree.topLevelItem(index)
             self._expand_ticked(group)
@@ -196,7 +213,8 @@ class ExportDialog(QDialog):
         ticked in part is the environments ticked in it. The same for cycles.
         """
         found = {"projects": [], "environments": [], "users": [],
-                 "cycle_projects": [], "cycles": [], "connections": []}
+                 "cycle_projects": [], "cycles": [], "connections": [],
+                 "agent_connections": [], "agent_skills": []}
         for item in self._walk():
             kind, value = item.data(0, KIND), item.data(0, VALUE)
             state = item.checkState(0)
@@ -214,6 +232,10 @@ class ExportDialog(QDialog):
                 found["cycles"].append(value)
             elif kind == "connection" and state == Qt.Checked:
                 found["connections"].append(value)
+            elif kind == "agent_connection" and state == Qt.Checked:
+                found["agent_connections"].append(value)
+            elif kind == "agent_skill" and state == Qt.Checked:
+                found["agent_skills"].append(value)
         return found
 
     def launch_document_part(self):
@@ -231,7 +253,9 @@ class ExportDialog(QDialog):
             "cycle_projects": [{"name": name} for name in chosen["cycle_projects"]
                                if name],
             "cycles": [{"id": row["id"]} for row in cycles],
-            "connections": [{"id": one} for one in chosen["connections"]]})
+            "connections": [{"id": one} for one in chosen["connections"]],
+            "agent_connections": [{"id": one} for one in chosen["agent_connections"]],
+            "agent_skills": [{"name": one} for one in chosen["agent_skills"]]})
         said = transfer.counts(preview)
         self.summary.setText("In the file: %s" % said)
         self.export_button.setEnabled(said != "nothing")

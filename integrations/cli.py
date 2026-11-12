@@ -31,11 +31,17 @@ printed: the only thing anybody is told about it is ``token_set``.
     scope --from=F                what a predefined query comes to, with its
                                   variables put in - asks nothing of Jira:
                                   {"predefined_query", "variables_from"}
+    agents COMMAND                the agent connections, which belong to
+                                  QAVector rather than to a project; the
+                                  commands are in integrations/agents/cli.py
 
 Options, anywhere on the line: ``--integrations-file=PATH`` (the project's
-connections), ``--cycle-secrets-file=PATH`` (the store their tokens are in) and
+connections), ``--cycle-secrets-file=PATH`` (the store their tokens are in),
 ``--environments-file=PATH`` (the project's environments, whose variables a
-connection's predefined query may use; by default beside the connections).
+connection's predefined query may use; by default beside the connections),
+``--agents-file=PATH`` (the agent connections; by default beside the user's
+data), ``--agent-sessions-dir=PATH`` (the project's conversations with agents)
+and ``--agent-skills-dir=PATH`` (the skills library agents are handed from).
 """
 
 import json
@@ -61,7 +67,8 @@ def main(argv=None):
         else:
             words.append(arg)
     unknown = sorted(set(options) - {"--integrations-file", "--cycle-secrets-file", "--from",
-                                     "--to", "--environments-file"})
+                                     "--to", "--environments-file", "--agents-file",
+                                     "--agent-sessions-dir", "--agent-skills-dir"})
     if unknown:
         return _usage("Unknown option %s." % ", ".join(unknown))
     if not words:
@@ -70,6 +77,8 @@ def main(argv=None):
     secrets_path = _path(options.get("--cycle-secrets-file"))
     environments = _path(options.get("--environments-file"))
     command, rest = words[0], words[1:]
+    if command == "agents":
+        return _agents(rest, options)
     try:
         handler = COMMANDS[command]
     except KeyError:
@@ -92,6 +101,32 @@ class _Usage(Exception):
     pass
 
 
+def _agents(rest, options):
+    """``agents ...``: the agent connections, which are QAVector's rather than
+    a project's and so have a file, and commands, of their own."""
+    from integrations.agents import cli as agents
+    try:
+        payload = agents.run(rest, options.get("--from") or "",
+                             _path(options.get("--agents-file")),
+                             _path(options.get("--agent-sessions-dir")),
+                             _path(options.get("--agent-skills-dir")),
+                             target=options.get("--to") or "")
+    except agents.Usage as exc:
+        return _usage(str(exc), agents.USAGE)
+    except Exception as exc:  # noqa: BLE001 - the report IS the error report
+        payload = {"ok": False, "kind": "error",
+                   "error": "%s: %s" % (type(exc).__name__, exc)}
+    if rest and rest[0] in agents.STREAMS:
+        # After a line per event, the answer is one line too.
+        try:
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass                        # nobody is reading; the record has it all
+        return 0 if payload.get("ok") else 1
+    return _print(payload)
+
+
 def _path(value):
     return os.path.abspath(os.path.expanduser(value)) if value else None
 
@@ -102,8 +137,8 @@ def _print(payload):
     return 0 if payload.get("ok") else 1
 
 
-def _usage(message):
-    _print({"ok": False, "kind": "usage", "error": message, "usage": USAGE})
+def _usage(message, usage=None):
+    _print({"ok": False, "kind": "usage", "error": message, "usage": usage or USAGE})
     return 2
 
 

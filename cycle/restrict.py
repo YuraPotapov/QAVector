@@ -145,16 +145,8 @@ class StepRestriction:
     def prepare(self, argv, cwd, env, folders=()):
         """``folders``: more the program needs to start - its own code - as
         ``{"path", "access", "reason"}``."""
-        from execution_runtime import toolfolders
-        from execution_runtime.backends.linux.restricted import launcher
-        visible = []
-        if self.effective["files"] in ("read_write", "read_only"):
-            visible.append(self.folder)
-        visible += [one["path"] for one in self.effective["folders"]]
-        argv, tools = toolfolders.for_command(argv, env, visible=visible)
-        if self.effective["files"] in ("all", "none"):
-            tools = []
-        extra = list(tools) + list(folders)
+        from execution_runtime.backends.linux import restricted
+        extra = list(folders)
         if self.effective["files"] != "all" and self.step_dir:
             # The run's folder is where its steps hand files to each other
             # (${run.workspace}/...), so it is read-write; what QAVector keeps
@@ -165,7 +157,9 @@ class StepRestriction:
                 extra += [{"path": os.path.join(self.workspace, name), "access": "read_only",
                            "reason": "this run's record"} for name in RUN_RECORDS]
             extra.append({"path": self.step_dir, "access": "read_write", "reason": "this step's own output folder"})
-        return launcher().prepare(self.effective, argv, cwd or self.folder, env, extra)
+        # The tools the command needs, and the launcher: shared with everything
+        # else that starts a restricted program.
+        return restricted.prepare_command(self.effective, argv, cwd, env, extra)
 
 
 def for_step(cycle, step, scope, step_dir, workspace=None):

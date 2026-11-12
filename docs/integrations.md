@@ -265,4 +265,131 @@ for a refusal or a failure, and 2 for a wrong command line. Failures carry a
 ## Not in this version
 
 - OAuth for Jira Server or Data Center. Use a personal access token there.
-- Other providers.
+- Other providers. Codex comes to Agents in a later version.
+
+## Agents chat
+
+**Integrations → Agents → Chat** keeps conversations in the current project.
+Connections and the skills library are shared across projects. **Settings**
+folds the less frequently used controls: agent, model and skills on one row,
+working folder and restrictions on another. The chosen agent and folder stay
+visible in the summary. Access mode remains beside the message, with Attach,
+Stop and Send (Queue while the agent is answering).
+
+Use **Attach files…**, drop local files into the chat, or paste copied files
+into the message box. Selected files can be removed before sending. Each
+message accepts up to 20 files with a combined size of 20 MB; text is optional.
+Files are copied when their turn starts into the conversation's private
+`attachments/` directory. Keep originals available until a queued turn starts.
+Later turns can read these copies even if the originals have moved or been
+deleted. Restricted execution exposes this directory read-only. File names
+are retained in the message history; the agent reads supported formats using
+its available tools. Attaching a file does not install document converters.
+
+Enter sends; Shift+Enter starts a new line. Stop also prevents the queued
+messages from starting. After a failure or Stop, queued text and files return
+to the composer for review. Message drafts and selected files stay with their
+conversation while switching chats; they are not persisted across app restarts.
+
+### Access
+
+A conversation is held in one folder, chosen before its first message; the
+agent's program keeps the conversation under that folder, so it does not move
+afterwards. What the agent may do there is chosen per message:
+
+| Access | The agent may |
+|---|---|
+| **Read** (the default) | read and search the folder, and change nothing |
+| **Edit** | also create and change files; each change is applied as it is made |
+| **Full** | also run commands - everything this account can do |
+
+Whatever the access, the folder's **restrictions** hold: the same network,
+files and limits the lock beside every Project folder sets. A folder with the
+network off cannot reach the model, so a message there is refused at once
+rather than left to retry.
+
+A write the access does not allow is refused by the program and is not
+recorded as a file written. A conversation started by a cycle is shown
+read-only: it is the record of what that step did, not something to carry on.
+
+## Agent connections
+
+**Integrations → Agents → Connections** lists the agent programs QAVector can
+talk to - Claude Code for now - once for every project. A connection says:
+
+| Field | Meaning |
+|---|---|
+| Name | What the page shows. Renaming keeps its id, which is what cycles name. |
+| Agent | Which program it is. Fixed once made: a conversation held with one program cannot be carried on by another. |
+| Program | The program's path. Blank finds it on PATH each time it is used; the dialog says where it is now. |
+| Model, Effort | What it is asked for unless a message or a step says otherwise. Blank is the program's own choice. |
+
+The program signs in by itself and keeps its own credentials: nothing typed
+here is a secret, and `agents.json` - beside the user's data, owner-readable -
+holds none. **Test** asks the program who it is signed in as and remembers the
+answer; **Sign in…** starts the program's own browser sign-in. If it wants a
+code typed into a terminal instead, run `claude auth login` there and press
+Test. Neither asks a model anything.
+
+## Skills
+
+**Integrations → Agents → Skills** is a library of skills - folders with a
+`SKILL.md` saying what the skill is for and how to do it, and whatever files
+it uses - that an agent can be handed for a conversation. It is shared by every
+project, beside the user's data in `agent-skills/`.
+
+**Nothing is added unseen.** A skill's instructions are followed by an agent
+and its scripts may be run by one, so adding is two steps:
+
+1. **+ Skill**, then a link or a folder, then **Look**. A link is a repository
+   or a folder in one, as its page's address says it -
+   `https://git.example.invalid/owner/repo/tree/main/skills/name` - or any address git
+   can fetch (`ssh://`, `git@host:path`). Look fetches it with git and your own
+   credentials and shows every skill found: its files, whether any could be
+   run, where it came from and at which commit. Nothing is added yet.
+2. **Add** takes exactly the copy that was looked at - there is no second fetch
+   for it to differ in. A skill whose name the library has already is replaced
+   only when it is ticked on purpose.
+
+**Update…** fetches a skill's source again and says which files changed before
+any of it is taken. Nothing updates by itself. A skill that reaches outside
+its own folder through a link, or is too big to be one, is refused.
+
+In a conversation, **Skills** in the composer's settings ticks the library's
+skills for it. They are copied into the conversation for each turn and handed
+to the program for that turn only: neither the program's own configuration
+nor the working folder changes. A skill with scripts can run them only with
+Full access. The skills a program has by itself are listed for information.
+
+## Agents activity
+
+**Activity** lists every turn taken with an agent in the project, the newest
+first: from the chat, and from every agent step of a cycle - with a
+connection or without one (see *Every call on the record* in
+[cycle-agents.md](cycle-agents.md)). Each row says when, which connection, who
+asked, where, with what access, model and skills, how long it took, what it
+cost and how it ended. Double-click opens the conversation.
+
+The record is the conversations themselves, in `<project>/agent-sessions/`,
+owner-readable only; nothing is kept beside it to disagree with it.
+
+## Command line: agents
+
+```sh
+qavector-core --integrations agents COMMAND [--agents-file=PATH]
+              [--agent-sessions-dir=PATH] [--agent-skills-dir=PATH]
+```
+
+| Command | What it does |
+|---|---|
+| `kinds` | The agent programs this build knows, and where each is on PATH. Starts nothing. |
+| `list`, `save --from=F`, `delete ID` | The connections. |
+| `test ID` or `test --from=F` | Asks the program who is signed in; a saved one remembers the answer. |
+| `sign-in ID` | The command that signs the program in, for the caller to run. |
+| `sessions`, `session ID` | The conversations, and one with what was said in it. |
+| `session-new --from=F`, `session-set ID --from=F`, `session-delete ID` | Start, change, remove one. |
+| `send ID --from=F` | Take one turn. Prints a line per event as it happens and the answer last; SIGTERM stops the agent. |
+| `activity` | Every turn of every conversation, newest first. |
+| `skills`, `skill-look --from=F`, `skill-add --from=F`, `skill-update NAME`, `skill-remove NAME` | The skills library. Look and Update are the only commands that reach the network. |
+
+`send` is the only command that asks a model anything.

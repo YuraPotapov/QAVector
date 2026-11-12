@@ -1,8 +1,9 @@
 """Integrations: the services this project is connected to.
 
-The page opens on the provider it was left on - Jira, the only one so far - and
+The page opens on the provider it was left on - Jira, unless another was - and
 its breadcrumb leads back to the list of providers. Everything Jira is in
-``jira.py``; this page hosts providers and coordinates their window lifecycle.
+``jira.py`` and everything Agents in ``agents.py``; this page hosts providers
+and coordinates their window lifecycle.
 """
 
 from PySide6.QtCore import Qt, Signal
@@ -11,11 +12,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHeaderView, QPu
 
 from .. import search, widgets
 from ..integrationhost import IntegrationHost
+from .agents import AgentsView
 from .jira import JiraView
 
 #: Provider id -> what the list calls it and says about it.
 PROVIDERS = (("jira", "Jira", "Issues: read, search, and change them; cycles name a "
-                              "connection instead of carrying a site and a token."),)
+                              "connection instead of carrying a site and a token."),
+             ("agents", "Agents", "Agent programs such as Claude Code, set once for every "
+                                  "project, and every turn taken with one."))
 
 
 class IntegrationsPage(QWidget):
@@ -80,9 +84,12 @@ class IntegrationsPage(QWidget):
         self.jira.back_requested.connect(self._back_to_catalog)
         self.jira.connections_changed.connect(self._fill)
         self.jira.connections_changed.connect(self.search_sources_changed)
+        self.agents = AgentsView(settings)
+        self.agents.back_requested.connect(self._back_to_catalog)
+        self.agents.connections_changed.connect(self._fill)
         # All providers are registered through a host: separate-window support
         # is part of the integration contract, not a Jira-only feature.
-        self.views = {"jira": self.jira}
+        self.views = {"jira": self.jira, "agents": self.agents}
         self.hosts = {provider: IntegrationHost(provider, name, self.views[provider],
                                               self.stack, settings, self)
                       for provider, name, _description in PROVIDERS}
@@ -134,10 +141,16 @@ class IntegrationsPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # The list counts connections: the project's file, read by the core.
-        # Jira itself is not asked anything by showing this.
-        if self.stack.currentWidget() is self.catalog and not self.jira._listed:
-            self.jira.list_connections(then=self._fill)
+        if self.stack.currentWidget() is self.catalog:
+            self._count_connections()
+
+    def _count_connections(self):
+        """Read what the list counts: each provider's connections, once. Files,
+        read by the core - neither Jira nor an agent's program is asked
+        anything. A provider that was opened has read its own already."""
+        for view in self.views.values():
+            if not view._listed:
+                view.list_connections(then=self._fill)
 
     # -- Ctrl+K ---------------------------------------------------------------
     # -- search (Ctrl+K) --------------------------------------------------------
@@ -199,6 +212,10 @@ class IntegrationsPage(QWidget):
     def show_catalog(self):
         self.stack.setCurrentWidget(self.catalog)
         self._save_view("")
+        if self.isVisible():
+            # Come back to from one provider: the other was never opened, and
+            # a dash where its count goes would read as "cannot tell".
+            self._count_connections()
 
     def _back_to_catalog(self):
         self.show_catalog()
@@ -251,9 +268,8 @@ class IntegrationsPage(QWidget):
         for provider, name, what in PROVIDERS:
             row = self.table.rowCount()
             self.table.insertRow(row)
-            count = len(self.jira.connections) if provider == "jira" else 0
-            listed = self.jira._listed if provider == "jira" else True
-            values = (name, ("%d" % count) if listed else "—", what)
+            view = self.views[provider]
+            values = (name, ("%d" % len(view.connections)) if view._listed else "—", what)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column == 0:

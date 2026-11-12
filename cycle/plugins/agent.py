@@ -24,7 +24,7 @@ import os
 import re
 import tempfile
 
-from cycle import registry
+from cycle import connections, registry
 from cycle.plugins import agent_cli, agent_run
 from cycle.operations import (Operation, recorded, result_document,
                               result_from_document)
@@ -55,6 +55,7 @@ class AgentReview(CyclePlugin):
         summary="Review code and step results. The default backend needs no API key.",
         permissions=("process.spawn", "filesystem.read", "filesystem.write", "network"),
         inputs=(
+            agent_run.connection_field(),
             field("framework", "Framework", "choice", default="claude_cli",
                   options=("claude_cli", "crewai", "autogen", "runtime"),
                   hint="claude_cli runs the Claude Code CLI and needs no API "
@@ -67,9 +68,11 @@ class AgentReview(CyclePlugin):
             field("python", "Agent Python", "file",
                   hint="Only for crewai and autogen: an interpreter in an "
                        "environment with the chosen framework installed."),
-            field("model", "Model", required=True,
-                  hint="Provider/model for CrewAI; model name for the AutoGen "
-                       "client; an alias such as opus or sonnet for claude_cli."),
+            field("model", "Model",
+                  hint="Provider/model for CrewAI and the AutoGen client's model "
+                       "name - required for both. For claude_cli an alias such as "
+                       "opus or sonnet; blank takes the connection's model, or the "
+                       "CLI's own."),
             field("effort", "Effort", "choice", default="",
                   options=agent_run.EFFORT_LEVELS,
                   hint="Only for claude_cli: how hard the model is asked to "
@@ -220,7 +223,12 @@ class AgentReview(CyclePlugin):
         for key in ("python", "model", "task", "repository", "model_client", "api_key_env"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
+        _connected, wrong = connections.agent_problems(settings)
+        found.extend(wrong)
         framework = settings.get("framework")
+        if (framework in WORKER_FRAMEWORKS and not str(settings.get("model") or "").strip()):
+            # A framework has no default of its own to fall back on.
+            found.append("Model is required for %s." % framework)
         if framework == "autogen" and not str(settings.get("model_client") or "").strip():
             found.append("AutoGen requires a model_client component class.")
         # `python` is the worker's interpreter, and the CLI backend has no

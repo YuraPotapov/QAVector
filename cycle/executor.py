@@ -1487,6 +1487,9 @@ class _Scheduler(object):
                 # two members are never both inside their plugin at once.
                 semaphore.acquire()
             resolved = _Step(step, settings)
+            # Which connection it ran through, once the settings no longer say:
+            # for what records the step's work in the connection's integration.
+            resolved.connection = self.bound.get(step.id, "")
             context.progress(step.id, title=step.label or plugin.metadata.name or step.id)
             if step.id not in self.prepared:
                 # Once per step, not once per turn. `cleanup` is called exactly

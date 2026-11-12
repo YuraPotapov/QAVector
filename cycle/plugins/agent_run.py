@@ -23,12 +23,14 @@ when the checks agree.
 
 import logging
 import os
+import time
 
 from cycle.operations import (Operation, recorded, result_document,
                               result_from_document)
 
 from cycle.plugins import agent_stream
 from cycle.plugins._process import run_process
+from integrations.agents.adapters.claude import EFFORTS as _claude_efforts
 from qavector_agent_claude.command import command as _argv, tool_list as _tool_list
 
 log = logging.getLogger("cycle.agent_run")
@@ -53,12 +55,29 @@ RESULT_BYTES = 2 * 1024 * 1024
 #: ``bypassPermissions``, which would also hand over everything else.
 ACCEPT_EDITS = "acceptEdits"
 
-#: How hard the CLI is asked to think, from ``--effort``. Written down here
-#: rather than left to the binary because the CLI *warns and carries on* when
-#: the level is not one it knows - so a typo in a cycle file would run at the
-#: default, pass, and leave nobody able to tell from the report that the step
-#: did not run at the level it says it did. A step is refused instead.
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+#: How hard the CLI is asked to think, from ``--effort`` - the levels its
+#: adapter lists. Written down rather than left to the binary because the CLI
+#: *warns and carries on* when the level is not one it knows - so a typo in a
+#: cycle file would run at the default, pass, and leave nobody able to tell
+#: from the report that the step did not run at the level it says it did. A
+#: step is refused instead.
+EFFORT_LEVELS = _claude_efforts
+
+
+def connection_field():
+    """The ``connection`` field every Claude step takes: an agent connection,
+    set once in Integrations -> Agents, in place of saying the program here."""
+    from cycle.registry import field
+    return field("connection", "Connection", "connection", options=("agents",),
+                 hint="An agent connection, by its id - set once for every project in "
+                      "Integrations -> Agents -> Connections. It says which program runs "
+                      "the step, and its model and effort when the step leaves them "
+                      "blank. When set, leave Claude Code binary empty.")
+
+
+#: What the Model field says on a step that runs Claude Code.
+MODEL_HINT = ("An alias such as opus or sonnet. Blank takes the connection's model, "
+              "or the CLI's own when there is none.")
 
 
 def min_effort_field():
@@ -253,6 +272,7 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
                            backend_cwd, name, env={"CLAUDE_CODE_SIMPLE": None},
                            on_stdout=_reader(context, step, written))
 
+    began = time.time()
     result, answer, agent_result, profile = run_legacy_claude(
         run_id=context.run.id, node_id=step.id,
         operation_id=os.path.basename(operation.directory), epoch=operation.epoch,
@@ -265,6 +285,11 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
     reply = Reply(result, changed, answer,
                   problem="" if agent_result["status"] == "completed" else agent_result["summary"],
                   agent_result=agent_result)
+    if result.outputs.get("started") is not False:
+        # A call that was made - never one replayed from its receipt, which
+        # returned above - goes into the Agents integration's record.
+        _record(context, step, operation, complete_prompt(prompt), cwd, options, began,
+                result, answer, reply)
     # An exit code alone cannot say whether a remote request was billed. Only
     # a provider result (or failure before the process started) settles it.
     if answer is not None or result.outputs.get("started") is False:
@@ -281,6 +306,28 @@ def run_claude(context, step, prompt, cwd, tools, binary, mode="", model="",
         elif answer is not None:
             inbox.delivered(snapshot, context.relative(operation.directory))
     return reply
+def _record(context, step, operation, prompt, cwd, options, began, result, answer, reply):
+    """Hand one call to the conversations record (``cycle/connections.py``)."""
+    from cycle import connections
+    answer = answer or {}
+    if reply.ok:
+        state = "completed"
+    elif not answer and context.cancel.is_set():
+        state = "stopped"
+    else:
+        state = "failed"
+    stdout = result.outputs.get("stdout_path") or ""
+    steps = answer.get("num_turns")
+    connections.record_agent_call(context, step, {
+        "prompt": prompt, "cwd": cwd, "tools": list(options.get("tools") or ()),
+        "model": options.get("model") or "", "effort": options.get("effort") or "",
+        "started": began, "ended": time.time(), "state": state, "error": reply.problem,
+        "cost_usd": reply.cost, "steps": steps if isinstance(steps, int) else None,
+        "provider_session": str(answer.get("session_id") or ""),
+        "stdout": os.path.join(context.workspace, stdout) if stdout else "",
+        "prompt_file": os.path.join(operation.directory, PROMPT_FILE)})
+
+
 #: The heading of the section a person's messages are given under. One place,
 #: so a test and a reader of a saved prompt can find it.
 CLARIFICATIONS = "# Clarifications from the person running this"

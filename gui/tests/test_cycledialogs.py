@@ -1127,3 +1127,105 @@ def test_the_connection_field_is_as_wide_as_the_others(jira_node, qapp):
     dialog.show()
     qapp.processEvents()
     assert dialog._widgets["with.connection"].width() == dialog._widgets["with.site"].width()
+
+
+# ---------------------------------------------------- an agent connection
+AGENT_REVIEW = {"id": "agent.review", "name": "Agent Review", "summary": "Review code.",
+          "inputs": [_field("framework", "Framework", "choice", "claude_cli",
+                            ["claude_cli", "crewai", "autogen", "runtime"]),
+                     _field("connection", "Connection", "connection", options=["agents"]),
+                     _field("claude", "Claude Code binary", "file"),
+                     _field("python", "Agent Python", "file"),
+                     _field("model", "Model"), _field("model_client", "AutoGen model client"),
+                     _field("api_key_env", "API key environment variable"),
+                     _field("task", "Review task", "multiline")],
+          "outputs": [], "actions": []}
+
+AGENT_CONNECTIONS = [{"id": "claude-code", "name": "Claude Code", "kind": "claude",
+                      "binary": "", "model": "opus", "effort": ""},
+                     {"id": "reviews", "name": "Reviews", "kind": "claude",
+                      "binary": "/opt/claude/bin/claude", "model": "", "effort": ""}]
+
+
+class _AgentsCore:
+    """Reads the agent connections file, as the core would. Nothing else."""
+
+    offload = False
+
+    def __init__(self):
+        self.asked = []
+
+    def integrations(self, *args, **kwargs):
+        pytest.fail("an agent step lists agent connections, not the project's")
+
+    def agents(self, *args, **kwargs):
+        self.asked.append(args)
+        return {"ok": True, "connections": [dict(one) for one in AGENT_CONNECTIONS]}
+
+
+@pytest.fixture
+def agent_node(qapp, dispose):
+    made = []
+
+    def build(settings, variables=None):
+        dialog = NodeDialog({"id": "review", "plugin": "agent.review", "with": dict(settings)},
+                            AGENT_REVIEW, None, True, core=_AgentsCore(), variables=variables)
+        made.append(dialog)
+        return dialog
+
+    yield build
+    for dialog in made:
+        dispose(dialog)
+
+
+def test_an_agent_step_is_offered_the_agent_connections(agent_node):
+    dialog = agent_node({"task": "Review it"})
+    combo = dialog._widgets["with.connection"]
+    assert [combo.itemText(i) for i in range(combo.count())] == ["", "claude-code", "reviews"]
+    assert dialog._core.asked == [("list",)], "the connections file - no program is started"
+    assert combo.lineEdit().placeholderText() == "None - the program named below"
+
+
+def test_a_named_agent_connection_hides_the_program_and_saves_without_it(agent_node):
+    dialog = agent_node({"connection": "claude-code", "framework": "claude_cli",
+                         "claude": "", "task": "Review it", "model": "sonnet"})
+    for key in ("framework", "claude", "python", "model_client", "api_key_env"):
+        assert not _visible(dialog, "with." + key), key
+    # A path's label and hint go with it, not only its box and Browse.
+    from PySide6.QtWidgets import QLabel
+    shown = [one.text() for one in dialog.findChildren(QLabel) if one.isVisibleTo(dialog)]
+    assert "Claude Code binary" not in shown and "Agent Python" not in shown
+    assert _visible(dialog, "with.model") and _visible(dialog, "with.task")
+    dialog.save_button.click()
+    assert dialog.saved["with"] == {"connection": "claude-code", "task": "Review it",
+                                    "model": "sonnet"}
+
+
+def test_an_old_agent_step_is_offered_the_connection_that_runs_its_program(agent_node):
+    dialog = agent_node({"framework": "claude_cli", "claude": "/opt/claude/bin/claude",
+                         "task": "Review it", "model": "sonnet"})
+    offer = dialog.use_connection
+    assert offer.isVisibleTo(dialog) and offer.text() == "Use connection Reviews instead"
+    offer.click()
+    assert dialog._widgets["with.connection"].currentText() == "reviews"
+    assert not _visible(dialog, "with.claude")
+    dialog.save_button.click()
+    assert dialog.saved["with"] == {"connection": "reviews", "task": "Review it",
+                                    "model": "sonnet"}
+
+
+def test_a_step_on_path_is_offered_the_connection_on_path_and_a_framework_none(agent_node):
+    on_path = agent_node({"task": "Review it"})
+    assert on_path.use_connection.text() == "Use connection Claude Code instead"
+    crew = agent_node({"framework": "crewai", "python": "/usr/bin/python3", "model": "m",
+                       "task": "Review it"})
+    assert not crew.use_connection.isVisibleTo(crew)
+
+
+def test_an_agent_step_without_a_connection_saves_as_it_always_did(agent_node):
+    settings = {"framework": "claude_cli", "claude": "/usr/local/bin/claude",
+                "task": "Review it", "model": "sonnet"}
+    dialog = agent_node(settings)
+    assert _visible(dialog, "with.claude")
+    dialog.save_button.click()
+    assert dialog.saved["with"] == settings

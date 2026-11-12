@@ -17,7 +17,14 @@ signs in to; a cycle project brings its cycles. The file is JSON::
                          "secrets": {"jira_token": "..."}}],
      "connections":    [{"id": "product-team", "name": "Product team", ...,
                          "token": "..."}],
-     "integration_apps": [{"provider": "atlassian", "client_id": "...", ...}]}
+     "integration_apps": [{"provider": "atlassian", "client_id": "...", ...}],
+     "agent_connections": [{"id": "claude-code", "name": "Claude Code", "kind": "claude",
+                            "binary": "", "model": "opus", "effort": ""}],
+     "agent_skills":      [{"name": "odoo-review", "source": {...},
+                            "files": [{"path": "SKILL.md", "data": "<base64>"}]}]}
+
+Agent connections and skills are QAVector's rather than a project's; they go
+in a file when ticked, like everything else, and hold no secret.
 
 Passwords, secret values and connection tokens are written as they are - the file is as private as
 users.json, and is written readable by its owner only. Environments are named,
@@ -148,13 +155,21 @@ def connections_part(core, ids):
     return core.integrations_export(ids)
 
 
+def agents_part(core, connection_ids=(), skill_names=()):
+    """``{agent_connections, agent_skills}`` for what was ticked - read by the
+    core, which alone reads the skills library, files and all."""
+    if not connection_ids and not skill_names:
+        return {}
+    return core.agents_export(list(connection_ids), list(skill_names))
+
+
 def bundle(*parts):
     """One export document from the parts."""
     document = {"format": FORMAT, "version": VERSION,
                 "exported": datetime.datetime.now().isoformat(timespec="seconds"),
                 "projects": [], "environments": [], "users": [],
                 "cycle_projects": [], "cycles": [], "connections": [],
-                "integration_apps": []}
+                "integration_apps": [], "agent_connections": [], "agent_skills": []}
     for part in parts:
         for key, values in part.items():
             document[key].extend(values)
@@ -188,7 +203,9 @@ def counts(document):
                            ("users", "user", "users"),
                            ("cycle_projects", "cycle project", "cycle projects"),
                            ("cycles", "cycle", "cycles"),
-                           ("connections", "connection", "connections")):
+                           ("connections", "connection", "connections"),
+                           ("agent_connections", "agent connection", "agent connections"),
+                           ("agent_skills", "skill", "skills")):
         number = len(document.get(key) or [])
         if number:
             parts.append("%d %s" % (number, one if number == 1 else many))
@@ -219,7 +236,7 @@ def read(path):
         raise TransferError("%s was written by a newer QAVector (version %d)."
                             % (path, version))
     for key in ("projects", "environments", "users", "cycle_projects", "cycles",
-                "connections", "integration_apps"):
+                "connections", "integration_apps", "agent_connections", "agent_skills"):
         if not isinstance(document.get(key) or [], list):
             raise TransferError("%s: %s has to be a list." % (path, key))
         document[key] = [one for one in document.get(key) or [] if isinstance(one, dict)]
@@ -248,7 +265,7 @@ def _existing_env(catalog, project_id, name):
 
 
 def plan(document, projects, catalog, rows, cycle_project_names=(), cycle_ids=(),
-         connection_ids=()):
+         connection_ids=(), agent_connection_ids=(), skill_names=()):
     """``[Item]``: everything in ``document``, each said new or already here."""
     project_ids = _project_ids_by_name(projects, catalog)
     logins = {person.login for person in usersfile.credentials(rows)}
@@ -273,7 +290,27 @@ def plan(document, projects, catalog, rows, cycle_project_names=(), cycle_ids=()
     for connection in document.get("connections") or []:
         items.append(Item("Connection", connection.get("name") or connection.get("id", ""),
                           connection.get("id") in set(connection_ids)))
+    for connection in document.get("agent_connections") or []:
+        items.append(Item("Agent connection",
+                          connection.get("name") or connection.get("id", ""),
+                          connection.get("id") in set(agent_connection_ids)))
+    for skill in document.get("agent_skills") or []:
+        items.append(Item("Skill", skill.get("name", ""), skill.get("name") in set(skill_names)))
     return items
+
+
+def apply_agents(document, mode, core):
+    """Put the agent connections and skills of ``document`` in through
+    ``core``. Returns what was done, said."""
+    if not document.get("agent_connections") and not document.get("agent_skills"):
+        return []
+    answer = core.agents("import", document={
+        "agent_connections": document.get("agent_connections") or [],
+        "agent_skills": document.get("agent_skills") or [],
+        "mode": "copy" if mode == COPY else "merge"})
+    if not answer.get("ok"):
+        raise TransferError(answer.get("error") or "the agents were not imported")
+    return list(answer.get("said") or [])
 
 
 def apply_connections(document, mode, core):

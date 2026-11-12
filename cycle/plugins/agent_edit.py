@@ -36,7 +36,7 @@ the run's workspace that does not exist until something writes there.
 
 import os
 
-from cycle import registry
+from cycle import connections, registry
 from cycle.plugins import agent_cli, agent_run
 from cycle.plugins.agent import AgentReview, read_files
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
@@ -57,12 +57,12 @@ class AgentEdit(CyclePlugin):
         permissions=("process.spawn", "filesystem.read", "filesystem.write",
                      "network"),
         inputs=(
+            agent_run.connection_field(),
             field("claude", "Claude Code binary", "file",
                   hint="Blank finds `claude` on PATH. It signs in through the "
                        "browser and keeps the credentials itself - there is no "
                        "API key here."),
-            field("model", "Model", required=True,
-                  hint="An alias such as opus or sonnet."),
+            field("model", "Model", hint=agent_run.MODEL_HINT),
             field("effort", "Effort", "choice", default="",
                   options=agent_run.EFFORT_LEVELS,
                   hint="How hard the model is asked to think. Blank leaves it "
@@ -121,6 +121,7 @@ class AgentEdit(CyclePlugin):
             if isinstance(literal.get(key), str) and "${" in literal[key]:
                 literal.pop(key)
         found = super().problems(literal)
+        found.extend(connections.agent_problems(settings)[1])
         for key in ("model", "task", "directory", "claude", "read_only"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)

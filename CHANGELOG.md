@@ -16,6 +16,52 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- **Integrations → Agents.** Agent programs - Claude Code for now - are an
+  integration of their own, set once for every project. Four tabs:
+  - **Chat** talks to an agent: the first message makes a conversation, each
+    in a folder you choose and with what the agent may do there - Read, Edit, or
+    Full with commands - under the folder's restrictions. Enter sends; a message
+    written while the agent answers waits its turn; Stop ends the agent and the
+    conversation goes on. Conversations are kept in the project.
+  - **Connections** says which program runs, its default model and effort, and
+    who it is signed in as (**Test**, **Sign in…**). The program keeps its own
+    sign-in; nothing typed here is a secret.
+  - **Skills** is a library of skill folders an agent can be handed for a
+    conversation, added from a link (GitHub or any git repository, or a folder
+    in one) or from a folder. **Look** shows every file, the source and the
+    commit before anything is added, and **Add** takes exactly that copy.
+    **Update…** says what changed first. Nothing updates by itself.
+  - **Activity** lists every turn taken with an agent in the project, from the
+    chat or from a cycle: where it ran, what it was allowed, what it cost and
+    how it ended.
+- **Agent steps can name an agent connection** - `connection: claude-code` on
+  `agent.review`, `agent.edit`, `agent.implement` and `agent.merge` - instead of
+  saying the program themselves. A blank model or effort takes the
+  connection's. Steps written the old way keep working, and the step editor
+  offers the matching connection.
+- Every call a Claude step makes is recorded in Agents as a read-only
+  conversation, with the cycle, step and run it came from.
+- Agent chat accepts files through **Attach files**, drag-and-drop or pasting
+  local files. Each message can carry up to 20 files / 20 MB, including a
+  message without text. Copies are kept with the conversation and their names
+  appear in its history; restricted turns receive read-only access to them.
+
+### Changed
+- A Claude agent step no longer needs a model: blank takes the connection's,
+  or the CLI's own. CrewAI and AutoGen reviews still need theirs.
+- Chat groups agent/model/skills and folder/restrictions under collapsible
+  **Settings**. Attach, access mode, Stop and Send/Queue remain beside the
+  message; the selected agent and folder stay visible when settings are folded.
+
+### Fixed
+- Agent output split mid-character keeps non-Latin text and emoji intact. Stop prevents the
+  next queued message even if the current turn completes at the same moment.
+  Queued messages retain their selected model, access mode and attachments.
+- Late history reads no longer reopen an abandoned conversation or lose live
+  events. A core crash does not delete a conversation whose outcome is unknown;
+  tools without results are shown as unconfirmed.
+
 ## [0.16.66] - 2026-11-11
 
 ### Added

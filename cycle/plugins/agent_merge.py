@@ -69,10 +69,10 @@ class AgentMerge(CyclePlugin):
         permissions=("process.spawn", "filesystem.read", "filesystem.write",
                      "network"),
         inputs=(
+            agent_run.connection_field(),
             field("claude", "Claude Code binary", "file",
                   hint="Blank finds `claude` on PATH."),
-            field("model", "Model", required=True,
-                  hint="An alias such as opus or sonnet."),
+            field("model", "Model", hint=agent_run.MODEL_HINT),
             field("effort", "Effort", "choice", default="",
                   options=agent_run.EFFORT_LEVELS,
                   hint="How hard the model is asked to think."),

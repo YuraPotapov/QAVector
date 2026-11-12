@@ -280,3 +280,72 @@ def test_the_plan_says_which_connections_are_here_and_the_core_puts_them_in():
     assert said == ["Added connection Product team.", "Added connection Ops."]
     args, sent = core.asked[0]
     assert args == ("import",) and sent["mode"] == "copy"
+
+
+# -- agent connections and skills ------------------------------------------------
+class AgentsCore:
+    """Exports and imports agent connections and skills as the core does."""
+
+    def __init__(self):
+        self.asked = []
+
+    def agents_export(self, connection_ids, skill_names):
+        self.asked.append(("export", list(connection_ids), list(skill_names)))
+        return {"agent_connections": [{"id": one, "name": one.title(), "kind": "claude"}
+                                      for one in connection_ids],
+                "agent_skills": [{"name": one, "source": {},
+                                  "files": [{"path": "SKILL.md", "data": "eA=="}]}
+                                 for one in skill_names]}
+
+    def agents(self, *args, document=None, **kwargs):
+        self.asked.append((args, document))
+        return {"ok": True, "said": ["Agent connection %s added." % one["name"]
+                                     for one in document["agent_connections"]]
+                + ["Skill %s added." % one["name"] for one in document["agent_skills"]]}
+
+
+def test_agent_connections_and_skills_go_in_the_file(tmp_path):
+    core = AgentsCore()
+    document = transfer.bundle(transfer.agents_part(core, ["claude-code"], ["odoo-review"]))
+    path = transfer.write(str(tmp_path / ("out" + transfer.SUFFIX)), document)
+    again = transfer.read(path)
+    assert [one["id"] for one in again["agent_connections"]] == ["claude-code"]
+    assert again["agent_skills"][0]["files"] == [{"path": "SKILL.md", "data": "eA=="}]
+    assert transfer.counts(again) == "1 agent connection, 1 skill"
+    assert transfer.agents_part(core, [], []) == {}, "none chosen, the core is not asked"
+
+
+def test_a_file_from_before_agents_reads_with_none(tmp_path):
+    path = tmp_path / ("old" + transfer.SUFFIX)
+    path.write_text(json.dumps({"format": transfer.FORMAT, "version": 1, "cycles": []}))
+    again = transfer.read(str(path))
+    assert again["agent_connections"] == [] and again["agent_skills"] == []
+
+
+def test_the_plan_says_which_agents_and_skills_are_here_and_the_core_puts_them_in():
+    document = transfer.bundle({"agent_connections": [{"id": "claude-code", "name": "Claude"},
+                                                      {"id": "laptop", "name": "Laptop"}],
+                                "agent_skills": [{"name": "odoo-review"}, {"name": "notes"}]})
+    items = transfer.plan(document, [], [], [], agent_connection_ids=["claude-code"],
+                          skill_names=["notes"])
+    assert [(one.kind, one.name, one.exists) for one in items] == [
+        ("Agent connection", "Claude", True), ("Agent connection", "Laptop", False),
+        ("Skill", "odoo-review", False), ("Skill", "notes", True)]
+    core = AgentsCore()
+    said = transfer.apply_agents(document, transfer.COPY, core)
+    assert core.asked[0][0] == ("import",) and core.asked[0][1]["mode"] == "copy"
+    assert said == ["Agent connection Claude added.", "Agent connection Laptop added.",
+                    "Skill odoo-review added.", "Skill notes added."]
+    assert transfer.apply_agents(transfer.bundle(), transfer.MERGE, core) == []
+    assert len(core.asked) == 1
+
+
+def test_a_refused_agents_import_is_said():
+    class Refusing(AgentsCore):
+        def agents(self, *args, document=None, **kwargs):
+            return {"ok": False, "error": "cannot write agents.json"}
+
+    with pytest.raises(transfer.TransferError) as caught:
+        transfer.apply_agents(transfer.bundle({"agent_skills": [{"name": "x"}]}),
+                              transfer.MERGE, Refusing())
+    assert "cannot write agents.json" in str(caught.value)

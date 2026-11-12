@@ -171,6 +171,34 @@ class Settings:
         return ""
 
     @property
+    def agents_path(self):
+        """The agent connections - Integrations -> Agents -> Connections.
+
+        One file whichever project is open: an agent CLI signs in once for the
+        whole machine, so its connection is QAVector's and not a project's.
+        Always said, never left to the core's default - a core run from a
+        source checkout would look in the checkout.
+        """
+        from . import core
+        return os.path.join(core.home_folder(), "agents.json")
+
+    @property
+    def agent_skills_path(self):
+        """The skills library agents are handed from - Integrations -> Agents
+        -> Skills. QAVector's, like the connections, and for the same reason
+        always said."""
+        from . import core
+        return os.path.join(core.home_folder(), "agent-skills")
+
+    @property
+    def agent_sessions_path(self):
+        """Where this project's conversations with agents are kept."""
+        from . import core
+        if self.project_folder:
+            return self._project_path("agent_sessions")
+        return os.path.join(core.home_folder(), "agent-sessions")
+
+    @property
     def cycle_memory_path(self):
         """Where what the project remembers between runs is kept.
 
