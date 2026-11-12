@@ -133,6 +133,29 @@ def test_a_conversation_opens_in_place_read_only_and_goes_on_in_the_chat(make):
     assert page.agents.chat.current["id"] == session["id"]
 
 
+def test_the_chat_reached_from_an_issue_has_the_way_back_in_its_breadcrumb(make):
+    session = _talk("20261111-172345-3fa91c", "Fix the expiry")
+    page, core = make(agents_fakes.FakeCore(sessions=[session], events={session["id"]: []}))
+    page.delegation.work._toggle(0, True)
+    page.delegation.work.detail(session["id"]).open.click()
+    crumbs = page.agents.crumbs
+    assert page.stack.currentWidget() is page.agents
+    assert crumbs.trail() == ["Jira", "QA-139"]
+    assert [one.text() for one in crumbs.parts] == ["Jira  /", "QA-139  /"]
+    # Jira has moved on since; the issue part opens the issue again.
+    page.jira.issues.select_key("QA-142")
+    crumbs.parts[1].click()
+    assert page.stack.currentWidget() is page.jira
+    assert page.jira.issues.detail.issue["key"] == "QA-139"
+    # Reached any other way, Agents has no trail.
+    page.open_provider("agents")
+    assert crumbs.trail() == [] and page.jira.crumbs.trail() == []
+    page.delegation.open_agents(session["id"])
+    assert crumbs.trail() == ["Jira", "QA-139"]
+    crumbs.parts[0].click()
+    assert page.stack.currentWidget() is page.jira
+
+
 def test_delegate_begins_a_conversation_in_the_chat_with_the_issue_as_its_task(make, tmp_path,
                                                                                settings):
     page, core = make()

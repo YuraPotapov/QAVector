@@ -1722,6 +1722,50 @@ def heading(text, role="h1"):
     return label
 
 
+class Crumbs(QWidget):
+    """The way a page was reached, above its heading: each part a way back.
+
+    The first part is the page's home and is always there (``root``). The
+    parts after it are the way taken this time - an issue a conversation was
+    opened from, say - and are set by whoever took it, with :meth:`set_trail`;
+    an empty trail is the page reached directly. Each part ends with its
+    slash: the heading under the row is the part it leads to.
+    """
+
+    def __init__(self, root, object_name="integrationCrumb", parent=None):
+        super().__init__(parent)
+        self._object_name = object_name
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+        self.root = self._part(root)
+        self._layout.addWidget(self.root)
+        self.parts = []
+
+    def _part(self, text):
+        button = QPushButton("%s  /" % text)
+        button.setObjectName(self._object_name)
+        button.setProperty("variant", "ghost")
+        button.setCursor(Qt.PointingHandCursor)
+        return button
+
+    def set_trail(self, trail):
+        """``[(text, callback), ...]`` after the root - the way taken."""
+        for button in self.parts:
+            self._layout.removeWidget(button)
+            button.hide()
+            button.deleteLater()
+        self.parts = []
+        for text, callback in trail or ():
+            button = self._part(text)
+            button.clicked.connect(lambda _checked=False, go=callback: go())
+            self._layout.addWidget(button)
+            self.parts.append(button)
+
+    def trail(self):
+        return [button.text()[:-3] for button in self.parts]
+
+
 def elided_line(text="", role="h1"):
     """A heading or a status that may be long, in a row it shares with buttons.
 

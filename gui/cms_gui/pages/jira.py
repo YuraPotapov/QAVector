@@ -1100,6 +1100,7 @@ class IssueDetail(QFrame):
         self._stop_editing()
         self._stop_comment()
         self.issue = None
+        self.tell("")
         self.skeleton.stop()
         self.stack.setCurrentIndex(0)
         self.emptied.emit()
@@ -1118,6 +1119,7 @@ class IssueDetail(QFrame):
         self._stop_comment()
         self.skeleton.stop()
         self.issue = None
+        self.tell("")
         self.gone_title.setText("%s is not available" % key)
         self.gone_detail.setText(text)
         self.stack.setCurrentIndex(2)
@@ -1141,6 +1143,8 @@ class IssueDetail(QFrame):
             self._stop_editing()
         if issue.get("key") != (self.issue or {}).get("key"):
             self._stop_comment()
+            # What was just done was done to the issue shown before.
+            self.tell("")
         if issue.get("key") != self._people_of:
             self._people_of, self._people = issue.get("key"), []
             for editor in self._editors():
@@ -2215,12 +2219,10 @@ class JiraView(QWidget):
         outer.setContentsMargins(24, 18, 24, 14)
         outer.setSpacing(4)
         crumb = QHBoxLayout()
-        self.crumb = QPushButton("Integrations  /")
-        self.crumb.setObjectName("jiraCrumb")
-        self.crumb.setProperty("variant", "ghost")
-        self.crumb.setCursor(Qt.PointingHandCursor)
+        self.crumbs = widgets.Crumbs("Integrations", "jiraCrumb")
+        self.crumb = self.crumbs.root
         self.crumb.clicked.connect(self.back_requested)
-        crumb.addWidget(self.crumb)
+        crumb.addWidget(self.crumbs)
         crumb.addStretch(1)
         self.window_actions = crumb
         outer.addLayout(crumb)

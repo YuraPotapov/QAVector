@@ -607,12 +607,10 @@ class AgentsView(QWidget):
         outer.setContentsMargins(24, 18, 24, 14)
         outer.setSpacing(4)
         crumb = QHBoxLayout()
-        self.crumb = QPushButton("Integrations  /")
-        self.crumb.setObjectName("integrationCrumb")
-        self.crumb.setProperty("variant", "ghost")
-        self.crumb.setCursor(Qt.PointingHandCursor)
+        self.crumbs = widgets.Crumbs("Integrations")
+        self.crumb = self.crumbs.root
         self.crumb.clicked.connect(self.back_requested)
-        crumb.addWidget(self.crumb)
+        crumb.addWidget(self.crumbs)
         crumb.addStretch(1)
         self.window_actions = crumb
         outer.addLayout(crumb)

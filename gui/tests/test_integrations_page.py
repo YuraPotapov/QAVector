@@ -759,6 +759,20 @@ def test_the_status_button_offers_the_workflow_s_moves_and_makes_one(make):
     assert page.jira.issues.rows()[0]["status"] == "Done"
 
 
+def test_the_done_line_stays_with_the_issue_it_was_said_of(make):
+    core, page, detail = _opened(make, transitions=[
+        {"id": "31", "name": "Done", "to": "Done", "category": "done"}])
+    detail.status.menu().actions()[0].trigger()
+    assert detail.note.text() == "Moved to Done."
+    detail.show_issue(_issue("QA-142", status="Done"))
+    assert detail.note.text() == "Moved to Done."
+    detail.show_issue(_issue("QA-139"))
+    assert detail.note.text() == "" and detail.note.isHidden()
+    detail.tell("Comment posted.")
+    detail.clear()
+    assert detail.note.text() == ""
+
+
 def test_a_move_that_needs_fields_asks_for_them_and_sends_them(make, monkeypatch):
     from cms_gui.pages import jiradialogs
     answers = iter([{"ok": False, "kind": "fields", "transition": "Done", "error": "x",

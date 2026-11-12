@@ -228,13 +228,32 @@ class IntegrationsPage(QWidget):
         self.return_to_main_requested.emit()
 
     def _show_conversation(self, session_id=None):
-        """The agents' chat in front - on a conversation, when one is named."""
-        self.open_provider("agents")
+        """The agents' chat in front - on a conversation, when one is named.
+        It is reached from a Jira issue, and its breadcrumb leads back there."""
+        self.open_provider("agents", self._issue_trail())
         if session_id:
             self.agents.open_session(session_id)
 
-    def open_provider(self, provider):
+    def _issue_trail(self):
+        """``Jira / KEY`` for the issue Delegation is on: the issue part opens
+        it again, wherever Jira has gone since."""
+        trail = [("Jira", lambda: self.open_provider("jira"))]
+        key, connection_id = self.delegation.key(), self.delegation.connection_id
+        if key:
+            trail.append((key, lambda: self._back_to_issue(connection_id, key)))
+        return trail
+
+    def _back_to_issue(self, connection_id, key):
+        self.jira.show_found(("issue", connection_id, key))
+        self.open_provider("jira")
+
+    def open_provider(self, provider, trail=()):
+        """A provider in front. ``trail`` is the way it was reached, for its
+        breadcrumb; opened any other way, it has none."""
         if provider in self.hosts:
+            crumbs = getattr(self.views[provider], "crumbs", None)
+            if crumbs is not None:
+                crumbs.set_trail(trail)
             self.hosts[provider].open()
             self._save_view(provider)
 
