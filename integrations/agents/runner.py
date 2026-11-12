@@ -27,6 +27,7 @@ import uuid
 import runtime_paths
 from integrations.agents import adapters, sessions, skills as skills_mod, store
 from integrations.agents import attachments as attachment_files
+from integrations.agents import changes as changes_mod
 
 #: How long a stopped CLI is given to end by itself before it is killed.
 STOP_GRACE = 5.0
@@ -100,14 +101,33 @@ class Reader:
     made by anything else, so the two records read the same.
     """
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, cost_before=None):
         self.adapter = adapter
         self._writing = {}              # tool call id -> the path it asked to write
         self._refused = {}              # tool call id -> why the program would not run it
+        self._context = 0               # how full the agent's context was at its last request
+        self._hidden = set()            # calls of the program's own tools, never shown
+        # What the conversation had cost before this turn, as the program last
+        # reported it: a program continuing a conversation reports the whole
+        # of it, and the turn's own is the difference. None for a call that
+        # began a conversation of its own.
+        self.cost_before = cost_before
 
     def events(self, line):
         found = []
         for event in self.adapter.events(line):
+            if event["type"] == "context":
+                self._context = event.get("used") or self._context
+                continue
+            if (event["type"] == "tool.started"
+                    and event.get("name") in getattr(self.adapter, "HIDDEN_TOOLS", ())):
+                self._hidden.add(event.get("id"))
+                continue
+            if event["type"] == "tool.completed" and event.get("id") in self._hidden:
+                self._hidden.discard(event.get("id"))
+                continue
+            if event["type"] in ("completed", "failed"):
+                event = self._ended(event)
             if event["type"] == "tool.refused":
                 # Folded into the call's own result, so a refusal is one row
                 # that says so rather than a failure and a note beside it.
@@ -124,6 +144,21 @@ class Reader:
                 if path and event.get("ok"):
                     found.append({"type": "file.written", "path": path})
         return found
+
+    def _ended(self, event):
+        """The turn's end as recorded: its own cost beside the reported total,
+        and how full the context was against how much it holds."""
+        event = dict(event)
+        total = event.get("cost_usd")
+        if isinstance(total, (int, float)) and not isinstance(total, bool):
+            event["cost_total_usd"] = total
+            before = self.cost_before
+            if isinstance(before, (int, float)) and 0 <= before <= total:
+                event["cost_usd"] = round(total - before, 6)
+        window = event.pop("context_window", 0)
+        if self._context:
+            event["context"] = {"used": self._context, "window": window or 0}
+        return event
 
 
 def _signal(process, hard):
@@ -152,11 +187,15 @@ def _tail(path, limit=ERROR_CHARS):
 
 
 def send(root, session_id, message, agents_path=None, mode=None, model=None,
-         effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None):
+         effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None,
+         plan=None):
     """Take one turn. Returns ``{"session", "turn"}``; raises :class:`Refused`.
 
-    ``mode``, ``model``, ``effort`` and ``skills`` (names in the library at
-    ``skills_root``), when given, are what the session uses from this turn on.
+    ``mode``, ``model``, ``effort``, ``skills`` (names in the library at
+    ``skills_root``) and ``plan``, when given, are what the session uses from
+    this turn on. ``plan`` makes it a planning turn: the agent explores
+    read-only and answers with questions or a plan, and the session says which
+    it waits for (``phase``).
     ``emit`` is told each event once it is on disk. ``stop`` is an Event: set,
     it ends the CLI and the turn is recorded as stopped.
 
@@ -168,7 +207,7 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
         raise Refused("invalid", "There is nothing to send.")
     emit = emit or (lambda event: None)
     stop = stop or threading.Event()
-    chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills,
+    chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
               "skills_root": skills_root, "attachments": attachments if attachments is not None else []}
     try:
         sessions.load(root, session_id)             # not there: said before the lock
@@ -197,6 +236,9 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     if mode not in adapter.MODES:
         raise Refused("invalid", "%s has no %r mode; it has %s."
                       % (adapter.NAME, mode, ", ".join(adapter.MODES)))
+    planning = bool(session.get("plan") if chosen["plan"] is None else chosen["plan"])
+    if planning and not getattr(adapter, "PLANS", False):
+        raise Refused("invalid", "%s cannot plan before it works." % adapter.NAME)
     # What the session says, and under it what the connection says; blank at
     # both leaves the choice to the CLI's own configuration.
     session_model = session.get("model", "") if model is None else str(model).strip()
@@ -242,6 +284,8 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     else:
         attachments_dir = ""
     prompt = attachment_files.prompt(message, session_dir, attached)
+    if planning:
+        prompt = adapter.plan_prompt(prompt)
 
     # From here on something is recorded whatever happens.
     number = len(session.get("turns") or []) + 1
@@ -251,44 +295,91 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     provider = session["provider_session"] if resume else str(uuid.uuid4())
     turn = {"n": number, "started": time.time(), "ended": None, "state": sessions.RUNNING,
             "mode": mode, "model": used_model, "effort": used_effort, "skills": names,
-            "cost_usd": None, "steps": None, "error": ""}
+            "plan": planning, "cost_usd": None, "steps": None, "error": ""}
     if attached:
         turn["attachments"] = attached
     session.update(mode=mode, model=session_model, effort=session_effort, skills=names,
-                   provider_session=provider, updated=turn["started"],
+                   plan=planning, provider_session=provider, updated=turn["started"],
                    title=session.get("title") or sessions.title_from(
                        message or ", ".join(one["name"] for one in attached)))
     session.setdefault("turns", []).append(turn)
     sessions.save(root, session)
 
     record = sessions.Record(root, session["id"], number)
+    written = []
+
+    def tell(event):
+        if event.get("type") == "file.written":
+            written.append(event.get("path"))
+        emit(event)
+
     try:
         said = {"type": "user", "text": message, "mode": mode}
+        if planning:
+            said["plan"] = True
         if names:
             said["skills"] = names
         if attached:
             said["attachments"] = attached
         emit(record.add(said))
+        before = _snapshot(session_dir, folder)
         outcome = _run(adapter, adapter.turn_argv(binary, mode, used_model, used_effort,
                                                   session=provider, resume=resume,
                                                   skills_dir=staged,
-                                                  attachments_dir=attachments_dir),
-                       folder, effective, seen, prompt, where, record, emit, stop)
-        if outcome["state"] != sessions.COMPLETED and not outcome["reported"]:
+                                                  attachments_dir=attachments_dir,
+                                                  plan=planning),
+                       folder, effective, seen, prompt, where, record, tell, stop,
+                       cost_before=sessions.cost_so_far(session) if resume else None)
+        turn["changes"] = _changed(session_dir, where, folder, before, written)
+        emit(record.add(dict(turn["changes"], type="changes")))
+        if outcome.get("end"):
+            emit(record.add(outcome["end"]))
+        elif outcome["state"] != sessions.COMPLETED:
             # The CLI said nothing of how it ended, so the record does.
             emit(record.add({"type": outcome["state"], "error": outcome["error"]}))
     finally:
         record.close()
 
     turn.update(ended=time.time(), state=outcome["state"], error=outcome["error"],
-                cost_usd=outcome["cost_usd"], steps=outcome["steps"])
+                cost_usd=outcome["cost_usd"], cost_total_usd=outcome["cost_total_usd"],
+                steps=outcome["steps"])
+    for key in ("tokens", "context"):
+        if outcome.get(key):
+            turn[key] = outcome[key]
     if outcome["provider_session"]:
         # The CLI has the conversation now, under the id it says it has.
         session.update(provider_session=outcome["provider_session"], provider_started=True)
+    # What the conversation waits for now: answers to the agent's questions,
+    # a word on its plan - or nothing, once it was given work or answered.
     session.update(updated=turn["ended"], state=turn["state"],
-                   cost_usd=round(sum(one.get("cost_usd") or 0 for one in session["turns"]), 6))
+                   phase=outcome.get("asked") or "")
+    sessions.settle(session)
     sessions.save(root, session)
     return dict(turn)
+
+
+def _snapshot(session_dir, folder):
+    """The folder before a turn, or why there is none. Never the turn's
+    failure: what changed is an account of the turn, not part of it."""
+    try:
+        return changes_mod.snapshot(session_dir, folder)
+    except Exception as exc:            # noqa: BLE001 - an account, never the turn
+        return {"error": str(exc) or exc.__class__.__name__}
+
+
+def _changed(session_dir, where, folder, before, written):
+    """What the turn changed in the folder, kept for reading; the summary for
+    the turn's record, or why there is none."""
+    if before.get("error"):
+        return {"files": 0, "added": 0, "removed": 0, "kept": "none",
+                "error": "The folder could not be read before the turn: %s" % before["error"]}
+    try:
+        after = changes_mod.snapshot(session_dir, folder, layout=before)
+        return changes_mod.keep(session_dir, where, folder, before, after, written)
+    except Exception as exc:            # noqa: BLE001 - an account, never the turn
+        return {"files": 0, "added": 0, "removed": 0, "kept": "none",
+                "error": "What changed could not be kept: %s" % (
+                    str(exc) or exc.__class__.__name__)}
 
 
 def _keep(path, text):
@@ -297,11 +388,14 @@ def _keep(path, text):
         handle.write(text if text.endswith("\n") else text + "\n")
 
 
-def _run(adapter, argv, folder, effective, seen, message, where, record, emit, stop):
+def _run(adapter, argv, folder, effective, seen, message, where, record, emit, stop,
+         cost_before=None):
     """Run the CLI once and read it to the end. Never raises for the CLI's
     sake: how it went is the answer. ``seen`` is what a restricted CLI is
-    shown besides the session's folder."""
-    outcome = {"state": sessions.FAILED, "error": "", "cost_usd": None, "steps": None,
+    shown besides the session's folder; ``cost_before`` what the conversation
+    had cost when this turn began, for one the CLI continues."""
+    outcome = {"state": sessions.FAILED, "error": "", "cost_usd": None,
+               "cost_total_usd": None, "steps": None, "tokens": None, "context": None,
                "provider_session": "", "reported": False}
     out_path, err_path = os.path.join(where, "stdout.log"), os.path.join(where, "stderr.log")
     environment = adapter.turn_env(runtime_paths.clean_subprocess_env())
@@ -341,7 +435,7 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                    threading.Thread(target=watch, daemon=True)]
         for thread in threads:
             thread.start()
-        reader = Reader(adapter)
+        reader = Reader(adapter, cost_before=cost_before)
         try:
             for raw in process.stdout:
                 out_file.write(raw)
@@ -353,7 +447,16 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                         outcome.update(state=event["type"], reported=True,
                                        error=event.get("error", ""),
                                        cost_usd=event.get("cost_usd"),
-                                       steps=event.get("steps"))
+                                       cost_total_usd=event.get("cost_total_usd"),
+                                       steps=event.get("steps"),
+                                       tokens=event.get("tokens"),
+                                       context=event.get("context"))
+                        # Said once what the turn changed is kept: the end
+                        # is the last thing a turn says.
+                        outcome["end"] = event
+                        continue
+                    if event["type"] in ("plan", "questions"):
+                        outcome["asked"] = event["type"]
                     emit(record.add(event))
             code = process.wait()
         finally:

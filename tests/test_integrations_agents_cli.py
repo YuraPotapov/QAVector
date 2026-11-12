@@ -70,7 +70,7 @@ def test_kinds_says_where_claude_is_without_starting_it(agents, tmp_path, monkey
     assert answer["kinds"] == [{"kind": "claude", "name": "Claude Code",
                                 "default_binary": "claude", "found": path,
                                 "efforts": ["low", "medium", "high", "xhigh", "max"],
-                                "modes": ["read", "edit", "full"]}]
+                                "modes": ["read", "edit", "full"], "plans": True}]
     assert not marker.exists()
 
 

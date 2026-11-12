@@ -72,14 +72,14 @@ def test_a_turn_is_said_answered_and_all_of_it_kept(world):
     assert turn["ended"] >= turn["started"]
     assert [one["type"] for one in seen] == [
         "user", "started", "thinking", "text", "tool.started", "tool.completed",
-        "file.written", "completed"]
+        "file.written", "changes", "completed"]
     assert seen[6]["path"] == os.path.join(os.path.realpath(world.folder), "notes.md")
     assert seen[0]["text"] == "Why does the login test fail?"
     assert seen[3]["text"] == "You said: Why does the login test fail?"
     assert seen[-1]["text"] == "Done: Why does the login test fail?"
     # What was told is what is on disk, in the same order.
     assert sessions.events(world.root, session["id"]) == seen
-    assert [one["seq"] for one in seen] == list(range(1, 9))
+    assert [one["seq"] for one in seen] == list(range(1, 10))
     assert open(world.turn_file(session, 1, "prompt.md")).read() == (
         "Why does the login test fail?\n")
     raw = open(world.turn_file(session, 1, "stdout.log")).read().splitlines()
@@ -252,9 +252,29 @@ def test_the_second_turn_continues_the_conversation_the_first_began(world):
     assert named and "--resume" not in first["argv"]
     assert flag(second, "--resume") == named and "--session-id" not in second["argv"]
     assert answer["turn"]["n"] == 2
-    assert seen[0]["seq"] == 9 and all(one["turn"] == 2 for one in seen)
+    assert seen[0]["seq"] == 10 and all(one["turn"] == 2 for one in seen)
     saved = sessions.load(world.root, session["id"])
     assert saved["cost_usd"] == 0.025 and [one["n"] for one in saved["turns"]] == [1, 2]
+    # The CLI said 0.025 for the second turn - the conversation so far; the
+    # turn's own is what it added.
+    assert [(one["cost_usd"], one["cost_total_usd"]) for one in saved["turns"]] == [
+        (0.0125, 0.0125), (0.0125, 0.025)]
+    end = seen[-1]
+    assert (end["type"], end["cost_usd"], end["cost_total_usd"]) == ("completed", 0.0125, 0.025)
+
+
+def test_a_turn_keeps_its_tokens_and_how_full_the_context_was(world):
+    session = world.session()
+    world.send(session, "first")
+    answer, seen = world.send(session, "second")
+    tokens = {"input": 5, "cache_read": 1000, "cache_write": 200, "output": 30, "thinking": 7}
+    assert answer["turn"]["tokens"] == tokens
+    assert answer["turn"]["context"] == {"used": 1205, "window": 200000}
+    assert "context" not in [one["type"] for one in seen]   # folded into the end
+    assert seen[-1]["context"] == {"used": 1205, "window": 200000}
+    saved = sessions.described(world.root, sessions.load(world.root, session["id"]))
+    assert saved["tokens"] == {key: 2 * value for key, value in tokens.items()}
+    assert saved["context"] == {"used": 1205, "window": 200000}
 
 
 def test_mode_model_and_effort_given_with_a_turn_are_the_sessions_from_then_on(world):
@@ -289,7 +309,7 @@ def test_a_refusal_from_the_agent_is_a_failed_turn_with_its_words(world):
     session = world.session()
     answer, seen = world.send(session, "REFUSE this")
     assert (answer["turn"]["state"], answer["turn"]["error"]) == ("failed", "Not allowed here.")
-    assert [one["type"] for one in seen] == ["user", "started", "failed"]
+    assert [one["type"] for one in seen] == ["user", "started", "changes", "failed"]
     assert sessions.load(world.root, session["id"])["state"] == "failed"
 
 
@@ -334,7 +354,7 @@ def test_a_cli_that_cannot_be_started_is_a_failed_turn_on_the_record(world):
         runner.adapters.get("claude").resolve = original
     assert answer["turn"]["state"] == "failed"
     assert answer["turn"]["error"].startswith("Cannot start Claude Code:")
-    assert [one["type"] for one in seen] == ["user", "failed"]
+    assert [one["type"] for one in seen] == ["user", "changes", "failed"]
     assert sessions.load(world.root, session["id"])["provider_started"] is False
 
 
@@ -430,7 +450,8 @@ def test_stop_ends_the_cli_and_the_turn_is_recorded_as_stopped(world):
                          emit=emit, stop=stop)
     assert time.monotonic() - began < 10
     assert (answer["turn"]["state"], answer["turn"]["error"]) == ("stopped", "")
-    assert [one["type"] for one in seen] == ["user", "started", "thinking", "stopped"]
+    assert [one["type"] for one in seen] == ["user", "started", "thinking", "changes",
+                                           "stopped"]
     assert _gone(starts(world.log)[0]["pid"])
     saved = sessions.load(world.root, session["id"])
     assert saved["state"] == "stopped" and sessions.held(world.root, session["id"]) is False
@@ -525,7 +546,7 @@ def test_a_turn_is_handed_the_skills_chosen_for_it_as_a_copy_of_its_own(world, t
     assert manifest["name"] == "qavector"
     # A copy: neither the library nor the folder the agent works in is touched.
     assert not os.path.islink(os.path.join(staged, "skills", "odoo-review"))
-    assert os.listdir(world.folder) == []
+    assert os.listdir(world.folder) == ["notes.md"]     # only what the agent wrote
     assert answer["turn"]["skills"] == ["odoo-review", "test-writer"]
     assert seen[0]["skills"] == ["odoo-review", "test-writer"]
 
@@ -614,3 +635,45 @@ def test_restrictions_this_computer_cannot_enforce_fail_the_turn_not_run_it_open
     assert answer["turn"]["state"] == "failed"
     assert "No sandbox on this computer." in answer["turn"]["error"]
     assert starts(world.log) == []
+
+
+# ----------------------------------------------------------------- planning
+def test_a_planning_turn_asks_its_questions_as_data_and_changes_nothing(world):
+    """Read tools only, whatever the mode; the CLI's plan mode; the answer as
+    the schema says - and the tool the CLI carries it with is no row."""
+    session = world.session(mode="full")
+    answer, seen = world.send(session, "Make divide safe. ASK", plan=True)
+    (start,) = starts(world.log)
+    assert flag(start, "--permission-mode") == "plan" and "--json-schema" in start["argv"]
+    assert flag(start, "--tools") == "Read,Glob,Grep"
+    assert start["message"].startswith("[QAVector: planning turn]")
+    assert start["message"].endswith("Make divide safe. ASK")
+    assert open(world.turn_file(session, 1, "prompt.md")).read() == start["message"] + "\n"
+    kinds = [one["type"] for one in seen]
+    assert "tool.started" not in kinds and kinds[-3:] == ["questions", "changes", "completed"]
+    (asked,) = [one for one in seen if one["type"] == "questions"]
+    assert asked["items"] == [
+        {"question": "Raise or return None?", "options": ["Raise", "Return None"],
+         "multiple": False},
+        {"question": "Which files?", "options": ["calc.py", "all"], "multiple": True}]
+    assert seen[0]["plan"] is True and seen[-1]["text"] == ""
+    assert os.listdir(world.folder) == []
+    saved = sessions.load(world.root, session["id"])
+    assert (saved["phase"], saved["plan"], saved["turns"][0]["plan"]) == ("questions", True, True)
+
+
+def test_answers_bring_a_plan_and_work_on_it_waits_for_nothing(world):
+    session = world.session(mode="edit")
+    world.send(session, "Make divide safe. ASK", plan=True)
+    answer, seen = world.send(session, "Answers to your questions:\n1. Raise")
+    (planned,) = [one for one in seen if one["type"] == "plan"]
+    assert planned["text"] == "# Plan\n\n1. Guard divide().\n2. Test it."
+    assert sessions.load(world.root, session["id"])["phase"] == "plan"
+    answer, seen = world.send(session, "The plan is approved. Carry it out.", plan=False)
+    first, second, third = starts(world.log)
+    assert flag(second, "--permission-mode") == "plan"          # the session's, until changed
+    assert flag(third, "--permission-mode") == "acceptEdits" and "--json-schema" not in third["argv"]
+    assert not third["message"].startswith("[QAVector")
+    saved = sessions.load(world.root, session["id"])
+    assert (saved["phase"], saved["plan"]) == ("", False)
+    assert os.listdir(world.folder) == ["notes.md"]

@@ -16,8 +16,18 @@ read off the ``session.json`` files; there is no index beside them to disagree
 with a folder somebody deleted by hand.
 
 **A source it does not interpret.** A session says where it came from with a
-``source`` its creator gives - ``{"label": ..., "detail": ...}`` - which this
-module keeps and shows and never reads.
+``source`` its creator gives - ``{"label", "detail", "ref", "record"}`` - which
+this module keeps and shows and never reads. ``label`` and ``detail`` are for a
+person; ``ref`` is the creator's own key for what the conversation is about
+(a task, a ticket - whatever it is, it is matched exactly and never taken
+apart), so the creator can find its conversations again; ``record`` says the
+conversation is an account of turns taken elsewhere, kept to be read, not
+carried on.
+
+**Each turn's own cost.** A CLI that continues a conversation reports what the
+whole conversation has cost so far, not what the turn did. A turn keeps both -
+``cost_usd`` its own, ``cost_total_usd`` the reported total - and the session's
+figures are added up from the turns' own.
 
 **Private.** A conversation holds whatever was pasted into it and whatever the
 agent read, so every file here is owner-only.
@@ -123,7 +133,7 @@ def title_from(message):
 
 
 def create(root, connection, folder, mode, model="", effort="", title="",
-           source=None, restrictions=None, skills=None):
+           source=None, restrictions=None, skills=None, plan=False):
     """Start a conversation. Returns the session; nothing is asked of anybody.
 
     ``connection`` is the connection as its store holds it: its id is what the
@@ -154,13 +164,95 @@ def create(root, connection, folder, mode, model="", effort="", title="",
         # The library skills the agent is handed, by name: what the next turn
         # takes, and each turn writes down what it took.
         "skills": list(skills or []),
+        # Whether the next turn plans rather than works, and what the
+        # conversation waits for after one that did: "questions", "plan", "".
+        "plan": bool(plan), "phase": "",
         # The conversation's id in the CLI's own store, and whether the CLI
         # has it yet: a first turn names it, every later one continues it.
         "provider_session": "", "provider_started": False,
-        "source": dict(source or {"label": "Chat", "detail": ""}),
+        "source": normal_source(source),
         "created": now, "updated": now, "state": "", "cost_usd": 0.0, "turns": [],
     }
     save(root, session)
+    return session
+
+
+def normal_source(source):
+    """``source`` as a session keeps it. None is the chat: a person talking."""
+    source = source if isinstance(source, dict) else {}
+    return {"label": str(source.get("label") or "").strip() or "Chat",
+            "detail": str(source.get("detail") or "").strip(),
+            "ref": str(source.get("ref") or "").strip(),
+            "record": bool(source.get("record"))}
+
+
+def is_record(session):
+    """Whether a conversation is a record of turns taken elsewhere - shown, not
+    carried on. Said by its source; one made before the source could say so
+    is a record when it did not come from the chat, as every such one did."""
+    source = session.get("source") or {}
+    if "record" in source:
+        return bool(source["record"])
+    return (source.get("label") or "Chat") != "Chat"
+
+
+#: What a turn's tokens are counted as, each a whole number.
+TOKEN_KEYS = ("input", "cache_read", "cache_write", "output", "thinking")
+
+
+def own_costs(session):
+    """The session's turns with ``cost_usd`` their own cost.
+
+    A turn recorded before turns kept the reported total separately holds that
+    total as its cost; for a conversation the CLI continued, each such figure
+    includes every turn before it. Those are settled here - the turn's own is
+    what its total adds to the one before - so an old conversation adds up as a
+    new one does. A record's turns were separate calls and are left as they are.
+    """
+    turns = [dict(one) for one in session.get("turns") or []]
+    if is_record(session):
+        return turns
+    before = 0.0
+    for turn in turns:
+        if "cost_total_usd" in turn:
+            if isinstance(turn["cost_total_usd"], (int, float)):
+                before = turn["cost_total_usd"]
+            continue
+        total = turn.get("cost_usd")
+        if not isinstance(total, (int, float)) or isinstance(total, bool):
+            continue
+        turn["cost_usd"] = round(total - before, 6) if total >= before else total
+        turn["cost_total_usd"] = total
+        before = total
+    return turns
+
+
+def cost_so_far(session):
+    """What the CLI will say the conversation cost before the next turn: the
+    last total a turn reported, 0 for a conversation it has not begun."""
+    for turn in reversed(own_costs(session)):
+        if isinstance(turn.get("cost_total_usd"), (int, float)):
+            return turn["cost_total_usd"]
+    return 0.0
+
+
+def settle(session):
+    """Put the session's figures right from its turns: cost, tokens, and how
+    full the agent's context was at the end of the last turn that said."""
+    turns = own_costs(session)
+    session["cost_usd"] = round(sum(one.get("cost_usd") or 0 for one in turns), 6)
+    tokens = {}
+    for turn in turns:
+        for key, value in (turn.get("tokens") or {}).items():
+            if key in TOKEN_KEYS and isinstance(value, int):
+                tokens[key] = tokens.get(key, 0) + value
+    session["tokens"] = tokens
+    context = {}
+    for turn in reversed(turns):
+        if (turn.get("context") or {}).get("used"):
+            context = dict(turn["context"])
+            break
+    session["context"] = context
     return session
 
 
@@ -193,19 +285,23 @@ def described(root, session):
     """
     shown = dict(session)
     running = held(root, session["id"])
-    turns = [dict(one) for one in session.get("turns") or []]
+    turns = own_costs(session)
     if turns and turns[-1].get("state") == RUNNING and not running:
         turns[-1]["state"] = INTERRUPTED
     shown["turns"] = turns
     shown["running"] = running
     shown["state"] = RUNNING if running else (turns[-1]["state"] if turns else "")
-    return shown
+    shown["source"] = dict(normal_source(session.get("source")),
+                           record=is_record(session))
+    shown["record"] = shown["source"]["record"]
+    return settle(shown)
 
 
-def listing(root, limit=0, offset=0, query=""):
+def listing(root, limit=0, offset=0, query="", ref=""):
     """``{sessions, total, more}``, the most recently used first.
 
-    ``query`` narrows by title, folder, connection and source, as typed.
+    ``query`` narrows by title, folder, connection and source, as typed;
+    ``ref`` to the conversations whose source has exactly that ref.
     ``limit`` 0 is all of them.
     """
     base = resolve_root(root)
@@ -219,6 +315,9 @@ def listing(root, limit=0, offset=0, query=""):
             found.append(load(root, name))
         except SessionError:
             continue                    # half made, or not ours: not a session
+    ref = str(ref or "").strip()
+    if ref:
+        found = [one for one in found if (one.get("source") or {}).get("ref") == ref]
     needle = " ".join(str(query or "").lower().split())
     if needle:
         def text(one):
@@ -382,23 +481,23 @@ def append_turn(root, session_id, turn, events):
             record.close()
         session.setdefault("turns", []).append(turn)
         session.update(updated=turn.get("ended") or time.time(),
-                       state=turn.get("state") or "",
-                       cost_usd=round(sum(one.get("cost_usd") or 0
-                                          for one in session["turns"]), 6))
+                       state=turn.get("state") or "")
+        settle(session)
         if turn.get("provider_session"):
             session["provider_session"] = turn["provider_session"]
         save(root, session)
     return turn
 
 
-def activity(root, limit=500):
+def activity(root, limit=500, ref=""):
     """Every turn of every session, the newest first: the integration's log.
 
     Read off the sessions rather than kept beside them. Each entry is one turn
-    with what its session says about where it ran and who asked.
+    with what its session says about where it ran and who asked; ``ref``
+    narrows it to the conversations with exactly that source ref.
     """
     found = []
-    for session in listing(root)["sessions"]:
+    for session in listing(root, ref=ref)["sessions"]:
         for turn in session.get("turns") or []:
             found.append({
                 "session": session["id"], "title": session.get("title", ""),

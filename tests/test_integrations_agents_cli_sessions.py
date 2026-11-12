@@ -157,7 +157,7 @@ def test_a_turn_prints_a_line_per_event_and_its_answer_last(agents):
     assert all(set(line) == {"event"} for line in events)
     assert [line["event"]["type"] for line in events] == [
         "user", "started", "thinking", "text", "tool.started", "tool.completed",
-        "file.written", "completed"]
+        "file.written", "changes", "completed"]
     assert answer["ok"] is True and answer["turn"]["state"] == "completed"
     assert answer["session"]["title"] == "hello" and answer["session"]["running"] is False
 
@@ -166,10 +166,10 @@ def test_the_conversation_is_read_back_and_from_where_a_page_left_off(agents):
     session = agents.new()
     agents.lines("send", session["id"], document={"message": "hello"})
     code, answer = agents("session", session["id"])
-    assert code == 0 and len(answer["events"]) == 8
+    assert code == 0 and len(answer["events"]) == 9
     assert answer["session"]["turns"][0]["state"] == "completed"
     code, answer = agents("session", session["id"], document={"after": 6})
-    assert [one["seq"] for one in answer["events"]] == [7, 8]
+    assert [one["seq"] for one in answer["events"]] == [7, 8, 9]
     code, answer = agents("session", session["id"], document={"limit": 1})
     assert [one["type"] for one in answer["events"]] == ["completed"]
 
@@ -192,6 +192,46 @@ def test_a_turn_that_was_not_started_is_one_line_saying_why(agents):
     assert (code, lines[0]["kind"]) == (1, "not_found")
 
 
+def test_a_conversation_opened_for_a_task_is_found_by_its_ref_and_carried_on(agents):
+    """Whoever opens a conversation for something of its own - a task handed
+    over - gives a ref, and finds that thing's conversations by it alone."""
+    task = agents.new(title="Task", source={"label": "Jira QA-1", "detail": "Login fails",
+                                            "ref": "jira:work:QA-1"})
+    agents.new(title="Chat")
+    assert task["source"] == {"label": "Jira QA-1", "detail": "Login fails",
+                              "ref": "jira:work:QA-1", "record": False}
+    assert task["record"] is False
+    code, lines = agents.lines("send", task["id"], document={"message": "go"})
+    assert code == 0 and lines[-1]["ok"]
+    code, answer = agents("sessions", document={"ref": "jira:work:QA-1"})
+    assert code == 0 and [one["id"] for one in answer["sessions"]] == [task["id"]]
+    (only,) = answer["sessions"]
+    assert only["tokens"]["output"] == 30 and only["context"]["window"] == 200000
+    code, answer = agents("activity", document={"ref": "jira:work:QA-1"})
+    assert [one["session"] for one in answer["activity"]] == [task["id"]]
+    assert agents("sessions")[1]["total"] == 2
+
+
+def test_what_a_turn_changed_in_the_folder_is_kept_and_read_back(agents):
+    """Each turn says what it changed just before it says it ended; the patch,
+    the turn's and the conversation's so far, is read back without git."""
+    session = agents.new()
+    code, lines = agents.lines("send", session["id"], document={"message": "one"})
+    events = [line["event"] for line in lines[:-1]]
+    assert [one["type"] for one in events][-2:] == ["changes", "completed"]
+    assert {key: events[-2][key] for key in ("files", "added", "removed", "kept")} == {
+        "files": 1, "added": 1, "removed": 0, "kept": "all"}
+    assert lines[-1]["turn"]["changes"]["files"] == 1
+    agents.lines("send", session["id"], document={"message": "two"})
+    code, answer = agents("changes", session["id"])
+    assert code == 0 and [one["path"] for one in answer["files"]] == ["notes.md"]
+    assert answer["added"] == 2 and "+x" in answer["patch"]
+    code, answer = agents("changes", session["id"], document={"turn": 2})
+    assert (answer["added"], answer["turn"]) == (1, 2)
+    code, answer = agents("changes", session["id"], document={"turn": 3})
+    assert code == 1 and answer["kind"] == "invalid"
+
+
 def test_the_log_lists_every_turn_with_where_and_who(agents):
     first = agents.new(title="First")
     second = agents.new(title="Second", source={"label": "Cycle nightly · step review",
@@ -205,7 +245,7 @@ def test_the_log_lists_every_turn_with_where_and_who(agents):
         ("First", 2, "completed", "edit"), ("Second", 1, "failed", "read"),
         ("First", 1, "completed", "read")]
     assert answer["activity"][1]["source"] == {"label": "Cycle nightly · step review",
-                                               "detail": "Run 7"}
+                                               "detail": "Run 7", "ref": "", "record": False}
     assert answer["activity"][0]["folder"] == agents.folder
     assert len(agents("activity", document={"limit": 1})[1]["activity"]) == 1
 
@@ -255,7 +295,7 @@ def test_ending_the_process_stops_the_agent_and_the_turn_is_still_answered(agent
     lines += [json.loads(line) for line in out.splitlines() if line.strip()]
     assert process.returncode == 1, err
     assert [line["event"]["type"] for line in lines[:-1]] == [
-        "user", "started", "thinking", "stopped"]
+        "user", "started", "thinking", "changes", "stopped"]
     assert (lines[-1]["ok"], lines[-1]["kind"]) == (False, "stopped")
     assert lines[-1]["turn"]["state"] == "stopped"
     assert _gone(starts(agents.log)[0]["pid"])

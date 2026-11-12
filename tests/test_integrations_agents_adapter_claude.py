@@ -229,6 +229,54 @@ def test_a_refusal_is_read_as_its_own_event():
                                     "reason": "This command requires approval"}]
 
 
+def test_a_turn_s_tokens_come_from_usage_and_its_context_from_the_last_request():
+    """Lines as the CLI 2.1.291 writes them: ``usage`` is the turn's own,
+    ``modelUsage`` the conversation's so far - only its window is read."""
+    request = {"type": "assistant", "message": {"id": "m1", "content": [], "usage": {
+        "input_tokens": 2, "cache_read_input_tokens": 24689,
+        "cache_creation_input_tokens": 122, "output_tokens": 3}}}
+    assert claude.events(json.dumps(request)) == [{"type": "context", "used": 24813}]
+    helper = dict(request, parent_tool_use_id="toolu_9")
+    assert claude.events(json.dumps(helper)) == []          # a helper's own context
+    result = {"type": "result", "is_error": False, "result": "ok", "session_id": "s",
+              "num_turns": 4, "total_cost_usd": 0.2517566,
+              "usage": {"input_tokens": 10, "cache_read_input_tokens": 101029,
+                        "cache_creation_input_tokens": 3948, "output_tokens": 2037,
+                        "output_tokens_details": {"thinking_tokens": 1415}},
+              "modelUsage": {"claude-opus-5-5": {"inputTokens": 20, "contextWindow": 1000000}}}
+    (end,) = claude.events(json.dumps(result))
+    assert end["tokens"] == {"input": 10, "cache_read": 101029, "cache_write": 3948,
+                             "output": 2037, "thinking": 1415}
+    assert (end["context_window"], end["cost_usd"]) == (1000000, 0.251757)
+
+
+def test_a_planning_turn_reads_only_and_answers_as_the_schema_says():
+    argv = claude.turn_argv("claude", "full", plan=True)
+    assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
+    assert argv[argv.index("--permission-mode") + 1] == "plan" and "acceptEdits" not in argv
+    assert json.loads(argv[argv.index("--json-schema") + 1]) == claude.PLAN_SCHEMA
+    assert "--json-schema" not in claude.turn_argv("claude", "full")
+    assert claude.plan_prompt("Fix it").startswith(claude.PLANNING)
+
+
+def test_a_planning_turn_s_answer_is_read_from_structured_output():
+    """As Claude Code 2.1.291 ends one: the answer as JSON text and as data."""
+    def ended(answer):
+        return claude.events(json.dumps({"type": "result", "is_error": False,
+                                         "result": json.dumps(answer), "session_id": "s",
+                                         "structured_output": answer}))
+    asked, end = ended({"kind": "questions", "questions": [
+        {"question": " Raise  or None? ", "options": ["Raise", " ", "None"], "multiple": False},
+        {"question": "", "options": ["x"]}]})
+    assert asked == {"type": "questions", "items": [
+        {"question": "Raise or None?", "options": ["Raise", "None"], "multiple": False}]}
+    assert (end["type"], end["text"]) == ("completed", "")
+    planned, end = ended({"kind": "plan", "plan": "# Plan\n1. Do it"})
+    assert planned == {"type": "plan", "text": "# Plan\n1. Do it"}
+    (end,) = ended({"kind": "plan", "plan": "  "})
+    assert end["text"] == json.dumps({"kind": "plan", "plan": "  "})
+
+
 def test_model_and_effort_are_said_only_when_there_is_something_to_say():
     plain = claude.turn_argv("claude", "read")
     assert "--model" not in plain and "--effort" not in plain

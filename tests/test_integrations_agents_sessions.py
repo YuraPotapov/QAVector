@@ -42,14 +42,66 @@ def test_a_session_says_whom_it_is_with_where_and_how(root, folder):
     assert (session["connection"], session["connection_name"], session["kind"]) == (
         "claude", "Claude", "claude")
     assert (session["folder"], session["mode"], session["model"]) == (folder, "read", "sonnet")
-    assert session["source"] == {"label": "Chat", "detail": ""}
+    assert session["source"] == {"label": "Chat", "detail": "", "ref": "", "record": False}
     assert session["turns"] == [] and session["provider_started"] is False
     assert sessions.load(root, session["id"]) == session
 
 
 def test_whoever_started_it_says_so_in_its_own_words(root, folder):
     source = {"label": "Cycle nightly · step review", "detail": "Run 20261111-1"}
-    assert _new(root, folder, source=source)["source"] == source
+    assert _new(root, folder, source=source)["source"] == dict(source, ref="", record=False)
+
+
+def test_a_creator_finds_its_conversations_by_its_own_ref_matched_exactly(root, folder):
+    """A ref is the creator's key - a ticket, a task - and is never taken
+    apart: one ref is not a prefix of another, and case counts."""
+    task = _new(root, folder, title="Task", source={"label": "Jira QA-1", "ref": "jira:a:QA-1"})
+    _new(root, folder, title="Other", source={"label": "Jira QA-12", "ref": "jira:a:QA-12"})
+    _new(root, folder, title="Chat")
+    found = sessions.listing(root, ref="jira:a:QA-1")
+    assert [one["id"] for one in found["sessions"]] == [task["id"]] and found["total"] == 1
+    assert sessions.listing(root, ref="jira:a:qa-1")["sessions"] == []
+    assert sessions.listing(root)["total"] == 3
+    sessions.append_turn(root, task["id"], {"started": 1.0, "ended": 2.0, "state": "completed",
+                                            "cost_usd": 0.5}, [{"type": "user", "text": "hi"}])
+    assert [one["session"] for one in sessions.activity(root, ref="jira:a:QA-1")] == [task["id"]]
+    assert sessions.activity(root, ref="jira:a:QA-12") == []
+
+
+def test_a_record_is_said_by_its_source_and_old_ones_by_where_they_came_from(root, folder):
+    """A conversation opened elsewhere to talk in - a task handed over - goes on
+    in the chat; a record of turns taken elsewhere is read. One saved before a
+    source could say so is a record when it did not come from the chat."""
+    talk = _new(root, folder, source={"label": "Jira QA-1", "ref": "jira:a:QA-1"})
+    kept = _new(root, folder, source={"label": "Cycle n · step s", "record": True})
+    assert (sessions.described(root, talk)["record"], sessions.described(root, kept)["record"]) == (
+        False, True)
+    old = dict(talk, source={"label": "Cycle n · step s", "detail": "Run 1"})
+    assert sessions.is_record(old) is True
+    assert sessions.is_record(dict(talk, source={"label": "Chat", "detail": ""})) is False
+
+
+def test_a_turn_counts_its_own_cost_and_old_cumulative_records_are_settled(root, folder):
+    """The CLI reports what a continued conversation cost so far. A turn saved
+    before turns kept that apart holds the total as its cost: settled, the
+    turns add up to the last total, not to the sum of totals."""
+    session = _new(root, folder)
+    session["turns"] = [{"n": 1, "cost_usd": 0.10}, {"n": 2, "cost_usd": None},
+                        {"n": 3, "cost_usd": 0.25}]
+    assert [one["cost_usd"] for one in sessions.own_costs(session)] == [0.10, None, 0.15]
+    assert sessions.cost_so_far(session) == 0.25
+    assert sessions.settle(dict(session))["cost_usd"] == 0.25
+    session["turns"].append({"n": 4, "cost_usd": 0.05, "cost_total_usd": 0.30,
+                             "tokens": {"input": 5, "output": 30},
+                             "context": {"used": 1205, "window": 200000}})
+    settled = sessions.settle(dict(session))
+    assert settled["cost_usd"] == 0.30 and sessions.cost_so_far(session) == 0.30
+    assert settled["tokens"] == {"input": 5, "output": 30}
+    assert settled["context"] == {"used": 1205, "window": 200000}
+    # A record's turns were calls of their own: what each reported is its own.
+    record = dict(session, source={"label": "Cycle", "record": True},
+                  turns=[{"n": 1, "cost_usd": 0.10}, {"n": 2, "cost_usd": 0.25}])
+    assert sessions.settle(record)["cost_usd"] == 0.35
 
 
 def test_everything_kept_is_readable_by_its_owner_only(root, folder):

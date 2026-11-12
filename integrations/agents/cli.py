@@ -19,23 +19,29 @@ line itself is wrong.
                               prompt; --from=F accepts an unsaved connection
 
     sessions [--from=F]       the project's conversations, the most recently
-                              used first: {"limit", "offset", "query"}
+                              used first: {"limit", "offset", "query", "ref"} -
+                              "ref" is exactly the one a source gave
     session ID [--from=F]     one conversation and what was said in it:
                               {"after": seq, "limit": newest N}
     session-new --from=F      start one: {"connection", "folder", "mode",
-                              "model", "effort", "title", "restrictions",
-                              "skills", "source"} - asks nothing of the agent
+                              "model", "effort", "title", "restrictions", "plan",
+                              "skills", "source": {"label", "detail", "ref",
+                              "record"}} - asks nothing of the agent
     session-set ID --from=F   change its {"title", "mode", "model", "effort",
-                              "restrictions", "skills"}; "folder" only before
+                              "restrictions", "skills", "plan"}; "folder" only before
                               its first turn
     session-delete ID         remove it and everything kept of it
     send ID --from=F          take one turn: {"message", "mode", "model",
-                              "effort", "skills", "attachments": [file paths]}.
+                              "effort", "skills", "attachments": [file paths],
+                              "plan": a planning turn - questions or a plan}.
                               Prints one line per event
                               as it happens - {"event": {...}} - and the
                               answer as its last line. SIGTERM stops the agent.
     activity [--from=F]       every turn of every session, newest first:
-                              {"limit"}
+                              {"limit", "ref"}
+    changes ID [--from=F]     what changed in the conversation's folder, kept
+                              after each turn: the conversation's so far, or
+                              one turn's with {"turn": N}. Runs nothing
 
     skills                    the skills library, and what each agent has by
                               itself
@@ -253,6 +259,13 @@ def _settings(document, adapter, current=None, skills_root=None):
     for key in ("model", "effort"):
         if key in document:
             changed[key] = str(document.get(key) or "").strip()
+    if "plan" in document:
+        if not isinstance(document["plan"], bool):
+            found.append("Plan is true or false.")
+        elif document["plan"] and not getattr(adapter, "PLANS", False):
+            found.append("%s cannot plan before it works." % adapter.NAME)
+        else:
+            changed["plan"] = document["plan"]
     if changed.get("effort") and changed["effort"] not in adapter.EFFORTS:
         found.append("Effort must be one of %s, or blank for the connection's."
                      % ", ".join(adapter.EFFORTS))
@@ -269,18 +282,19 @@ def _settings(document, adapter, current=None, skills_root=None):
 
 
 def _source(document):
+    from integrations.agents import sessions
     source = document.get("source")
     if not isinstance(source, dict):
         return None
-    return {"label": str(source.get("label") or "").strip(),
-            "detail": str(source.get("detail") or "").strip()}
+    return sessions.normal_source(source)
 
 
 def _sessions(call):
     from integrations.agents import sessions
     document = _document(call.source)
     answer = sessions.listing(call.sessions, document.get("limit") or 0,
-                              document.get("offset") or 0, document.get("query") or "")
+                              document.get("offset") or 0, document.get("query") or "",
+                              ref=str(document.get("ref") or ""))
     return dict(answer, ok=True, path=sessions.resolve_root(call.sessions))
 
 
@@ -314,7 +328,8 @@ def _session_new(call):
         session = sessions.create(
             call.sessions, connection, document.get("folder") or "", settings["mode"],
             settings.get("model", ""), settings.get("effort", ""), settings.get("title", ""),
-            _source(document), settings.get("restrictions"), settings.get("skills"))
+            _source(document), settings.get("restrictions"), settings.get("skills"),
+            plan=settings.get("plan", False))
     except sessions.SessionError as exc:
         return _refusal(exc.kind, str(exc))
     return {"ok": True, "session": sessions.described(call.sessions, session)}
@@ -400,7 +415,8 @@ def _send(call):
                              agents_path=call.path, mode=document.get("mode"),
                              model=document.get("model"), effort=document.get("effort"),
                              skills=document.get("skills"), skills_root=call.skills,
-                             emit=emit, stop=stop, attachments=document.get("attachments"))
+                             emit=emit, stop=stop, attachments=document.get("attachments"),
+                             plan=document.get("plan"))
     except runner.Refused as exc:
         return _refusal(exc.kind, str(exc))
     finally:
@@ -418,7 +434,27 @@ def _activity(call):
     from integrations.agents import sessions
     document = _document(call.source)
     return {"ok": True, "activity": sessions.activity(
-        call.sessions, 500 if document.get("limit") is None else document.get("limit"))}
+        call.sessions, 500 if document.get("limit") is None else document.get("limit"),
+        ref=str(document.get("ref") or ""))}
+
+
+def _changes(call):
+    from integrations.agents import changes, sessions
+    session_id = _one(call, "changes")
+    document = _document(call.source)
+    try:
+        session = sessions.load(call.sessions, session_id)
+    except sessions.SessionError as exc:
+        return _refusal(exc.kind, str(exc))
+    where = sessions.directory(call.sessions, session_id)
+    turn = document.get("turn")
+    turn_dir = None
+    if turn is not None:
+        if not isinstance(turn, int) or isinstance(turn, bool) or not (
+                1 <= turn <= len(session.get("turns") or [])):
+            return _refusal("invalid", "This conversation has no turn %r." % (turn,))
+        turn_dir = sessions.turn_directory(call.sessions, session_id, turn)
+    return dict(changes.read(where, turn_dir), ok=True, session=session_id, turn=turn)
 
 
 # -- skills ---------------------------------------------------------------------
@@ -516,7 +552,7 @@ COMMANDS = {"kinds": _kinds, "models": _models, "list": _list, "save": _save, "d
             "test": _test, "sign-in": _sign_in,
             "sessions": _sessions, "session": _session, "session-new": _session_new,
             "session-set": _session_set, "session-delete": _session_delete,
-            "send": _send, "activity": _activity,
+            "send": _send, "activity": _activity, "changes": _changes,
             "skills": _skills, "skill-look": _skill_look, "skill-add": _skill_add,
             "skill-update": _skill_update, "skill-remove": _skill_remove,
             "export": _export, "import": _import}

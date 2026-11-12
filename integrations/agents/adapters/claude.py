@@ -552,6 +552,75 @@ TOOLS = {"read": _READ, "edit": _EDIT, "full": _EDIT + ("Bash",)}
 #: one a mode names, and their status notices end up in the agent's answer.
 NO_MCP = ("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}')
 
+# -- planning ---------------------------------------------------------------------
+#: This CLI can plan before it works: a planning turn explores read-only and
+#: answers with questions or a plan, each as data.
+#:
+#: Not with the CLI's own planning tools. Run with ``-p`` and nobody at a
+#: terminal, Claude Code 2.1.291 does not offer ``AskUserQuestion`` or
+#: ``ExitPlanMode`` at all - a model told to use them says it cannot and
+#: writes its question as prose. What it does offer is ``--json-schema``: the
+#: turn's answer then arrives as ``structured_output``, through a tool of its
+#: own (``StructuredOutput``), whatever the model wrote along the way.
+PLANS = True
+
+#: Tools the CLI adds for its own purposes, never a row in a conversation.
+HIDDEN_TOOLS = ("StructuredOutput",)
+
+#: What a planning turn answers with.
+PLAN_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["kind"],
+    "properties": {
+        "kind": {"enum": ["questions", "plan"]},
+        "questions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["question", "options"],
+            "properties": {"question": {"type": "string"},
+                           "options": {"type": "array", "items": {"type": "string"}},
+                           "multiple": {"type": "boolean"}}}},
+        "plan": {"type": "string"}}}
+
+#: Said before the person's message in a planning turn. In the message, not
+#: ``--append-system-prompt``: the CLI keeps the system prompt a conversation
+#: began with, so a conversation that starts planning later would never hear it.
+PLANNING = (
+    "[QAVector: planning turn] Explore read-only and plan; change nothing. If "
+    "anything the plan depends on is unclear, answer with kind \"questions\": "
+    "each question with 2-4 short options. Otherwise answer with kind \"plan\": "
+    "the whole plan in Markdown - what changes where, and how it will be checked.\n\n")
+
+#: How many questions, and options to one, are shown; the rest would not be
+#: answered anyway.
+MAX_QUESTIONS, MAX_OPTIONS = 8, 6
+
+
+def plan_prompt(message):
+    """What a planning turn tells the CLI: how to answer, then the message."""
+    return PLANNING + str(message or "")
+
+
+def _structured(answer):
+    """A planning turn's answer as an event: ``plan {text}`` or ``questions
+    {items: [{question, options, multiple}]}``; None for anything else."""
+    if not isinstance(answer, dict):
+        return None
+    if answer.get("kind") == "plan":
+        text = str(answer.get("plan") or "").strip()
+        return {"type": "plan", "text": text} if text else None
+    if answer.get("kind") != "questions":
+        return None
+    items = []
+    for one in answer.get("questions") or []:
+        if not isinstance(one, dict):
+            continue
+        question = " ".join(str(one.get("question") or "").split())
+        options = [" ".join(str(option).split()) for option in one.get("options") or []
+                   if str(option).strip()][:MAX_OPTIONS]
+        if question:
+            items.append({"question": question, "options": options,
+                          "multiple": bool(one.get("multiple"))})
+    return {"type": "questions", "items": items[:MAX_QUESTIONS]} if items else None
+
 #: Variables a turn must not inherit. ``CLAUDE_CODE_SIMPLE`` is the CLI's bare
 #: mode, in which it never reads its own sign-in - set in whatever started
 #: QAVector, it would leave every turn refused as signed out.
@@ -559,7 +628,7 @@ ENV_DROPPED = ("CLAUDE_CODE_SIMPLE",)
 
 
 def turn_argv(binary, mode="read", model="", effort="", session="", resume=False,
-              skills_dir="", attachments_dir=""):
+              skills_dir="", attachments_dir="", plan=False):
     """The command line for one turn. The message itself is written to stdin.
 
     On stdin rather than in argv for two reasons: argv is readable by every
@@ -574,10 +643,14 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
     skills were chosen for it. Named, the CLI loads it for this one run, and
     the tool that reads a skill is allowed with the rest - otherwise chosen
     skills would be listed to the agent and refused when it reached for one.
+
+    ``plan`` makes it a planning turn: the CLI's plan mode with the read tools
+    whatever ``mode`` says, answering as :data:`PLAN_SCHEMA` - the message
+    then goes through :func:`plan_prompt`.
     """
     from qavector_agent_claude.command import tool_list
     argv = [binary, "-p", "--output-format", "stream-json", "--verbose"]
-    tools = TOOLS[mode] + (("Skill",) if skills_dir else ())
+    tools = TOOLS["read" if plan else mode] + (("Skill",) if skills_dir else ())
     argv += ["--tools", ",".join(tools)]
     argv += tool_list("--allowedTools", tools)
     argv += NO_MCP
@@ -585,7 +658,9 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
         argv += ["--plugin-dir", skills_dir]
     if attachments_dir:
         argv += ["--add-dir", attachments_dir]
-    if mode != "read":
+    if plan:
+        argv += ["--permission-mode", "plan", "--json-schema", json.dumps(PLAN_SCHEMA)]
+    elif mode != "read":
         # Edits are applied as they are made: a turn that waited to be asked
         # would wait for ever. Not bypassPermissions, which would hand over
         # every tool there is rather than the ones named above.
@@ -665,8 +740,19 @@ def events(line):
         tool.completed   id, ok, detail
         tool.refused     id, reason - the CLI would not run that call; its
                          ``tool.completed`` follows, as a failure
-        completed        text, steps, cost_usd, provider_session
+        context          used - how much of the agent's context one request
+                         filled (input, cache read and cache write together);
+                         the last one is how full it was when the turn ended
+        plan             text - a planning turn's plan, in Markdown
+        questions        items - a planning turn's questions, each
+                         {question, options, multiple}
+        completed        text, steps, cost_usd, tokens, context_window,
+                         provider_session
         failed           the same, and error
+
+    ``cost_usd`` is what the CLI reports, and for a conversation it continued
+    that is the whole conversation so far, not the turn; ``tokens`` - input,
+    cache_read, cache_write, output, thinking - are the turn's own.
 
     Unknown lines carry nothing, as for stages.
 
@@ -694,6 +780,11 @@ def events(line):
     if kind == "result":
         failed = bool(event.get("is_error"))
         text = str(event.get("result") or "").strip()
+        answered = None if failed else _structured(event.get("structured_output"))
+        if answered:
+            # The result's text is the same answer as JSON; the event before
+            # the end says it in a form a page can show.
+            text = ""
         found = {"type": "failed" if failed else "completed", "text": text,
                  "provider_session": str(event.get("session_id") or "")}
         if isinstance(event.get("num_turns"), int):
@@ -701,15 +792,27 @@ def events(line):
         cost = event.get("total_cost_usd")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             found["cost_usd"] = round(float(cost), 6)
+        tokens = _tokens(event.get("usage"))
+        if tokens:
+            found["tokens"] = tokens
+        window = _context_window(event.get("modelUsage"))
+        if window:
+            found["context_window"] = window
         if failed:
             found["error"] = text or str(event.get("subtype") or "The agent refused.")
-        return [found]
+        return [answered, found] if answered else [found]
     if kind not in ("assistant", "user"):
         return []
     blocks = ((event.get("message") or {}).get("content")) or []
     if isinstance(blocks, str):
         blocks = [{"type": "text", "text": blocks}]
     found = []
+    if kind == "assistant" and not event.get("parent_tool_use_id"):
+        # The agent's own request, not a helper it started: what it was sent
+        # is how full its context is now.
+        used = _context_used((event.get("message") or {}).get("usage"))
+        if used:
+            found.append({"type": "context", "used": used})
     for block in blocks:
         if not isinstance(block, dict):
             continue
@@ -736,6 +839,41 @@ def events(line):
                           "ok": not block.get("is_error"),
                           "detail": _clean(_content(block.get("content")), RESULT_CHARS)})
     return found
+
+
+def _count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _tokens(usage):
+    """The turn's tokens from a result's ``usage``, which - unlike
+    ``modelUsage`` and the cost - counts this turn alone."""
+    if not isinstance(usage, dict):
+        return {}
+    details = usage.get("output_tokens_details") or {}
+    found = {"input": _count(usage.get("input_tokens")),
+             "cache_read": _count(usage.get("cache_read_input_tokens")),
+             "cache_write": _count(usage.get("cache_creation_input_tokens")),
+             "output": _count(usage.get("output_tokens")),
+             "thinking": _count(details.get("thinking_tokens")
+                                if isinstance(details, dict) else 0)}
+    return found if any(found.values()) else {}
+
+
+def _context_used(usage):
+    if not isinstance(usage, dict):
+        return 0
+    return sum(_count(usage.get(key)) for key in (
+        "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
+def _context_window(models):
+    """How much context the turn's model holds: the largest any model it
+    used says, the main model's being the one a conversation fills."""
+    if not isinstance(models, dict):
+        return 0
+    return max((_count((one or {}).get("contextWindow")) for one in models.values()
+                if isinstance(one, dict)), default=0)
 
 
 def _write_target(name, arguments):

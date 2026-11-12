@@ -49,5 +49,5 @@ def describe():
     """
     return [{"kind": one.KIND, "name": one.NAME, "default_binary": one.DEFAULT_BINARY,
              "found": one.resolve(""), "efforts": list(one.EFFORTS),
-             "modes": list(one.MODES)}
+             "modes": list(one.MODES), "plans": bool(getattr(one, "PLANS", False))}
             for one in _ADAPTERS.values()]

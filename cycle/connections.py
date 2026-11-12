@@ -332,7 +332,7 @@ def _record_agent_call(context, step, call):
             model=call.get("model") or "", effort=call.get("effort") or "",
             title="%s · %s" % (cycle_name, label),
             source={"label": "Cycle %s · step %s" % (cycle_name, label),
-                    "detail": "Run %s" % getattr(run, "id", "")})
+                    "detail": "Run %s" % getattr(run, "id", ""), "record": True})
         session_id = made["id"]
         with open(where, "w", encoding="utf-8") as handle:
             json.dump({"session": session_id}, handle)
@@ -354,13 +354,20 @@ def _record_agent_call(context, step, call):
         events.append({"type": state, "error": call.get("error") or ""})
     # Recorded after the fact: the end is when the call ended, not now.
     events[-1] = dict(events[-1], at=call.get("ended"))
-    sessions.append_turn(root, session_id, {
+    turn = {
         "started": call.get("started"), "ended": call.get("ended"), "state": state,
         "mode": mode, "model": call.get("model") or "", "effort": call.get("effort") or "",
         "skills": [], "cost_usd": call.get("cost_usd"), "steps": call.get("steps"),
         "error": call.get("error") or "", "provider_session": call.get("provider_session") or "",
         "files": {"prompt": call.get("prompt_file") or "", "stdout": call.get("stdout") or ""},
-    }, events)
+    }
+    # Each call is a conversation of its own to the program, so what it
+    # reports is the call's own; the tokens and context come from the stream.
+    end = next((one for one in reversed(events) if one["type"] in ("completed", "failed")), {})
+    for key in ("tokens", "context"):
+        if end.get(key):
+            turn[key] = end[key]
+    sessions.append_turn(root, session_id, turn, events)
 
 
 def expand_for_action(plugin, settings, agents_path=None):
