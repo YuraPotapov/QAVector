@@ -16,6 +16,19 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.68] - 2026-11-12
+
+### Fixed
+- **Agent chat shows the agent only what its access allows.** In Read the
+  agent was offered every tool and tried commands before reading the files
+  it could, each try refused and paid for. Now it is shown only Read's tools,
+  Edit's or Full's.
+- An agent turn no longer brings in the account's MCP servers and claude.ai
+  connectors, whose sign-in notices ended up in the agent's answer.
+- A call the agent program refuses is a caution saying what the access allows
+  ("Not allowed in Read: commands need Full access."), not a red failure
+  quoting "This command requires approval" - nothing in a chat can approve it.
+
 ## [0.16.67] - 2026-11-12
 
 ### Added
