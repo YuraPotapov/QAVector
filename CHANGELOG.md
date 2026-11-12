@@ -16,6 +16,30 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.70] - 2026-11-12
+
+### Added
+- **Effort in the agent chat.** Beside the model, the conversation's effort:
+  the levels the agent's program has, or *Default* - the connection's, else
+  the program's own. It goes with each turn and is the conversation's from
+  then on.
+
+### Changed
+- An agent connection's model and effort are labelled for what they are -
+  **Default model** and **Default effort**: what a conversation or a cycle
+  step that chooses none runs with. The Connections table calls the column
+  *Defaults*.
+
+### Fixed
+- **Empty windows flashed on the desktop when an agent conversation was
+  opened.** A row the conversation's feed took out while laying it out - a
+  tool's row replaced by its result - was shown a moment later with no
+  parent, as a window of its own. Rows taken out are hidden for good first;
+  the run's Stages list, the cockpit's buttons, the Services page and the
+  changes views do the same.
+- One more such window flashed at every start: a searchable check list showed
+  its search box before the layout had taken it.
+
 ## [0.16.69] - 2026-11-12
 
 ### Added
