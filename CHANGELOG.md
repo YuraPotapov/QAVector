@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.69] - 2026-11-12
+
 ### Added
 - **Hand a Jira issue to an agent.** An opened issue has *Delegate…*: carry on
   a conversation about it, or begin one in the agents' chat with the issue as
