@@ -1,6 +1,6 @@
 # ADR-006: agent messaging and task delegation (Phase 5)
 
-Date: 2026-11-13. Status: **Accepted** (user, 2026-11-13); 5.1 and 5.2 implemented ([5.1](phase-5-1-report.md), [5.2](phase-5-2-report.md)). User decisions 2026-11-13: D2 (parent's mode), D3/D4 (chat mode Auto / Approve / Deny; default and allowed agents on the connection). The rest await approval.
+Date: 2026-11-13. Status: **Accepted** (user, 2026-11-13); 5.1-5.3 implemented ([5.1](phase-5-1-report.md), [5.2](phase-5-2-report.md), [5.3](phase-5-3-report.md)). User decisions 2026-11-13: D2 (parent's mode), D3/D4 (chat mode Auto / Approve / Deny; default and allowed agents on the connection). The rest await approval.
 Builds on [ADR-005](adr-005-unified-agent-adapters.md). Phase 4's live check is
 deferred by the user's decision; Phase 5 starts without its gate closed.
 
@@ -82,6 +82,28 @@ Then, by what the message asks:
 A recipient chat in Deny refuses messages (`recipient_unavailable`). States:
 `queued -> awaiting_approval -> delivered -> acknowledged`, or `denied`,
 `failed`, `expired`. Delivery is not an answer.
+
+**D4 as built (5.3).** A message goes to a **connection's inbox** (its
+recipient is a connection). A reply goes back to the conversation that wrote.
+* **Capability:** `agents.<id>.message` (`agents.message` on resource
+  `agent-messages~<id>`), apart from the delegation resource, so a message
+  never waits behind a task.
+* **Answer asked (`expects_reply`):** one read-only turn of the recipient in a
+  record conversation (`source.label = "Message"`). Its answer is stored as a
+  reply, and the original is `acknowledged`.
+* **Reply:** `reply_to` answers a message addressed to the sender's
+  connection. The reply goes to the original sender's conversation, in the same
+  thread (`conversation_id`).
+* **No separate tools.** Agents get no list or reply tools: incoming messages
+  reach an agent through its chat (5.4).
+* **Owner pipe:** the GUI reads the store with `messages` and acknowledges
+  with `message_ack`.
+* **Store and limits:** the store is `<project>/.qcr/messages.sqlite` on the
+  journal primitives. A message's id is its sending execution's id. Unread
+  messages expire after 7 days. A recipient connection whose default is Deny
+  refuses (`recipient_unavailable`).
+* **Approve:** one message per recipient waits for approval at a time; the
+  next gets `busy`.
 
 **D5. Delegation is a task, and starting it is explicit.**
 `agents.<connection>.delegate` creates a child session and runs one turn. It

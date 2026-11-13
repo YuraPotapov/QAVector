@@ -37,8 +37,9 @@ TOOLS = [
                     "integrations, agents. Each names what it acts on (resource.name). The set changes - list "
                     "again in each new turn rather than relying on an earlier list. A service has reads beside "
                     "its actions: status, criteria (wait on readiness) and output (its log lines). agents: hand "
-                    "another agent a task (agents.<id>.delegate; it may wait for the person's approval) and "
-                    "record whether its criteria passed (agents.tasks.verify).",
+                    "another agent a task (agents.<id>.delegate), send it a message or ask it a question "
+                    "(agents.<id>.message; expects_reply for an answer), record whether a task's criteria "
+                    "passed (agents.tasks.verify). These may wait for the person's approval.",
      "inputSchema": {"type": "object", "additionalProperties": False,
                      "properties": {"namespace": {"type": "string", "description": "services, scenarios, cycles, "
                                                                                    "integrations, agents"}}}},

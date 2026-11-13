@@ -22,6 +22,7 @@ the execution that proves it.
 
 import os
 import threading
+import time
 
 from integrations.agents import adapters, runner, sessions, store
 from qcr import context as packages
@@ -33,6 +34,7 @@ from qcr.registry import Registration
 from .agents import run_turn, turn_artifacts
 
 PERMISSION = "agents.delegate"
+MESSAGE_PERMISSION = "agents.message"
 TASKS = "agent-tasks"
 MODES = ("read", "edit", "full")            # narrowest first: a child never goes higher
 
@@ -41,6 +43,8 @@ MAX_CHILDREN = 3
 DEFAULT_SECONDS, MAX_SECONDS = 1800, 21600
 GOAL_CHARS, SUMMARY_CHARS, CRITERION_CHARS, MAX_CRITERIA = 2000, 20000, 500, 10
 ANSWER_CHARS = 20000
+#: ADR-006 D6: messages one conversation may send in an hour.
+MAX_MESSAGES_PER_HOUR = 20
 
 _EXECUTION = {"type": "string", "minLength": 1, "maxLength": 200}
 DELEGATE_INPUT = {
@@ -56,6 +60,10 @@ DELEGATE_INPUT = {
         "artifacts": {"type": "array", "maxItems": 20, "items": _EXECUTION},
         "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": MAX_SECONDS}}}
 DELEGATE_OUTPUT = {"type": "object"}
+MESSAGE_INPUT = {
+    "type": "object", "additionalProperties": False, "required": ["body"],
+    "properties": {"body": {"type": "string", "minLength": 1, "maxLength": 20000},
+                   "expects_reply": {"type": "boolean"}, "reply_to": _EXECUTION}}
 VERIFY_INPUT = {
     "type": "object", "additionalProperties": False, "required": ["task", "criterion", "verdict"],
     "properties": {"task": _EXECUTION, "criterion": {"type": "integer", "minimum": 0},
@@ -70,6 +78,11 @@ CLOSING = ("Work only in this folder. Nobody can answer a question during this t
 
 def target_resource(connection_id):
     return "agent-connection~" + connection_id
+
+
+def message_resource(connection_id):
+    """Apart from the delegation resource: a message must not wait behind a task."""
+    return "agent-messages~" + connection_id
 
 
 def policy(document):
@@ -101,13 +114,14 @@ class Delegation:
     """The trusted invoker behind ``agents.<target>.delegate`` and ``agents.tasks.verify``."""
 
     def __init__(self, registry, engine, executions, project_id, sessions_root, agents_path,
-                 policies, notify, context_dir, known_secrets=lambda: ()):
+                 policies, notify, context_dir, known_secrets=lambda: (), messages=None):
         self.registry, self.engine, self.store = registry, engine, executions
         self.project_id, self.root, self.agents_path = project_id, sessions_root, agents_path
         self._policies = policies          # actor -> policy, kept by the host
         self._notify = notify
         self.context_dir = context_dir
         self._known_secrets = known_secrets
+        self.messages = messages
         self._owner = object()
         self._lock = threading.RLock()
         self._pending = {}                 # execution id -> (job, context): asked, not answered
@@ -131,6 +145,18 @@ class Delegation:
                 supports_cancel=True, supports_idempotency=True, timeout_seconds=MAX_SECONDS)
             registrations.append(Registration(ResourceDescriptor(ref, "agents", name, PERMISSION),
                                               (capability,), lambda ref, names: {}, invoker=self))
+            if self.messages is not None:
+                ref = ResourceRef(self.project_id, message_resource(connection["id"]), "agent_messages")
+                message = CapabilityDescriptor(
+                    "agents.%s.message" % connection["id"], ref, 1,
+                    "Send this agent a message; it does not start work unless expects_reply asks for an "
+                    "answer (one read-only turn). reply_to answers a message it sent you.",
+                    MESSAGE_INPUT, {"type": "object"}, MESSAGE_PERMISSION, risk_level="medium",
+                    mode="long_running", supports_cancel=True, supports_idempotency=True,
+                    timeout_seconds=MAX_SECONDS)
+                registrations.append(Registration(
+                    ResourceDescriptor(ref, "agents", "Messages to " + name, MESSAGE_PERMISSION),
+                    (message,), lambda ref, names: {}, invoker=self))
         ref = ResourceRef(self.project_id, TASKS, "agent_tasks")
         verify = CapabilityDescriptor(
             "agents.tasks.verify", ref, 1,
@@ -154,6 +180,10 @@ class Delegation:
                                      ("acceptance criteria", request.get("acceptance_criteria") or []),
                                      ("summary", request.get("summary") or ""),
                                      ("file list", request.get("files") or [])], self._secrets())
+        if capability.capability_id.endswith(".message"):
+            if not request["body"].strip():
+                raise QCRError("invalid_input", "A message needs a body.")
+            packages.refuse_secrets([("message", request["body"])], self._secrets())
         return ()
 
     def timeout(self, capability, request):
@@ -164,6 +194,9 @@ class Delegation:
     def start(self, job):
         if job.capability.capability_id == "agents.tasks.verify":
             self._verify(job)
+            return
+        if job.capability.capability_id.endswith(".message"):
+            self._message(job)
             return
         try:
             context = self._context(job)
@@ -206,16 +239,23 @@ class Delegation:
         job, context = slot
         by = str(by or "the person")[:200]
         if not approved:
+            if context.get("kind") == "message":
+                self._message_state(context["message_id"], "denied", {"by": by})
             job.fail("denied", "Denied by %s." % by)
             return True
         if job.progress("approval.answered", {"approved": True, "by": by}):
-            self._launch(job, context)
+            if context.get("kind") == "message":
+                self._deliver(job, context)
+            else:
+                self._launch(job, context)
         return True
 
     def cancel(self, job):
         with self._lock:
-            self._pending.pop(job.execution_id, None)
+            waiting = self._pending.pop(job.execution_id, None)
             slot = self._running.get(job.execution_id)
+        if waiting and waiting[1].get("kind") == "message":
+            self._message_state(waiting[1]["message_id"], "failed", {"reason": "canceled"})
         if slot:
             slot[0].set()
 
@@ -225,7 +265,9 @@ class Delegation:
             pending = list(self._pending.values())
             self._pending.clear()
             running = list(self._running.values())
-        for job, _context in pending:
+        for job, context in pending:
+            if context.get("kind") == "message":
+                self._message_state(context["message_id"], "failed", {"reason": "closed"})
             job.fail("source_unavailable", "QAVector closed before the person answered.")
         for stop, _thread, _parent in running:
             stop.set()
@@ -282,9 +324,9 @@ class Delegation:
             # Unreadable secrets must not let a package through unchecked.
             raise QCRError("source_unavailable", "The secrets store could not be read to check the task.")
 
-    def _launch(self, job, context):
+    def _launch(self, job, context, work=None):
         stop = threading.Event()
-        thread = threading.Thread(target=self._run, args=(job, context, stop), daemon=True)
+        thread = threading.Thread(target=work or self._run, args=(job, context, stop), daemon=True)
         with self._lock:
             if self._closed:
                 job.fail("source_unavailable", "Delegation is closed.")
@@ -390,3 +432,170 @@ class Delegation:
                 found[output["criterion"]] = output["verdict"]
         return found
 
+    # -- messages (ADR-006 D4) ---------------------------------------------------
+    def _message(self, job):
+        try:
+            context = self._message_context(job)
+            message, created = self.messages.create(
+                job.execution_id, self.project_id, kind="reply" if context["reply_to"] else "message",
+                sender_actor=job.actor_id, sender_session=context["parent"],
+                sender_connection=context["sender"], recipient_connection=context["target"],
+                recipient_session=context["recipient_session"], body=context["body"],
+                expects_reply=context["expects_reply"], reply_to=context["reply_to"],
+                conversation_id=context["conversation"])
+        except QCRError as exc:
+            job.fail(exc.code, str(exc))
+            return
+        context["message_id"] = message["message_id"]
+        card = {"kind": "message", "target": context["target"], "target_name": context["target_name"],
+                "body": context["body"][:2000], "expects_reply": context["expects_reply"],
+                "reply_to": context["reply_to"], "session": context["parent"]}
+        with self._lock:
+            if self._closed:
+                self._message_state(context["message_id"], "failed", {"reason": "closed"})
+                job.fail("source_unavailable", "Delegation is closed.")
+                return
+            if context["others"] == "approve":
+                self._pending[job.execution_id] = (job, context)
+        if context["others"] == "approve":
+            self._message_state(context["message_id"], "awaiting_approval")
+            if not job.dispatched({"approval": "requested"}) or not job.progress("approval.requested", card):
+                with self._lock:
+                    self._pending.pop(job.execution_id, None)
+                return
+            self._notify(dict(card, type="agent_approval", execution_id=job.execution_id,
+                              actor=job.actor_id, message_id=context["message_id"]))
+            return
+        if job.dispatched({"approval": "not_needed"}):
+            self._deliver(job, context)
+
+    def _message_context(self, job):
+        rule = self._policies.get(job.actor_id)
+        target = job.capability.capability_id.split(".")[1]
+        if rule is None or rule["others"] == "deny":
+            raise QCRError("authorization_denied", "This conversation does not work with other agents.")
+        if target == rule["connection"]:
+            raise QCRError("authorization_denied", "An agent does not message its own connection.")
+        connection = store.get(target, self.agents_path)
+        if connection is None:
+            raise QCRError("not_found", "That agent connection is gone.")
+        if connection.get("others_default") == "deny":
+            raise QCRError("recipient_unavailable", "%s works alone; it takes no messages from other agents."
+                           % connection["name"])
+        request = job.request
+        recipient_session, conversation, reply_to = None, None, request.get("reply_to")
+        if reply_to:
+            try:
+                original = self.messages.get(reply_to)
+            except QCRError:
+                raise QCRError("not_found", "There is no such message to reply to.") from None
+            if (original["project_id"] != self.project_id or original["recipient_connection"] != rule["connection"]
+                    or original["sender_connection"] != target):
+                raise QCRError("not_found", "There is no such message to reply to.")
+            recipient_session, conversation = original["sender_session"], original["conversation_id"]
+            try:
+                back = sessions.load(self.root, recipient_session)
+            except sessions.SessionError:
+                back = None
+            if back is not None and sessions.others_of(back) == "deny":
+                raise QCRError("recipient_unavailable", "That conversation now works alone.")
+        expects_reply = bool(request.get("expects_reply"))
+        if expects_reply:
+            adapter = adapters.get(connection["kind"])
+            if not adapter.resolve(connection.get("binary")):
+                raise QCRError("not_installed", "%s is not installed." % adapter.NAME)
+            if not os.path.isdir(rule["folder"]):
+                raise QCRError("invalid_input", "The conversation's folder is gone.")
+        if self.messages.sent_since(self.project_id, rule["session"], time.time() - 3600) >= MAX_MESSAGES_PER_HOUR:
+            raise QCRError("limit_exceeded", "This conversation has sent %d messages in the last hour."
+                           % MAX_MESSAGES_PER_HOUR)
+        return {"kind": "message", "target": target, "target_name": connection["name"],
+                "provider": connection["kind"], "parent": rule["session"], "parent_name": rule["name"],
+                "sender": rule["connection"], "folder": rule["folder"], "restrictions": rule["restrictions"],
+                "mode": "read", "others": rule["others"], "body": request["body"],
+                "expects_reply": expects_reply, "reply_to": reply_to,
+                "recipient_session": recipient_session, "conversation": conversation}
+
+    def _message_state(self, message_id, state, payload=None):
+        try:
+            self.messages.transition(message_id, state, payload)
+        except QCRError:
+            pass
+
+    def _deliver(self, job, context):
+        """Into the recipient's inbox; with ``expects_reply``, one read-only turn answers it."""
+        self._message_state(context["message_id"], "delivered")
+        if context["reply_to"]:
+            self._message_state(context["reply_to"], "acknowledged", {"replied_by": context["message_id"]})
+        if not context["expects_reply"]:
+            job.succeed({"message_id": context["message_id"], "state": "delivered",
+                         "conversation_id": context["conversation"] or context["message_id"],
+                         "recipient": context["target"]})
+            return
+        with self._lock:
+            busy = sum(1 for slot in self._running.values() if slot[2] == context["parent"])
+        if busy >= MAX_CHILDREN:
+            self._message_state(context["message_id"], "failed", {"reason": "limit_exceeded"})
+            job.fail("limit_exceeded", "This conversation already has %d tasks with other agents." % MAX_CHILDREN)
+            return
+        self._launch(job, context, self._answer_message)
+
+    def _answer_message(self, job, context, stop):
+        message_id = context["message_id"]
+        try:
+            if job.finished or stop.is_set():
+                return
+            connection = store.get(context["target"], self.agents_path)
+            if connection is None or connection["kind"] != context["provider"]:
+                raise QCRError("source_unavailable", "That agent connection has changed.")
+            session = sessions.create(
+                self.root, connection, context["folder"], "read", title=context["body"][:80],
+                restrictions=context["restrictions"], others="deny",
+                source={"label": "Message", "ref": "qcr-message:" + message_id, "record": True,
+                        "detail": "%s asks: %s" % (context["parent_name"], context["body"])[:300]})
+            metadata = {"message_id": message_id, "session_id": session["id"], "provider": context["provider"],
+                        "target": context["target"], "parent_session": context["parent"]}
+            if not job.running(metadata) or stop.is_set():
+                return
+            told = ("[QAVector: a message from %s, who waits for your answer]\n\n%s\n\n"
+                    "Answer it. This turn is read-only and nobody can answer a question back; your "
+                    "answer is sent to %s as it is." % (context["parent_name"], context["body"],
+                                                        context["parent_name"]))
+            answer, text = run_turn(job, self.root, self.agents_path, session, context["provider"],
+                                    message_id, metadata, told, "read", "", "", stop)
+            turn = answer["turn"]
+            if turn["state"] != sessions.COMPLETED or not text.strip():
+                self._message_state(message_id, "failed", {"reason": "no_answer"})
+                job.fail("agent_failed", "The agent did not answer the message.",
+                         output={"message_id": message_id, "session_id": session["id"],
+                                 "turn_state": turn["state"]})
+                return
+            reply, _created = self.messages.create(
+                message_id + ".reply", self.project_id, kind="reply",
+                sender_actor="agent:%s/%s" % (context["target"], session["id"]),
+                sender_session=session["id"], sender_connection=context["target"],
+                recipient_connection=context["sender"], recipient_session=context["parent"],
+                body=text[:ANSWER_CHARS], reply_to=message_id,
+                conversation_id=context["conversation"] or message_id)
+            self._message_state(reply["message_id"], "delivered")
+            self._message_state(message_id, "acknowledged", {"replied_by": reply["message_id"]})
+            job.succeed({"message_id": message_id, "state": "acknowledged", "session_id": session["id"],
+                         "reply": {"message_id": reply["message_id"], "body": reply["body"]},
+                         "conversation_id": reply["conversation_id"],
+                         "artifacts": turn_artifacts(self.root, session["id"], turn)})
+        except (runner.Refused, QCRError, sessions.SessionError) as exc:
+            self._message_state(message_id, "failed", {"reason": "error"})
+            job.fail(getattr(exc, "code", getattr(exc, "kind", "agent_failed")), str(exc))
+        except Exception:
+            self._message_state(message_id, "failed", {"reason": "error"})
+            job.fail("agent_failed", "The message could not be answered; inspect its conversation.")
+        finally:
+            with self._lock:
+                self._running.pop(job.execution_id, None)
+
+    def acknowledge(self, message_id, by=""):
+        """The person passed a delivered message into a chat (the owner says so)."""
+        message = self.messages.get(message_id)
+        if message["project_id"] != self.project_id or message["state"] != "delivered":
+            raise QCRError("not_found", "No delivered message has that id.")
+        return self.messages.transition(message_id, "acknowledged", {"by": str(by or "the person")[:200]})

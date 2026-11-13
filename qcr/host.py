@@ -97,6 +97,8 @@ class Host:
         self.store = ExecutionStore(store_path)
         #: Context packages live beside the journal, in the project folder (ADR-006 D7).
         self.context_dir = os.path.join(os.path.dirname(os.path.abspath(store_path)), "context")
+        self._messages_path = os.path.join(os.path.dirname(os.path.abspath(store_path)), "messages.sqlite")
+        self.messages = None
         self._secrets_path = None
         extra = {} if schedule is None else {"schedule": schedule}
         self.engine = Engine(self.registry, self.store, on_change=self._changed, **extra)
@@ -174,6 +176,8 @@ class Host:
         if self.delegation is not None:
             self.delegation.close()
         self.engine.close()
+        if self.messages is not None:
+            self.messages.close()
         self.store.close()
 
     # -- input --------------------------------------------------------------------
@@ -333,13 +337,38 @@ class Host:
                for value in (root, path)):
             raise QCRError("invalid_message", "Agent storage paths are required.")
         if self.delegation is None:
+            from .messages import MessageStore
+            self.messages = MessageStore(self._messages_path)
             self.delegation = Delegation(self.registry, self.engine, self.store, self.project_id,
                                          root, path, self._agent_policies, self.send,
-                                         self.context_dir, self._known_secrets)
+                                         self.context_dir, self._known_secrets, self.messages)
         elif (root, path) != (self.delegation.root, self.delegation.agents_path):
             raise QCRError("conflict", "Agent storage cannot change during this host's lifetime.")
         self.delegation.configure()
         return {}
+
+    def _on_messages(self, message):
+        """Owner pipe: messages for a connection's inbox, a conversation, or a thread."""
+        from .messages import summary
+        if self.messages is None:
+            return {"messages": []}
+        filters = {}
+        for key in ("recipient_connection", "recipient_session", "sender_session", "conversation_id", "state"):
+            value = message.get(key)
+            if value is not None:
+                if not isinstance(value, str) or not value or len(value) > 400:
+                    raise QCRError("invalid_message", "A message filter is a string.")
+                filters[key] = value
+        limit = message.get("limit", 50)
+        if type(limit) is not int or not 0 < limit <= 200:
+            raise QCRError("invalid_message", "A limit is 1 to 200.")
+        return {"messages": [summary(one) for one in self.messages.list(self.project_id, limit=limit, **filters)]}
+
+    def _on_message_ack(self, message):
+        """Owner pipe: the person passed a delivered message into a chat."""
+        if self.delegation is None or self.messages is None:
+            raise QCRError("not_found", "No delivered message has that id.")
+        return {"message": self.delegation.acknowledge(message.get("message_id"), message.get("by", ""))}
 
     def _known_secrets(self):
         """Every value in the secrets store, for a context package to be checked
