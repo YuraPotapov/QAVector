@@ -230,7 +230,8 @@ class PlanCard(QFrame):
 
     def _quote(self):
         # A selection across paragraphs comes back with Qt's own separator.
-        chosen = self.text.textCursor().selectedText().replace(" ", "\n").strip()
+        # Written as an escape: the character itself is a line terminator to editors.
+        chosen = self.text.textCursor().selectedText().replace("\u2029", "\n").strip()
         if not chosen:
             return
         quoted = "\n".join("> " + line for line in chosen.splitlines())
@@ -278,3 +279,132 @@ class ChangesLine(QWidget):
         self.view.clicked.connect(self.wanted)
         across.addWidget(self.view)
         across.addStretch(1)
+
+
+# -- other agents (ADR-006) ----------------------------------------------------------
+#: What a waiting request says in its head, by how it stands.
+REQUEST_STATES = {"waiting": "waits for you", "approved": "approved - working", "running": "working",
+                  "succeeded": "done", "failed": "did not finish", "denied": "denied",
+                  "canceled": "canceled", "timed_out": "ran out of time", "unknown": "outcome unknown"}
+
+#: What the next message is prefixed with when other agents wrote to this conversation.
+INBOX = "Messages from other agents, sent to you since your last turn:"
+
+
+class AgentRequestCard(QFrame):
+    """A task this conversation's agent hands another agent, or a message it
+    sends - waiting for the person's yes when the conversation says Approve,
+    then telling how it went (ADR-006 D3)."""
+
+    approve = Signal(str)
+    deny = Signal(str)
+    open = Signal(str)
+    dismiss = Signal(str)
+
+    def __init__(self, request):
+        super().__init__()
+        self.setProperty("role", "agentcard")
+        self.request = dict(request)
+        self.execution_id = self.request.get("execution_id") or ""
+        message = self.request.get("kind") == "message"
+        target = self.request.get("target_name") or self.request.get("target") or "another agent"
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 6, 10, 8)
+        column.setSpacing(6)
+        title = ("QUESTION FOR %s" if self.request.get("expects_reply") else "MESSAGE TO %s") if message \
+            else "TASK FOR %s"
+        head, self.kind, self.meta = _head(title % target.upper())
+        column.addLayout(head)
+        self.text = QLabel(self.request.get("body") if message else self.request.get("goal") or "")
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(self.text)
+        details = []
+        if not message:
+            if self.request.get("mode"):
+                details.append("Mode: %s" % self.request["mode"].capitalize())
+            for key, word in (("files", "file"), ("artifacts", "earlier run")):
+                count = int(self.request.get(key) or 0)
+                if count:
+                    details.append("%d %s%s" % (count, word, "s" if count != 1 else ""))
+        self.details = QLabel(" · ".join(details))
+        self.details.setProperty("role", "hint")
+        self.details.setVisible(bool(details))
+        column.addWidget(self.details)
+        self.result = QLabel("")
+        self.result.setProperty("role", "hint")
+        self.result.setWordWrap(True)
+        self.result.setVisible(False)
+        column.addWidget(self.result)
+        self.deny_button = QPushButton("Deny")
+        self.deny_button.setToolTip("Nothing runs; the agent hears it was denied.")
+        self.deny_button.clicked.connect(lambda: self.deny.emit(self.execution_id))
+        self.approve_button = QPushButton("Approve")
+        self.approve_button.setProperty("variant", "primary")
+        self.approve_button.setToolTip("Let it go to %s." % target)
+        self.approve_button.clicked.connect(lambda: self.approve.emit(self.execution_id))
+        self.open_button = QPushButton("Open conversation")
+        self.open_button.setProperty("variant", "ghost")
+        self.open_button.clicked.connect(lambda: self.open.emit(self.request.get("session_id") or ""))
+        self.dismiss_button = QPushButton("Dismiss")
+        self.dismiss_button.setProperty("variant", "ghost")
+        self.dismiss_button.clicked.connect(lambda: self.dismiss.emit(self.execution_id))
+        self.actions = widgets.row(self.open_button, None, self.dismiss_button, self.deny_button,
+                                   self.approve_button)
+        column.addWidget(self.actions)
+        widgets.see_through(self)
+        self.set_state(self.request.get("state") or "waiting")
+
+    def set_state(self, state, session_id="", detail=""):
+        self.request["state"] = state
+        if session_id:
+            self.request["session_id"] = session_id
+        self.meta.setText(REQUEST_STATES.get(state, state))
+        waiting = state == "waiting"
+        ended = state not in ("waiting", "approved", "running")
+        self.deny_button.setVisible(waiting)
+        self.approve_button.setVisible(waiting)
+        self.open_button.setVisible(bool(self.request.get("session_id")))
+        self.dismiss_button.setVisible(ended)
+        self.result.setText(detail)
+        self.result.setVisible(bool(detail))
+        _settled(self, ended)
+
+
+class InboxCard(QFrame):
+    """A message another agent sent this conversation, or its connection: it goes
+    with the person's next message, unless dismissed (ADR-006 D4)."""
+
+    dismiss = Signal(str)
+
+    def __init__(self, message):
+        super().__init__()
+        self.setProperty("role", "agentcard")
+        self.message = dict(message)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 6, 10, 8)
+        column.setSpacing(6)
+        sender = self.message.get("sender_connection") or "another agent"
+        kind = "REPLY FROM %s" if self.message.get("kind") == "reply" else "MESSAGE FROM %s"
+        head, self.kind, self.meta = _head(kind % sender.upper(), "goes with your next message")
+        self.dismiss_button = QPushButton("Dismiss")
+        self.dismiss_button.setProperty("variant", "ghost")
+        self.dismiss_button.setToolTip("Mark it read without passing it on.")
+        self.dismiss_button.clicked.connect(lambda: self.dismiss.emit(self.message.get("message_id") or ""))
+        head.addWidget(self.dismiss_button)
+        column.addLayout(head)
+        self.text = QLabel(self.message.get("body") or "")
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(self.text)
+        widgets.see_through(self)
+
+
+def inbox_prefix(messages):
+    """What the next message starts with: each waiting message, who sent it."""
+    lines = [INBOX]
+    for one in messages:
+        kind = "reply" if one.get("kind") == "reply" else "message"
+        lines.append("- %s from %s: %s" % (kind, one.get("sender_connection") or "another agent",
+                                         one.get("body") or ""))
+    return "\n".join(lines) + "\n\n"

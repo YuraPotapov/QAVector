@@ -21,8 +21,8 @@ import threading
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QPushButton, QTabWidget,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QPushButton, QScrollArea, QTabWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import background, core as core_mod, search, theme, widgets
@@ -212,7 +212,8 @@ class ConnectionsTab(QWidget):
         dialog = ConnectionDialog(self, connection,
                                   taken=[one.get("name", "") for one in self.connections
                                          if one is not connection],
-                                  kinds=self.kinds)
+                                  kinds=self.kinds,
+                                  others=[one for one in self.connections if one is not connection])
         dialog.save_requested.connect(self.save_requested)
         dialog.check_requested.connect(self.check_requested)
         dialog.models_requested.connect(self.models_requested)
@@ -294,6 +295,11 @@ QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
                    ("jira", "Read Jira"))
 
 
+#: What a connection's conversations start with for other agents (ADR-006 D3).
+OTHERS_DEFAULT = (("Approve each one", "approve"), ("Auto - without asking", "auto"),
+                  ("Deny - work alone", "deny"))
+
+
 class ConnectionDialog(QDialog):
     """Add an agent connection, or change one.
 
@@ -307,16 +313,33 @@ class ConnectionDialog(QDialog):
     check_requested = Signal(dict, object)
     models_requested = Signal(dict, object)
 
-    def __init__(self, parent, connection=None, taken=(), kinds=()):
+    def __init__(self, parent, connection=None, taken=(), kinds=(), others=()):
         super().__init__(parent)
         self.connection = dict(connection or {})
+        #: The other connections, the ones its conversations may work with.
+        self._others = [dict(one) for one in others or [] if one.get("id") != self.connection.get("id")]
+        #: Each provider's name as the core says it, for the other connections' boxes.
+        self._kind_names = dict((value, name) for name, value in KINDS)
+        self._kind_names.update({one["kind"]: one.get("name") or one["kind"] for one in kinds or [] if one.get("kind")})
         self._taken = {name.casefold() for name in taken if name}
         self._kinds = []
         self.setWindowTitle("Edit connection" if connection else "Add an agent connection")
         self.frame = widgets.dress(self)
         self.setMinimumWidth(480)
-        column = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setSpacing(8)
+        # The fields scroll; what is done with them stays at the bottom. All of
+        # it no longer fits a laptop's screen at once.
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        column = QVBoxLayout(body)
+        column.setContentsMargins(0, 0, 4, 0)
         column.setSpacing(8)
+        self.scroll.setWidget(body)
+        outer.addWidget(self.scroll, 1)
         self.name = QLineEdit(self.connection.get("name", ""))
         self.name.setPlaceholderText("Agent connection")
         column.addWidget(widgets.field(
@@ -372,6 +395,7 @@ class ConnectionDialog(QDialog):
             "What this agent's conversations may do here, through “Run service actions through QCR”. "
             "Everything it does is journalled (Log, Executions mode). Approvals let it answer a cycle's "
             "gates and questions in your place."))
+        column.addWidget(self._others_field())
         self.check = QPushButton("Check")
         self.check.setToolTip("Ask the program who it is signed in as. Nothing is saved.")
         self.check.clicked.connect(self._check)
@@ -384,7 +408,7 @@ class ConnectionDialog(QDialog):
         self.problem.setProperty("role", "error")
         self.problem.setWordWrap(True)
         self.problem.setVisible(False)
-        column.addWidget(self.problem)
+        outer.addWidget(self.problem)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
@@ -395,9 +419,16 @@ class ConnectionDialog(QDialog):
         self.save.setDefault(True)
         self.save.clicked.connect(self._save)
         buttons.addWidget(self.save)
-        column.addLayout(buttons)
+        outer.addLayout(buttons)
         self.kind.currentIndexChanged.connect(self._kind_changed)
         self.set_kinds(kinds)
+        widgets.see_through(body)
+        self.scroll.viewport().setProperty("seethrough", "true")
+        # As tall as the fields want, up to most of the screen; then it scrolls.
+        screen = self.screen().availableGeometry() if self.screen() is not None else None
+        wanted = body.sizeHint().height() + 110
+        self.resize(max(self.minimumWidth(), self.sizeHint().width()),
+                    min(wanted, int(screen.height() * 0.88)) if screen is not None else wanted)
 
     # -- which agents there are ------------------------------------------------
     def set_kinds(self, kinds):
@@ -460,13 +491,60 @@ class ConnectionDialog(QDialog):
             self.binary.setText(chosen)
 
     # -- asking and saving -----------------------------------------------------
+    def _others_field(self):
+        """Other agents (ADR-006 D3): what its conversations start with, and
+        which other connections they may hand tasks to and message. A new
+        connection asks each time and may reach every connection already here."""
+        new = not self.connection.get("id")
+        self.others_default = QComboBox()
+        for label, value in OTHERS_DEFAULT:
+            self.others_default.addItem(label, value)
+        wanted = "approve" if new else (self.connection.get("others_default") or "deny")
+        self.others_default.setCurrentIndex(max(0, self.others_default.findData(wanted)))
+        allowed = set(self.connection.get("allowed_agents") or [])
+        self.allowed = {}
+        boxes = QHBoxLayout()
+        boxes.setContentsMargins(0, 0, 0, 0)
+        boxes.setSpacing(12)
+        for one in self._others:
+            kind = self._kind_names.get(one.get("kind"), one.get("kind") or "")
+            box = QCheckBox("%s (%s)" % (one.get("name") or one["id"], kind) if kind else one.get("name") or one["id"])
+            box.setChecked(new or one["id"] in allowed)
+            self.allowed[one["id"]] = box
+            boxes.addWidget(box)
+        if not self._others:
+            nobody = QLabel("No other agent connection yet.")
+            nobody.setProperty("role", "hint")
+            boxes.addWidget(nobody)
+        boxes.addStretch(1)
+        self.others_default.currentIndexChanged.connect(self._sync_others)
+        self._sync_others()
+        holder = QWidget()
+        stack = QVBoxLayout(holder)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.setSpacing(4)
+        stack.addWidget(widgets.row(self.others_default, None))
+        stack.addLayout(boxes)
+        return widgets.field(
+            "Other agents", holder,
+            "Its conversations may hand tasks to, and message, the agents ticked here - each "
+            "conversation can change the mode for itself. Approve shows you every one first; "
+            "Deny keeps it to its own provider.")
+
+    def _sync_others(self, *_args):
+        working = self.others_default.currentData() != "deny"
+        for box in self.allowed.values():
+            box.setEnabled(working)
+
     def entry(self):
         entry = {key: value for key, value in self.connection.items() if key != "last_check"}
         entry.update({"name": self.name.text().strip(), "kind": self.kind.currentData(),
                       "binary": self.binary.text().strip(),
                       "model": self.model.value(),
                       "effort": self.effort.currentData() or "",
-                      "qavector_access": {key: box.isChecked() for key, box in self.access.items()}})
+                      "qavector_access": {key: box.isChecked() for key, box in self.access.items()},
+                      "others_default": self.others_default.currentData(),
+                      "allowed_agents": [key for key, box in self.allowed.items() if box.isChecked()]})
         return entry
 
     def _check(self):

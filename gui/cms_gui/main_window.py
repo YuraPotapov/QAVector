@@ -305,6 +305,10 @@ class MainWindow(QMainWindow):
         self.qcr_host.set_handler("launcher.stop", self._qcr_launcher_stop)
         # An agent conversation's turns reach QAVector through this host (ADR-003 6a).
         agentchat_mod.ChatTab.qcr_access = self.qcr_host
+        # What an agent here hands other agents: its cards in the chat (ADR-006 D3/D9).
+        # Here, not with the pages: they are built before the host is.
+        self.qcr_host.agent_approval.connect(self.integrations.agents.chat.agent_request)
+        self.qcr_host.execution_changed.connect(self.integrations.agents.chat.agent_execution)
         self._qcr_answers = {}          # node approval request id -> (execution id, item id)
         self._qcr_run = None
         self._aim_qcr()
@@ -836,6 +840,9 @@ class MainWindow(QMainWindow):
         self.integrations.set_project_name(self._project(self.settings.project_id).name)
         self.integrations.return_to_main_requested.connect(self._return_to_integrations)
         self.integrations.search_sources_changed.connect(self._search_sources_changed)
+        # A connection added, changed or removed: the host's delegation targets follow.
+        self.integrations.agents.connections_changed.connect(
+            lambda: getattr(self, "qcr_host", None) is not None and self.qcr_host.refresh_agents())
         self.cycles.set_run_state(self.run_state)
         self.cycles.interaction_requested.connect(self._send_cycle_interaction)
         self.cycles.cycle_opened.connect(self._restore_selected_cycle)
@@ -3660,6 +3667,8 @@ class MainWindow(QMainWindow):
             host.stop()
             return
         host.start(argv, self.settings.project_id)
+        # Every agent connection is a target another agent may be granted (ADR-006).
+        host.set_agent_storage(self.settings.agent_sessions_path, self.settings.agents_path)
 
     def _aim_log_sources(self):
         """Tell the core which logsources.json is in force.

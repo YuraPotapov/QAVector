@@ -1,6 +1,6 @@
 # ADR-006: agent messaging and task delegation (Phase 5)
 
-Date: 2026-11-13. Status: **Accepted** (user, 2026-11-13); 5.1-5.3 implemented ([5.1](phase-5-1-report.md), [5.2](phase-5-2-report.md), [5.3](phase-5-3-report.md)). User decisions 2026-11-13: D2 (parent's mode), D3/D4 (chat mode Auto / Approve / Deny; default and allowed agents on the connection). The rest await approval.
+Date: 2026-11-13. Status: **Accepted** (user, 2026-11-13); 5.1-5.4 implemented ([5.1](phase-5-1-report.md), [5.2](phase-5-2-report.md), [5.3](phase-5-3-report.md), [5.4](phase-5-4-report.md)); 5.5 is the user's live check. User decisions 2026-11-13: D2 (parent's mode), D3/D4 (chat mode Auto / Approve / Deny; default and allowed agents on the connection). The rest await approval.
 Builds on [ADR-005](adr-005-unified-agent-adapters.md). Phase 4's live check is
 deferred by the user's decision; Phase 5 starts without its gate closed.
 

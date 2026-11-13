@@ -1034,6 +1034,7 @@ QFrame[role="agentcard"] QLabel[role="cardquestion"] {{
     font-size: 13px; font-weight: 600; color: {text};
 }}
 QFrame[role="agentcard"] QPlainTextEdit {{ background: {bg}; }}
+QFrame[role="agentcard"] QWidget[seethrough="true"] {{ background: transparent; }}
 /* A diff: per file a line with its counts, then the patch itself. */
 QLabel[role="diffadded"] {{ font-family: {mono}; font-size: 11px; color: {diff_add_ink}; }}
 QLabel[role="diffremoved"] {{ font-family: {mono}; font-size: 11px; color: {diff_del_ink}; }}

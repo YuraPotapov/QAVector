@@ -102,6 +102,8 @@ class QcrHost(QObject):
     finished_badly = Signal(dict)
     #: off / starting / ready / down - down is "gave up restarting".
     state_changed = Signal(str)
+    #: A delegation or a message waits for the person (ADR-006 D3): the host's card.
+    agent_approval = Signal(dict)
 
     def __init__(self, supervisor, parent=None, bridge=None):
         """``bridge``: the main window's ServiceBridge, shared with scenarios;
@@ -126,6 +128,7 @@ class QcrHost(QObject):
         self._finishers = {}       # execution id -> callback(execution) at its end
         self._last = {}            # execution id -> latest execution seen (bounded)
         self._inventory = None     # scenarios/environments/accounts, as the host needs them
+        self._agent_storage = None  # (sessions root, agents.json): delegation targets (ADR-006)
         self._handlers = {}        # dispatch op -> handler(execution_id, resource_id, input)
         self._readers = {}         # owner_read op -> reader(message, reply)
         self._waits = {}           # bridge request id -> (execution id, callback)
@@ -292,6 +295,7 @@ class QcrHost(QObject):
             queued, self._queue = self._queue, []
             for one in queued:
                 self._send(one)
+            self._push_agent_storage()
         elif kind == "reply":
             callback = self._replies.pop(message.get("id"), None)
             if callback is not None:
@@ -309,6 +313,8 @@ class QcrHost(QObject):
             if execution.get("actor_id") == GUI_ACTOR and execution.get("state") in TERMINAL \
                     and execution.get("state") != "succeeded":
                 self.finished_badly.emit(execution)
+        elif kind == "agent_approval":
+            self.agent_approval.emit(dict(message))
         elif kind == "error":
             log.warning("QCR host refused a line: %s", (message.get("error") or {}).get("code"))
 
@@ -428,17 +434,74 @@ class QcrHost(QObject):
         if job is not None:
             job["stop"] = stop
 
-    def grant_agent(self, connection, session_id):
+    # -- agents working with each other (ADR-006) ----------------------------------
+    def set_agent_storage(self, sessions_root, agents_path):
+        """Where agent connections and this project's conversations are: every
+        connection is then a target another agent's turn may be granted."""
+        self._agent_storage = (str(sessions_root or ""), str(agents_path or ""))
+        self._push_agent_storage()
+
+    def _push_agent_storage(self):
+        """Said again whenever the connections may have changed - a new one, one
+        removed - so the host's targets are the connections there are."""
+        if self.state == READY and self._agent_storage and all(self._agent_storage):
+            self._send({"type": "agent_connections", "id": next(self._ids),
+                        "sessions_root": self._agent_storage[0], "agents_path": self._agent_storage[1]})
+
+    refresh_agents = _push_agent_storage
+
+    def answer_agent(self, execution_id, approve, by="you"):
+        """The person's word on a delegation or a message that waits for it."""
+        self._send_when_ready({"type": "agent_answer", "id": next(self._ids),
+                               "execution_id": execution_id, "approve": bool(approve), "by": by})
+
+    def messages(self, done, **filters):
+        """Messages from the host's store (ADR-006 D4): ``done(list)``."""
+        self.ask("messages", lambda reply: done(reply.get("messages") or [] if reply.get("ok") else []),
+                 **filters)
+
+    def acknowledge_message(self, message_id, by="you"):
+        self._send_when_ready({"type": "message_ack", "id": next(self._ids), "message_id": message_id, "by": by})
+
+    @staticmethod
+    def agent_grants(connection, session, mode):
+        """``(grants, policy)`` a turn gets for other agents: the connection's
+        allowed agents as targets when the conversation is not Deny, and what the
+        conversation is - nothing at all for Deny or a connection that allows
+        nobody."""
+        connection, session = connection or {}, session or {}
+        others = session.get("others")
+        if others not in ("auto", "approve") or not session.get("folder"):
+            return [], None
+        own = connection.get("id")
+        targets = [one for one in connection.get("allowed_agents") or [] if one and one != own]
+        if not targets:
+            return [], None
+        grants = [{"permission": permission, "resource_id": prefix + target}
+                  for target in targets
+                  for permission, prefix in (("agents.delegate", "agent-connection~"),
+                                             ("agents.message", "agent-messages~"))]
+        grants.append({"permission": "agents.delegate", "resource_id": "agent-tasks"})
+        policy = {"session": session.get("id") or "", "connection": own or "",
+                  "name": connection.get("name") or own or "", "folder": session["folder"],
+                  "mode": mode if mode in ("read", "edit", "full") else "read", "others": others,
+                  "restrictions": dict(session.get("restrictions") or {})}
+        return grants, policy
+
+    def grant_agent(self, connection, session_id, session=None, mode=None):
         """QAVector for one turn of ``connection``'s agent (ADR-003 D4/D6), or None.
 
         None when the host is not ready, has no socket, or the connection's
-        "QAVector access" grants nothing. Otherwise the actor is issued its
-        grants, a fresh token's digest is registered, and the token itself is
-        written to a 0600 file beside the socket - the turn gets its *path*.
+        "QAVector access" grants nothing and the conversation works with no
+        other agent. Otherwise the actor is issued its grants (and, for other
+        agents, what its conversation is), a fresh token's digest is
+        registered, and the token itself is written to a 0600 file beside the
+        socket - the turn gets its *path*.
         """
         access = (connection or {}).get("qavector_access") or {}
         permissions = sorted({p for key, on in access.items() if on is True for p in AGENT_GRANTS.get(key, ())})
-        if self.state != READY or self._proc is None or not self.socket_path or not permissions:
+        others, policy = self.agent_grants(connection, dict(session or {}, id=session_id), mode)
+        if self.state != READY or self._proc is None or not self.socket_path or not (permissions or others):
             return None
         connection_id = str((connection or {}).get("id") or "agent")
         actor = "agent:%s/%s" % (connection_id[:64], str(session_id)[:64])
@@ -454,8 +517,11 @@ class QcrHost(QObject):
         except OSError as exc:
             log.warning("QAVector access for an agent turn not given: %s", exc)
             return None
-        self._send({"type": "actor", "id": next(self._ids), "actor": actor,
-                    "grants": [{"permission": p} for p in permissions]})
+        message = {"type": "actor", "id": next(self._ids), "actor": actor,
+                   "grants": [{"permission": p} for p in permissions] + others}
+        if policy is not None:
+            message["agents"] = policy
+        self._send(message)
         self._send({"type": "agent_token", "id": next(self._ids), "actor": actor,
                     "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
                     "expires_at": time.time() + AGENT_TOKEN_SECONDS})

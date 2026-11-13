@@ -531,7 +531,9 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "",
-            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False}}})
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False},
+            # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
+            "others_default": "approve", "allowed_agents": []}})
         assert dialog.result() == QDialog.Accepted
     finally:
         dispose(dialog)
@@ -629,7 +631,9 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
         assert core.calls[-1] == (("save",), {"connection": {
             "id": "claude", "name": "Claude", "kind": "claude",
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high",
-            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False}}})
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False},
+            # A connection from before ADR-006 keeps working alone until somebody says otherwise.
+            "others_default": "deny", "allowed_agents": []}})
     finally:
         dispose(dialog)
     assert page.agents.connections_tab.table.item(0, 2).text() == "/opt/claude/bin/claude"

@@ -348,7 +348,7 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     composer = chat.composer
     assert composer.settings() == {"connection": "claude", "folder": "/home/someone/src/shop",
                                    "mode": "edit", "model": "opus",
-                                   "effort": "", "plan": False}
+                                   "effort": "", "plan": False, "others": "deny"}
     # With one agent, in one folder: neither changes once it has begun.
     assert not composer.connection.isEnabled() and not composer.folder.isEnabled()
     assert not composer.browse.isEnabled()
@@ -404,7 +404,8 @@ def test_the_first_message_makes_the_conversation_and_takes_the_first_turn(make,
     assert _say(chat, QUESTION)
     args, document = next(call for call in core.calls if call[0][0] == "session-new")
     assert document == {"connection": "claude", "folder": str(tmp_path), "mode": "read",
-                        "model": "", "effort": "", "plan": False, "restrictions": {}, "skills": []}
+                        "model": "", "effort": "", "plan": False, "others": "deny", "restrictions": {},
+                        "skills": []}
     (turn,) = FakeTurn.made
     assert turn.started and turn.session_id == chat.current["id"]
     assert turn.document == {"message": QUESTION, "mode": "read", "model": "",
@@ -553,7 +554,8 @@ def test_a_first_message_that_could_not_be_said_leaves_no_conversation_behind(ma
     assert chat.composer.note.property("bad") == "true"
     # What was chosen for it is still chosen.
     assert chat.composer.settings() == {"connection": "claude", "folder": str(tmp_path),
-                                        "mode": "edit", "model": "", "effort": "", "plan": False}
+                                        "mode": "edit", "model": "", "effort": "", "plan": False,
+                                        "others": "deny"}
     assert chat.composer.folder.isEnabled()
 
 
@@ -827,7 +829,8 @@ def test_the_next_conversation_starts_from_the_last_one_s_choices(make, settings
     assert memory["folders"] == [str(other), str(tmp_path)]
     chat.new_button.click()
     assert chat.composer.settings() == {"connection": "second", "folder": str(other),
-                                        "mode": "edit", "model": "", "effort": "", "plan": False}
+                                        "mode": "edit", "model": "", "effort": "", "plan": False,
+                                        "others": "deny"}
     assert [chat.composer.folder.itemText(index)
             for index in range(chat.composer.folder.count())] == [str(other), str(tmp_path)]
 
