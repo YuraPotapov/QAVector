@@ -241,6 +241,8 @@ def settle(session):
     full the agent's context was at the end of the last turn that said."""
     turns = own_costs(session)
     session["cost_usd"] = round(sum(one.get("cost_usd") or 0 for one in turns), 6)
+    if any(one.get("cost_scope") in ("unknown", "turn") and one.get("cost_usd") is None for one in turns):
+        session["cost_usd"] = None       # missing prices cannot be added as zero
     tokens = {}
     for turn in turns:
         for key, value in (turn.get("tokens") or {}).items():

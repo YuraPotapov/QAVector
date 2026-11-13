@@ -101,7 +101,7 @@ def test_the_library_is_listed_with_what_each_agent_has_by_itself(agents, tmp_pa
     assert code == 0
     assert (answer["path"], answer["skills"]) == (agents.library, [])
     # For information: those every turn has whatever is chosen here.
-    assert answer["own"] == {"claude": ["pdf"]}
+    assert answer["own"] == {"claude": ["pdf"], "codex": []}
 
 
 def test_a_skill_is_looked_at_then_added_then_listed(agents):

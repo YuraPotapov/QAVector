@@ -119,6 +119,7 @@ class Host:
         self._lock = threading.RLock()
         self.tokens = TokenBook()
         self.gateway = None
+        self.agent_runtime = None
         #: Told when a snapshot arrives - what a criteria wait wakes on.
         self._snapshot_seen = threading.Condition(threading.Lock())
         self._owner_reads = {}            # id -> [Event, reply]
@@ -159,6 +160,8 @@ class Host:
         self.done = True
         if self.gateway is not None:
             self.gateway.close()
+        if self.agent_runtime is not None:
+            self.agent_runtime.close()
         self.engine.close()
         self.store.close()
 
@@ -223,6 +226,35 @@ class Host:
         self._callers[actor] = self.authority.issue(actor, self._grants(grants))
 
     # -- handlers -----------------------------------------------------------------
+    def _on_agent_profiles(self, message):
+        """Trusted owner pipe only; never accepted from the agent socket.
+
+        Profiles bind logical agents to their connection/workspace. No actor
+        receives agents.execute automatically, including the agents themselves.
+        """
+        from integrations.agents.contracts import AgentProfile
+        from .adapters.agents import AgentRuntime
+        profiles = message.get("profiles")
+        if not isinstance(profiles, list) or len(profiles) > 200:
+            raise QCRError("invalid_message", "Agent profiles must be a bounded list.")
+        try:
+            made = [AgentProfile(**row) for row in profiles]
+        except (TypeError, ValueError):
+            raise QCRError("invalid_message", "Invalid agent profile fields.") from None
+        root, path = message.get("sessions_root"), message.get("agents_path")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 4000
+               for value in (root, path)):
+            raise QCRError("invalid_message", "Agent storage paths are required.")
+        if self.agent_runtime is None:
+            runtime = AgentRuntime(self.registry, self.engine, self.project_id, root, path)
+            runtime.configure(made)
+            self.agent_runtime = runtime
+        else:
+            if (root, path) != (self.agent_runtime.root, self.agent_runtime.agents_path):
+                raise QCRError("conflict", "Agent storage cannot change during this host's lifetime.")
+            self.agent_runtime.configure(made)
+        return {}
+
     def _on_snapshot(self, message):
         self._snapshot = message.get("snapshot")
         self.services.refresh()

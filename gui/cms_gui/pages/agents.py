@@ -318,7 +318,7 @@ class ConnectionDialog(QDialog):
         column = QVBoxLayout(self)
         column.setSpacing(8)
         self.name = QLineEdit(self.connection.get("name", ""))
-        self.name.setPlaceholderText("Claude Code")
+        self.name.setPlaceholderText("Agent connection")
         column.addWidget(widgets.field(
             "Name", self.name,
             "Whatever uses it names it by its id%s, which never changes when you "
@@ -447,7 +447,9 @@ class ConnectionDialog(QDialog):
         self._model_context()
 
     def _model_context(self, *_args):
-        self.model.set_context((self.kind.currentData(), self.binary.text().strip()))
+        name = self._kind().get("name") or "the program"
+        self.model.set_context((self.kind.currentData(), self.binary.text().strip()),
+                               self._kind().get("model_default_label") or "Use %s settings" % name)
 
     def _browse(self):
         chosen = widgets.pick_path(self, "The agent's program",

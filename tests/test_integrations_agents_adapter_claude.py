@@ -406,7 +406,10 @@ def test_the_runner_hands_qavector_only_to_an_adapter_that_takes_it():
         @staticmethod
         def turn_argv(binary, mode="read"):
             return []
-    assert runner._qavector(Old, {"socket": "/s", "token_file": "/t"}) == {}
+    import pytest
+    with pytest.raises(runner.Refused) as caught:
+        runner._qavector(Old, {"socket": "/s", "token_file": "/t"})
+    assert caught.value.kind == "unsupported"
     assert runner._qavector(claude_adapter, None) == {}
     assert runner._qavector(claude_adapter, {"socket": "/s", "token_file": "/t"}) == {
         "qavector": {"socket": "/s", "token_file": "/t"}}

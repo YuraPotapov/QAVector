@@ -67,10 +67,16 @@ def test_kinds_says_where_claude_is_without_starting_it(agents, tmp_path, monkey
     monkeypatch.setenv("PATH", str(tmp_path))
     code, answer = agents("kinds")
     assert code == 0
-    assert answer["kinds"] == [{"kind": "claude", "name": "Claude Code",
+    from integrations.agents.adapters import claude, codex
+    assert [one["kind"] for one in answer["kinds"]] == ["claude", "codex"]
+    assert answer["kinds"][0] == {"kind": "claude", "name": "Claude Code",
                                 "default_binary": "claude", "found": path,
                                 "efforts": ["low", "medium", "high", "xhigh", "max"],
-                                "modes": ["read", "edit", "full"], "plans": True}]
+                                "modes": ["read", "edit", "full"], "plans": True,
+                                "mode_description": claude.MODE_DESCRIPTION,
+                                "model_default_label": claude.MODEL_DEFAULT_LABEL,
+                                "capabilities": claude.capabilities().document()}
+    assert answer["kinds"][1]["capabilities"] == codex.capabilities().document()
     assert not marker.exists()
 
 

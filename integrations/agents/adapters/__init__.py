@@ -20,9 +20,9 @@ them and a kind that is not listed here cannot be loaded by writing it into a
 connections file.
 """
 
-from integrations.agents.adapters import claude
+from integrations.agents.adapters import claude, codex
 
-_ADAPTERS = {claude.KIND: claude}
+_ADAPTERS = {one.KIND: one for one in (claude, codex)}
 
 #: The kinds a connection may be, in the order they are offered.
 KINDS = tuple(_ADAPTERS)
@@ -49,5 +49,8 @@ def describe():
     """
     return [{"kind": one.KIND, "name": one.NAME, "default_binary": one.DEFAULT_BINARY,
              "found": one.resolve(""), "efforts": list(one.EFFORTS),
-             "modes": list(one.MODES), "plans": bool(getattr(one, "PLANS", False))}
+             "modes": list(one.MODES), "plans": bool(getattr(one, "PLANS", False)),
+             "mode_description": one.MODE_DESCRIPTION,
+             "model_default_label": one.MODEL_DEFAULT_LABEL,
+             "capabilities": one.capabilities().document()}
             for one in _ADAPTERS.values()]

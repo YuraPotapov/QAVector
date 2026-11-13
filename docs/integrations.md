@@ -455,6 +455,20 @@ never reads.
 
 ## Command line: agents
 
+Codex connections use the same chat UI and CLI commands as Claude Code.
+The adapter discovers models with `app-server model/list` without a prompt and
+runs turns with `codex exec --json`, resuming the exact provider thread on later
+turns. Read uses a read-only sandbox; Full uses workspace-write. Edit without
+shell, Plan first and selected library skills are explicitly unsupported for
+Codex v1. Model/effort can be selected on the connection or conversation;
+blank model uses Codex's default (execution ignores user config). Sign-in stays
+with the Codex CLI. Missing cost is shown as unknown, not zero.
+
+The existing QAVector access switches also apply to Codex. They grant only the
+selected project's capabilities through the existing per-turn MCP token.
+See [Phase 4](qcr/phase-4-report.md) for the separate Agent Task API, validation
+and current acceptance limits.
+
 ```sh
 qavector-core --integrations agents COMMAND [--agents-file=PATH]
               [--agent-sessions-dir=PATH] [--agent-skills-dir=PATH]

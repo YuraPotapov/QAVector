@@ -112,10 +112,13 @@ class Reader:
         # of it, and the turn's own is the difference. None for a call that
         # began a conversation of its own.
         self.cost_before = cost_before
+        self._text = []
 
     def events(self, line):
         found = []
         for event in self.adapter.events(line):
+            if event["type"] == "text" and event.get("text"):
+                self._text.append(event["text"])
             if event["type"] == "context":
                 self._context = event.get("used") or self._context
                 continue
@@ -127,6 +130,8 @@ class Reader:
                 self._hidden.discard(event.get("id"))
                 continue
             if event["type"] in ("completed", "failed"):
+                if "text" not in event:
+                    event = dict(event, text="\n\n".join(self._text))
                 event = self._ended(event)
             if event["type"] == "tool.refused":
                 # Folded into the call's own result, so a refusal is one row
@@ -150,10 +155,12 @@ class Reader:
         and how full the context was against how much it holds."""
         event = dict(event)
         total = event.get("cost_usd")
+        capabilities = getattr(self.adapter, "capabilities", None)
+        scope = capabilities().cost_scope if capabilities else "session"
         if isinstance(total, (int, float)) and not isinstance(total, bool):
-            event["cost_total_usd"] = total
+            event["cost_total_usd"] = total if scope == "session" else None
             before = self.cost_before
-            if isinstance(before, (int, float)) and 0 <= before <= total:
+            if scope == "session" and isinstance(before, (int, float)) and 0 <= before <= total:
                 event["cost_usd"] = round(total - before, 6)
         window = event.pop("context_window", 0)
         if self._context:
@@ -235,19 +242,24 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
         adapter = adapters.get(connection["kind"])
     except adapters.UnknownKind as exc:
         raise Refused("invalid", str(exc)) from None
+    if connection["kind"] != session["kind"]:
+        raise Refused("provider_mismatch", "A conversation cannot change its provider.")
+    features = adapter.capabilities()
     mode = str(mode or session.get("mode") or adapter.MODES[0])
     if mode not in adapter.MODES:
-        raise Refused("invalid", "%s has no %r mode; it has %s."
+        raise Refused("unsupported" if mode in ("read", "edit", "full") else "invalid", "%s has no %r mode; it has %s."
                       % (adapter.NAME, mode, ", ".join(adapter.MODES)))
     planning = bool(session.get("plan") if chosen["plan"] is None else chosen["plan"])
     if planning and not getattr(adapter, "PLANS", False):
-        raise Refused("invalid", "%s cannot plan before it works." % adapter.NAME)
+        raise Refused("unsupported", "%s cannot plan before it works." % adapter.NAME)
     # What the session says, and under it what the connection says; blank at
     # both leaves the choice to the CLI's own configuration.
     session_model = session.get("model", "") if model is None else str(model).strip()
     session_effort = session.get("effort", "") if effort is None else str(effort).strip()
     used_model = session_model or connection.get("model", "")
     used_effort = session_effort or connection.get("effort", "")
+    if (used_model and not features.selected_model) or (used_effort and not features.effort):
+        raise Refused("unsupported", "%s cannot override the model or effort." % adapter.NAME)
     if used_effort and used_effort not in adapter.EFFORTS:
         raise Refused("invalid", "Effort must be one of %s, or blank for the CLI's own."
                       % ", ".join(adapter.EFFORTS))
@@ -263,6 +275,14 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     # so a skill updated or removed since the last turn is what the agent gets.
     names = (list(session.get("skills") or []) if chosen["skills"] is None
              else [str(one) for one in chosen["skills"]])
+    if names and not features.skills:
+        raise Refused("unsupported", "%s cannot load selected library skills." % adapter.NAME)
+    if chosen.get("qavector") and not features.qavector:
+        raise Refused("unsupported", "%s cannot connect to QAVector." % adapter.NAME)
+    qavector_args = _qavector(adapter, chosen.get("qavector"))
+    resume = bool(session.get("provider_started") and session.get("provider_session"))
+    if resume and not features.resume:
+        raise Refused("unsupported", "%s cannot resume this conversation." % adapter.NAME)
     try:
         staged = adapter.stage_skills(
             os.path.join(sessions.directory(root, session["id"]), "skills"),
@@ -294,11 +314,11 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     number = len(session.get("turns") or []) + 1
     where = sessions.make_turn_directory(root, session["id"], number)
     _keep(os.path.join(where, "prompt.md"), prompt)
-    resume = bool(session.get("provider_started") and session.get("provider_session"))
-    provider = session["provider_session"] if resume else str(uuid.uuid4())
+    provider = session["provider_session"] if resume else ("" if features.assigns_session_id else str(uuid.uuid4()))
     turn = {"n": number, "started": time.time(), "ended": None, "state": sessions.RUNNING,
             "mode": mode, "model": used_model, "effort": used_effort, "skills": names,
-            "plan": planning, "cost_usd": None, "steps": None, "error": ""}
+            "plan": planning, "cost_usd": None, "cost_scope": features.cost_scope,
+            "steps": None, "error": ""}
     if attached:
         turn["attachments"] = attached
     session.update(mode=mode, model=session_model, effort=session_effort, skills=names,
@@ -312,6 +332,11 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     written = []
 
     def tell(event):
+        if event.get("provider_session"):
+            # Persist Codex's assigned thread as soon as it exists, including
+            # when this process is killed before its terminal event arrives.
+            session.update(provider_session=event["provider_session"], provider_started=True)
+            sessions.save(root, session)
         if event.get("type") == "file.written":
             written.append(event.get("path"))
         emit(event)
@@ -330,7 +355,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
                                                   session=provider, resume=resume,
                                                   skills_dir=staged,
                                                   attachments_dir=attachments_dir,
-                                                  plan=planning, **_qavector(adapter, chosen.get("qavector"))),
+                                                  plan=planning, **qavector_args),
                        folder, effective, seen, prompt, where, record, tell, stop,
                        cost_before=sessions.cost_so_far(session) if resume else None)
         turn["changes"] = _changed(session_dir, where, folder, before, written)
@@ -407,6 +432,9 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
     err_file = os.fdopen(os.open(err_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
                                  sessions.PRIVATE_FILE), "wb")
     with out_file, err_file:
+        if stop.is_set():
+            outcome.update(state=sessions.STOPPED, error="")
+            return outcome
         try:
             process = _start(argv, folder, environment, effective, seen,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err_file,
@@ -469,6 +497,9 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                 process.wait()
             for thread in threads:
                 thread.join(STOP_GRACE + 1)
+    if outcome["reported"] and outcome["state"] == sessions.COMPLETED and code != 0:
+        outcome.update(state=sessions.FAILED, error="The agent process exited with code %s after its result." % code)
+        outcome["end"] = dict(outcome.get("end") or {}, type=sessions.FAILED, error=outcome["error"])
     if outcome["reported"]:
         return outcome
     if stop.is_set():
@@ -481,12 +512,17 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
 
 
 def _qavector(adapter, qavector):
-    """``{"qavector": ...}`` for an adapter whose turns can take it; nothing otherwise."""
+    """Requested tools must be passed or explicitly refused, never dropped."""
     import inspect
     if not qavector:
         return {}
+    if not isinstance(qavector, dict) or any(not isinstance(qavector.get(key), str) or not qavector[key]
+                                            for key in ("socket", "token_file")):
+        raise Refused("invalid", "QAVector access needs a socket and token file.")
     try:
         takes = "qavector" in inspect.signature(adapter.turn_argv).parameters
     except (TypeError, ValueError):
         takes = False
-    return {"qavector": dict(qavector)} if takes else {}
+    if not takes:
+        raise Refused("unsupported", "This provider cannot connect to QAVector.")
+    return {"qavector": dict(qavector)}

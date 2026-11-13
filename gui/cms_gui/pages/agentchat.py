@@ -868,11 +868,26 @@ class Composer(QFrame):
         connection = next((one for one in self._connections if one.get("id") == chosen), {})
         # The connection's own default reads as itself ("opus"); where it comes
         # from is said by the tooltip, not crowded into the field.
-        inherited = connection.get("model") or "Use Claude Code settings"
+        kind = next((one for one in self._kinds if one.get("kind") == connection.get("kind")), {})
+        inherited = (connection.get("model") or kind.get("model_default_label")
+                     or "Use %s settings" % (kind.get("name") or "the program"))
         self.model.set_context((chosen, connection.get("kind"), connection.get("binary")), inherited,
                                "The connection's default model." if connection.get("model")
                                else "Leave the model choice to the program's own settings.")
         self._fill_efforts(connection)
+        if kind:
+            modes = kind.get("modes", [value for _, value in MODES])
+            for label, value in MODES:
+                self.mode.set_enabled(label, value in modes,
+                                      "This provider does not support this mode." if value not in modes else "")
+            if "plans" in kind:             # older cores did not advertise it
+                self.plan.setEnabled(bool(kind["plans"]))
+                if not kind["plans"]:
+                    self.plan.setChecked(False)
+            self.mode.setToolTip(kind.get("mode_description") or MODE_MEANS)
+            features = kind.get("capabilities") or {}
+            if "skills" in features:
+                self.skills_button.setEnabled(bool(features["skills"]))
         self._summarize()
 
     def set_kinds(self, kinds):

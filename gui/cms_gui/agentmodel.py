@@ -20,7 +20,7 @@ class ModelPicker(QComboBox):
         self.setMinimumContentsLength(16)
         self.setMaxVisibleItems(12)
         self._context = None
-        self._inherit = "Use Claude Code settings"
+        self._inherit = "Use the program's settings"
         self._inherit_tip = "Leave the model choice to the program's own settings."
         self._models = []
         self._loaded_at = 0
@@ -43,7 +43,7 @@ class ModelPicker(QComboBox):
             self.addItem(value + " (saved)", value)
         self.setCurrentIndex(self.findData(value))
 
-    def set_context(self, context, inherited="Use Claude Code settings", tip=None):
+    def set_context(self, context, inherited="Use the program's settings", tip=None):
         """Drop stale results when the selected program/connection changes."""
         value = self.value()
         if context != self._context:

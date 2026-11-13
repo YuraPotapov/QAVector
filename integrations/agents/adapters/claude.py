@@ -49,6 +49,7 @@ import runtime_paths
 #: What a connection of this kind records, and what a person reads.
 KIND = "claude"
 NAME = "Claude Code"
+MODEL_DEFAULT_LABEL = "Use Claude Code settings"
 
 #: How hard the CLI is asked to think, from ``--effort``, lowest first. Written
 #: down here rather than left to the binary because the CLI *warns and carries
@@ -64,6 +65,13 @@ DEFAULT_BINARY = "claude"
 #: plus, sometimes, a token refresh - a second is normal, ten means something is
 #: wrong and a settings page should say so rather than hang.
 STATUS_TIMEOUT = 20.0
+
+
+def capabilities():
+    from integrations.agents.contracts import ProviderCapabilities
+    return ProviderCapabilities(KIND, MODES, resume=True, selected_model=True, effort=True,
+                                cancel=True, usage=True, qavector=True,
+                                planning=True, skills=True, cost_scope="session")
 
 
 def resolve(binary=None):
@@ -543,6 +551,8 @@ def last_result(text):
 #: everything the account can do inside whatever the folder's restrictions
 #: leave open.
 MODES = ("read", "edit", "full")
+MODE_DESCRIPTION = ("Read: it reads the folder and changes nothing. Edit: it also changes files. "
+                    "Full: it also runs commands inside the folder's restrictions.")
 _READ = ("Read", "Glob", "Grep")
 _EDIT = _READ + ("Edit", "Write", "MultiEdit")
 TOOLS = {"read": _READ, "edit": _EDIT, "full": _EDIT + ("Bash",)}
