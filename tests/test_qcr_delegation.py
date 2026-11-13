@@ -69,7 +69,8 @@ class World:
             execution = self.ask("wait", actor, execution_id=execution_id, timeout=1)["execution"]
             if execution["state"] in ("succeeded", "failed", "canceled", "timed_out"):
                 return execution
-        pytest.fail("the delegation did not end")
+        pytest.fail("the delegation did not end: %s %s" % (execution["state"], [
+            event.get("type") for event in self.events(execution_id)]))
 
     def events(self, execution_id):
         return self.host.store.events(execution_id)

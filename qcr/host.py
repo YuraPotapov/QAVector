@@ -50,6 +50,7 @@ Nothing is printed on stdout but these lines; logging goes to stderr.
 """
 
 import json
+import os
 import logging
 import signal
 import sys
@@ -94,6 +95,9 @@ class Host:
         self.authority = Authority()
         self.registry = Registry(self.authority)
         self.store = ExecutionStore(store_path)
+        #: Context packages live beside the journal, in the project folder (ADR-006 D7).
+        self.context_dir = os.path.join(os.path.dirname(os.path.abspath(store_path)), "context")
+        self._secrets_path = None
         extra = {} if schedule is None else {"schedule": schedule}
         self.engine = Engine(self.registry, self.store, on_change=self._changed, **extra)
         self.invoker = ServiceInvoker(self.send, **extra)
@@ -150,6 +154,7 @@ class Host:
         from integrations.reader import ProjectReader
         from .adapters.integrations import IntegrationAdapter
         integrations_path = store.resolve_path(integrations_path)
+        self._secrets_path = secret_store.resolve_path(secrets_path)
         reader = ProjectReader(integrations_path, secret_store.resolve_path(secrets_path),
                                environments_path or scope.default_environments_path(integrations_path))
         self.integrations = IntegrationAdapter(self.registry, self.project_id, reader)
@@ -329,11 +334,24 @@ class Host:
             raise QCRError("invalid_message", "Agent storage paths are required.")
         if self.delegation is None:
             self.delegation = Delegation(self.registry, self.engine, self.store, self.project_id,
-                                         root, path, self._agent_policies, self.send)
+                                         root, path, self._agent_policies, self.send,
+                                         self.context_dir, self._known_secrets)
         elif (root, path) != (self.delegation.root, self.delegation.agents_path):
             raise QCRError("conflict", "Agent storage cannot change during this host's lifetime.")
         self.delegation.configure()
         return {}
+
+    def _known_secrets(self):
+        """Every value in the secrets store, for a context package to be checked
+        against (ADR-006 D7). Nothing when no store was opened."""
+        if not self._secrets_path:
+            return []
+        from cycle import secrets as secret_store
+        found = []
+        for values in (secret_store.load(self._secrets_path) or {}).values():
+            if isinstance(values, dict):
+                found += [one for one in values.values() if isinstance(one, str)]
+        return found
 
     def _on_agent_answer(self, message):
         """The person approved or denied a delegation that waits (ADR-006 D3)."""

@@ -24,6 +24,7 @@ import os
 import threading
 
 from integrations.agents import adapters, runner, sessions, store
+from qcr import context as packages
 from qcr.contracts import CapabilityDescriptor, ResourceDescriptor, ResourceRef
 from qcr.errors import QCRError
 from qcr.executions import TERMINAL
@@ -50,6 +51,9 @@ DELEGATE_INPUT = {
                                 "items": {"type": "string", "minLength": 1, "maxLength": CRITERION_CHARS}},
         "summary": {"type": "string", "maxLength": SUMMARY_CHARS},
         "mode": {"enum": list(MODES)},
+        "files": {"type": "array", "maxItems": 50,
+                  "items": {"type": "string", "minLength": 1, "maxLength": 1000}},
+        "artifacts": {"type": "array", "maxItems": 20, "items": _EXECUTION},
         "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": MAX_SECONDS}}}
 DELEGATE_OUTPUT = {"type": "object"}
 VERIFY_INPUT = {
@@ -97,11 +101,13 @@ class Delegation:
     """The trusted invoker behind ``agents.<target>.delegate`` and ``agents.tasks.verify``."""
 
     def __init__(self, registry, engine, executions, project_id, sessions_root, agents_path,
-                 policies, notify):
+                 policies, notify, context_dir, known_secrets=lambda: ()):
         self.registry, self.engine, self.store = registry, engine, executions
         self.project_id, self.root, self.agents_path = project_id, sessions_root, agents_path
         self._policies = policies          # actor -> policy, kept by the host
         self._notify = notify
+        self.context_dir = context_dir
+        self._known_secrets = known_secrets
         self._owner = object()
         self._lock = threading.RLock()
         self._pending = {}                 # execution id -> (job, context): asked, not answered
@@ -120,7 +126,7 @@ class Delegation:
             capability = CapabilityDescriptor(
                 "agents.%s.delegate" % connection["id"], ref, 1,
                 "Hand this agent one task in your folder; it runs once and answers. Give goal, "
-                "acceptance_criteria and a summary of what it needs to know. Follow with qavector_wait.",
+                "acceptance_criteria, a summary, files and your runs it needs. Follow with qavector_wait.",
                 DELEGATE_INPUT, DELEGATE_OUTPUT, PERMISSION, risk_level="high", mode="long_running",
                 supports_cancel=True, supports_idempotency=True, timeout_seconds=MAX_SECONDS)
             registrations.append(Registration(ResourceDescriptor(ref, "agents", name, PERMISSION),
@@ -139,8 +145,15 @@ class Delegation:
     def requirements(self, capability, request):
         if self._closed:
             raise QCRError("source_unavailable", "Delegation is closed.")
-        if capability.capability_id.endswith(".delegate") and not request["goal"].strip():
-            raise QCRError("invalid_input", "A task needs a goal.")
+        if capability.capability_id.endswith(".delegate"):
+            if not request["goal"].strip():
+                raise QCRError("invalid_input", "A task needs a goal.")
+            # Before the Engine writes the request down: a secret the agent put in
+            # its task must not land in the journal either (ADR-006 D7).
+            packages.refuse_secrets([("goal", request["goal"]),
+                                     ("acceptance criteria", request.get("acceptance_criteria") or []),
+                                     ("summary", request.get("summary") or ""),
+                                     ("file list", request.get("files") or [])], self._secrets())
         return ()
 
     def timeout(self, capability, request):
@@ -170,7 +183,9 @@ class Delegation:
             if context["others"] == "approve":
                 self._pending[job.execution_id] = (job, context)
         card = {"target": context["target"], "target_name": context["target_name"],
-                "goal": context["goal"], "mode": context["mode"], "session": context["parent"]}
+                "goal": context["goal"], "mode": context["mode"], "session": context["parent"],
+                "context_package": context["package"], "files": len(context["document"]["files"]),
+                "artifacts": len(context["document"]["artifacts"])}
         if context["others"] == "approve":
             if not job.dispatched({"approval": "requested"}) or not job.progress("approval.requested", card):
                 with self._lock:
@@ -244,12 +259,28 @@ class Delegation:
             runner.effective_restrictions({"folder": rule["folder"], "restrictions": rule["restrictions"]})
         except runner.Refused as exc:
             raise QCRError(exc.kind, str(exc)) from None
+        artifacts = [self._own(job, one) for one in dict.fromkeys(job.request.get("artifacts") or [])]
+        document = packages.build(
+            goal=job.request["goal"].strip(), criteria=list(job.request.get("acceptance_criteria") or []),
+            summary=str(job.request.get("summary") or "").strip(),
+            constraints={"mode": mode, "timeout_seconds": job.request.get("timeout_seconds", DEFAULT_SECONDS),
+                         "depth": 1, "qavector_access": False},
+            folder=rule["folder"], files=job.request.get("files") or (), artifacts=artifacts,
+            provenance={"actor": job.actor_id, "session": rule["session"], "connection": rule["connection"],
+                        "execution_id": job.execution_id},
+            known_secrets=self._secrets())
         return {"target": target, "target_name": connection["name"], "provider": connection["kind"],
                 "parent": rule["session"], "parent_name": rule["name"], "folder": rule["folder"],
                 "restrictions": rule["restrictions"], "mode": mode, "others": rule["others"],
-                "goal": job.request["goal"].strip(),
-                "criteria": list(job.request.get("acceptance_criteria") or []),
-                "summary": str(job.request.get("summary") or "").strip()}
+                "goal": document["goal"], "criteria": document["acceptance_criteria"],
+                "package": packages.keep(document, self.context_dir), "document": document}
+
+    def _secrets(self):
+        try:
+            return list(self._known_secrets() or ())
+        except Exception:
+            # Unreadable secrets must not let a package through unchecked.
+            raise QCRError("source_unavailable", "The secrets store could not be read to check the task.")
 
     def _launch(self, job, context):
         stop = threading.Event()
@@ -278,13 +309,19 @@ class Delegation:
                         "target": context["target"], "parent_session": context["parent"]}
             if not job.running(metadata) or stop.is_set():
                 return
+            # Read again from where it was kept: the bytes the person approved.
+            document = packages.load(context["package"], self.context_dir)
+            stale = packages.freshness(document, context["folder"])
+            message = packages.render(document, sender=context["parent_name"], mode=context["mode"],
+                                      changed=stale, closing=CLOSING)
             answer, text = run_turn(job, self.root, self.agents_path, session, context["provider"],
-                                    task_id, metadata, render(context), context["mode"], "", "", stop)
+                                    task_id, metadata, message, context["mode"], "", "", stop)
             turn = answer["turn"]
             output = {"task_id": task_id, "target": context["target"], "provider": context["provider"],
                       "session_id": session["id"],
                       "provider_session_id": answer["session"].get("provider_session", ""),
                       "mode": context["mode"], "turn_state": turn["state"],
+                      "context_package": context["package"], "stale_files": stale,
                       "answer": text[:ANSWER_CHARS], "changes": turn.get("changes") or {},
                       "artifacts": turn_artifacts(self.root, session["id"], turn),
                       "acceptance": [{"criterion": one, "status": "unverified"} for one in context["criteria"]],
@@ -353,15 +390,3 @@ class Delegation:
                 found[output["criterion"]] = output["verdict"]
         return found
 
-
-def render(context):
-    """The child's first and only message: the task, never the delegator's transcript."""
-    lines = ["[QAVector: a task delegated to you by %s]" % context["parent_name"], "",
-             "Goal: " + context["goal"]]
-    if context["criteria"]:
-        lines += ["", "Acceptance criteria:"] + ["%d. %s" % (n, one) for n, one in
-                                                  enumerate(context["criteria"], 1)]
-    if context["summary"]:
-        lines += ["", "What you need to know:", context["summary"]]
-    lines += ["", "Mode: %s." % context["mode"], CLOSING]
-    return "\n".join(lines)

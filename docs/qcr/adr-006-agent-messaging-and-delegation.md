@@ -1,6 +1,6 @@
 # ADR-006: agent messaging and task delegation (Phase 5)
 
-Date: 2026-11-13. Status: **Accepted** (user, 2026-11-13); 5.1 implemented ([report](phase-5-1-report.md)). User decisions 2026-11-13: D2 (parent's mode), D3/D4 (chat mode Auto / Approve / Deny; default and allowed agents on the connection). The rest await approval.
+Date: 2026-11-13. Status: **Accepted** (user, 2026-11-13); 5.1 and 5.2 implemented ([5.1](phase-5-1-report.md), [5.2](phase-5-2-report.md)). User decisions 2026-11-13: D2 (parent's mode), D3/D4 (chat mode Auto / Approve / Deny; default and allowed agents on the connection). The rest await approval.
 Builds on [ADR-005](adr-005-unified-agent-adapters.md). Phase 4's live check is
 deferred by the user's decision; Phase 5 starts without its gate closed.
 
@@ -107,17 +107,36 @@ Retries are never automatic. A failed delegation is reported, and re-asking it
 is the parent's decision. An idempotency key dedups.
 
 **D7. Context Package, not transcript.** This is an immutable JSON document,
-content-addressed in `<project>/.qcr/context/<sha256>.json`. It holds:
-* goal, acceptance criteria and constraints;
+content-addressed in `<project>/.qcr/context/<sha256>.json`
+(`qcr/context.py`). It holds:
+* goal, acceptance criteria and constraints (mode, time, depth 1, no
+  QAVector access);
 * a summary the delegator writes (≤ 20 000 chars);
-* file references: path, git `HEAD` when the folder is a repository, and the
-  file's sha256 at packaging time;
-* artifact references: execution ids and turn directories;
-* provenance: sender actor, session, turn and time, for every part.
+* files: path inside the folder, sha256 and size at packaging time, and the
+  folder's git `HEAD` when it is a repository;
+* artifacts: the delegator's own executions, with capability, state and a
+  2 000-character output excerpt (the child cannot read QCR itself);
+* provenance: actor, session, connection, execution, time.
 
-Values that look like secrets (the existing redaction patterns) are refused,
-not silently cut. The child's first message is the package rendered as text.
-Provider session ids are never passed.
+Limits: at most 50 files and 20 artifacts, 64 KB in all.
+
+**Secrets.** QAVector had no pattern-based detector, only replacement of known
+values (an earlier draft of this ADR said otherwise). So a package is checked
+in two ways:
+* against every value in the secrets store (8 characters or longer);
+* against a few high-confidence credential shapes: private keys, `sk-`,
+  `ghp_`/`github_pat_`, `AKIA`, `xox*-`, JWT.
+
+A match refuses the task with `secret_in_context`, naming the field and never
+the value. The goal, criteria, summary and file list are checked in
+`requirements()`, before the Engine records the request, so a refused secret
+is not in the journal either.
+
+**Freshness.** At launch, which may come after an approval wait, the files are
+hashed again. A changed file is marked "(changed since the task was given)" in
+the child's message and listed in the output's `stale_files`. The child gets
+the package rendered as text, read back from its file and checked against its
+hash. Provider session ids are never passed.
 
 **D8. Result = evidence, not "done".** A task's output holds:
 * the child's final text and its turn state;
