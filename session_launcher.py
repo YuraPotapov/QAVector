@@ -4042,6 +4042,11 @@ def main():
         # stdio and forwards every tool call to the QCR host's agent socket.
         from qcr.mcp_server import main as qcr_mcp_main
         sys.exit(qcr_mcp_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["--codex-turn"]:
+        # One Codex agent turn, started by the agents runner: the message on
+        # stdin, events on stdout, codex app-server behind it.
+        from integrations.agents.codex_turn import main as codex_turn_main
+        sys.exit(codex_turn_main(sys.argv[2:]))
     if sys.argv[1:2] == ["--cycle-step-worker"]:
         # A restricted Jira or Teams step, started by a cycle run inside its
         # sandbox: first, before anything here touches the user's data folder.

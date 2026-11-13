@@ -456,13 +456,29 @@ never reads.
 ## Command line: agents
 
 Codex connections use the same chat UI and CLI commands as Claude Code.
-The adapter discovers models with `app-server model/list` without a prompt and
-runs turns with `codex exec --json`, resuming the exact provider thread on later
-turns. Read uses a read-only sandbox; Full uses workspace-write. Edit without
-shell, Plan first and selected library skills are explicitly unsupported for
-Codex v1. Model/effort can be selected on the connection or conversation;
-blank model uses Codex's default (execution ignores user config). Sign-in stays
-with the Codex CLI. Missing cost is shown as unknown, not zero.
+The adapter discovers models with `app-server model/list` without a prompt.
+Each turn runs a short-lived bridge (`--codex-turn`) over `codex app-server`.
+The turn starts or resumes the exact provider thread, runs, and ends with the
+turn ([ADR-005](qcr/adr-005-unified-agent-adapters.md), Phase 4.1).
+
+* **Read**: read-only sandbox. **Edit**: workspace-write; file changes are
+  accepted, and every command Codex asks about is declined. Codex runs its
+  own safe read-only commands and commands that the user's Codex rules allow
+  without asking. **Full**: workspace-write, nothing asked. Never
+  danger-full-access, never network from the sandbox.
+* **Plan first** uses Codex's plan mode. Codex's questions end the turn and
+  are answered by the next message. Its plan arrives as a plan item. After
+  approval, the next turn runs in the default mode in the same thread.
+* **Selected library skills** are copied per turn and passed as an extra skills
+  root of that one app-server process. Codex's configuration is not written.
+* The user's Codex configuration is loaded, so a blank model means the model
+  that configuration names. MCP servers from it are switched off. Plugins,
+  apps, computer/browser use, image generation, hooks and memories are off.
+  Only the QAVector server of the turn is present.
+
+`QAVECTOR_CODEX_TRANSPORT=exec` switches back to the earlier `codex exec --json`
+transport (Read and Full only, no planning or skills). Sign-in stays with the
+Codex CLI. Missing cost is shown as unknown, not zero.
 
 The existing QAVector access switches also apply to Codex. They grant only the
 selected project's capabilities through the existing per-turn MCP token.

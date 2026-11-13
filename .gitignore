@@ -86,3 +86,9 @@ installers/**/*.exe
 signin-service/node_modules/
 signin-service/.wrangler/
 signin-service/wrangler.toml
+
+# Working plans and test-run snapshots stay on the machine that wrote them: the
+# plans are drafts (docs/QAVector_*TODO*.md), the results record one machine's
+# environment, interpreter and temporary paths.
+docs/*TODO*.md
+docs/qcr/*-results.json

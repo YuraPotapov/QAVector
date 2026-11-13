@@ -27,7 +27,7 @@ Design and limits: [ADR-005](adr-005-unified-agent-adapters.md).
 Final regression run: **525 passed** (all agent integration tests, QCR,
 journal and tracked packaging checks; 49.51 s). GUI: **145 passed** (agent chat,
 connections, model picker and third-provider metadata; 160.05 s). No failures,
-errors or skips. [Machine-readable results](phase-4-results.json).
+errors or skips.
 
 The Codex CLI fixture starts the real MCP server using the adapter's generated
 configuration and connects to the real host/socket: granted reads are visible,

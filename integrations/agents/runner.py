@@ -28,6 +28,7 @@ import runtime_paths
 from integrations.agents import adapters, sessions, skills as skills_mod, store
 from integrations.agents import attachments as attachment_files
 from integrations.agents import changes as changes_mod
+from integrations.agents.contracts import Unsupported
 
 #: How long a stopped CLI is given to end by itself before it is killed.
 STOP_GRACE = 5.0
@@ -250,7 +251,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
         raise Refused("unsupported" if mode in ("read", "edit", "full") else "invalid", "%s has no %r mode; it has %s."
                       % (adapter.NAME, mode, ", ".join(adapter.MODES)))
     planning = bool(session.get("plan") if chosen["plan"] is None else chosen["plan"])
-    if planning and not getattr(adapter, "PLANS", False):
+    if planning and not (features.planning and getattr(adapter, "PLANS", False)):
         raise Refused("unsupported", "%s cannot plan before it works." % adapter.NAME)
     # What the session says, and under it what the connection says; blank at
     # both leaves the choice to the CLI's own configuration.
@@ -309,12 +310,20 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     prompt = attachment_files.prompt(message, session_dir, attached)
     if planning:
         prompt = adapter.plan_prompt(prompt)
+    provider = session["provider_session"] if resume else ("" if features.assigns_session_id else str(uuid.uuid4()))
+    # Built before anything is recorded: a combination the adapter refuses
+    # refuses the turn rather than leaving one that never ran.
+    try:
+        argv = adapter.turn_argv(binary, mode, used_model, used_effort, session=provider,
+                                 resume=resume, skills_dir=staged, attachments_dir=attachments_dir,
+                                 plan=planning, **qavector_args)
+    except Unsupported as exc:
+        raise Refused("unsupported", str(exc)) from None
 
     # From here on something is recorded whatever happens.
     number = len(session.get("turns") or []) + 1
     where = sessions.make_turn_directory(root, session["id"], number)
     _keep(os.path.join(where, "prompt.md"), prompt)
-    provider = session["provider_session"] if resume else ("" if features.assigns_session_id else str(uuid.uuid4()))
     turn = {"n": number, "started": time.time(), "ended": None, "state": sessions.RUNNING,
             "mode": mode, "model": used_model, "effort": used_effort, "skills": names,
             "plan": planning, "cost_usd": None, "cost_scope": features.cost_scope,
@@ -351,12 +360,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             said["attachments"] = attached
         emit(record.add(said))
         before = _snapshot(session_dir, folder)
-        outcome = _run(adapter, adapter.turn_argv(binary, mode, used_model, used_effort,
-                                                  session=provider, resume=resume,
-                                                  skills_dir=staged,
-                                                  attachments_dir=attachments_dir,
-                                                  plan=planning, **qavector_args),
-                       folder, effective, seen, prompt, where, record, tell, stop,
+        outcome = _run(adapter, argv, folder, effective, seen, prompt, where, record, tell, stop,
                        cost_before=sessions.cost_so_far(session) if resume else None)
         turn["changes"] = _changed(session_dir, where, folder, before, written)
         emit(record.add(dict(turn["changes"], type="changes")))

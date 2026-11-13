@@ -22,7 +22,47 @@ own session store. The user requested this implementation on an isolated branch.
   second task state machine. Task ID is durable in execution input; execution,
   session, connection, agent and provider-session IDs remain distinct.
 
-## Codex transport
+## Codex transport (superseded by Phase 4.1, 2026-11-13)
+
+**Decision (user, 2026-11-13): Codex turns run over `codex app-server`.** A
+bridge process (`--codex-turn`, `integrations/agents/codex_turn.py`) is started
+by the runner like any CLI: message on stdin, a JSON line per event on stdout.
+It speaks JSON-RPC for exactly one turn: `initialize` (experimental API) ->
+`config/read` -> `thread/start|resume` -> `turn/start` -> `turn/completed`.
+The one-process-per-turn model is kept. Stdout carries every app-server message
+verbatim plus the bridge's own `{"qavector": thread|decision|end}` lines.
+
+* Modes: Read = read-only; Edit = workspace-write with `untrusted` approvals,
+  file changes accepted, commands declined; Full = workspace-write, `never`.
+  Plan first = read-only + `collaborationMode: plan`; every turn states its
+  collaboration mode, because the mode is sticky in a thread.
+* Questions (`item/tool/requestUserInput`) interrupt the turn, then are answered
+  empty. The record gets `questions`, the session waits for answers. A plan
+  item becomes `plan`. Every other server request is declined or refused;
+  nothing waits for a person during a turn. Approvals go to `user`, never auto-review.
+* Selected skills: copied per turn and passed with `skills/extraRoots/set`. This
+  was checked on 0.167.0-alpha: it lasts only for that process and does not
+  write the configuration.
+* app-server has no `--ignore-user-config`; `-c` merges into the user's tables.
+  So the bridge reads `config/read` for the folder. When the user's MCP servers
+  are present, it restarts with `mcp_servers.<name>.enabled=false` for each.
+  A name that cannot be addressed fails the turn. Plugins, apps,
+  computer/browser use, image generation, hooks and memories are switched off
+  through `features.*`. A blank model now means the model named in the user's
+  Codex configuration; before, it meant Codex's built-in default.
+* Stop: SIGTERM -> `turn/interrupt` -> 3 s grace -> exit 130. The app-server
+  has a session of its own, so the runner's group signal does not kill it
+  mid-write. It still ends with the bridge when its stdin closes.
+* Usage: per-turn tokens = the thread total at the end minus the total before
+  the first request of the turn. Context occupancy = the last request's input
+  against `modelContextWindow`.
+* The runner now builds the command line before it records the turn. An
+  adapter refusing a combination (`Unsupported`) refuses the turn instead of
+  leaving one that never ran.
+* `QAVECTOR_CODEX_TRANSPORT=exec` keeps the earlier transport below as a
+  fallback until the user's live check; it is then to be removed.
+
+### Earlier transport (exec, kept as a fallback)
 
 Use `codex exec --json` with stdin for a turn and `exec resume <thread-id> -`
 for continuation. This matches QAVector's existing one-process-per-turn model.
