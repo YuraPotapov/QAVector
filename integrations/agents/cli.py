@@ -25,10 +25,10 @@ line itself is wrong.
                               {"after": seq, "limit": newest N}
     session-new --from=F      start one: {"connection", "folder", "mode",
                               "model", "effort", "title", "restrictions", "plan",
-                              "skills", "source": {"label", "detail", "ref",
+                              "skills", "others", "source": {"label", "detail", "ref",
                               "record"}} - asks nothing of the agent
     session-set ID --from=F   change its {"title", "mode", "model", "effort",
-                              "restrictions", "skills", "plan"}; "folder" only before
+                              "restrictions", "skills", "plan", "others"}; "folder" only before
                               its first turn
     session-delete ID         remove it and everything kept of it
     send ID --from=F          take one turn: {"message", "mode", "model",
@@ -261,6 +261,12 @@ def _settings(document, adapter, current=None, skills_root=None):
     for key in ("model", "effort"):
         if key in document:
             changed[key] = str(document.get(key) or "").strip()
+    if "others" in document:
+        from integrations.agents import store
+        if document["others"] not in store.OTHERS:
+            found.append("Other agents must be one of %s." % ", ".join(store.OTHERS))
+        else:
+            changed["others"] = document["others"]
     if "plan" in document:
         if not isinstance(document["plan"], bool):
             found.append("Plan is true or false.")
@@ -331,7 +337,7 @@ def _session_new(call):
             call.sessions, connection, document.get("folder") or "", settings["mode"],
             settings.get("model", ""), settings.get("effort", ""), settings.get("title", ""),
             _source(document), settings.get("restrictions"), settings.get("skills"),
-            plan=settings.get("plan", False))
+            plan=settings.get("plan", False), others=settings.get("others"))
     except sessions.SessionError as exc:
         return _refusal(exc.kind, str(exc))
     return {"ok": True, "session": sessions.described(call.sessions, session)}

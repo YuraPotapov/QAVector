@@ -120,6 +120,10 @@ class Host:
         self.tokens = TokenBook()
         self.gateway = None
         self.agent_runtime = None
+        #: Delegation between agent connections (ADR-006), once the GUI says where
+        #: they are; and what each agent actor's conversation is, as the GUI said.
+        self.delegation = None
+        self._agent_policies = {}
         #: Told when a snapshot arrives - what a criteria wait wakes on.
         self._snapshot_seen = threading.Condition(threading.Lock())
         self._owner_reads = {}            # id -> [Event, reply]
@@ -162,6 +166,8 @@ class Host:
             self.gateway.close()
         if self.agent_runtime is not None:
             self.agent_runtime.close()
+        if self.delegation is not None:
+            self.delegation.close()
         self.engine.close()
         self.store.close()
 
@@ -301,7 +307,42 @@ class Host:
         return {"service_status": row["properties"]["status"]} if row else None
 
     def _on_actor(self, message):
+        """An actor and its grants; for an agent turn, also what its conversation
+        is (``agents``: ADR-006 policy) - kept after the turn, for its tasks."""
+        from .adapters.delegation import policy
+        rule = policy(message.get("agents"))
         self._issue(message.get("actor"), message.get("grants"))
+        if rule is not None:
+            self._agent_policies[message.get("actor")] = rule
+        else:
+            self._agent_policies.pop(message.get("actor"), None)
+        return {}
+
+    def _on_agent_connections(self, message):
+        """Trusted owner pipe only: where agent connections and conversations
+        are, so every connection becomes a delegation target (ADR-006). Sent
+        again when the connections change; the paths cannot."""
+        from .adapters.delegation import Delegation
+        root, path = message.get("sessions_root"), message.get("agents_path")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 4000
+               for value in (root, path)):
+            raise QCRError("invalid_message", "Agent storage paths are required.")
+        if self.delegation is None:
+            self.delegation = Delegation(self.registry, self.engine, self.store, self.project_id,
+                                         root, path, self._agent_policies, self.send)
+        elif (root, path) != (self.delegation.root, self.delegation.agents_path):
+            raise QCRError("conflict", "Agent storage cannot change during this host's lifetime.")
+        self.delegation.configure()
+        return {}
+
+    def _on_agent_answer(self, message):
+        """The person approved or denied a delegation that waits (ADR-006 D3)."""
+        approved = message.get("approve")
+        if type(approved) is not bool:
+            raise QCRError("invalid_message", "An answer approves or not.")
+        if self.delegation is None or not self.delegation.answer(
+                message.get("execution_id"), approved, str(message.get("by") or "")):
+            raise QCRError("not_found", "No delegation waits for that answer.")
         return {}
 
     def _on_revoke(self, message):

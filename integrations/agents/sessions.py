@@ -133,7 +133,7 @@ def title_from(message):
 
 
 def create(root, connection, folder, mode, model="", effort="", title="",
-           source=None, restrictions=None, skills=None, plan=False):
+           source=None, restrictions=None, skills=None, plan=False, others=None):
     """Start a conversation. Returns the session; nothing is asked of anybody.
 
     ``connection`` is the connection as its store holds it: its id is what the
@@ -171,10 +171,23 @@ def create(root, connection, folder, mode, model="", effort="", title="",
         # has it yet: a first turn names it, every later one continues it.
         "provider_session": "", "provider_started": False,
         "source": normal_source(source),
+        # What it may do with other agents (ADR-006 D3): its connection's
+        # default unless said; a conversation from before then is "deny".
+        "others": others_of({"others": others}, connection),
         "created": now, "updated": now, "state": "", "cost_usd": 0.0, "turns": [],
     }
     save(root, session)
     return session
+
+
+def others_of(session, connection=None):
+    """A conversation's mode for other agents: its own, else its connection's
+    default, else "deny" - what every conversation was before ADR-006."""
+    from integrations.agents import store
+    for value in ((session or {}).get("others"), (connection or {}).get("others_default")):
+        if value in store.OTHERS:
+            return value
+    return store.OTHERS_BEFORE
 
 
 def normal_source(source):

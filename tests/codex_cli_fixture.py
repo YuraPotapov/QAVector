@@ -11,6 +11,8 @@ message says decides the turn:
     CMD     a command approval request; the answer decides the command row
     PATCH   a file change approval request; accepted -> file changed
     MCP_LIST  calls the QAVector MCP server from its -c argument and says what it listed
+    MCP_DELEGATE  through that server, delegates "Say hello" to the Claude connection,
+              waits for it and says the delegated agent's answer
 
 ``FAKE_CODEX_LOG`` gets one line per start (argv) and per request received.
 ``FAKE_CODEX_MCP`` (JSON) is the mcp_servers table config/read reports.
@@ -83,6 +85,36 @@ if args[0] == "app-server":
                               capture_output=True, text=True, timeout=10)
         result = json.loads(done.stdout.splitlines()[1])["result"]
         return None if result.get("isError") else result["content"][0]["text"]
+    def mcp_delegate():
+        import subprocess
+        spec = next(arg for arg in args if arg.startswith("mcp_servers.qavector="))
+        prefix = "mcp_servers.qavector={command="
+        command, end = json.JSONDecoder().raw_decode(spec[len(prefix):])
+        rest = spec[len(prefix) + end:]
+        arguments, _end = json.JSONDecoder().raw_decode(rest[len(",args="):])
+        server = subprocess.Popen([command, *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        def call(ident, method, params):
+            server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}) + "\n")
+            server.stdin.flush()
+            return json.loads(server.stdout.readline())
+        def tool(ident, name, **arguments):
+            reply = call(ident, "tools/call", {"name": name, "arguments": arguments})
+            return json.loads(reply["result"]["content"][0]["text"])
+        call(1, "initialize", {})
+        started = tool(2, "qavector_invoke", capability="agents.claude.delegate",
+                       input={"goal": "Say hello", "acceptance_criteria": ["it says hello"]})
+        if not started.get("ok"):
+            server.stdin.close()
+            return None
+        execution = started["execution"]
+        for ident in range(3, 40):
+            if execution["state"] in ("succeeded", "failed", "canceled", "timed_out"):
+                break
+            execution = tool(ident, "qavector_wait", execution_id=execution["execution_id"],
+                             timeout_seconds=1)["execution"]
+        server.stdin.close()
+        server.wait(timeout=10)
+        return "delegated %s: %s" % (execution["state"], (execution.get("output") or {}).get("answer", ""))
     turns = 0
     while True:
         message = read()
@@ -149,6 +181,12 @@ if args[0] == "app-server":
                         handle.write("print('hi')\n")
                 say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn, "item": dict(
                     item, status="completed" if applied else "declined")}})
+            if "MCP_DELEGATE" in text:
+                said = mcp_delegate()
+                if said is None:
+                    finish(turn, "failed", {"message": "delegation refused"})
+                    continue
+                text = said
             if "MCP_LIST" in text:
                 listed = mcp_list()
                 if listed is None:

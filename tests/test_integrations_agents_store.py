@@ -51,7 +51,26 @@ def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
                      "binary": "", "model": "sonnet", "effort": "high",
                      # QAVector through QCR: nothing until somebody turns it on (ADR-003 D6).
                      "qavector_access": {"services": False, "scenarios": False, "cycles": False,
-                                         "approvals": False, "jira": False}}
+                                         "approvals": False, "jira": False},
+                     # Other agents: a new connection asks the person each time (ADR-006 D3).
+                     "others_default": "approve", "allowed_agents": []}
+
+
+def test_other_agents_defaults_new_old_and_never_itself(path):
+    first, _ = store.upsert({"name": "Claude", "kind": "claude"}, path)
+    second, _ = store.upsert({"name": "Codex", "kind": "codex"}, path)
+    assert second["others_default"] == "approve" and second["allowed_agents"] == ["claude"]
+    # One added later is not allowed anywhere on its own.
+    assert store.get("claude", path)["allowed_agents"] == []
+    # A connection from before ADR-006: nothing changes for it.
+    assert store.normalize({"id": "old", "name": "Old"})["others_default"] == "deny"
+    assert store.normalize({"id": "old", "name": "Old"})["allowed_agents"] == []
+    mine, _ = store.upsert(dict(second, allowed_agents=["codex", "claude", "claude", 7]), path)
+    assert mine["allowed_agents"] == ["claude"]
+    chosen, _ = store.upsert({"name": "Quiet", "kind": "codex", "others_default": "deny",
+                              "allowed_agents": []}, path)
+    assert chosen["others_default"] == "deny" and chosen["allowed_agents"] == []
+    assert store.normalize({"others_default": "sometimes"})["others_default"] == "deny"
 
 
 def test_it_lives_beside_the_users_data_whichever_project_is_open(tmp_path, monkeypatch):

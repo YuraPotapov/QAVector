@@ -27,6 +27,16 @@ VERSION = 1
 #: each off until somebody turns it on - approvals above all.
 QAVECTOR_ACCESS = ("services", "scenarios", "cycles", "approvals", "jira")
 
+#: What a conversation may do with other agents (ADR-006 D3): delegate and
+#: message them without asking, only once the person approves, or not at all.
+OTHERS = ("auto", "approve", "deny")
+
+#: What a connection made before ADR-006 says: nothing changes for it.
+OTHERS_BEFORE = "deny"
+
+#: What a new connection starts with: the person approves each one.
+OTHERS_NEW = "approve"
+
 #: The fields that say which program runs; changing one makes a past check moot.
 PROGRAM = ("kind", "binary")
 
@@ -65,10 +75,23 @@ def normalize(entry):
         "qavector_access": {key: (entry.get("qavector_access") or {}).get(key) is True
                             for key in QAVECTOR_ACCESS}
         if isinstance(entry.get("qavector_access"), dict) else {key: False for key in QAVECTOR_ACCESS},
+        # What its conversations start with for other agents, and which other
+        # connections they may reach (ADR-006 D3). Never itself.
+        "others_default": entry.get("others_default") if entry.get("others_default") in OTHERS
+        else OTHERS_BEFORE,
+        "allowed_agents": _allowed(entry.get("allowed_agents"), str(entry.get("id") or "").strip()),
     }
     # The known fields first and in one order, whatever order they came in: the
     # file is plain JSON a person may open.
     return dict(known, **{key: value for key, value in entry.items() if key not in known})
+
+
+def _allowed(value, own_id=""):
+    """The other connections' ids, once each and in order; never ``own_id``."""
+    if not isinstance(value, list):
+        return []
+    return [one for one in dict.fromkeys(str(item).strip() for item in value if isinstance(item, str))
+            if one and one != own_id]
 
 
 def problems(entry):
@@ -131,9 +154,17 @@ def upsert(entry, path=None):
     id replaces the connection of that id and keeps it - renaming changes the
     name, never what its users call it.
     """
+    raw = dict(entry or {})
     entry = normalize(entry)
     connections = load(path)
     taken = {one["id"] for one in connections}
+    if not entry["id"]:
+        # A new connection: the person approves each delegation and message,
+        # to every connection already here - unless the form said otherwise.
+        if raw.get("others_default") not in OTHERS:
+            entry["others_default"] = OTHERS_NEW
+        if not isinstance(raw.get("allowed_agents"), list):
+            entry["allowed_agents"] = [one["id"] for one in connections]
     if entry["id"] and entry["id"] not in taken:
         return entry, ["No connection %r to change." % entry["id"]]
     found = problems(entry)
@@ -144,6 +175,7 @@ def upsert(entry, path=None):
         return entry, found
     if not entry["id"]:
         entry["id"] = shared.slug(entry["name"], taken)
+        entry["allowed_agents"] = _allowed(entry["allowed_agents"], entry["id"])
         entry.pop("last_check", None)
         connections.append(entry)
     else:

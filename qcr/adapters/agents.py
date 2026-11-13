@@ -184,21 +184,13 @@ class AgentRuntime:
                         "agent_id": profile.id, "connection_id": profile.connection_id}
             if not job.dispatched(metadata) or not job.running(metadata) or stop.is_set():
                 return
-            def emit(event):
-                normalized = normalized_event(event, provider, session["id"], task_id)
-                job.progress(normalized["type"], normalized)
-                if event["type"] in ("completed", "failed") and "tokens" in event:
-                    job.progress("usage.reported", dict(metadata, tokens=event["tokens"],
-                                 cost_usd=event.get("cost_usd")))
-            answer = runner.send(self.root, session["id"], job.request["message"],
-                        agents_path=self.agents_path, mode=profile.mode, model=profile.model,
-                        effort=profile.effort, plan=False, skills=[], emit=emit, stop=stop)
+            answer, _text = run_turn(job, self.root, self.agents_path, session, provider, task_id,
+                                     metadata, job.request["message"], profile.mode,
+                                     profile.model, profile.effort, stop)
             turn = answer["turn"]
-            where = sessions.turn_directory(self.root, session["id"], turn["n"])
             output = {"task_id": task_id, "session_id": session["id"], "provider": provider,
                       "provider_session_id": answer["session"].get("provider_session", ""),
-                      "turn": turn, "artifacts": [os.path.join(where, name) for name in
-                          ("prompt.md", "stdout.log", "stderr.log") if os.path.isfile(os.path.join(where, name))]}
+                      "turn": turn, "artifacts": turn_artifacts(self.root, session["id"], turn)}
             if turn["state"] == sessions.COMPLETED:
                 job.succeed(output)
             else:
@@ -225,3 +217,31 @@ class AgentRuntime:
             stop.set()
         for _stop, thread in jobs:
             thread.join(runner.STOP_GRACE + 2)
+
+
+def run_turn(job, root, agents_path, session, provider, task_id, metadata, message, mode,
+             model, effort, stop):
+    """One turn of ``session`` for ``job``: its events become the job's progress
+    (normalized, plus ``usage.reported``). Returns ``(runner answer, the turn's
+    final text)``. No skills, no planning and no QAVector access: a task is
+    given exactly its folder and mode."""
+    said = {"text": ""}
+
+    def emit(event):
+        normalized = normalized_event(event, provider, session["id"], task_id)
+        job.progress(normalized["type"], normalized)
+        if event["type"] in ("completed", "failed"):
+            said["text"] = str(event.get("text") or "")
+            if "tokens" in event:
+                job.progress("usage.reported", dict(metadata, tokens=event["tokens"],
+                             cost_usd=event.get("cost_usd")))
+    answer = runner.send(root, session["id"], message, agents_path=agents_path, mode=mode,
+                         model=model, effort=effort, plan=False, skills=[], emit=emit, stop=stop)
+    return answer, said["text"]
+
+
+def turn_artifacts(root, session_id, turn):
+    """The files a turn left for diagnosis: its prompt and the program's streams."""
+    where = sessions.turn_directory(root, session_id, turn["n"])
+    return [os.path.join(where, name) for name in ("prompt.md", "stdout.log", "stderr.log")
+            if os.path.isfile(os.path.join(where, name))]

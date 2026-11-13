@@ -34,12 +34,14 @@ _ID = {"type": "string", "minLength": 1, "maxLength": 256}
 TOOLS = [
     {"name": "qavector_list_capabilities",
      "description": "List the QAVector capabilities you may use in this project: services, scenarios, cycles, "
-                    "integrations. Each names what it acts on (resource.name). The set changes - list again "
-                    "in each new turn rather than relying on an earlier list. A service has reads beside its "
-                    "actions: status, criteria (wait on readiness) and output (its log lines).",
+                    "integrations, agents. Each names what it acts on (resource.name). The set changes - list "
+                    "again in each new turn rather than relying on an earlier list. A service has reads beside "
+                    "its actions: status, criteria (wait on readiness) and output (its log lines). agents: hand "
+                    "another agent a task (agents.<id>.delegate; it may wait for the person's approval) and "
+                    "record whether its criteria passed (agents.tasks.verify).",
      "inputSchema": {"type": "object", "additionalProperties": False,
                      "properties": {"namespace": {"type": "string", "description": "services, scenarios, cycles, "
-                                                                                   "integrations"}}}},
+                                                                                   "integrations, agents"}}}},
     {"name": "qavector_describe",
      "description": "One capability in full: what it does, its input and output JSON Schema, its risk.",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["capability"],
