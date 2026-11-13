@@ -24,7 +24,7 @@ import tempfile
 import time
 
 import runtime_paths
-from integrations.agents import codex_turn
+from integrations.agents import codex_turn, locate
 from integrations.agents.contracts import ProviderCapabilities, Unsupported
 
 KIND, NAME, DEFAULT_BINARY = "codex", "Codex", "codex"
@@ -66,12 +66,28 @@ def capabilities():
                                 assigns_session_id=True)
 
 
+#: Where Codex's installers put it, after PATH (see :mod:`integrations.agents.locate`).
+#: The ChatGPT desktop app carries a Codex CLI of its own; the Linux path is
+#: the one its package installs. The macOS app paths are not yet verified on a
+#: real machine.
+PLACES = ((("the ChatGPT app", "/usr/lib/chatgpt/resources/codex"),
+           ("the ChatGPT app", "/opt/ChatGPT/resources/codex"),
+           ("the ChatGPT app", "/Applications/ChatGPT.app/Contents/Resources/codex"),
+           ("the Codex app", "/Applications/Codex.app/Contents/Resources/codex"))
+          if os.name != "nt" else ()) + locate.node_places("codex") + locate.common_places("codex")
+
+#: What a person who has no Codex is told to do.
+INSTALL_HINT = ("Install the ChatGPT desktop app, or the Codex CLI "
+                "(npm install -g @openai/codex), then check again.")
+
+
+def find(binary=None):
+    """``(path, where)``: the program a connection uses, and where it was found."""
+    return locate.find(DEFAULT_BINARY, PLACES, binary)
+
+
 def resolve(binary=None):
-    name = (binary or "").strip() or DEFAULT_BINARY
-    if os.path.dirname(os.path.expanduser(name)):
-        path = os.path.abspath(os.path.expanduser(name))
-        return path if os.path.isfile(path) and os.access(path, os.X_OK) else ""
-    return shutil.which(name) or ""
+    return find(binary)[0]
 
 
 def status(binary=None, timeout=STATUS_TIMEOUT, run=None):

@@ -6,6 +6,8 @@ An adapter is a module with:
     DEFAULT_BINARY        the name looked up on PATH when none is given
     EFFORTS               the effort levels the CLI knows, lowest first
     resolve(binary)       the command to run, or "" when it cannot be found
+    find(binary)          (path, where) - where: given, PATH or an install place
+    INSTALL_HINT          what to tell somebody who does not have the CLI
     status(binary, ...)   who the CLI is signed in as, as plain data
     describe(status)      one line for a status row
     login_argv(binary)    what to run to sign in
@@ -44,13 +46,26 @@ def get(kind):
 def describe():
     """Every kind, and where its CLI is on this machine.
 
-    A look along PATH and nothing more: no CLI is started, so this is cheap
-    enough for a form to ask each time it opens.
+    A look along PATH and where the CLI's installers put it, and nothing more:
+    no CLI is started, so this is cheap enough for a form to ask each time it
+    opens.
     """
-    return [{"kind": one.KIND, "name": one.NAME, "default_binary": one.DEFAULT_BINARY,
-             "found": one.resolve(""), "efforts": list(one.EFFORTS),
-             "modes": list(one.MODES), "plans": bool(getattr(one, "PLANS", False)),
-             "mode_description": one.MODE_DESCRIPTION,
-             "model_default_label": one.MODEL_DEFAULT_LABEL,
-             "capabilities": one.capabilities().document()}
+    return [dict(_found(one), kind=one.KIND, name=one.NAME, default_binary=one.DEFAULT_BINARY,
+                 install_hint=getattr(one, "INSTALL_HINT", ""), **_rest(one))
             for one in _ADAPTERS.values()]
+
+
+def _found(adapter):
+    """``found`` (the program blank would use, or "") and ``found_where`` -
+    PATH, or the place it was found in."""
+    finder = getattr(adapter, "find", None)
+    path, where = finder("") if finder else (adapter.resolve(""), "PATH")
+    return {"found": path, "found_where": where if path else ""}
+
+
+def _rest(one):
+    return dict(efforts=list(one.EFFORTS),
+                modes=list(one.MODES), plans=bool(getattr(one, "PLANS", False)),
+                mode_description=one.MODE_DESCRIPTION,
+                model_default_label=one.MODEL_DEFAULT_LABEL,
+                capabilities=one.capabilities().document())

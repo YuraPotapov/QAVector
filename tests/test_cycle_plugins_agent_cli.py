@@ -48,6 +48,8 @@ SIGNED_IN = {"loggedIn": True, "authMethod": "claude.ai",
 def test_a_bare_name_is_looked_up_on_the_path(tmp_path, monkeypatch):
     path = answering(tmp_path, SIGNED_IN)
     monkeypatch.setenv("PATH", str(tmp_path))
+    # Nor where its installers put it: a home of the test's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert agent_cli.resolve("claude") == path
     assert agent_cli.resolve("") == path          # the default name
 
@@ -61,6 +63,8 @@ def test_a_name_that_is_nowhere_resolves_to_nothing(monkeypatch, tmp_path):
     """Returning "" rather than raising keeps "not installed" a thing the
     caller reports, which is the useful answer."""
     monkeypatch.setenv("PATH", str(tmp_path))
+    # Nor where its installers put it: a home of the test's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert agent_cli.resolve("claude") == ""
     assert agent_cli.resolve("/no/such/binary") == ""
 
@@ -98,6 +102,8 @@ def test_a_cli_that_is_not_signed_in_says_what_to_run(tmp_path):
 
 def test_a_cli_that_is_not_installed_says_so(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
+    # Nor where its installers put it: a home of the test's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     status = agent_cli.auth_status()
 
     assert not status["installed"] and not status["logged_in"]
@@ -160,6 +166,8 @@ def test_a_cli_signed_in_with_no_email_falls_back_to_the_organisation(tmp_path):
 
 def test_what_the_rows_say_when_it_is_not_there(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
+    # Nor where its installers put it: a home of the test's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert agent_cli.describe(agent_cli.auth_status()) == (
         "Claude Code is not installed")
 

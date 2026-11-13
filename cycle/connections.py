@@ -243,7 +243,7 @@ def expand(plugin, settings, connections):
 
 def _expand_agent(metadata, settings, name, connections):
     """An agent step's settings with its connection's program in place of its
-    name: ``claude`` (blank finds it on PATH), the CLI backend, and the
+    name: ``claude`` (blank is found as :func:`_program` says), the CLI backend, and the
     connection's model and effort wherever the step left those blank - the step
     may still ask for another."""
     connection = (connections or {}).get(_agent_key(name))
@@ -253,13 +253,28 @@ def _expand_agent(metadata, settings, name, connections):
     accepted = {one.key for one in metadata.inputs}
     expanded = {key: value for key, value in settings.items() if key != "connection"}
     if "claude" in accepted:
-        expanded["claude"] = connection.get("binary") or ""
+        expanded["claude"] = _program(connection)
     if "framework" in accepted:
         expanded["framework"] = "claude_cli"
     for key in ("model", "effort"):
         if key in accepted and expanded.get(key) in (None, "") and connection.get(key):
             expanded[key] = connection[key]
     return expanded
+
+
+def _program(connection):
+    """The program an agent connection runs: the path it names, or - blank -
+    wherever its CLI is found now, PATH first and then where its installers put
+    it (the same lookup as the Agents integration's). Still blank when it is
+    nowhere, so the step's own check says it cannot be found."""
+    binary = connection.get("binary") or ""
+    if binary:
+        return binary
+    from integrations.agents import adapters
+    try:
+        return adapters.get(connection.get("kind") or "claude").resolve("")
+    except adapters.UnknownKind:
+        return ""
 
 
 #: The file in a step's folder that says which conversation its agent calls

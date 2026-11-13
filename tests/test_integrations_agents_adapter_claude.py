@@ -64,6 +64,8 @@ def _assistant(*blocks):
 def test_the_kinds_are_listed_with_where_each_cli_is(tmp_path, monkeypatch):
     path = _cli(tmp_path, "pass")
     monkeypatch.setenv("PATH", str(tmp_path))
+    # Nor where its installers put it: a home of the test's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (found,) = [one for one in adapters.describe() if one["kind"] == "claude"]
     assert found["name"] == "Claude Code"
     assert found["found"] == path
@@ -75,6 +77,8 @@ def test_listing_the_kinds_starts_nothing(tmp_path, monkeypatch):
     marker = tmp_path / "ran"
     _cli(tmp_path, "open(%r, 'w').close()" % str(marker))
     monkeypatch.setenv("PATH", str(tmp_path))
+    # Nor where its installers put it: a home of the test's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     adapters.describe()
     assert not marker.exists()
 

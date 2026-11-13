@@ -383,7 +383,7 @@ def test_a_connection_s_row_says_what_runs_and_how_its_last_check_went(make):
             "at": "2026-11-09T09:00:00+0200", "ok": False, "kind": "not_installed",
             "error": "Claude Code is not installed."})]))
     table = page.agents.connections_tab.table
-    assert _texts(table, 0) == ["Claude", "Claude Code", "Found on PATH", "CLI default",
+    assert _texts(table, 0) == ["Claude", "Claude Code", "Found automatically", "CLI default",
                                 "Not checked"]
     assert _texts(table, 1) == ["Reviews", "Claude Code", "/opt/claude/bin/claude",
                                 "opus · high effort",
@@ -525,8 +525,7 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         assert dialog.name.text() == "Claude Code"
         assert dialog.kind.currentData() == "claude" and dialog.kind.isEnabled()
         assert dialog.binary.text() == ""
-        assert dialog.found.text() == ("Blank uses /home/someone/.local/bin/claude, where "
-                                       "Claude Code is on PATH now.")
+        assert dialog.found.text() == "Blank uses /home/someone/.local/bin/claude, found on PATH."
         assert [dialog.effort.itemData(index) for index in range(dialog.effort.count())] == [
             "", "low", "medium", "high", "xhigh", "max"]
         dialog.save.click()
@@ -542,10 +541,15 @@ def test_a_first_connection_needs_no_thought(make, dispose):
 
 def test_a_program_that_is_nowhere_is_said_before_anything_is_saved(make, dispose):
     page = make(FakeCore())
-    dialog = _dialog(page, kinds=[dict(KINDS[0], found="")])
+    dialog = _dialog(page, kinds=[dict(KINDS[0], found="", install_hint="Install it with npm.")])
     try:
-        assert dialog.found.text() == ("Claude Code was not found on PATH. Install it, or "
-                                       "give the path of its program.")
+        assert dialog.found.text() == ("Claude Code is not installed on this computer. Install "
+                                       "it with npm. Or give the path of its program.")
+        # Installed since, outside PATH: the dialog says where it was found.
+        # The same dialog: one more would only add a window to the process.
+        dialog.set_kinds([dict(KINDS[0], found="/opt/app/claude", found_where="the app")])
+        assert dialog.found.text() == "Blank uses /opt/app/claude, found in the app."
+        assert dialog.binary.placeholderText() == "claude, found automatically"
     finally:
         dispose(dialog)
 
@@ -577,8 +581,7 @@ def test_adding_through_the_tab_asks_where_the_programs_are_once(make, monkeypat
     before = core.asked().count("kinds")            # the chat's, for effort levels
     page.agents.connections_tab.add_button.click()
     assert core.asked().count("kinds") == before + 1 and "test" not in core.asked()
-    assert seen == [("Blank uses /home/someone/.local/bin/claude, where Claude Code is on "
-                     "PATH now.", "Claude Code")]
+    assert seen == [("Blank uses /home/someone/.local/bin/claude, found on PATH.", "Claude Code")]
 
 
 def test_a_name_already_taken_or_missing_is_said_without_asking_the_core(make, dispose):
@@ -822,7 +825,7 @@ def test_search_offers_what_is_loaded_and_never_asks_anything_more(make):
     hits = page.search_rows()
     assert core.calls == asked, "search reads only what the page has loaded"
     titles = {hit.title: hit for hit in hits if hit.target[0] == "agents"}
-    assert titles["Claude"].detail == "Agent connection · Found on PATH"
+    assert titles["Claude"].detail == "Agent connection · Found automatically"
     assert titles["Flaky login test"].detail == ("Conversation · Claude · "
                                                  "/home/someone/src/shop")
     assert titles["odoo-review"].detail == "Skill · Review Odoo modules."

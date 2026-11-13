@@ -376,7 +376,7 @@ talk to - Claude Code for now - once for every project. A connection says:
 |---|---|
 | Name | What the page shows. Renaming keeps its id, which is what cycles name. |
 | Agent | Which program it is. Fixed once made: a conversation held with one program cannot be carried on by another. |
-| Program | The program's path. Blank finds it on PATH each time it is used; the dialog says where it is now. |
+| Program | The program's path. Blank finds it each time it is used: on PATH, then where its installers put it (Claude Code's own installer, the ChatGPT app for Codex, npm, nvm, Homebrew, `~/.local/bin`). The dialog says where it is now, or how to install it. A path given here is used as it is. |
 | Model, Effort | What it is asked for unless a message or a step says otherwise. Blank is the program's own choice. |
 
 The program signs in by itself and keeps its own credentials: nothing typed
@@ -492,7 +492,7 @@ qavector-core --integrations agents COMMAND [--agents-file=PATH]
 
 | Command | What it does |
 |---|---|
-| `kinds` | The agent programs this build knows, and where each is on PATH. Starts nothing. |
+| `kinds` | The agent programs this build knows, where each is found (`found`, `found_where`) and how to install it (`install_hint`). Starts nothing. |
 | `list`, `save --from=F`, `delete ID` | The connections. |
 | `test ID` or `test --from=F` | Asks the program who is signed in; a saved one remembers the answer. |
 | `sign-in ID` | The command that signs the program in, for the caller to run. |

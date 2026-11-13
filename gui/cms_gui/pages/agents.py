@@ -297,7 +297,7 @@ QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
 class ConnectionDialog(QDialog):
     """Add an agent connection, or change one.
 
-    Everything in it is optional but the name: a blank program is found on PATH
+    Everything in it is optional but the name: a blank program is found automatically
     each time it is used, and a blank model or effort is the CLI's own choice.
     **Check** asks the program who is signed in before anything is saved.
     """
@@ -430,15 +430,17 @@ class ConnectionDialog(QDialog):
             self.effort.addItem(level, level)
         self.effort.setCurrentIndex(max(0, self.effort.findData(wanted)))
         default = kind.get("default_binary") or kind["kind"]
-        self.binary.setPlaceholderText("%s, found on PATH" % default)
+        self.binary.setPlaceholderText("%s, found automatically" % default)
+        where = kind.get("found_where") or "PATH"
         if "found" not in kind:
             self.found.setText("Blank finds %s on PATH each time it is used." % default)
         elif kind["found"]:
-            self.found.setText("Blank uses %s, where %s is on PATH now."
-                               % (kind["found"], name))
+            self.found.setText("Blank uses %s, found %s." % (
+                kind["found"], "on PATH" if where == "PATH" else "in %s" % where))
         else:
-            self.found.setText("%s was not found on PATH. Install it, or give the "
-                               "path of its program." % name)
+            self.found.setText("%s is not installed on this computer. %s Or give the path "
+                               "of its program." % (name, kind.get("install_hint")
+                                                    or "Install it, then check again."))
         if not self.connection and not self.name.text().strip() \
                 and name.casefold() not in self._taken:
             # A first connection needs no thought: it is called what it is.
@@ -896,7 +898,7 @@ class AgentsView(QWidget):
         self.connections_changed.emit()
 
     def load_kinds(self, done):
-        """Which agents the core knows, and where each program is on PATH."""
+        """Which agents the core knows, and where each program is found."""
         def answered(payload):
             done(payload.get("kinds") or [] if payload.get("ok") else [])
 

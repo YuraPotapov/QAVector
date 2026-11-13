@@ -198,7 +198,7 @@ def import_entries(entries, mode="merge", path=None):
         binary = entry.get("binary") or ""
         if binary and not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
             entry["binary"] = ""
-            note = "; its program %s is not on this computer, so it is found on PATH" % binary
+            note = "; its program %s is not on this computer, so it is found automatically" % binary
         found = problems(entry)
         if found:
             said.append("Agent connection %s was not imported: %s"

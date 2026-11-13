@@ -177,7 +177,7 @@ class ExportDialog(QDialog):
             picked = set(chosen.get("agent_connections") or ())
             for one in self.agent_connections:
                 self._item(agents, "agent_connection", one["id"], one.get("name") or one["id"],
-                           one.get("binary") or "Found on PATH", one["id"] in picked)
+                           one.get("binary") or "Found automatically", one["id"] in picked)
         if self.skills:
             library = self._group("Skills")
             picked = set(chosen.get("agent_skills") or ())

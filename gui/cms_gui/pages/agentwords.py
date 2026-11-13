@@ -24,8 +24,8 @@ def kind_name(kind, kinds=()):
 
 
 def program_text(connection):
-    """Where the CLI is: the path somebody gave, or that PATH decides."""
-    return connection.get("binary") or "Found on PATH"
+    """Where the CLI is: the path somebody gave, or found when it is used."""
+    return connection.get("binary") or "Found automatically"
 
 
 def model_text(connection):

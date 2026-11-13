@@ -146,7 +146,7 @@ def test_agent_connections_and_skills_can_be_ticked_and_are_counted(qapp, dispos
                   for i in range(dialog.tree.topLevelItemCount())]
         assert groups[-2:] == ["Agent connections", "Skills"]
         items = _items(dialog)
-        assert items["claude-code"].text(1) == "Found on PATH"
+        assert items["claude-code"].text(1) == "Found automatically"
         assert items["odoo-review"].text(1) == "Review Odoo."
         items["claude-code"].setCheckState(0, Qt.Checked)
         items["odoo-review"].setCheckState(0, Qt.Checked)

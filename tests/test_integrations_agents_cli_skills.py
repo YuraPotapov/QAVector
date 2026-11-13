@@ -283,13 +283,13 @@ def test_what_is_here_already_is_left_alone_or_added_beside_it(agents):
         "Claude", "Claude (copy)"]
 
 
-def test_a_program_that_is_not_on_this_computer_is_found_on_path_instead(agents):
+def test_a_program_that_is_not_on_this_computer_is_found_automatically_instead(agents):
     code, answer = agents("import", document={"agent_connections": [
         {"id": "laptop", "name": "Laptop", "kind": "claude",
          "binary": "/no/such/place/claude"}]})
     assert answer["said"] == ["Agent connection Laptop added; its program "
                               "/no/such/place/claude is not on this computer, so it is "
-                              "found on PATH."]
+                              "found automatically."]
     (one,) = [c for c in agents("list")[1]["connections"] if c["id"] == "laptop"]
     assert one["binary"] == ""
 

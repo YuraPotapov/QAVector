@@ -45,6 +45,7 @@ import subprocess
 import tempfile
 
 import runtime_paths
+from integrations.agents import locate
 
 #: What a connection of this kind records, and what a person reads.
 KIND = "claude"
@@ -74,18 +75,30 @@ def capabilities():
                                 planning=True, skills=True, cost_scope="session")
 
 
-def resolve(binary=None):
-    """The command to run. Returns "" when it cannot be found.
+#: Where Claude Code's installers put it, after PATH (see
+#: :mod:`integrations.agents.locate`): its own installer, then npm and the rest.
+PLACES = ((("Claude Code's installer", "~/.claude/local/claude"),)
+          + locate.node_places("claude") + locate.common_places("claude"))
 
-    A bare name is looked up on PATH; anything with a separator in it is taken
-    as a path and checked. Returning "" rather than raising keeps "it is not
-    installed" a thing the caller reports, which is the useful answer.
+#: What a person who has no Claude Code is told to do.
+INSTALL_HINT = ("Install Claude Code with its installer or with npm "
+                "(npm install -g @anthropic-ai/claude-code), then check again.")
+
+
+def find(binary=None):
+    """``(path, where)``: the program a connection uses, and where it was found.
+
+    A program a connection names is used as it is - a path is checked, a bare
+    name is looked up on PATH. Blank looks on PATH and then where Claude Code's
+    installers put it. ``("", "")`` when it cannot be found: "it is not
+    installed" is a thing the caller reports, which is the useful answer.
     """
-    name = (binary or "").strip() or DEFAULT_BINARY
-    if os.path.dirname(os.path.expanduser(name)):
-        path = os.path.abspath(os.path.expanduser(name))
-        return path if os.path.isfile(path) and os.access(path, os.X_OK) else ""
-    return shutil.which(name) or ""
+    return locate.find(DEFAULT_BINARY, PLACES, binary)
+
+
+def resolve(binary=None):
+    """The command to run. Returns "" when it cannot be found (see :func:`find`)."""
+    return find(binary)[0]
 
 
 def status(binary=None, timeout=STATUS_TIMEOUT, run=None):

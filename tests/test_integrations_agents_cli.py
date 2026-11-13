@@ -65,12 +65,14 @@ def test_kinds_says_where_claude_is_without_starting_it(agents, tmp_path, monkey
     marker = tmp_path / "ran"
     path = _cli(tmp_path, "open(%r, 'w').close()" % str(marker))
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     code, answer = agents("kinds")
     assert code == 0
     from integrations.agents.adapters import claude, codex
     assert [one["kind"] for one in answer["kinds"]] == ["claude", "codex"]
     assert answer["kinds"][0] == {"kind": "claude", "name": "Claude Code",
-                                "default_binary": "claude", "found": path,
+                                "default_binary": "claude", "found": path, "found_where": "PATH",
+                                "install_hint": claude.INSTALL_HINT,
                                 "efforts": ["low", "medium", "high", "xhigh", "max"],
                                 "modes": ["read", "edit", "full"], "plans": True,
                                 "mode_description": claude.MODE_DESCRIPTION,
@@ -82,7 +84,9 @@ def test_kinds_says_where_claude_is_without_starting_it(agents, tmp_path, monkey
 
 def test_kinds_says_when_it_is_nowhere(agents, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path))
-    assert agents("kinds")[1]["kinds"][0]["found"] == ""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    claude = agents("kinds")[1]["kinds"][0]
+    assert claude["found"] == "" and claude["found_where"] == "" and claude["install_hint"]
 
 
 def test_models_asks_for_metadata_only_and_discards_account_data(agents, tmp_path):
