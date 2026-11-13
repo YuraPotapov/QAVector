@@ -33,7 +33,17 @@ The one-process-per-turn model is kept. Stdout carries every app-server message
 verbatim plus the bridge's own `{"qavector": thread|decision|end}` lines.
 
 * Modes: Read = read-only; Edit = workspace-write with `untrusted` approvals,
-  file changes accepted, commands declined; Full = workspace-write, `never`.
+  file changes accepted, commands accepted only when Codex's own parse
+  (`commandActions`) is all read/listFiles/search, others declined; Full =
+  workspace-write, `never`. First live check (2026-11-14): declining every
+  command left Codex unable to read its folder, since it reads only through
+  the shell.
+* The turn's QAVector server runs with `default_tools_approval_mode="approve"`.
+  Under `untrusted`, Codex otherwise asks before each tool call
+  (`mcpServer/elicitation/request`, `codex_approval_kind: mcp_tool_call`),
+  and the bridge declined it in the same live check. The QCR host's grants
+  decide what a tool may do. An approval asked for a tool of that server
+  anyway is accepted; one for any other server is declined.
   Plan first = read-only + `collaborationMode: plan`; every turn states its
   collaboration mode, because the mode is sticky in a thread.
 * Questions (`item/tool/requestUserInput`) interrupt the turn, then are answered

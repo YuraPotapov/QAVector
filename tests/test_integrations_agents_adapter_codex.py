@@ -66,7 +66,8 @@ def test_server_argv_switches_off_user_extensions_and_requires_qavector():
     for feature in ("plugins", "apps", "computer_use", "browser_use", "hooks"):
         assert "features.%s=false" % feature in joined
     assert "mcp_servers.node_repl.enabled=false" in argv
-    assert 'mcp_servers.qavector={command="/core",args=["--qcr-mcp"],required=true}' in argv
+    assert ('mcp_servers.qavector={command="/core",args=["--qcr-mcp"],required=true,'
+            'default_tools_approval_mode="approve"}') in argv
     assert "danger" not in joined
 
 
@@ -240,6 +241,35 @@ def test_edit_declines_commands_and_accepts_file_changes(world):
     assert rows["patch-1"]["ok"] is True
     assert (work / "a.py").exists()
     assert result["turn"]["changes"]["files"] == 1
+
+
+def test_edit_runs_commands_codex_reads_as_reading_and_declines_the_rest(world):
+    root, path, session, logged, _work = world
+    runner.send(root, session["id"], "READCMD CMD", agents_path=path, mode="edit")
+    rows = {one.get("id"): one for one in sessions.events(root, session["id"]) if one["type"] == "tool.completed"}
+    assert rows["cmd-2"]["ok"] is True
+    assert rows["cmd-1"]["ok"] is False and rows["cmd-1"]["refused"] is True
+    assert "only commands that read" in rows["cmd-1"]["reason"]
+
+
+def test_full_never_asks_and_read_declines_even_reading_commands(world):
+    root, path, session, logged, _work = world
+    runner.send(root, session["id"], "READCMD", agents_path=path, mode="read")
+    rows = {one.get("id"): one for one in sessions.events(root, session["id"]) if one["type"] == "tool.completed"}
+    assert rows["cmd-2"]["ok"] is False          # Read: nothing runs that Codex asks about
+
+
+def test_qavector_tools_are_approved_and_other_servers_are_not(world):
+    root, path, session, logged, _work = world
+    result = runner.send(root, session["id"], "ELICIT", agents_path=path, mode="edit")
+    assert result["turn"]["state"] == "completed"
+    assert sessions.events(root, session["id"])[-1]["text"] == "Answer: qavector=accept elsewhere=decline"
+
+
+def test_reads_only_needs_codex_to_name_every_part():
+    assert codex_turn.reads_only([{"type": "read"}, {"type": "search"}, {"type": "listFiles"}])
+    assert not codex_turn.reads_only([{"type": "read"}, {"type": "unknown"}])
+    assert not codex_turn.reads_only([]) and not codex_turn.reads_only(None)
 
 
 def test_read_declines_file_changes(world):

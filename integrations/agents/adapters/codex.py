@@ -31,13 +31,14 @@ KIND, NAME, DEFAULT_BINARY = "codex", "Codex", "codex"
 MODEL_DEFAULT_LABEL = "Use Codex default"
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 # Full means commands inside workspace-write, never danger-full-access. Edit
-# declines every command Codex asks about - all but the ones it holds to be
-# safe and read-only, and those the user's own Codex rules allow.
+# runs the commands Codex parses as reading, listing or searching files, and
+# the ones it holds safe by itself or the user's own Codex rules allow; it
+# declines the rest.
 MODES = ("read", "edit", "full")
 MODE_DESCRIPTION = ("Read: read-only sandbox. Edit: edit files in the workspace-write sandbox; "
-                    "commands other than Codex's safe read-only ones are refused. Full: edit "
-                    "files and run commands in the workspace-write sandbox. Folder "
-                    "restrictions still apply.")
+                    "of the commands, only those Codex reads as reading, listing or searching "
+                    "files run. Full: edit files and run commands in the workspace-write "
+                    "sandbox. Folder restrictions still apply.")
 #: Plans with Codex's own plan mode: questions end the turn, a plan comes as
 #: Codex's plan item (see :mod:`integrations.agents.codex_turn`).
 PLANS = True

@@ -179,6 +179,23 @@ class AppServer:
             pass
 
 
+#: What Codex says a command does (its ``commandActions``) that Edit lets run.
+READ_ACTIONS = frozenset(("read", "listFiles", "search"))
+
+
+def reads_only(actions):
+    """Whether Codex parsed a command into reading, listing and searching only.
+    Nothing parsed, or anything it could not name ("unknown"), is not."""
+    return (isinstance(actions, list) and bool(actions)
+            and all(isinstance(one, dict) and one.get("type") in READ_ACTIONS for one in actions))
+
+
+def qavector_tool_call(params):
+    """An approval Codex asks for a tool of the turn's own QAVector server."""
+    meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+    return params.get("serverName") == QAVECTOR_SERVER and meta.get("codex_approval_kind") == "mcp_tool_call"
+
+
 def launcher():
     """How the runner starts a bridge: the core itself, as for --qcr-mcp."""
     if getattr(sys, "frozen", False):
@@ -196,7 +213,10 @@ def server_argv(binary, qavector=None, switched_off=()):
     for name in switched_off:
         argv += ["-c", "mcp_servers.%s.enabled=false" % name]
     if qavector:
-        argv += ["-c", "mcp_servers.%s={command=%s,args=%s,required=true}" % (
+        # Its tools are not asked about: what an agent may do there is the QCR
+        # host's grants, which the person set on the connection.
+        argv += ["-c", "mcp_servers.%s={command=%s,args=%s,required=true,"
+                       "default_tools_approval_mode=\"approve\"}" % (
             QAVECTOR_SERVER, json.dumps(qavector[0]), json.dumps(list(qavector[1:])))]
     return argv
 
@@ -272,8 +292,22 @@ class Turn:
             self.server.send({"id": ident, "result": {"decision": "accept"}})
             self.say("decision", request=method, item=item, decision="accepted")
             return
+        if method == "item/commandExecution/requestApproval" and mode == "edit" and not plan \
+                and reads_only(params.get("commandActions")):
+            # Codex reads through the shell; in Edit it may, as long as Codex
+            # itself says the command only reads, lists or searches.
+            self.server.send({"id": ident, "result": {"decision": "accept"}})
+            self.say("decision", request=method, item=item, decision="accepted", reason="reads only")
+            return
+        if method == "mcpServer/elicitation/request" and qavector_tool_call(params):
+            # Asked only if the server's own setting was not honoured: the same answer.
+            self.server.send({"id": ident, "result": {"action": "accept", "content": {}}})
+            self.say("decision", request=method, item=item, decision="accepted", reason="QAVector tool")
+            return
         reason = {
             "item/commandExecution/requestApproval":
+                "In Edit only commands that read, list or search files run (cat, rg, ls); Full runs "
+                "the rest." if mode == "edit" and not plan else
                 "This conversation's mode does not let the agent run that command.",
             "item/fileChange/requestApproval": "This conversation's mode does not let the agent edit files.",
             "item/permissions/requestApproval": "A turn is never given more access than its mode.",

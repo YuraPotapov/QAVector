@@ -461,11 +461,14 @@ Each turn runs a short-lived bridge (`--codex-turn`) over `codex app-server`.
 The turn starts or resumes the exact provider thread, runs, and ends with the
 turn ([ADR-005](qcr/adr-005-unified-agent-adapters.md), Phase 4.1).
 
-* **Read**: read-only sandbox. **Edit**: workspace-write; file changes are
-  accepted, and every command Codex asks about is declined. Codex runs its
-  own safe read-only commands and commands that the user's Codex rules allow
-  without asking. **Full**: workspace-write, nothing asked. Never
+* **Read**: read-only sandbox. **Edit**: workspace-write. File changes are
+  accepted. Of the commands Codex asks about, only those it parses as reading,
+  listing or searching files run; the rest are declined. Codex also runs its
+  own safe commands, and commands the user's Codex rules allow, without
+  asking. **Full**: workspace-write, nothing asked. Never
   danger-full-access, never network from the sandbox.
+* The turn's QAVector tools are not asked about. What they may do is decided
+  by the connection's "QAVector access" and the QCR host.
 * **Plan first** uses Codex's plan mode. Codex's questions end the turn and
   are answered by the next message. Its plan arrives as a plan item. After
   approval, the next turn runs in the default mode in the same thread.

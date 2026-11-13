@@ -8,7 +8,10 @@ message says decides the turn:
     REFUSE  a failed turn
     ASK     request_user_input, then (after turn/interrupt) an interrupted turn
     PLAN    a plan item
-    CMD     a command approval request; the answer decides the command row
+    CMD     a command approval request (Codex could not parse it); the answer decides the row
+    READCMD the same for a command Codex parsed as reading a file
+    ELICIT  an MCP tool approval for the qavector server, then one for another server;
+            says which were accepted
     PATCH   a file change approval request; accepted -> file changed
     MCP_LIST  calls the QAVector MCP server from its -c argument and says what it listed
     MCP_DELEGATE  through that server, delegates "Say hello" to the Claude connection,
@@ -77,7 +80,8 @@ if args[0] == "app-server":
         rest = spec[len(prefix) + end:]
         assert rest.startswith(",args=")
         arguments, end = json.JSONDecoder().raw_decode(rest[len(",args="):])
-        assert rest[len(",args=") + end:] == ",required=true}"
+        assert rest[len(",args=") + end:] == ',required=true,default_tools_approval_mode="approve"}'
+
         requests = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
                         "name": "qavector_list_capabilities", "arguments": {"namespace": "services"}}}]
@@ -161,11 +165,25 @@ if args[0] == "app-server":
             if "PLAN" in text:
                 say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn,
                      "item": {"type": "plan", "id": "plan-1", "text": "1. Change a.py\n2. Test"}}})
-            if "CMD" in text:
-                item = {"type": "commandExecution", "id": "cmd-1", "command": "rm -rf build", "status": "inProgress"}
+            if "ELICIT" in text:
+                said = []
+                for n, server in enumerate(("qavector", "elsewhere")):
+                    answer = ask("e-%d" % n, "mcpServer/elicitation/request", {
+                        "threadId": THREAD, "turnId": turn, "serverName": server, "mode": "form",
+                        "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_name": "tool"},
+                        "message": "Allow?", "requestedSchema": {"type": "object", "properties": {}}})
+                    said.append("%s=%s" % (server, answer["result"]["action"]))
+                text = " ".join(said)
+            for keyword, ident, command, actions in (
+                    ("READCMD", "cmd-2", "cat a.py", [{"type": "read", "command": "cat a.py", "name": "a.py", "path": "a.py"}]),
+                    ("CMD", "cmd-1", "rm -rf build", [{"type": "unknown", "command": "rm -rf build"}])):
+                if keyword not in text.split():
+                    continue
+                item = {"type": "commandExecution", "id": ident, "command": command, "status": "inProgress"}
                 say({"method": "item/started", "params": {"threadId": THREAD, "turnId": turn, "item": item}})
-                answer = ask("a-1", "item/commandExecution/requestApproval",
-                             {"threadId": THREAD, "turnId": turn, "itemId": "cmd-1", "command": "rm -rf build"})
+                answer = ask("a-" + ident, "item/commandExecution/requestApproval",
+                             {"threadId": THREAD, "turnId": turn, "itemId": ident, "command": command,
+                              "commandActions": actions})
                 ran = answer["result"]["decision"] == "accept"
                 say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn, "item": dict(
                     item, status="completed" if ran else "declined", exitCode=0 if ran else None)}})
