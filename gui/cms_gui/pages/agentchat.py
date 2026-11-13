@@ -653,8 +653,11 @@ class Composer(QFrame):
         self.how = widgets.row(_caption("AGENT"), self.connection, 6,
                                _caption("MODEL"), self.model, 6, _caption("EFFORT"), self.effort,
                                None, self.skills_button)
-        self.where = widgets.row(_caption("FOLDER"), self.folder, self.browse, self.restrict)
-        self.where.layout().setStretchFactor(self.folder, 1)
+        # Browse as wide as its word; the room the capped folder leaves goes before
+        # Restrictions, the way the row above leaves it before Skills.
+        self.browse.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.where = widgets.row(_caption("FOLDER"), self.folder, self.browse, None, self.restrict)
+        self.where.layout().setStretchFactor(self.folder, 1)      # up to its cap, then the gap takes the rest
         options_layout.addWidget(self.how)
         options_layout.addWidget(self.where)
 
@@ -802,10 +805,12 @@ class Composer(QFrame):
             return
         parts = [self.connection.currentText() or "Choose an agent",
                  folder_text(self.folder.currentText()) or "Choose a folder"]
-        model = self.model.value()
-        if model:
+        # What the turn will run with - chosen here, or the connection's default.
+        chosen = self.connection.currentData()
+        connection = next((one for one in getattr(self, "_connections", ()) if one.get("id") == chosen), {})
+        if self.model.value() or connection.get("model"):
             parts.append(self.model.currentText())
-        effort = self.effort.currentData() if hasattr(self, "effort") else ""
+        effort = (self.effort.currentData() if hasattr(self, "effort") else "") or connection.get("effort")
         if effort:
             parts.append("effort " + effort)
         if self._skills:
@@ -861,10 +866,12 @@ class Composer(QFrame):
     def _say_model(self):
         chosen = self.connection.currentData()
         connection = next((one for one in self._connections if one.get("id") == chosen), {})
-        inherited = ("From connection: " + connection["model"] if connection.get("model")
-                     else "Use Claude Code settings")
-        self.model.set_context((chosen, connection.get("kind"), connection.get("binary")),
-                               inherited)
+        # The connection's own default reads as itself ("opus"); where it comes
+        # from is said by the tooltip, not crowded into the field.
+        inherited = connection.get("model") or "Use Claude Code settings"
+        self.model.set_context((chosen, connection.get("kind"), connection.get("binary")), inherited,
+                               "The connection's default model." if connection.get("model")
+                               else "Leave the model choice to the program's own settings.")
         self._fill_efforts(connection)
         self._summarize()
 
@@ -883,8 +890,9 @@ class Composer(QFrame):
             levels.append(wanted)               # chosen before, kept as it was
         self.effort.blockSignals(True)
         self.effort.clear()
-        self.effort.addItem("From connection: " + connection["effort"]
-                            if connection.get("effort") else "Default", "")
+        self.effort.addItem(connection.get("effort") or "Default", "")
+        self.effort.setItemData(0, "The connection's default effort." if connection.get("effort")
+                                else "Leave it to the program's own settings.", Qt.ToolTipRole)
         for level in levels:
             self.effort.addItem(level, level)
         self.effort.setCurrentIndex(max(0, self.effort.findData(wanted)))
@@ -1084,6 +1092,9 @@ class ChatTab(QWidget):
 
     #: What reads a turn as it happens. A test puts a stand-in here.
     turn_factory = AgentTurn
+    #: The QCR host (set by the main window): a turn of a connection whose
+    #: "QAVector access" grants something is given QAVector through MCP.
+    qcr_access = None
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -1740,7 +1751,16 @@ class ChatTab(QWidget):
             for key in ("mode", "model", "effort", "plan"):
                 if key in chosen:
                     document[key] = chosen[key]
+        access = None
+        if ChatTab.qcr_access is not None:
+            connection = next((one for one in self.connections if one.get("id") == session.get("connection")), None)
+            access = ChatTab.qcr_access.grant_agent(connection, session_id)
+            if access is not None:
+                # Paths only: the token is in its own 0600 file, never in the turn's document.
+                document = dict(document, qavector={"socket": access["socket"], "token_file": access["token_file"]})
         turn = self.turn_factory(self.core(), session_id, document, self)
+        if access is not None:
+            turn.answered.connect(lambda _answer, access=access: ChatTab.qcr_access.end_agent(access))
         turn.event.connect(lambda event, session_id=session_id: self._heard(session_id, event))
         turn.answered.connect(lambda answer, session_id=session_id:
                               self._answered(session_id, answer))

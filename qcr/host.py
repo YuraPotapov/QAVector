@@ -1,0 +1,515 @@
+"""The QCR host (ADR-002 D1/D2): one core process the GUI starts and talks to.
+
+``session_launcher.py --qcr-host --qcr-project=ID --qcr-store=PATH``. It holds
+the registry, the policy, the engine and the execution journal of one project.
+Its only channel is its own stdin/stdout - JSON, one object per line - so the
+only party that can send it anything is the GUI that started it. There is no
+socket and no listener. It ends on ``shutdown``, at the end of stdin, or (on
+Linux) when its parent dies.
+
+**The GUI is the trust root.** It names the actors and their grants (``hello``,
+``actor``, ``revoke``); nothing in an ``invoke`` can claim an actor or a grant
+that was not given that way.
+
+GUI -> host::
+
+    {"type": "snapshot", "snapshot": {...}}            services as the supervisor sees them
+    {"type": "inventory", "inventory": {...}}          scenarios, environments, accounts (the GUI's --describe)
+    {"type": "pending", "pending": {...} | null}       what is open in the cycle run on screen
+    {"type": "hello", "protocol": 1, "actors": {"gui-user": [{"permission": "services.start"}, ...]}}
+    {"type": "actor", "actor": "cycle:r1", "grants": [...]} / {"type": "revoke", "actor": ...}
+    {"type": "invoke", "id": 7, "actor": "gui-user", "capability": "services.<id>.start",
+     "input": {...}, "idempotency_key": "...", "correlation_id": "..."}
+    {"type": "cancel" | "get" | "events" | "list", "id": 8, "actor": ..., ...}
+    {"type": "owner", "execution_id": ..., "event": "accepted" | "running" | "progress"
+                                                     | "succeeded" | "failed", ...}
+    {"type": "owner_read_reply", "id": 4, "result": {...}} / {..., "error": {...}}   to an owner_read
+    {"type": "agent_token", "id": 9, "actor": "agent:<connection>/<session>",
+     "token_sha256": "...", "expires_at": 1731500000}    an issued actor's token, by digest
+    {"type": "capabilities" | "describe" | "read", "id": 10, "actor": ..., ...}
+    {"type": "shutdown"}
+
+**Agents** reach the host on its agent socket (:mod:`qcr.agent_socket`, ADR-003
+D4) with a token the GUI registered here. Their requests are the same kinds -
+``capabilities``, ``describe``, ``read``, ``invoke``, ``get``, ``events``,
+``wait`` (at most 60 s), ``cancel``, ``list`` - answered for the token's actor
+only. The socket's path is in ``ready``.
+
+host -> GUI::
+
+    {"type": "ready", "protocol": 1, "recovered": [...]}
+    {"type": "reply", "id": 7, "ok": true, ...} / {"type": "reply", "id": 7, "ok": false, "error": {...}}
+    {"type": "dispatch", "execution_id": ..., "op": "start", "resource_id": ..., "input": {...}}
+    {"type": "stop_waiting", "execution_id": ...}
+    {"type": "owner_read", "id": 4, "op": "service.output", "resource_id": ..., "lines": 50}
+    {"type": "owner_read", "id": 5, "op": "launcher.status" | "launcher.output", "resource_id": "main", ...}
+    {"type": "execution", "execution": {...}}           after every change
+    {"type": "error", "error": {...}}                   a line that could not be taken
+
+Nothing is printed on stdout but these lines; logging goes to stderr.
+"""
+
+import json
+import logging
+import signal
+import sys
+import threading
+import time
+
+from .adapters.cycles import CycleAdapter, CycleAnswerInvoker, CycleInvoker
+from .adapters.launcher import WAIT_SECONDS as LAUNCHER_WAIT_SECONDS, LauncherAdapter, LauncherInvoker
+from .agent_socket import AgentGateway, SocketError, TokenBook
+from .adapters.scenarios import ScenarioAdapter, ScenarioInvoker
+from .adapters.services import ServiceAdapter, ServiceInvoker
+from .contracts import document, text
+from .engine import Engine
+from .errors import QCRError
+from .executions import ExecutionStore
+from .policy import Authority, Grant
+from .registry import Registry
+
+PROTOCOL = 1
+#: Longest line taken; a longer one is refused, not read into memory whole.
+LINE_BYTES = 1024 * 1024
+_PR_SET_PDEATHSIG = 1
+#: What an agent may ask on the socket; everything else is the GUI's alone.
+AGENT_KINDS = ("capabilities", "describe", "read", "invoke", "get", "events", "wait", "cancel", "list")
+WAIT_SECONDS = 60
+#: How long an owner read (a service's output) may take the GUI to answer.
+OWNER_READ_SECONDS = 5
+
+log = logging.getLogger("qcr.host")
+
+
+def _error(code, message, **extra):
+    return dict({"code": code, "message": message}, **extra)
+
+
+class Host:
+    def __init__(self, project_id, store_path, write, *, schedule=None):
+        text(project_id, "project id")
+        self.project_id = project_id
+        self._write_line = write
+        self._write_lock = threading.Lock()
+        self.authority = Authority()
+        self.registry = Registry(self.authority)
+        self.store = ExecutionStore(store_path)
+        extra = {} if schedule is None else {"schedule": schedule}
+        self.engine = Engine(self.registry, self.store, on_change=self._changed, **extra)
+        self.invoker = ServiceInvoker(self.send, **extra)
+        self._snapshot = None
+        self.services = ServiceAdapter(self.registry, project_id, lambda: self._snapshot, self.invoker)
+        self._inventory = None
+        self.scenario_invoker = ScenarioInvoker(self.send, **extra)
+        self.scenarios = ScenarioAdapter(self.registry, project_id, lambda: self._inventory, self.scenario_invoker)
+        self.cycle_invoker = CycleInvoker(self.send, **extra)
+        self.answer_invoker = CycleAnswerInvoker(self.send, **extra)
+        self._pending = None
+        self.cycles = CycleAdapter(self.registry, project_id, lambda: self._inventory, self.cycle_invoker,
+                                   pending_reader=lambda: self._pending, answer_invoker=self.answer_invoker)
+        self.launcher_invoker = LauncherInvoker(self.send, **extra)
+        self.launcher = LauncherAdapter(self.registry, project_id, self.launcher_invoker)
+        #: Every invoker an ``owner`` report may belong to.
+        self._invokers = (self.invoker, self.scenario_invoker, self.cycle_invoker, self.answer_invoker,
+                          self.launcher_invoker)
+        self._callers = {}
+        self._ready = False
+        self.done = False
+        #: One request at a time through the registry - the GUI's pipe and the agents' socket alike.
+        self._lock = threading.RLock()
+        self.tokens = TokenBook()
+        self.gateway = None
+        #: Told when a snapshot arrives - what a criteria wait wakes on.
+        self._snapshot_seen = threading.Condition(threading.Lock())
+        self._owner_reads = {}            # id -> [Event, reply]
+        self._owner_read_ids = iter(range(1, 1 << 62))
+
+    # -- output -------------------------------------------------------------------
+    def send(self, message):
+        line = json.dumps(message, separators=(",", ":"), allow_nan=False)
+        with self._write_lock:
+            self._write_line(line)
+
+    def _changed(self, execution_id):
+        try:
+            self.send({"type": "execution", "execution": self.store.get(execution_id)})
+        except Exception:
+            log.debug("could not push execution %s", execution_id)
+
+    def open_integrations(self, integrations_path="", secrets_path="", environments_path=""):
+        """Register the project's integration reads (Jira) - the 1B adapter -
+        from its connections file. Reads configuration only; nothing is asked
+        of a service until somebody reads (lazy, as everywhere)."""
+        from cycle import secrets as secret_store
+        from integrations import scope, store
+        from integrations.reader import ProjectReader
+        from .adapters.integrations import IntegrationAdapter
+        integrations_path = store.resolve_path(integrations_path)
+        reader = ProjectReader(integrations_path, secret_store.resolve_path(secrets_path),
+                               environments_path or scope.default_environments_path(integrations_path))
+        self.integrations = IntegrationAdapter(self.registry, self.project_id, reader)
+        self.integrations.refresh()
+
+    def open_agent_socket(self, directory=None):
+        """Start listening for agents (ADR-003 D4). Returns the socket's path."""
+        self.gateway = AgentGateway(self.handle_agent, self.tokens, directory)
+        return self.gateway.path
+
+    def close(self):
+        self.done = True
+        if self.gateway is not None:
+            self.gateway.close()
+        self.engine.close()
+        self.store.close()
+
+    # -- input --------------------------------------------------------------------
+    def feed(self, line):
+        """Take one line. Never raises: a bad line is answered, not fatal."""
+        if len(line.encode("utf-8", "replace")) > LINE_BYTES:
+            self.send({"type": "error", "error": _error("too_large", "Line is too long.")})
+            return
+        try:
+            message = json.loads(line)
+        except ValueError:
+            self.send({"type": "error", "error": _error("invalid_message", "Line is not JSON.")})
+            return
+        if not isinstance(message, dict) or not isinstance(message.get("type"), str):
+            self.send({"type": "error", "error": _error("invalid_message", "Expected an object with a type.")})
+            return
+        kind = message["type"]
+        handler = getattr(self, "_on_" + kind, None) if kind.isidentifier() else None
+        request_id = message.get("id")
+        try:
+            if handler is None:
+                raise QCRError("invalid_message", "Unknown message type.")
+            if not self._ready and kind not in ("snapshot", "inventory", "pending", "hello", "shutdown"):
+                raise QCRError("not_ready", "Say hello first.")
+            with self._lock:
+                answer = handler(message)
+            if answer is not None:
+                self.send(dict({"type": "reply", "id": request_id, "ok": True}, **answer))
+        except QCRError as exc:
+            error = _error(exc.code, str(exc))
+            if getattr(exc, "execution_id", None):
+                error["execution_id"] = exc.execution_id
+            self.send({"type": "reply", "id": request_id, "ok": False, "error": error} if request_id is not None
+                      else {"type": "error", "error": error})
+        except Exception:
+            log.exception("message %r failed", kind)
+            self.send({"type": "reply", "id": request_id, "ok": False,
+                       "error": _error("host_error", "The host could not handle the message.")})
+
+    def _caller(self, message):
+        caller = self._callers.get(message.get("actor"))
+        if caller is None:
+            raise QCRError("authorization_denied", "Unknown actor.")
+        return caller
+
+    def _grants(self, grants):
+        if not isinstance(grants, list):
+            raise QCRError("invalid_message", "Grants are a list.")
+        made = []
+        for grant in grants:
+            if not isinstance(grant, dict) or set(grant) - {"permission", "resource_id"}:
+                raise QCRError("invalid_message", "A grant is {permission, resource_id}.")
+            made.append(Grant(self.project_id, grant.get("permission"), grant.get("resource_id")))
+        return made
+
+    def _issue(self, actor, grants):
+        text(actor, "actor")
+        previous = self._callers.pop(actor, None)
+        if previous is not None:
+            self.authority.revoke(previous)
+        self._callers[actor] = self.authority.issue(actor, self._grants(grants))
+
+    # -- handlers -----------------------------------------------------------------
+    def _on_snapshot(self, message):
+        self._snapshot = message.get("snapshot")
+        self.services.refresh()
+        with self._snapshot_seen:
+            self._snapshot_seen.notify_all()
+        return None
+
+    def _on_owner_read_reply(self, message):
+        slot = self._owner_reads.get(message.get("id"))
+        if slot is not None:
+            slot[1] = message
+            slot[0].set()
+        return None
+
+    def _on_inventory(self, message):
+        self._inventory = message.get("inventory")
+        self.scenarios.refresh()
+        self.cycles.refresh()
+        return None
+
+    def _on_pending(self, message):
+        self._pending = message.get("pending")
+        return None
+
+    def _on_hello(self, message):
+        if self._ready:
+            raise QCRError("invalid_message", "Hello was already said.")
+        if message.get("protocol") != PROTOCOL:
+            raise QCRError("unsupported_protocol", "Protocol version is not supported.")
+        actors = message.get("actors") or {}
+        if not isinstance(actors, dict):
+            raise QCRError("invalid_message", "Actors are an object.")
+        for actor, grants in actors.items():
+            self._issue(actor, grants)
+        recovered = self.engine.recover(self._observe)
+        self._ready = True
+        self.send({"type": "ready", "protocol": PROTOCOL, "recovered": recovered,
+                   "socket": self.gateway.path if self.gateway is not None else None})
+        return None
+
+    def _observe(self, execution):
+        rows = (self._snapshot or {}).get("resources", ())
+        row = next((row for row in rows if row.get("resource_id") == execution["resource_id"]), None)
+        return {"service_status": row["properties"]["status"]} if row else None
+
+    def _on_actor(self, message):
+        self._issue(message.get("actor"), message.get("grants"))
+        return {}
+
+    def _on_revoke(self, message):
+        caller = self._callers.pop(message.get("actor"), None)
+        if caller is not None:
+            self.authority.revoke(caller)
+        self.tokens.forget_actor(message.get("actor"))
+        return {}
+
+    def _on_agent_token(self, message):
+        """The GUI registers one agent turn's token, by its digest, for an actor it already issued."""
+        actor = message.get("actor")
+        if actor not in self._callers or not str(actor).startswith("agent:"):
+            raise QCRError("invalid_message", "A token is for an agent actor issued first.")
+        expires_at = message.get("expires_at")
+        if type(expires_at) not in (int, float):
+            raise QCRError("invalid_message", "A token says when it expires.")
+        try:
+            self.tokens.add(actor, message.get("token_sha256"), expires_at)
+        except ValueError:
+            raise QCRError("invalid_message", "A token is given by its SHA-256, in hex.") from None
+        return {}
+
+    def _on_capabilities(self, message):
+        namespace = message.get("namespace")
+        caller = self._caller(message)
+        caps = self.registry.list_capabilities(caller, self.project_id,
+                                               namespace=namespace if isinstance(namespace, str) else None)
+        # Each with what it acts on, by name: an id alone ("services.56c8...start")
+        # does not tell an agent which service is Odoo.
+        resources = {one.ref: one for one in self.registry.list_resources(caller, self.project_id)}
+
+        def target(cap):
+            found = resources.get(cap.resource)
+            return {"id": cap.resource.resource_id, "type": cap.resource.resource_type,
+                    "name": found.display_name if found else "", "aliases": list(found.aliases) if found else []}
+        return {"capabilities": [{"capability_id": cap.capability_id, "description": cap.description,
+                                  "risk_level": cap.risk_level, "read_only": cap.read_only, "mode": cap.mode,
+                                  "version": cap.version, "resource": target(cap)} for cap in caps]}
+
+    def _on_describe(self, message):
+        return {"capability": document(self.registry.describe_capability(
+            self._caller(message), self.project_id, message.get("capability")))}
+
+    def _on_read(self, message):
+        return {"result": self.registry.read(self._caller(message), self.project_id, message.get("capability"),
+                                             message.get("input") or {})}
+
+    # -- reads that wait: outside the lock --------------------------------------------
+    def _service_read(self, request):
+        """``services.<id>.criteria`` with ``wait_seconds`` and ``services.<id>.output``:
+        they wait - on the next snapshot, on the owner - so never while holding the
+        lock the GUI's messages need. Others: None (the ordinary read)."""
+        capability_id = str(request.get("capability") or "")
+        op = capability_id.rsplit(".", 1)[-1]
+        given = request.get("input") or {}
+        if op not in ("criteria", "output") or (op == "criteria" and not given.get("wait_seconds")):
+            return None
+        with self._lock:
+            if not self._ready:
+                raise QCRError("not_ready", "QAVector is not ready yet.")
+            caller = self._caller(request)
+            capability = self.registry.describe_capability(caller, self.project_id, capability_id)
+            self.registry.validate_input(capability, given)
+        if op == "output":
+            return {"result": self._owner_read(capability, "service.output",
+                                               {"lines": int(given.get("lines", 50))})}
+        end = time.monotonic() + float(given["wait_seconds"])
+        while True:
+            with self._lock:
+                result = self.registry.read(caller, self.project_id, capability_id, given)
+            left = end - time.monotonic()
+            if result["settled"] != "waiting" or left <= 0:
+                return {"result": result}
+            with self._snapshot_seen:
+                self._snapshot_seen.wait(min(left, 2.0))
+
+    def _launcher_read(self, request):
+        """``launcher.main.status`` / ``.output``: the window's to answer, and an
+        output read may wait - so outside the lock, like a service's output."""
+        capability_id = str(request.get("capability") or "")
+        op = LauncherAdapter.owner_op(capability_id)
+        if op is None:
+            return None
+        given = request.get("input") or {}
+        with self._lock:
+            if not self._ready:
+                raise QCRError("not_ready", "QAVector is not ready yet.")
+            capability = self.registry.describe_capability(self._caller(request), self.project_id, capability_id)
+            self.registry.validate_input(capability, given)
+        fields, wait = {}, 0.0
+        if op == "launcher.output":
+            wait = min(float(given.get("wait_seconds") or 0), LAUNCHER_WAIT_SECONDS)
+            fields = {"after": int(given.get("after") or 0), "limit": int(given.get("limit") or 200),
+                      "wait_seconds": wait}
+        return {"result": self._owner_read(capability, op, fields, OWNER_READ_SECONDS + wait)}
+
+    def _owner_read(self, capability, op, fields, seconds=None):
+        """Ask the GUI for what only it holds (a service's console, the launcher's
+        output), and wait for its answer - a little, or as long as the read waits."""
+        request_id = next(self._owner_read_ids)
+        slot = [threading.Event(), None]
+        self._owner_reads[request_id] = slot
+        try:
+            self.send(dict(fields, type="owner_read", id=request_id, op=op,
+                           resource_id=capability.resource.resource_id))
+            if not slot[0].wait(OWNER_READ_SECONDS if seconds is None else seconds):
+                raise QCRError("owner_unavailable", "QAVector's window did not answer in time.")
+        finally:
+            self._owner_reads.pop(request_id, None)
+        reply = slot[1] or {}
+        if reply.get("error"):
+            raise QCRError(str(reply["error"].get("code") or "owner_failed"), "The window could not read it.")
+        result = reply.get("result")
+        self.registry.validate_output(capability, result)
+        return result
+
+    # -- the agent socket ---------------------------------------------------------
+    def handle_agent(self, actor, message):
+        """One request from an agent's connection, answered as ``actor`` (the token's)."""
+        kind = message.get("type")
+        if kind not in AGENT_KINDS:
+            return {"ok": False, "error": _error("invalid_message", "Not something an agent may ask.")}
+        request = dict(message, actor=actor)
+        try:
+            if kind == "wait":
+                # Outside the lock: a wait must not hold the GUI's requests up.
+                timeout = message.get("timeout", 30)
+                if type(timeout) not in (int, float) or timeout < 0:
+                    raise QCRError("invalid_message", "Timeout is a number of seconds.")
+                with self._lock:
+                    caller = self._caller(request)
+                return {"ok": True, "execution": self.engine.wait(caller, message.get("execution_id"),
+                                                                  min(float(timeout), WAIT_SECONDS))}
+            if kind == "read":
+                capability_id = str(message.get("capability") or "")
+                special = (self._service_read(request) if capability_id.startswith("services.")
+                           else self._launcher_read(request) if capability_id.startswith("launcher.") else None)
+                if special is not None:
+                    return dict({"ok": True}, **special)
+            with self._lock:
+                if not self._ready:
+                    raise QCRError("not_ready", "QAVector is not ready yet.")
+                answer = getattr(self, "_on_" + kind)(request)
+            return dict({"ok": True}, **answer)
+        except QCRError as exc:
+            error = _error(exc.code, str(exc))
+            if getattr(exc, "execution_id", None):
+                error["execution_id"] = exc.execution_id
+            return {"ok": False, "error": error}
+
+    def _on_invoke(self, message):
+        caller = self._caller(message)
+        execution = self.engine.invoke(
+            caller, self.project_id, message.get("capability"), message.get("input", {}),
+            idempotency_key=message.get("idempotency_key"), correlation_id=message.get("correlation_id"),
+            parent_id=message.get("parent_id"))
+        return {"execution": execution}
+
+    def _on_cancel(self, message):
+        return {"execution": self.engine.cancel(self._caller(message), message.get("execution_id"),
+                                                message.get("reason"))}
+
+    def _on_get(self, message):
+        return {"execution": self.engine.get(self._caller(message), message.get("execution_id"))}
+
+    def _on_events(self, message):
+        after = message.get("after", 0)
+        if type(after) is not int or after < 0:
+            raise QCRError("invalid_message", "After is a cursor.")
+        return self.engine.subscribe(self._caller(message), message.get("execution_id"), after)
+
+    def _on_list(self, message):
+        filters = message.get("filters") or {}
+        allowed = {"state", "capability_id", "actor_id", "resource_id", "limit", "before"}
+        if not isinstance(filters, dict) or set(filters) - allowed:
+            raise QCRError("invalid_message", "Unknown filter.")
+        return {"executions": self.engine.list(self._caller(message), self.project_id, **filters)}
+
+    def _on_owner(self, message):
+        for invoker in self._invokers:
+            if invoker.knows(message.get("execution_id")):
+                invoker.report(message)
+                break
+        return None
+
+    def _on_shutdown(self, message):
+        self.done = True
+        return None
+
+
+def _die_with_parent():
+    """On Linux, end when the GUI does - even if it is killed outright."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def main(argv):
+    """``--qcr-host --qcr-project=ID --qcr-store=PATH``. Returns the exit code."""
+    options = dict(arg.split("=", 1) for arg in argv if "=" in arg)
+    project_id, store_path = options.get("--qcr-project"), options.get("--qcr-store")
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s qcr-host: %(message)s")
+    if not project_id or not store_path:
+        log.error("--qcr-host needs --qcr-project=ID and --qcr-store=PATH")
+        return 2
+    _die_with_parent()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    out = sys.stdout
+
+    def write(line):
+        out.write(line + "\n")
+        out.flush()
+    try:
+        host = Host(project_id, store_path, write)
+    except QCRError as exc:
+        write(json.dumps({"type": "error", "error": _error(exc.code, str(exc))}))
+        return 1
+    try:
+        host.open_integrations(options.get("--integrations-file", ""), options.get("--cycle-secrets-file", ""),
+                               options.get("--environments-file", ""))
+    except Exception as exc:
+        # No integration reads then; services, scenarios and cycles work as before.
+        log.warning("integration reads unavailable: %s", exc)
+    if options.get("--qcr-socket") != "off":
+        try:
+            host.open_agent_socket(options.get("--qcr-socket-dir"))
+        except (SocketError, OSError) as exc:
+            # The GUI's own path still works; only agents cannot reach this host.
+            log.warning("agent socket unavailable: %s", exc)
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if line:
+                host.feed(line)
+            if host.done:
+                break
+    finally:
+        host.close()
+    return 0

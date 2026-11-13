@@ -16,7 +16,7 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel,
                                QLineEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
                                QWidget)
 
@@ -185,6 +185,16 @@ class SettingsDialog(QDialog):
         self.cycle_inactivity.setValue(settings.cycle_inactivity_seconds)
         column.addWidget(widgets.field("Cycle inactivity threshold", self.cycle_inactivity,
                                       "Show 'No output for' after this interval. Silence does not mark a step as failed."))
+
+        column.addSpacing(10)
+        self.qcr_services = QCheckBox("Run service actions through QCR")
+        self.qcr_services.setChecked(bool(settings.qcr_services))
+        column.addWidget(widgets.field(
+            "Capability runtime (experimental)", self.qcr_services,
+            "Start, Stop and Restart of a service that has a QCR identity are checked, written to "
+            "the project's execution journal (.qcr in the project folder) and then carried out by "
+            "this window as before. Services without an identity keep working as they always have."))
+        column.addSpacing(10)
 
         # The GUI's own, and the launcher has never heard of it - so where this
         # one goes really is nobody else's business.
@@ -487,6 +497,7 @@ class SettingsDialog(QDialog):
         if self.hotkey_editor is not None and not self.hotkey_editor.apply():
             return False
         self.settings.cycle_inactivity_seconds = self.cycle_inactivity.value()
+        self.settings.qcr_services = self.qcr_services.isChecked()
         self.settings.config = self.config.text().strip()
         self.settings.services_path = self.services.text().strip()
         self.settings.cycle_projects_path = self.cycle_projects.text().strip()

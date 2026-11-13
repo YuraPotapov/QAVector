@@ -48,7 +48,10 @@ def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     entry = json.load(open(path, encoding="utf-8"))["connections"][0]
     assert entry == {"id": "claude", "name": "Claude", "kind": "claude",
-                     "binary": "", "model": "sonnet", "effort": "high"}
+                     "binary": "", "model": "sonnet", "effort": "high",
+                     # QAVector through QCR: nothing until somebody turns it on (ADR-003 D6).
+                     "qavector_access": {"services": False, "scenarios": False, "cycles": False,
+                                         "approvals": False, "jira": False}}
 
 
 def test_it_lives_beside_the_users_data_whichever_project_is_open(tmp_path, monkeypatch):
@@ -122,3 +125,12 @@ def test_removing_one_leaves_the_others(path):
     assert store.remove("claude", path) is True
     assert store.remove("claude", path) is False
     assert [one["id"] for one in store.load(path)] == ["second"]
+
+
+
+def test_qavector_access_keeps_only_its_switches_and_only_true_turns_one_on():
+    normalized = store.normalize({"name": "C", "qavector_access": {
+        "services": True, "approvals": "yes", "cycles": 1, "everything": True}})
+    assert normalized["qavector_access"] == {"services": True, "scenarios": False, "cycles": False,
+                                             "approvals": False, "jira": False}
+    assert store.normalize({"name": "C", "qavector_access": "all"})["qavector_access"]["services"] is False

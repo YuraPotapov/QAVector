@@ -259,9 +259,11 @@ def render(cycle, live=False, plugins=None, threshold=60, expanded_details=(), i
         for receipt in decisions:
             important = receipt.get("important") or any(node.get("id") == receipt.get("step") and node.get("important")
                                                         for node in (cycle.get("graph") or {}).get("nodes", []))
-            content += '<p>%s · %s · %s mode · execution %s</p>' % tuple(_text(value) for value in (
+            content += '<p>%s · %s · %s mode · execution %s%s</p>' % tuple(_text(value) for value in (
                 ("! " if important else "") + (receipt.get("label") or receipt.get("step")), str(receipt.get("status") or "").capitalize(),
-                str(receipt.get("mode") or "").capitalize(), receipt.get("execution_generation", 1)))
+                str(receipt.get("mode") or "").capitalize(), receipt.get("execution_generation", 1),
+                # Who decided: a person's login, or an agent's QCR actor (agent:...).
+                " · by %s" % receipt["decided_by"] if receipt.get("decided_by") else ""))
     if brief:
         git = brief.get("git") or {}
         workspace = brief.get("workspace") or {}

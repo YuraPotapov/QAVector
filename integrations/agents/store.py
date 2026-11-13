@@ -23,6 +23,10 @@ from integrations.agents import adapters
 FILE_NAME = "agents.json"
 VERSION = 1
 
+#: What a connection's turns may do in QAVector itself, through QCR (ADR-003 D6):
+#: each off until somebody turns it on - approvals above all.
+QAVECTOR_ACCESS = ("services", "scenarios", "cycles", "approvals", "jira")
+
 #: The fields that say which program runs; changing one makes a past check moot.
 PROGRAM = ("kind", "binary")
 
@@ -58,6 +62,9 @@ def normalize(entry):
         # Blank leaves either choice to the CLI's own configuration.
         "model": str(entry.get("model") or "").strip(),
         "effort": str(entry.get("effort") or "").strip(),
+        "qavector_access": {key: (entry.get("qavector_access") or {}).get(key) is True
+                            for key in QAVECTOR_ACCESS}
+        if isinstance(entry.get("qavector_access"), dict) else {key: False for key in QAVECTOR_ACCESS},
     }
     # The known fields first and in one order, whatever order they came in: the
     # file is plain JSON a person may open.

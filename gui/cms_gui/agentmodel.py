@@ -21,6 +21,7 @@ class ModelPicker(QComboBox):
         self.setMaxVisibleItems(12)
         self._context = None
         self._inherit = "Use Claude Code settings"
+        self._inherit_tip = "Leave the model choice to the program's own settings."
         self._models = []
         self._loaded_at = 0
         self._loading = False
@@ -42,7 +43,7 @@ class ModelPicker(QComboBox):
             self.addItem(value + " (saved)", value)
         self.setCurrentIndex(self.findData(value))
 
-    def set_context(self, context, inherited="Use Claude Code settings"):
+    def set_context(self, context, inherited="Use Claude Code settings", tip=None):
         """Drop stale results when the selected program/connection changes."""
         value = self.value()
         if context != self._context:
@@ -54,13 +55,15 @@ class ModelPicker(QComboBox):
             self._loaded_at = 0
             self._error = ""
         self._inherit = inherited
+        if tip is not None:
+            self._inherit_tip = tip
         self._fill(value)
 
     def _fill(self, value):
         self.blockSignals(True)
         self.clear()
         self.addItem(self._inherit, "")
-        self.setItemData(0, "Leave the model choice to the connection / CLI settings.", Qt.ToolTipRole)
+        self.setItemData(0, self._inherit_tip, Qt.ToolTipRole)
         for model in self._models:
             self.addItem(model["label"], model["value"])
             tip = "\n".join(part for part in (model.get("description"),

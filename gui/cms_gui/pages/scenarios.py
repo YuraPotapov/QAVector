@@ -23,12 +23,12 @@ import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHeaderView,
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QSplitter, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import core as core_mod, search, theme, widgets
+from .. import core as core_mod, flowswatch, search, theme, widgets
 
 #: Fallback for a core too old to advertise its grammar in --describe.
 FALLBACK_ACTIONS = {
@@ -64,6 +64,9 @@ class ScenariosPage(QWidget):
 
     #: A scenario was written or removed; the window re-reads --describe.
     saved = Signal()
+    #: The scenarios folder changed outside this window (an agent, an editor,
+    #: git); the window re-reads --describe, as after a save.
+    changed_outside = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -129,6 +132,14 @@ class ScenariosPage(QWidget):
         self.status = widgets.mono("")
         column.addWidget(self.status)
         self._update_buttons()
+
+        # ADR-004 D4: changes made outside this window show up without Refresh.
+        # Connected before the window's own handler, so a save of ours is
+        # known to the watch before anything re-reads.
+        self._selectors_loaded = None    # the selectors text as last read, to tell an edit from a reload
+        self.watch = flowswatch.FolderWatch(self)
+        self.saved.connect(self.watch.settle)
+        self.watch.changed.connect(self._changed_on_disk)
 
     # -- construction ---------------------------------------------------------
     def _list_panel(self):
@@ -203,6 +214,10 @@ class ScenariosPage(QWidget):
             "structural: a flow that keys on a visible label breaks the moment "
             "the same app is opened in another language."))
 
+        (self.selector_banner, self.selector_banner_text, self.selector_reload,
+         self.selector_keep) = self._disk_banner(self.load_selectors, self._keep_my_selectors)
+        panel.layout().addWidget(self.selector_banner)
+
         self.selector_yaml = QPlainTextEdit()
         self.selector_yaml.setFont(theme.mono_font(10))
         self.selector_yaml.textChanged.connect(self._selector_yaml_edited)
@@ -243,6 +258,10 @@ class ScenariosPage(QWidget):
             "Tags", self.tags_edit,
             "Comma-separated. template, manual and blocked are kept out of a "
             "run-everything selection; a new scenario starts as template."))
+
+        self.disk_banner, self.disk_banner_text, self.disk_reload, self.disk_keep = self._disk_banner(
+            self.reload_from_disk, self._keep_mine)
+        panel.layout().addWidget(self.disk_banner)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._steps_tab(), "Steps")
@@ -327,7 +346,7 @@ class ScenariosPage(QWidget):
             self.select(wanted)
         self._reload_selector_list()
         self._refresh_resolved()
-        self._flows_dir = inventory.dirs().get("flows") or ""
+        self.set_flows_dir(inventory.dirs().get("flows") or "")
         self._write_lede()
 
     def set_developer_mode(self, enabled):
@@ -601,6 +620,7 @@ class ScenariosPage(QWidget):
         self._refresh_resolved()
         self._show_problems(payload)
         self._mark_clean()
+        self.disk_banner.setVisible(False)
 
     def _load_steps(self, steps):
         self.steps.setRowCount(len(steps))
@@ -860,6 +880,106 @@ class ScenariosPage(QWidget):
         else:
             self.problems.setText("")
 
+    # -- changed outside this window (ADR-004 D4) ---------------------------------
+    @staticmethod
+    def _disk_banner(reload, keep):
+        """A strip over an editor: the file changed on disk, with Reload and Keep mine."""
+        banner = QFrame()
+        banner.setProperty("role", "diskchange")
+        text = QLabel("")
+        text.setWordWrap(True)
+        reload_button = QPushButton("Reload")
+        reload_button.setToolTip("Show the file as it is on disk now; your edits here are dropped")
+        reload_button.clicked.connect(reload)
+        keep_button = QPushButton("Keep mine")
+        keep_button.setToolTip("Hide this and go on with your version; Save writes it over the file")
+        keep_button.clicked.connect(keep)
+        line = QHBoxLayout(banner)
+        line.setContentsMargins(10, 6, 10, 6)
+        line.setSpacing(8)
+        line.addWidget(text, 1)
+        line.addWidget(reload_button)
+        line.addWidget(keep_button)
+        banner.setVisible(False)
+        return banner, text, reload_button, keep_button
+
+    def set_flows_dir(self, path):
+        """The user's scenarios folder: watched for changes made elsewhere."""
+        self._flows_dir = path or ""
+        self.watch.set_root(self._flows_dir)
+
+    def _changed_on_disk(self):
+        """The folder changed, not by this window: the list is re-read, and an
+        open scenario or the selectors follow the file - unless there are edits
+        here, which are never dropped without asking."""
+        self.changed_outside.emit()
+        self._follow_open_scenario()
+        self._follow_selectors()
+
+    @staticmethod
+    def _read(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return False                # there, but unreadable now: nothing to say yet
+
+    def _follow_open_scenario(self):
+        if not self.current or not self.current.get("path"):
+            return
+        text = self._read(self.current["path"])
+        if text is False or text == self.current.get("yaml"):
+            return
+        if text is None:
+            self.disk_banner_text.setText("This file was deleted outside QAVector. What you see is "
+                                          "still here; Save writes it back.")
+            self.disk_reload.setVisible(False)
+            self.disk_banner.setVisible(True)
+            return
+        if not self._dirty:
+            self.open(self.current["id"])
+            self.status.setText("reloaded %s - changed outside QAVector" % self.current["id"])
+            return
+        self.disk_banner_text.setText("This file was changed outside QAVector, and you have unsaved "
+                                      "edits here.")
+        self.disk_reload.setVisible(True)
+        self.disk_banner.setVisible(True)
+
+    def _follow_selectors(self):
+        if self._selectors_loaded is None or not self.selector_path.text():
+            return
+        text = self._read(self.selector_path.text())
+        text = "" if text is None else text
+        if text is False or text == self._selectors_loaded:
+            return
+        if self.selector_yaml.toPlainText() == self._selectors_loaded:
+            self.load_selectors()
+            return
+        self.selector_banner_text.setText("selectors.yaml was changed outside QAVector, and you have "
+                                          "unsaved edits here.")
+        self.selector_banner.setVisible(True)
+
+    def reload_from_disk(self):
+        if self.current:
+            self.open(self.current["id"])
+
+    def _keep_mine(self):
+        # What the file now is becomes what "unchanged" means, so the banner does
+        # not come back for the same change; Save still writes this version.
+        if self.current:
+            text = self._read(self.current["path"])
+            if isinstance(text, str):
+                self.current["yaml"] = text
+        self.disk_banner.setVisible(False)
+
+    def _keep_my_selectors(self):
+        text = self._read(self.selector_path.text())
+        if isinstance(text, str):
+            self._selectors_loaded = text
+        self.selector_banner.setVisible(False)
+
     # -- commands -------------------------------------------------------------
     def new_scenario(self):
         if not self._confirm_discard():
@@ -1042,6 +1162,8 @@ class ScenariosPage(QWidget):
                                   "accent" if writable else "neutral")
         finally:
             self._building = False
+        self._selectors_loaded = payload.get("yaml") or ""
+        self.selector_banner.setVisible(False)
         self.selector_problems.setText("")
         self._reload_selector_list()
 
@@ -1063,6 +1185,8 @@ class ScenariosPage(QWidget):
             self.selector_problems.setStyleSheet("color: %s;" % theme.BAD)
             return
         self.status.setText("wrote %s" % result.get("path", ""))
+        self._selectors_loaded = self.selector_yaml.toPlainText()
+        self.selector_banner.setVisible(False)
         # Every flow points at these names, so what changed here changes what
         # runs - the whole inventory has to be re-read.
         self.saved.emit()

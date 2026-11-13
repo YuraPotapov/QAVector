@@ -368,3 +368,45 @@ def test_the_integration_imports_nothing_of_what_uses_it():
                           text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "[]"
+
+
+# -- QAVector through MCP (QCR ADR-003 6a.3) --------------------------------------------
+def _mcp(argv):
+    i = argv.index("--mcp-config")
+    return json.loads(argv[i + 1])
+
+
+def test_a_turn_given_qavector_gets_that_server_alone_and_its_tools_allowed():
+    from integrations.agents.adapters import claude as claude_adapter
+    argv = claude_adapter.turn_argv("claude", "edit", qavector={"socket": "/run/q/s.sock",
+                                                                 "token_file": "/run/q/tokens/t1"})
+    assert "--strict-mcp-config" in argv
+    server = _mcp(argv)["mcpServers"]["qavector"]
+    assert server["type"] == "stdio" and server["args"][-3:] == ["--qcr-mcp", "--socket=/run/q/s.sock",
+                                                                  "--token-file=/run/q/tokens/t1"]
+    assert list(_mcp(argv)["mcpServers"]) == ["qavector"], "only QAVector's server, nothing from settings"
+    allowed = argv[argv.index("--allowedTools") + 1:]
+    assert any("mcp__qavector" in one for one in allowed)
+
+
+def test_without_qavector_or_in_a_planning_turn_there_is_no_mcp_server():
+    from integrations.agents.adapters import claude as claude_adapter
+    for argv in (claude_adapter.turn_argv("claude", "edit"),
+                 claude_adapter.turn_argv("claude", "edit", plan=True,
+                                          qavector={"socket": "/s", "token_file": "/t"})):
+        assert _mcp(argv) == {"mcpServers": {}}
+        assert "mcp__qavector" not in " ".join(argv)
+
+
+def test_the_runner_hands_qavector_only_to_an_adapter_that_takes_it():
+    from integrations.agents import runner
+    from integrations.agents.adapters import claude as claude_adapter
+
+    class Old:
+        @staticmethod
+        def turn_argv(binary, mode="read"):
+            return []
+    assert runner._qavector(Old, {"socket": "/s", "token_file": "/t"}) == {}
+    assert runner._qavector(claude_adapter, None) == {}
+    assert runner._qavector(claude_adapter, {"socket": "/s", "token_file": "/t"}) == {
+        "qavector": {"socket": "/s", "token_file": "/t"}}

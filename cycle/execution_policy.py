@@ -190,7 +190,10 @@ class Approvals:
             self._record(dict(receipt, status="invalidated", invalidated_at=time.time(), invalidation_reason="node inputs changed"))
             return "The node inputs changed. Review a new approval request."
         approved = request["approved"]
-        self._record(dict(receipt, status="approved" if approved else "declined", approved=approved, decided_at=time.time()))
+        decided = dict(receipt, status="approved" if approved else "declined", approved=approved, decided_at=time.time())
+        if request.get("who"):
+            decided["decided_by"] = request["who"]
+        self._record(decided)
         if not approved:
             next_action = "Review node details or Stop; Continue asks again"
             if self.run.pause_requested:
@@ -214,4 +217,9 @@ def parse_answer(raw):
     if not isinstance(raw, dict) or any(not isinstance(raw.get(key), str) or not raw[key]
                                         for key in ("run_id", "request_id", "fingerprint")) or type(raw.get("approved")) is not bool:
         return None, "Node approval needs a run id, request id, fingerprint and boolean decision."
-    return {key: raw[key] for key in ("run_id", "request_id", "fingerprint", "approved")}, ""
+    who = raw.get("who", "")
+    if not isinstance(who, str) or len(who) > 256 or any(ord(char) < 32 for char in who):
+        return None, "Node approval names who decided with a short line of text, or nobody."
+    # Who decided - the person at the screen, or an agent through QCR - is
+    # written into the receipt. Optional: an answer of an earlier build has none.
+    return dict({key: raw[key] for key in ("run_id", "request_id", "fingerprint", "approved")}, who=who), ""

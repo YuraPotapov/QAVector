@@ -57,7 +57,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QPushButton, QScrollArea, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import background, icons
+from .. import background, icons, qcrhost
 from .. import logsourcesfile as lsf
 from .. import criteria as criteria_mod
 from .. import runnertypes
@@ -1356,7 +1356,11 @@ class ProjectBlock(QWidget):
         # whatever each row's toggles say, and a row with none lines up too.
         held = [] if quick is None else (
             [widgets.vline(), quick, widgets.vline()] if quick.restrictable else [quick])
-        strip = _actions(toggle, restart, *held, None,
+        # Only a service with a QCR identity has anything journalled to show.
+        journal = ([_cell_button("Executions", lambda: self.page.show_executions(self.name, name),
+                                 "What QCR journalled for this service: who asked what, and how it ended.")]
+                   if row.extra.get("qcr_id") else [])
+        strip = _actions(toggle, restart, *held, None, *journal,
             _cell_button("Console", lambda: self.page.open_console(self.name, row),
                          "What this service is printing."),
             _cell_button("Edit", lambda: self.page.edit_runner(self.name, row)),
@@ -1531,6 +1535,8 @@ class ServicesPage(QWidget):
     """The page: two files, one accordion, and a supervisor watching the lot."""
 
     saved = Signal()
+    #: (service label, running now) - show what QCR journalled for this service.
+    executions_requested = Signal(str, bool)
 
     #: Where this page's fold states live in QSettings. Every section on the page
     #: is remembered - a project, the unassigned block, the connections - because
@@ -1578,6 +1584,8 @@ class ServicesPage(QWidget):
         self._valid = True
 
         self.supervisor = svc.ServiceSupervisor(self)
+        #: The QCR host (set_qcr), when the main window has one.
+        self.qcr = None
         self.supervisor.status_changed.connect(self._status_changed)
         self.supervisor.criteria_changed.connect(self._criteria_changed)
 
@@ -1882,6 +1890,8 @@ class ServicesPage(QWidget):
             self._column.insertWidget(at, block)
 
         self.supervisor.sync(self._projects)
+        if self.qcr is not None:
+            self.qcr.schedule_snapshot()
         self.supervisor.set_runtime_control_paths([self._services_path, self._log_path])
         self._refresh_statuses()
         self._update_dirty()
@@ -2115,17 +2125,89 @@ class ServicesPage(QWidget):
     def start_project(self, name=None, names=(), confirm=False):
         if not names and confirm and not self._confirm_all("start", name):
             return
-        self.supervisor.start_all(name, names or None)
+        legacy = self._all_via_qcr("start", name, names, lambda service: not service.is_running())
+        if legacy is None:
+            self.supervisor.start_all(name, names or None)
+        elif legacy:
+            self.supervisor.start_all(name, legacy)
 
     def stop_project(self, name=None, names=(), confirm=False):
         if not names and confirm and not self._confirm_all("stop", name):
             return
-        self.supervisor.stop_all(name, names or None)
+        legacy = self._all_via_qcr("stop", name, names, lambda service: service.is_running())
+        if legacy is None:
+            self.supervisor.stop_all(name, names or None)
+        elif legacy:
+            self.supervisor.stop_all(name, legacy)
 
     def restart_project(self, name=None, names=(), confirm=False):
         if not names and confirm and not self._confirm_all("restart", name):
             return
-        self.supervisor.restart_all(name, names or None)
+        legacy = self._all_via_qcr("restart", name, names, lambda service: True)
+        if legacy is None:
+            self.supervisor.restart_all(name, names or None)
+        elif legacy:
+            self.supervisor.restart_all(name, legacy)
+
+    # -- through the QCR host (qcr_services_v1) ----------------------------------------
+    def set_qcr(self, host):
+        """The QCR host the actions of services with a QCR identity go through,
+        while ``qcr_services_v1`` is on; the rest keep the page's own path."""
+        self.qcr = host
+        host.finished_badly.connect(self._qcr_failed)
+
+    def _via_qcr(self, op, project_name, runner_name):
+        """Ask the host for ``op``; False when this service is not routed through it."""
+        if self.qcr is None or not self.qcr.handles(project_name, runner_name):
+            return False
+
+        def answered(reply):
+            if not reply.get("ok"):
+                self._show_problem("%s · %s: %s" % (project_name, runner_name, qcrhost.words(reply.get("error"))))
+        self.qcr.invoke(op, project_name, runner_name, answered)
+        return True
+
+    def _all_via_qcr(self, op, project, names, wanted):
+        """Route the routed part of an All/selection action. Returns the names
+        left for the page's own path, [] for none, None when nothing was routed
+        (so the original call runs untouched)."""
+        if self.qcr is None or self.qcr.state == "off":
+            return None
+        legacy, routed = [], False
+        for (group, runner), service in self.supervisor.ordered(project, names or None):
+            if self.qcr.handles(group, runner):
+                routed = True
+                if wanted(service):
+                    self._via_qcr(op, group, runner)
+            else:
+                legacy.append(runner)
+        if not routed:
+            return None
+        return legacy
+
+    @staticmethod
+    def service_label(project_name, runner_name):
+        """How a service is named in the Executions view - one spelling for both."""
+        return "%s · %s" % (project_name, runner_name)
+
+    def label_of(self, resource_id):
+        """The label of the service with this QCR identity, "" when none has it."""
+        for key in self.supervisor.keys():
+            service = self.supervisor.service(*key)
+            if service is not None and resource_id and service.runner.extra.get("qcr_id") == resource_id:
+                return self.service_label(*key)
+        return ""
+
+    def show_executions(self, project_name, runner_name):
+        service = self.supervisor.service(project_name, runner_name)
+        self.executions_requested.emit(self.service_label(project_name, runner_name),
+                                       bool(service is not None and service.is_running()))
+
+    def _qcr_failed(self, execution):
+        name = self.label_of(execution.get("resource_id")) or execution.get("resource_id") or ""
+        op = (execution.get("capability_id") or "").rsplit(".", 1)[-1]
+        self._show_problem("%s: %s %s - %s" % (name, op, execution.get("state", "").replace("_", " "),
+                                               qcrhost.words(execution.get("error"))))
 
     #: For each verb: how many services it would actually touch, what to ask, and
     #: what to say instead when the answer is none of them. Named fields rather
@@ -2212,7 +2294,7 @@ class ServicesPage(QWidget):
         project = self._project(project_name)
         if project is None or row not in project.runners:
             return
-        clone = row.copy()
+        clone = row.duplicate()
         clone.name = _unique(clone.name or "service",
                              [r.name for r in project.runners])
         # A copy is a row that did not exist a moment ago, so it is the newest
@@ -2301,10 +2383,12 @@ class ServicesPage(QWidget):
         if service is None:
             return
         if service.is_running():
-            self.supervisor.stop(project_name, runner_name)
+            if not self._via_qcr("stop", project_name, runner_name):
+                self.supervisor.stop(project_name, runner_name)
         else:
             self._show_ok("Starting %s…" % runner_name)
-            self.supervisor.start(project_name, runner_name)
+            if not self._via_qcr("start", project_name, runner_name):
+                self.supervisor.start(project_name, runner_name)
 
     # -- restrictions ----------------------------------------------------------------
     def _restrictions_of(self, project_name, runner_name):
@@ -2338,6 +2422,8 @@ class ServicesPage(QWidget):
         else:
             target.extra.pop("restrictions", None)
         self.supervisor.sync(self._projects)
+        if self.qcr is not None:
+            self.qcr.schedule_snapshot()
         self._update_dirty()
         self._validate()
         if said:
@@ -2443,6 +2529,8 @@ class ServicesPage(QWidget):
         background.run(lambda: restrictions_mod.capabilities(core), done, owner=self)
 
     def restart_runner(self, project_name, runner_name):
+        if self._via_qcr("restart", project_name, runner_name):
+            return
         started = self.supervisor.restart(project_name, runner_name)
         service = self.supervisor.service(project_name, runner_name)
         if not started and service is not None and "execution" in service.runner.extra and not service.launch_allowed:

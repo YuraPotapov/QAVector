@@ -531,7 +531,8 @@ def test_a_first_connection_needs_no_thought(make, dispose):
             "", "low", "medium", "high", "xhigh", "max"]
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
-            "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": ""}})
+            "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "",
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False}}})
         assert dialog.result() == QDialog.Accepted
     finally:
         dispose(dialog)
@@ -624,7 +625,8 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
             "id": "claude", "name": "Claude", "kind": "claude",
-            "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high"}})
+            "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high",
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False}}})
     finally:
         dispose(dialog)
     assert page.agents.connections_tab.table.item(0, 2).text() == "/opt/claude/bin/claude"
@@ -843,3 +845,20 @@ def test_a_found_conversation_skill_or_connection_is_shown_where_it_lives(make):
     assert view.chat.current["id"] == session["id"]
     assert not page.show_found(("agents", ("session", "20200101-000000-aaaaaa")))
     assert not page.show_found(("agents", ("skill", "gone")))
+
+
+
+def test_qavector_access_is_off_until_a_switch_is_turned_on(qapp):
+    """QCR ADR-003 D6: what an agent may do in QAVector, per connection, nothing by default."""
+    from cms_gui.pages.agents import ConnectionDialog
+    dialog = ConnectionDialog(None, {"id": "claude", "name": "Claude", "kind": "claude",
+                                     "qavector_access": {"services": True}})
+    try:
+        assert dialog.entry()["qavector_access"] == {"services": True, "scenarios": False, "cycles": False,
+                                                      "approvals": False, "jira": False}
+        dialog.access["approvals"].setChecked(True)
+        assert dialog.entry()["qavector_access"]["approvals"] is True
+        assert ConnectionDialog(None).entry()["qavector_access"] == dict.fromkeys(
+            ("services", "scenarios", "cycles", "approvals", "jira"), False)
+    finally:
+        dialog.close()

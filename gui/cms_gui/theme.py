@@ -424,6 +424,8 @@ QLabel[role="runtook"] {{ font-family: {mono}; font-size: 12px; color: {n600}; }
 /* Stepping a paused scenario (pages/runsteps.py): the bar takes the warning
    tint while the window waits, the bad one when it waits on a failed step. */
 QWidget[role="stepbar"] {{ border-bottom: 1px solid {divider}; }}
+QFrame[role="diskchange"] {{ background: {warn_tint}; border: 1px solid {warn}; }}
+QFrame[role="diskchange"] QLabel {{ color: {warn_ink}; background: transparent; }}
 QWidget[role="stepbar"][state="paused"] {{ background: {warn_tint}; }}
 QWidget[role="stepbar"][state="failure"] {{ background: {bad_tint}; }}
 QLabel[role="stephead"] {{

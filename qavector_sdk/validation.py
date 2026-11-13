@@ -143,6 +143,27 @@ def validate_contract(name, value):
     return value
 
 
+def compile_output(schema, *, local_schemas=None, code="OUTPUT_SCHEMA_INVALID"):
+    """Check a schema (and its local set) once; return ``check(value)``.
+
+    For a caller that validates many values against one fixed schema:
+    :func:`validate_output` checks the schema itself against the metaschema on
+    every call, which costs far more than validating the value. The schema and
+    local schemas are copied, so changing them afterwards changes nothing.
+    ``check`` raises :class:`ContractError` exactly as ``validate_output`` does.
+    """
+    validate_schema(schema, code=code)
+    schema = json.loads(json.dumps(schema))   # after the check: dumps would coerce bad keys
+    registry = Registry(retrieve=_deny_retrieval)
+    for identifier, document in (local_schemas or {}).items():
+        _json_document(document, code)
+        registry = registry.with_resource(identifier, _resource(json.loads(json.dumps(document)), code))
+
+    def check(value):
+        return _validate(value, schema, registry, code)
+    return check
+
+
 def validate_output(value, schema, *, local_schemas=None, code="OUTPUT_SCHEMA_INVALID"):
     """Validate output/options using explicitly supplied schemas only.
 

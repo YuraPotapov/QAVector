@@ -33,7 +33,9 @@ line itself is wrong.
     session-delete ID         remove it and everything kept of it
     send ID --from=F          take one turn: {"message", "mode", "model",
                               "effort", "skills", "attachments": [file paths],
-                              "plan": a planning turn - questions or a plan}.
+                              "plan": a planning turn - questions or a plan,
+                              "qavector": {"socket", "token_file"} - QAVector
+                              through MCP for this turn}.
                               Prints one line per event
                               as it happens - {"event": {...}} - and the
                               answer as its last line. SIGTERM stops the agent.
@@ -416,7 +418,7 @@ def _send(call):
                              model=document.get("model"), effort=document.get("effort"),
                              skills=document.get("skills"), skills_root=call.skills,
                              emit=emit, stop=stop, attachments=document.get("attachments"),
-                             plan=document.get("plan"))
+                             plan=document.get("plan"), qavector=document.get("qavector"))
     except runner.Refused as exc:
         return _refusal(exc.kind, str(exc))
     finally:

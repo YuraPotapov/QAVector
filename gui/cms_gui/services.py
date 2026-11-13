@@ -42,6 +42,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 
 from PySide6.QtCore import (QObject, QProcess, QProcessEnvironment, QTimer,
                             Signal)
@@ -1254,6 +1255,55 @@ class ServiceSupervisor(QObject):
         self._timer.timeout.connect(self._tick)
 
     # -- the configuration ----------------------------------------------------
+    def qcr_snapshot(self, project_id):
+        """Allowlisted DTO from the owning Qt thread; no probe, file I/O or start.
+
+        project_id is the *outer* workspace identity supplied by the host, not
+        a service group's name. observed_at measures reading this owner's cache,
+        not the service's latest health check. Unmigrated rows are not QCR targets.
+        """
+        from .servicesfile import qcr_identity_problems
+        problems = qcr_identity_problems(self._projects)
+        if problems:
+            raise ValueError(problems[0])
+        rows, legacy = [], 0
+        for project in self._projects:
+            for runner in project.runners:
+                group_id, resource_id = project.extra.get("qcr_id"), runner.extra.get("qcr_id")
+                if not group_id or not resource_id:
+                    legacy += 1
+                    continue
+                service = self.service(project.name, runner.name)
+                if service is None:
+                    continue
+                # What it depends on, by QCR id - the closure QCR authorizes
+                # before a start. One without an id is counted, not dropped:
+                # QCR refuses such a start rather than skip the check.
+                depends_on, unmigrated = [], 0
+                for name in runner.depends:
+                    dependency = project.runner(name)
+                    if dependency is None:
+                        continue
+                    if dependency.extra.get("qcr_id"):
+                        depends_on.append(dependency.extra["qcr_id"])
+                    else:
+                        unmigrated += 1
+                row = {"resource_id": resource_id, "group_id": group_id,
+                    "alias": "%s/%s" % (project.name, runner.name), "display_name": runner.name,
+                    "properties": {"status": service.status, "runner_type": runner.type,
+                                   "detached": bool(runner.detach), "configuration_stale": bool(service.stale)},
+                    "depends_on": list(dict.fromkeys(depends_on)),
+                    # What its log says, with each criterion's colour - its sign:
+                    # green is the good news, red the bad (an agent waits on these).
+                    "criteria": [{"name": str(name)[:256], "color": color if color in criteria_mod.COLORS
+                                  else criteria_mod.DEFAULT_COLOR, "met": bool(lit)}
+                                 for name, color, lit, _why in service.criteria_state() if str(name).strip()][:100]}
+                if unmigrated:
+                    row["unmigrated_dependencies"] = unmigrated
+                rows.append(row)
+        return {"schema_version": 1, "project_id": project_id, "observed_at": time.time(),
+                "ttl_seconds": POLL_MS / 1000, "resources": rows, "legacy_count": legacy}
+
     def set_runtime_core(self, core):
         self.runtime_core = core
         for service in self._services.values():
@@ -1521,6 +1571,10 @@ class ServiceSupervisor(QObject):
                 if service is not None:
                     ordered.append(((row.name, runner.name), service))
         return ordered
+
+    def ordered(self, project=None, names=None):
+        """``[((project, name), service)]`` in dependency order (see _ordered)."""
+        return list(self._ordered(project, names))
 
     def start_all(self, project=None, names=None):
         for key, service in self._ordered(project, names):

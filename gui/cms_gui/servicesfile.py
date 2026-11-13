@@ -22,6 +22,8 @@ not need this module to know.
 
 import json
 import os
+import re
+import uuid
 
 from . import core
 from . import criteria as criteria_mod
@@ -149,6 +151,13 @@ class RunnerRow:
                          [one.copy() for one in self.criteria], dict(self.extra),
                          self.added)
 
+    def duplicate(self):
+        """A new service, unlike copy() which is also used for editing."""
+        clone = self.copy()
+        if "qcr_id" in clone.extra:
+            clone.extra["qcr_id"] = uuid.uuid4().hex
+        return clone
+
 
 class ProjectRow:
     """One project: a name, where it lives, and the services in it."""
@@ -245,6 +254,14 @@ class ProjectRow:
                           [r.copy() for r in self.runners], dict(self.extra),
                           self.added)
 
+    def duplicate(self):
+        """A new group and new service identities; copy() still preserves edits."""
+        clone = self.copy()
+        if "qcr_id" in clone.extra:
+            clone.extra["qcr_id"] = uuid.uuid4().hex
+        clone.runners = [runner.duplicate() for runner in self.runners]
+        return clone
+
 
 def load(path):
     """Read ``services.json`` into rows. Missing file = nothing (not an error)."""
@@ -274,7 +291,7 @@ def validate(projects):
     Returned rather than raised, so the editor shows them all at once and a row
     can be half-typed without an exception.
     """
-    problems = []
+    problems = qcr_identity_problems(projects)
     seen_projects = {}
     for index, project in enumerate(projects, start=1):
         where = "project %d" % index
@@ -351,6 +368,88 @@ def validate(projects):
                             "them could ever start."
                             % (where, " -> ".join(cycle)))
     return problems
+
+
+def qcr_identity_problems(projects):
+    """Optional v1 extension; legacy rows remain valid and are never assigned IDs."""
+    seen, problems = set(), []
+    for project in projects:
+        for row in (project, *project.runners):
+            if "qcr_id" not in row.extra:
+                continue
+            value = row.extra["qcr_id"]
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
+                problems.append("Invalid QCR identity; expected a lowercase UUID hex string.")
+            elif value in seen:
+                problems.append("Duplicate QCR identity; copy/import needs a new identity.")
+            else:
+                seen.add(value)
+    return problems
+
+
+def migrate_qcr_ids(path):
+    """Explicit one-file migration; preserve all fields and require a backup.
+
+    Call while the GUI configuration writer is idle, then reload/sync its rows.
+    Neither load(), save(), nor reading the supervisor invokes this migration.
+    Returns the number of assigned identities; an already migrated file is a no-op.
+    """
+    import stat
+    import tempfile
+
+    with open(path, "rb") as source:
+        original = source.read()
+    backup_temp = None
+    try:
+        document = json.loads(original.decode("utf-8-sig"))
+        if not isinstance(document, dict) or not isinstance(document.get("projects"), list):
+            raise ServicesFileError("Expected a services document with projects.")
+        if type(document.get("version", 1)) is not int or document.get("version", 1) != 1:
+            raise ServicesFileError("Only services format version 1 can be migrated.")
+        projects = [ProjectRow.from_entry(row) for row in document["projects"]]
+    except (ValueError, UnicodeError):
+        raise ServicesFileError("Invalid services document.") from None
+    problems = validate(projects)
+    if problems:
+        raise ServicesFileError("\n".join(problems))
+    count = 0
+    for project in document["projects"]:
+        for row in (project, *project.get("runners", [])):
+            if "qcr_id" not in row:
+                row["qcr_id"] = uuid.uuid4().hex
+                count += 1
+    if not count:
+        return 0
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, temporary = tempfile.mkstemp(prefix=".qcr-services-", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+            json.dump(document, target, ensure_ascii=False, indent=2)
+            target.write("\n")
+            target.flush()
+            os.fsync(target.fileno())
+        os.chmod(temporary, stat.S_IMODE(os.stat(path).st_mode))
+        with open(path, "rb") as source:
+            if source.read() != original:
+                raise ServicesFileError("Services changed during migration; reload before retrying.")
+        # Install the exact original as backup atomically, without following an
+        # existing .bak symlink. A failed backup must prevent the migration.
+        backup_fd, backup_temp = tempfile.mkstemp(prefix=".qcr-backup-", dir=directory)
+        with os.fdopen(backup_fd, "wb") as backup:
+            backup.write(original)
+            backup.flush()
+            os.fsync(backup.fileno())
+        os.chmod(backup_temp, stat.S_IMODE(os.stat(path).st_mode))
+        os.replace(backup_temp, str(path) + ".bak")
+        os.replace(temporary, path)
+    except OSError:
+        raise ServicesFileError("Could not migrate service identities; the original file was retained.") from None
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        if backup_temp is not None and os.path.exists(backup_temp):
+            os.unlink(backup_temp)
+    return count
 
 
 def _cycles(project):

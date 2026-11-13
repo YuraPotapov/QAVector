@@ -1,4 +1,6 @@
-"""Log page: the launcher's stderr, filterable, live or from an earlier run.
+"""Log page: the launcher's stderr, filterable, live or from an earlier run -
+and, as its second mode, the QCR Inspector (:mod:`.executions`): the service
+actions the QCR host journalled. The mode is remembered.
 
 The core already tags each line with the session that produced it during
 parallel runs (``[dev-agent] ...``), so per-session filtering costs nothing but
@@ -16,11 +18,12 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QLineEdit, QPlainTextEdit, QPushButton,
+                               QLineEdit, QPlainTextEdit, QPushButton, QStackedWidget,
                                QVBoxLayout, QWidget)
 
 from .. import history as history_mod, theme, widgets
 from ..runner import parse_log_line
+from .executions import ExecutionsView
 
 LEVEL_COLOR = {
     "DEBUG": theme.NEUTRAL[500],
@@ -32,6 +35,9 @@ LEVEL_COLOR = {
 LEVEL_ORDER = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR"]
 
 LIVE = "Live run"
+#: The page's two modes, as the switch says them.
+LAUNCHER, EXECUTIONS = "Launcher log", "Executions"
+_MODES = {LAUNCHER: "launcher", EXECUTIONS: "executions"}
 SESSION_MAX_WIDTH = 180            # px; a longer session name is shortened
 MAX_ARCHIVE_BYTES = 8_000_000      # a log this big is a disk problem, not a read
 
@@ -79,20 +85,30 @@ class LogPage(QWidget):
         self.source.setMinimumWidth(240)
         self.source.setMaximumWidth(420)
         self.source.currentIndexChanged.connect(self._source_chosen)
-        head_layout.addWidget(widgets.row(
-            widgets.heading("Log"), None,
-            self.level, self.session, self.search, self.follow, save,
-            self.clear_button))
+        # The launcher's own controls, hidden as a group in Executions mode.
+        self.launcher_tools = widgets.row(self.level, self.session, self.search, self.follow, save,
+                                          self.clear_button)
+        head_layout.addWidget(widgets.row(widgets.heading("Log"), None, self.launcher_tools))
         # The picker sits on its own line with the note. Crowding it into the row
         # above pushed the window's minimum width past 1500px, and this page sets
         # that minimum for every page in the stack.
         self.note = widgets.elided_mono("stderr of the launcher process")
+        # The mode switch leads the second line rather than the first: the first
+        # is the widest row in the stack and sets the window's minimum width.
+        self.mode = widgets.Segmented([LAUNCHER, EXECUTIONS], LAUNCHER)
+        self.mode.changed.connect(self._mode_chosen)
+        self.showing = QWidget()
+        showing = QHBoxLayout(self.showing)
+        showing.setContentsMargins(0, 0, 0, 0)
+        showing.setSpacing(10)
+        showing.addWidget(widgets.kicker("showing"))
+        showing.addWidget(self.source)
+        showing.addWidget(self.note, 1)
         second = QHBoxLayout()
         second.setContentsMargins(0, 6, 0, 0)
-        second.setSpacing(10)
-        second.addWidget(widgets.kicker("showing"))
-        second.addWidget(self.source)
-        second.addWidget(self.note, 1)
+        second.setSpacing(16)
+        second.addWidget(self.mode)
+        second.addWidget(self.showing, 1)
         head_layout.addLayout(second)
         column.addWidget(head)
 
@@ -103,10 +119,38 @@ class LogPage(QWidget):
         self.view.setStyleSheet(
             "background: %s; border: none; font-family: %s; font-size: 12px;"
             % (theme.NEUTRAL[100], theme.MONO_CSS))
-        column.addWidget(self.view, 1)
+        self.executions = ExecutionsView()
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.view)
+        self.stack.addWidget(self.executions)
+        column.addWidget(self.stack, 1)
 
         self._reload_sources()
         self._restore()
+        self.set_mode(getattr(settings, "log_mode", "launcher") if settings is not None else "launcher",
+                      remember=False)
+
+    # -- mode -----------------------------------------------------------------
+    def set_mode(self, mode, remember=True):
+        """``launcher`` or ``executions``: which of the page's two logs is shown."""
+        label = EXECUTIONS if mode == "executions" else LAUNCHER
+        if self.mode.current() != label:
+            self.mode.set_current(label, notify=False)
+        executions = label == EXECUTIONS
+        self.stack.setCurrentWidget(self.executions if executions else self.view)
+        self.launcher_tools.setVisible(not executions)
+        self.showing.setVisible(not executions)
+        if remember and self.settings is not None:
+            self.settings.log_mode = _MODES[label]
+
+    def _mode_chosen(self, label):
+        self.set_mode(_MODES.get(label, "launcher"))
+
+    def show_executions(self, service_label="", running=False):
+        """Executions mode, narrowed to one service when ``service_label`` is given
+        (and its row selected: see ExecutionsView.show_service)."""
+        self.set_mode("executions")
+        self.executions.show_service(service_label, running)
 
     # -- input ----------------------------------------------------------------
     def append(self, record):

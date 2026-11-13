@@ -16,6 +16,14 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Added
+- QCR Phase 1A internal registry and read API: versioned capability descriptors,
+  project/resource-scoped discovery, property permissions and freshness, with
+  an adapter for allowlisted snapshots from the existing service supervisor.
+- Explicit, backed-up migration of optional service identities. Renaming keeps
+  identities; copying a service assigns a new one. Legacy service files remain
+  readable without migration. No QCR execution or external gateway is enabled.
+
 ## [0.16.72] - 2026-11-12
 
 ### Added

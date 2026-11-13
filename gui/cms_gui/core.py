@@ -409,6 +409,12 @@ class Core:
         return (list(self.prefix) + ["--integrations", "agents"] + list(args)
                 + self._agents_flags() + (["--from=" + source] if source else []))
 
+    def qcr_host_argv(self, project_id, store_path):
+        """The QCR host's command line: the subcommand first, as the launcher
+        reads it before any of its own flags (``qcr.host``)."""
+        return (list(self.prefix) + ["--qcr-host", "--qcr-project=" + project_id,
+                                     "--qcr-store=" + store_path] + self.secrets_flag())
+
     def agents_export(self, connection_ids, skill_names):
         """Agent connections and skills, files and all, for an export file. The
         core writes them into a file only this account can read; it is read

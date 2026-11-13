@@ -557,3 +557,17 @@ def test_the_buttons_area_counts_rows_added_while_it_is_on_screen(qapp, dispose)
     assert view.actions.height() > one_row
     assert view.actions.height() >= view.actions_body.sizeHint().height()
     dispose(view)
+
+
+def test_a_node_decision_says_who_made_it():
+    """QCR ADR-003 D7: a person's login or an agent's actor beside the decision."""
+    from cms_gui import cyclecockpit
+    cycle = {"run_id": "r", "cycle": "c", "status": "running", "steps": {"deploy": {"status": "succeeded"}},
+             "graph": {"nodes": [{"id": "deploy"}]},
+             "node_approvals": {"a": {"id": "a", "step": "deploy", "label": "Deploy", "status": "approved",
+                                      "mode": "approve", "decided_by": "agent:claude/s1"},
+                                "b": {"id": "b", "step": "deploy", "label": "Deploy", "status": "declined",
+                                      "mode": "approve"}}}
+    page = cyclecockpit.render(cycle)
+    assert "Deploy · Approved · Approve mode · execution 1 · by agent:claude/s1" in page
+    assert "Deploy · Declined · Approve mode · execution 1</p>" in page

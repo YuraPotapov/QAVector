@@ -87,6 +87,26 @@ class Settings:
         self._qs.setValue("cycles/inactivity_seconds", max(10, int(value)))
 
     @property
+    def qcr_services(self):
+        """``qcr_services_v1``: service Start/Stop/Restart go through the QCR host.
+        Off by default; one setting for the whole application, not per project."""
+        return self._qs.value("qcr/services_v1", False, bool)
+
+    @qcr_services.setter
+    def qcr_services(self, value):
+        self._qs.setValue("qcr/services_v1", bool(value))
+
+    @property
+    def log_mode(self):
+        """The Log page's mode: ``launcher`` (stderr) or ``executions`` (QCR)."""
+        value = self._qs.value("log/mode", "launcher", str)
+        return value if value in ("launcher", "executions") else "launcher"
+
+    @log_mode.setter
+    def log_mode(self, value):
+        self._qs.setValue("log/mode", value if value in ("launcher", "executions") else "launcher")
+
+    @property
     def config(self):
         """--config value; empty means the core's own default (users.json)."""
         if self.project_folder:

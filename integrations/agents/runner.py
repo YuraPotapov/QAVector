@@ -188,7 +188,7 @@ def _tail(path, limit=ERROR_CHARS):
 
 def send(root, session_id, message, agents_path=None, mode=None, model=None,
          effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None,
-         plan=None):
+         plan=None, qavector=None):
     """Take one turn. Returns ``{"session", "turn"}``; raises :class:`Refused`.
 
     ``mode``, ``model``, ``effort``, ``skills`` (names in the library at
@@ -196,6 +196,8 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     this turn on. ``plan`` makes it a planning turn: the agent explores
     read-only and answers with questions or a plan, and the session says which
     it waits for (``phase``).
+    ``qavector`` (``{"socket", "token_file"}``, from the GUI) gives this one
+    turn QAVector through MCP, as its connection's grants allow (ADR-003).
     ``emit`` is told each event once it is on disk. ``stop`` is an Event: set,
     it ends the CLI and the turn is recorded as stopped.
 
@@ -208,7 +210,8 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     emit = emit or (lambda event: None)
     stop = stop or threading.Event()
     chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
-              "skills_root": skills_root, "attachments": attachments if attachments is not None else []}
+              "skills_root": skills_root, "attachments": attachments if attachments is not None else [],
+              "qavector": qavector}
     try:
         sessions.load(root, session_id)             # not there: said before the lock
         with sessions.lock(root, session_id):
@@ -327,7 +330,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
                                                   session=provider, resume=resume,
                                                   skills_dir=staged,
                                                   attachments_dir=attachments_dir,
-                                                  plan=planning),
+                                                  plan=planning, **_qavector(adapter, chosen.get("qavector"))),
                        folder, effective, seen, prompt, where, record, tell, stop,
                        cost_before=sessions.cost_so_far(session) if resume else None)
         turn["changes"] = _changed(session_dir, where, folder, before, written)
@@ -475,3 +478,15 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
     outcome["error"] = ("%s ended without an answer (exit %s)%s"
                         % (adapter.NAME, code, ": %s" % said if said else "."))
     return outcome
+
+
+def _qavector(adapter, qavector):
+    """``{"qavector": ...}`` for an adapter whose turns can take it; nothing otherwise."""
+    import inspect
+    if not qavector:
+        return {}
+    try:
+        takes = "qavector" in inspect.signature(adapter.turn_argv).parameters
+    except (TypeError, ValueError):
+        takes = False
+    return {"qavector": dict(qavector)} if takes else {}

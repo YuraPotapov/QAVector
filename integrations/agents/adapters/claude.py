@@ -627,8 +627,21 @@ def _structured(answer):
 ENV_DROPPED = ("CLAUDE_CODE_SIMPLE",)
 
 
+#: The name the QAVector MCP server goes by in a turn, and so its tools' prefix.
+QAVECTOR_SERVER = "qavector"
+
+
+def qavector_mcp(socket_path, token_file):
+    """``--strict-mcp-config --mcp-config ...`` naming only the QAVector server
+    (ADR-003 D4): paths on the command line, the token in its 0600 file."""
+    from qcr.mcp_server import server_command
+    command = server_command(socket_path, token_file)
+    config = {"mcpServers": {QAVECTOR_SERVER: {"type": "stdio", "command": command[0], "args": command[1:]}}}
+    return ("--strict-mcp-config", "--mcp-config", json.dumps(config))
+
+
 def turn_argv(binary, mode="read", model="", effort="", session="", resume=False,
-              skills_dir="", attachments_dir="", plan=False):
+              skills_dir="", attachments_dir="", plan=False, qavector=None):
     """The command line for one turn. The message itself is written to stdin.
 
     On stdin rather than in argv for two reasons: argv is readable by every
@@ -647,13 +660,20 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
     ``plan`` makes it a planning turn: the CLI's plan mode with the read tools
     whatever ``mode`` says, answering as :data:`PLAN_SCHEMA` - the message
     then goes through :func:`plan_prompt`.
+
+    ``qavector`` (``{"socket", "token_file"}``) gives the turn QAVector itself
+    through MCP - the services, scenarios, cycles and reads its connection was
+    granted (ADR-003). Only that server; not for a planning turn, which only
+    reads. Without it, as ever, no MCP server at all.
     """
     from qavector_agent_claude.command import tool_list
     argv = [binary, "-p", "--output-format", "stream-json", "--verbose"]
     tools = TOOLS["read" if plan else mode] + (("Skill",) if skills_dir else ())
     argv += ["--tools", ",".join(tools)]
-    argv += tool_list("--allowedTools", tools)
-    argv += NO_MCP
+    access = qavector if isinstance(qavector, dict) and qavector.get("socket") and qavector.get("token_file") \
+        and not plan else None
+    argv += tool_list("--allowedTools", tools + (("mcp__" + QAVECTOR_SERVER,) if access else ()))
+    argv += qavector_mcp(access["socket"], access["token_file"]) if access else NO_MCP
     if skills_dir:
         argv += ["--plugin-dir", skills_dir]
     if attachments_dir:

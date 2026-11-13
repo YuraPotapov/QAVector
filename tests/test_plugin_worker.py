@@ -422,3 +422,26 @@ def test_pipe_event_loop_supports_threads_without_socketpair(monkeypatch):
     async def task():
         return await asyncio.to_thread(lambda: 7)
     assert run_loop(task()) == 7
+
+
+def test_an_attempt_written_by_an_earlier_build_is_finished_by_this_one(tmp_path):
+    """AttemptStore on the journal (QCR 2.6) reads and completes what the store
+    of earlier builds wrote: same tables, same canonical documents."""
+    from journal import canonical
+    from test_journal import legacy_file
+    init, params = example("plugin-initialize"), example("plugin-execute")
+    event, result = example("node-event"), example("node-result")
+    attempt = params["request"]["attempt_id"]
+    fingerprint = __import__("hashlib").sha256(canonical([init, params, None]).encode()).hexdigest()
+    path = tmp_path / "attempts.db"
+    legacy_file(path, rows=[(attempt, fingerprint, "node", "running", None)],
+                events=[(attempt, event["event_id"], event["sequence"], canonical(event))])
+    store = AttemptStore(path)
+    assert store.claim(init, params) is False
+    assert store.append(event) is False
+    terminal = dict(event, event_id="terminal-1", sequence=event["sequence"] + 1, type="completed",
+                    payload={"result": result})
+    store.finish(result, terminal)
+    assert store.snapshot(attempt) == {"attempt_id": attempt, "status": result["status"], "result": result}
+    assert [item["event"]["event_id"] for item in store.events(attempt)] == [event["event_id"], "terminal-1"]
+    store.close()

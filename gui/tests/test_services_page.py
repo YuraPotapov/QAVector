@@ -258,6 +258,18 @@ def test_a_copied_service_is_valid_the_moment_it_is_made(page):
     assert page.save_button.isEnabled()
 
 
+def test_copy_keeps_source_qcr_identity_and_assigns_a_new_one(page):
+    project = page.rows()[2][0]
+    original = project.runners[0]
+    original.extra["qcr_id"] = "a" * 32
+    page.copy_runner("Claim", original)
+    assert original.extra["qcr_id"] == "a" * 32
+    copied = page.rows()[2][0].runners[1]
+    assert copied.extra["qcr_id"] != original.extra["qcr_id"]
+    assert not sf.qcr_identity_problems(page.rows()[2])
+    assert page.save_button.isEnabled()
+
+
 def test_deleting_a_service_asks_first(page, monkeypatch):
     asked = {}
     _answer_question(monkeypatch, record=asked)

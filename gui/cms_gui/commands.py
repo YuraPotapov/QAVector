@@ -175,6 +175,11 @@ GUI_OWNED = ("--config", "--events", "--control", "--describe", "--init-users-js
              "--agents-file", "--agent-sessions-dir",
              # The Plugins page's own command line, with a parser of its own.
              "--plugins",
+             # The QCR host: a process the GUI keeps for itself while
+             # "Run service actions through QCR" is on, talking JSON lines on
+             # its pipes. Nobody composes one by hand. Its --qcr-project and
+             # --qcr-store share its --help line and mean nothing without it.
+             "--qcr-host",
              # The Inspector's Setup section: a plugin declares what it can be
              # asked outside a run, and the page renders and calls it. Nobody
              # composes one of these by hand.

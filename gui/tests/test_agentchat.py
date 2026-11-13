@@ -833,9 +833,15 @@ def test_the_next_conversation_starts_from_the_last_one_s_choices(make, settings
 
 
 def test_the_model_box_says_what_blank_means_for_the_agent_chosen(make):
-    core = FakeCore(connections=[_connection(model="sonnet"), _connection("second", "Second")])
+    core = FakeCore(connections=[_connection(model="sonnet", effort="high"), _connection("second", "Second")])
     chat = make(core).agents.chat
-    assert chat.composer.model.currentText() == "From connection: sonnet"
+    # The connection's default reads as itself; where it comes from is the tooltip's to say.
+    assert chat.composer.model.currentText() == "sonnet"
+    assert chat.composer.model.itemData(0, Qt.ToolTipRole) == "The connection's default model."
+    assert chat.composer.effort.currentText() == "high" and chat.composer.effort.currentData() == ""
+    # And the folded line says what the turn will run with, inherited or not.
+    assert "sonnet" in chat.composer.context_summary.text()
+    assert "effort high" in chat.composer.context_summary.text()
     chat.composer.connection.setCurrentIndex(1)
     chat.composer.connection.activated.emit(1)
     assert chat.composer.model.currentText() == "Use Claude Code settings"

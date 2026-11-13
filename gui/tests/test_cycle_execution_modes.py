@@ -438,8 +438,10 @@ def test_mode_and_approval_commands_are_bound_to_existing_run(window, monkeypatc
     window._answer_cycle_node_approval(receipt["id"], "wrong", True)
     assert not sent
     window._answer_cycle_node_approval(receipt["id"], receipt["fingerprint"], False)
+    # Who decided goes along (QCR ADR-003 D7): the person at the screen, by login.
+    from cms_gui.askbridge import _who
     assert sent[-1] == {"command": "cycle.node.approval.answer", "run_id": "r", "request_id": receipt["id"],
-                        "fingerprint": receipt["fingerprint"], "approved": False}
+                        "fingerprint": receipt["fingerprint"], "approved": False, "who": _who()}
     window._control_cycle("set_mode", "approve")
     assert len(sent) == 1
     window.run_state.cycle["paused"] = True

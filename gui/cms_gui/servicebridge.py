@@ -89,6 +89,9 @@ class ServiceBridge(QObject):
         self._supervisor = supervisor
         self._send = send
         self._pending = {}
+        #: request id -> who answers it, for a request that is not the
+        #: launcher's (the QCR host's). Everything else goes down ``send``.
+        self._repliers = {}
         self._buffers = {}
         #: Keys asked to start again whose new run has not begun yet. What the
         #: criteria and the status say about them is the previous run's.
@@ -98,13 +101,21 @@ class ServiceBridge(QObject):
         supervisor.criteria_changed.connect(self._criteria_changed)
 
     # -- the request ----------------------------------------------------------
-    def handle(self, event):
-        """Take one ``service.request`` event. True when it was one."""
+    def handle(self, event, reply=None):
+        """Take one ``service.request`` event. True when it was one.
+
+        ``reply(**result)`` answers this one request instead of ``send`` - how
+        the QCR host shares this bridge, and with it what the bridge knows about
+        a restart whose new run has not begun, with the scenarios that wait on
+        the same services. Its ids must not be the launcher's (they are strings).
+        """
         if event.get("kind") != "service.request":
             return False
         request_id = event.get("id")
         if request_id is None:
             return False
+        if reply is not None:
+            self._repliers[request_id] = reply
         op = event.get("op") or ""
         service, found = self._resolve(event.get("project") or "",
                                        event.get("service") or "")
@@ -129,11 +140,23 @@ class ServiceBridge(QObject):
             pending.timer = timer
         return True
 
+    def cancel(self, request_id):
+        """Drop one pending request without answering it: whoever asked has
+        stopped waiting (the QCR host's ``stop_waiting``). True when it was pending."""
+        self._repliers.pop(request_id, None)
+        pending = self._pending.get(request_id)
+        if pending is None:
+            return False
+        self._drop(pending)
+        return True
+
     def cancel_all(self):
-        """Drop every pending request. The launcher has gone; nobody is listening."""
+        """Drop every pending request of the launcher's. The launcher has gone;
+        nobody is listening. Requests someone else answers (the QCR host's) stay."""
         for pending in list(self._pending.values()):
-            self._discard(pending)
-        self._pending.clear()
+            if pending.id not in self._repliers:
+                self._discard(pending)
+                self._pending.pop(pending.id, None)
 
     def _resolve(self, project, name):
         """``(service, key)`` for a reference that names one, else ``(None, why)``."""
@@ -310,9 +333,15 @@ class ServiceBridge(QObject):
         self._drop(pending)
 
     # -- replying -------------------------------------------------------------
+    def resolve(self, project, name):
+        """``(service, (project, name))`` for a reference, or ``(None, why)`` -
+        the same reading a request gets, for whoever routes it elsewhere first."""
+        return self._resolve(project or "", name or "")
+
     def _answer(self, request_id, ok, status, message):
-        self._send(command="service.result", id=request_id, ok=bool(ok),
-                   status=status or "", message=str(message))
+        answer = self._repliers.pop(request_id, None) or self._send
+        answer(command="service.result", id=request_id, ok=bool(ok),
+               status=status or "", message=str(message))
 
     def _why(self, pending, what):
         """Why a wait ended badly, in the words of the thing it was watching."""

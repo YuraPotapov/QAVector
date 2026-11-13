@@ -57,6 +57,8 @@ hiddenimports = (
     + collect_submodules("qavector_sdk")
     + collect_submodules("plugin_host")
     + collect_submodules("qavector_agent_claude")
+    + collect_submodules("qcr")
+    + collect_submodules("journal")
     + ["yaml", "playwright", "playwright.sync_api",
        "cryptography.hazmat.primitives.ciphers",
        "cryptography.hazmat.primitives.serialization",

@@ -21,7 +21,7 @@ import threading
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QPushButton, QTabWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -286,6 +286,14 @@ class ConnectionsTab(QWidget):
         self.remove_requested.emit(chosen["id"], done)
 
 
+#: The "QAVector access" switches, in the order the form shows them.
+QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
+                   ("scenarios", "Run scenarios"),
+                   ("cycles", "Run cycles"),
+                   ("approvals", "Answer a cycle's approvals and questions"),
+                   ("jira", "Read Jira"))
+
+
 class ConnectionDialog(QDialog):
     """Add an agent connection, or change one.
 
@@ -345,6 +353,25 @@ class ConnectionDialog(QDialog):
             "Default effort", self.effort,
             "How hard the model is asked to think when a conversation or a step "
             "does not say. The program's own choice leaves it to its settings."))
+        # What this agent may do in QAVector itself, through QCR (ADR-003 D6).
+        # Every switch off until somebody turns it on; a turn gets exactly these.
+        access = self.connection.get("qavector_access") or {}
+        self.access = {}
+        rows = QVBoxLayout()
+        rows.setSpacing(4)
+        for key, label in QAVECTOR_ACCESS:
+            box = QCheckBox(label)
+            box.setChecked(access.get(key) is True)
+            self.access[key] = box
+            rows.addWidget(box)
+        holder = QWidget()
+        holder.setLayout(rows)
+        rows.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(widgets.field(
+            "QAVector access", holder,
+            "What this agent's conversations may do here, through “Run service actions through QCR”. "
+            "Everything it does is journalled (Log, Executions mode). Approvals let it answer a cycle's "
+            "gates and questions in your place."))
         self.check = QPushButton("Check")
         self.check.setToolTip("Ask the program who it is signed in as. Nothing is saved.")
         self.check.clicked.connect(self._check)
@@ -434,7 +461,8 @@ class ConnectionDialog(QDialog):
         entry.update({"name": self.name.text().strip(), "kind": self.kind.currentData(),
                       "binary": self.binary.text().strip(),
                       "model": self.model.value(),
-                      "effort": self.effort.currentData() or ""})
+                      "effort": self.effort.currentData() or "",
+                      "qavector_access": {key: box.isChecked() for key, box in self.access.items()}})
         return entry
 
     def _check(self):

@@ -3815,6 +3815,9 @@ write a report. The steps that do not depend on each other run at the same time.
                             recorded there, for Integrations -> Agents.
   --integrations COMMAND    Connections and their operations, as JSON. Use
                             --integrations --help for the commands.
+  --qcr-host --qcr-project=ID --qcr-store=PATH
+                            The GUI's QCR host: capability invocations and
+                            their journal, as JSON lines on stdin/stdout.
 
   --cycle-memory-list[=P]   What the project remembers, as keys. P narrows to
                             keys starting with it.
@@ -4029,6 +4032,16 @@ def main():
         # out, nothing of the launcher's parsing below.
         from integrations.cli import main as integrations_main
         sys.exit(integrations_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["--qcr-host"]:
+        # The GUI's QCR host: JSON lines on stdin/stdout for as long as the GUI
+        # keeps it open. Nothing of the launcher's parsing or data folders below.
+        from qcr.host import main as qcr_host_main
+        sys.exit(qcr_host_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["--qcr-mcp"]:
+        # An agent's MCP server: started by the agent's CLI, it speaks MCP on its
+        # stdio and forwards every tool call to the QCR host's agent socket.
+        from qcr.mcp_server import main as qcr_mcp_main
+        sys.exit(qcr_mcp_main(sys.argv[2:]))
     if sys.argv[1:2] == ["--cycle-step-worker"]:
         # A restricted Jira or Teams step, started by a cycle run inside its
         # sandbox: first, before anything here touches the user's data folder.

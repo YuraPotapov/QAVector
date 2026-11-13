@@ -348,6 +348,8 @@ class AskBridge(QObject):
         self._open = {}
         #: request id -> what a Cockpit says about it: id, step, question, since
         self._about = {}
+        #: request id -> the cycle.ask event, for what QCR shows an agent (pending_items)
+        self._events = {}
 
     def handle(self, event):
         """Take one ``cycle.ask`` or ``cycle.ask.withdrawn`` event. True when it was one."""
@@ -376,6 +378,7 @@ class AskBridge(QObject):
         seconds = [int(event.get("timeout_ms") or 0) // 1000]
         timer.timeout.connect(lambda: self._tick(request_id, seconds))
         self._open[request_id] = (dialog, timer)
+        self._events[request_id] = dict(event)
         self._about[request_id] = {"id": str(request_id), "step": str(event.get("step") or ""),
                                    "question": str(event.get("question") or "Continue?"),
                                    "since": time.time()}
@@ -419,6 +422,7 @@ class AskBridge(QObject):
         for request_id in list(self._open):
             dialog, timer = self._open.pop(request_id)
             self._about.pop(request_id, None)
+            self._events.pop(request_id, None)
             timer.stop()
             dialog.close()
             dialog.deleteLater()
@@ -433,6 +437,7 @@ class AskBridge(QObject):
         """
         found = self._open.pop(request_id, None)
         self._about.pop(request_id, None)
+        self._events.pop(request_id, None)
         if found is None:
             return
         dialog, timer = found
@@ -465,9 +470,56 @@ class AskBridge(QObject):
         # the two.
         found[0].close()
 
+    def pending_items(self):
+        """The questions on screen as QCR shows them (``qcr.adapters.cycles``):
+        ``ask:<id>`` with their kind - revision, input, choice or approval."""
+        items = []
+        for request_id, event in self._events.items():
+            revision, text, choice = event.get("revision") or {}, event.get("text"), event.get("choice")
+            kind = ("revision" if revision else "input" if text is not None
+                    else "choice" if choice is not None else "approval")
+            item = {"id": "ask:%s" % request_id, "kind": kind, "step": str(event.get("step") or "")[:256],
+                    "question": str(event.get("question") or "Continue?")[:4000],
+                    "detail": str(event.get("detail") or "")[:20000],
+                    "options": [str(one)[:256] for one in event.get("options") or ()][:20]}
+            if revision:
+                item["revision"] = {"enabled": bool(revision.get("enabled"))}
+            if text is not None:
+                item["text"] = {"required": bool(text.get("required")),
+                                "placeholder": str(text.get("placeholder") or "")[:500]}
+            if choice is not None:
+                item["choice"] = {"mode": "single" if choice.get("mode") == "single" else "multiple",
+                                  "columns": [str(c)[:256] for c in choice.get("columns") or ()][:20],
+                                  "rows": [[str(cell)[:1000] for cell in (row.get("cells") or ())][:20]
+                                           for row in (choice.get("rows") or ())[:500]]}
+            items.append(item)
+        return items
+
+    def answer(self, request_id, answer, who, text=None, chosen=None, revise=False, feedback=""):
+        """Answer one question on screen as its dialog would, for ``who`` (an
+        agent through QCR), and take the dialog away. False when it is not open."""
+        key = next((one for one in self._open if str(one) == str(request_id)), None)
+        if key is None:
+            return False
+        dialog, timer = self._open.pop(key)
+        self._about.pop(key, None)
+        self._events.pop(key, None)
+        timer.stop()
+        extra = {"revise": True, "feedback": feedback} if revise else {}
+        if text is not None:
+            extra["text"] = text
+        if chosen is not None:
+            extra["chosen"] = list(chosen)
+        self._send(command="ask.result", id=key, answer=DISMISSED if revise else answer, who=who, **extra)
+        dialog.close()                  # gone from _open first: closing sends nothing more
+        dialog.deleteLater()
+        self.changed.emit()
+        return True
+
     def _done(self, request_id):
         found = self._open.pop(request_id, None)
         self._about.pop(request_id, None)
+        self._events.pop(request_id, None)
         if found is None:
             return
         dialog, timer = found

@@ -537,3 +537,22 @@ def test_receipt_write_failure_cannot_start_protected_work(tmp_path, monkeypatch
         assert not plugin.calls
         saved = json.loads((tmp_path / "metadata.json").read_text())
         assert saved["status"] == "failed" and "synthetic full disk" in saved["message"]
+
+
+def test_a_node_decision_names_who_made_it_and_an_answer_without_one_still_counts(tmp_path):
+    """QCR ADR-003 D7: the person's login or an agent's actor goes into the receipt."""
+    definition = workflow(node("first"), node("second", needs=["first"]))
+    with live(tmp_path, definition, mode="approve") as (observer, _plugin, _result):
+        first = observer.request("first")
+        assert answer(first, who="x" * 300) != "", "who is a short line of text"
+        assert answer(first, who="agent:claude/s1") == ""
+        decided = observer.wait("cycle.node.approval", lambda event: event["receipt"]["id"] == first["id"]
+                                and event["receipt"]["status"] == "approved")["receipt"]
+        assert decided["decided_by"] == "agent:claude/s1"
+        second = observer.request("second")
+        assert answer(second) == "", "an answer of an earlier build, with no who, is still an answer"
+        plain = observer.wait("cycle.node.approval", lambda event: event["receipt"]["id"] == second["id"]
+                              and event["receipt"]["status"] == "approved")["receipt"]
+        assert "decided_by" not in plain
+    stored = json.loads(policy_file(tmp_path).read_text())["node_approvals"]
+    assert stored[first["id"]]["decided_by"] == "agent:claude/s1"

@@ -13,6 +13,7 @@ than in either page, so neither page has to know the other exists.
 
 import logging
 import os
+import re
 from types import SimpleNamespace
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -25,18 +26,20 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLa
 
 from . import (background, commands, core as core_mod, cycleinteractions, cyclereplay,
                cyclelayoutfile as clf, cycleprojectsfile as cpf, history as history_mod,
-               icon, icons, projectsearch, projectsfile,
+               icon, icons, projectsearch, projectsfile, qcrhost,
                launch as launch_mod, launchprojectsfile as lpf, load as load_mod,
                logsourcesfile as lsf, search, stageswindow, subjecthistory, theme,
                titlebar, transfer, usersfile,
                widgets)
-from .askbridge import AskBridge
+from .askbridge import AskBridge, _who as askbridge_who
+from .pages import agentchat as agentchat_mod
 from .cyclecockpit import ActiveStrip
 from .cyclewatch import Listener
 from .cycleschedule import PlanScheduler
 from .loader import LoaderThread
 from .hotkeys import ActionRegistry, ActionSpec, bind_tooltip
 from . import version as gui_version
+from .launcherfeed import LauncherFeed, label as launch_label
 from .runner import LauncherProcess, RunState, holds_only_windows, launch_kind
 from .servicebridge import ServiceBridge
 from .settings import Settings
@@ -122,6 +125,9 @@ HEADING_TRIM = 10
 # live run. The launcher SIGTERMs every window and gives Chrome up to 15 s each to
 # flush its cookies, so anything shorter risks closing on a login mid-write.
 CLOSE_WAIT_MS = 20000
+#: A launcher.output read that waited answers this long after the first new
+#: entry, so a burst of lines goes in one answer.
+LAUNCHER_BURST_MS = 250
 
 # The splash. READY is how long "Ready!" stays up once the pages are populated -
 # long enough to read rather than a flicker. MAX is the hard stop: --describe is
@@ -205,6 +211,9 @@ class MainWindow(QMainWindow):
         self.inventory = core_mod.Inventory()
         self.run_state = RunState(self)
         self.process = LauncherProcess(self)
+        #: What the launcher said, kept for QCR's launcher.main.status/output (ADR-004 L.1).
+        self.launcher_feed = LauncherFeed()
+        self._launcher_stops = []       # QCR executions waiting for the launcher to end
         # What the running launcher was started to do - see runner.launch_kind.
         self._launch_kind = ""
         self._cycle_was_blocked = False
@@ -281,10 +290,30 @@ class MainWindow(QMainWindow):
         # the launcher's stdin to answer on, and this is where both exist.
         self.service_bridge = ServiceBridge(self.services.supervisor,
                                             self.process.send_command, self)
+        # The QCR host, while qcr_services_v1 is on: Start/Stop/Restart of a
+        # service with a QCR identity are checked and journalled there first.
+        self.qcr_host = qcrhost.QcrHost(self.services.supervisor, self, bridge=self.service_bridge)
+        self.services.set_qcr(self.qcr_host)
+        self.log.executions.set_host(self.qcr_host, self._qcr_label)
+        self.services.executions_requested.connect(self._show_executions)
+        self.qcr_host.set_handler("scenario.run", self._qcr_scenario_run)
+        self.qcr_host.set_handler("cycle.execute", self._qcr_cycle_execute)
+        self.qcr_host.set_handler("cycle.answer", self._qcr_cycle_answer)
+        # The launcher itself (ADR-004 L.1): its status and output, and Stop.
+        self.qcr_host.set_reader("launcher.status", self._qcr_launcher_status)
+        self.qcr_host.set_reader("launcher.output", self._qcr_launcher_output)
+        self.qcr_host.set_handler("launcher.stop", self._qcr_launcher_stop)
+        # An agent conversation's turns reach QAVector through this host (ADR-003 6a).
+        agentchat_mod.ChatTab.qcr_access = self.qcr_host
+        self._qcr_answers = {}          # node approval request id -> (execution id, item id)
+        self._qcr_run = None
+        self._aim_qcr()
         # The same pipe again, carrying a question for the person at the screen
         # rather than one for a service. It needs nothing but somewhere to
         # answer on and a window to belong to.
         self.ask_bridge = AskBridge(self.process.send_command, self)
+        # What QCR shows an agent as open follows the questions on screen.
+        self.ask_bridge.changed.connect(self._qcr_push_pending)
         # And the Cockpits list what it holds open, and bring a question back.
         self.ask_bridge.changed.connect(self._questions_changed)
         self.cycles.question_requested.connect(self.ask_bridge.show)
@@ -876,6 +905,7 @@ class MainWindow(QMainWindow):
         # Writing a scenario changes what --run-tests can run, so the inventory
         # every other page reads has to be re-read.
         self.scenarios.saved.connect(self.refresh_inventory)
+        self.scenarios.changed_outside.connect(self.refresh_inventory)
         # A cycle names the scenarios and services it runs, so
         # writing one changes nothing else - but the inventory is
         # what its own list is built from.
@@ -960,6 +990,7 @@ class MainWindow(QMainWindow):
     def _connect_process(self):
         self.process.event.connect(self._on_event)
         self.process.log.connect(self.log.append)
+        self.process.log.connect(self.launcher_feed.log)
         self.process.started.connect(self._on_started)
         self.process.finished.connect(self._on_finished)
         self.process.failed.connect(self._on_failed)
@@ -1337,6 +1368,7 @@ class MainWindow(QMainWindow):
                                 
         def _on_finished(inventory):
             self.inventory = inventory
+            self.qcr_host.set_inventory(self._qcr_inventory())
             
             _splash_msg("Populating environments...")
             self.environments.set_inventory(self.inventory)
@@ -1901,6 +1933,7 @@ class MainWindow(QMainWindow):
             self.launch_registry.reload()
             self.core = self._new_core()
             self._aim_log_sources()
+            self._aim_qcr()
             self.listener.set_core(self.core)
             self.subjects_page.set_core(self.core)
             self.refresh_inventory()
@@ -2056,6 +2089,7 @@ class MainWindow(QMainWindow):
         self.integrations.set_project_name(project.name)
         self.integrations.set_core(self.core)
         self._aim_log_sources()
+        self._aim_qcr()
         self.listener.set_core(self.core)
         self.subjects_page.set_core(self.core)
         self.credentials.load(self.settings.config)
@@ -2828,6 +2862,19 @@ class MainWindow(QMainWindow):
             widgets.note(self, "Run", "The core was not found. Reinstall QAVector, or start "
                                                  "the GUI from a checkout.")
             return
+        args = self._cycle_run_args(cycle_id, how, step, variables, subject, execution_mode)
+        try:
+            argv = self.core.argv(*args)
+        except core_mod.CoreError as exc:
+            widgets.warn(self, "Run", str(exc))
+            return
+        self._begin_cycle_run(cycle_id, args, argv, how, step)
+        self.show_page("cycles")
+        self.process.start(argv, working_dir=self.core.spawn_dir())
+
+    def _cycle_run_args(self, cycle_id, how="", step="", variables=None, subject=None, execution_mode=None):
+        """The launcher arguments of one cycle run - one spelling for the Cycles
+        page's Run and for a run asked through QCR."""
         args = (["--cycle-run=" + cycle_id, "--events=-", "--control=-"]
                 + self.core.secrets_flag() + self.core.memory_flag()
                 + ["--cycle-var=%s=%s" % one for one in sorted((variables or {}).items())])
@@ -2855,12 +2902,10 @@ class MainWindow(QMainWindow):
             displayed = self.run_state.cycle or {}
             if displayed.get("cycle") == cycle_id and displayed.get("run_id"):
                 args.append("--cycle-reuse=" + displayed["run_id"])
-        try:
-            argv = self.core.argv(*args)
-        except core_mod.CoreError as exc:
-            widgets.warn(self, "Run", str(exc))
-            return
+        return args
 
+    def _begin_cycle_run(self, cycle_id, args, argv, how="", step="", summary=None, started=None):
+        """Everything a cycle run settles before its launcher starts."""
         self._release_launcher()
         self.run_state.reset()
         # The cycle record has its own lifetime - a scenario run no longer
@@ -2870,14 +2915,12 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self._stopping = False
         self._entry_id = self.history.begin(history_mod.CYCLE, {
-            "summary": cycle_id,
+            "summary": summary or cycle_id,
             "argv": argv,
             "display_command": self.core.display_argv(*args),
             "config": {"cycle": cycle_id, **({"action": step} if how == "action" else {})},
         })
-        self.run.run_started("cycle %s · events on stdout" % cycle_id)
-        self.show_page("cycles")
-        self.process.start(argv, working_dir=self.core.spawn_dir())
+        self.run.run_started(started or "cycle %s · events on stdout" % cycle_id)
 
     def stop_run(self):
         if not self.process.is_running():
@@ -2891,7 +2934,13 @@ class MainWindow(QMainWindow):
         if not widgets.confirm(self, "Confirm Stop", msg, agree="Stop",
                                kind="warn"):
             return
-            
+        self._stop_running()
+
+    def _stop_running(self):
+        """Stop the run, with no question asked - what Stop does once it is confirmed,
+        and what a QCR cancel of a run it started does."""
+        if not self.process.is_running():
+            return
         self._stopping = True
         if self.run_state.cycle_running and self.run_state.cycle:
             self.run_state.cycle["_stopping"] = True
@@ -2933,17 +2982,30 @@ class MainWindow(QMainWindow):
                 or receipt.get("status") != "pending" or receipt.get("fingerprint") != fingerprint):
             return
         if not self.process.send_command(command="cycle.node.approval.answer", run_id=cycle.get("run_id"),
-                                         request_id=request_id, fingerprint=fingerprint, approved=bool(approved)):
+                                         request_id=request_id, fingerprint=fingerprint, approved=bool(approved),
+                                         who=askbridge_who()):
             self.status_right.setText("The launcher is no longer accepting approval answers.")
 
     def _on_started(self, argv):
         self._launch_kind = launch_kind(argv)
         self._set_running(True)
+        qcr_run = self._qcr_run
+        self.launcher_feed.begin(
+            launch_label(argv), self._launch_kind,
+            by=(self.qcr_host.actor_of(qcr_run["execution_id"]) or "qcr") if qcr_run else "person",
+            execution_id=qcr_run["execution_id"] if qcr_run else "", history_entry=self._entry_id or "")
+        if self._qcr_run is not None and not self._qcr_run["running"]:
+            self._qcr_run["running"] = True
+            self.qcr_host.owner(self._qcr_run["execution_id"], "running")
         self.log.append({"ts": "", "level": "INFO", "session": "",
                          "text": "$ " + " ".join(argv)})
 
     def _on_event(self, event):
+        self.launcher_feed.event(event)
         self.run_state.handle(event)
+        self._qcr_run_event(event)
+        if event.get("kind") in ("cycle.node.approval", "cycle.control.refused"):
+            self._qcr_approval_event(event)
         kind = event.get("kind")
         if (kind == "flow.end" and self._entry_id is not None and not self._stopping
                 and event.get("status") in ("pass", "fail", "error")):
@@ -2962,7 +3024,8 @@ class MainWindow(QMainWindow):
         if kind == "service.request":
             # A scenario is blocked on the answer to this, so it goes first and
             # nothing else here is interested in it.
-            self.service_bridge.handle(event)
+            if not self._service_request_via_qcr(event):
+                self.service_bridge.handle(event)
             return
         if kind in ("cycle.ask", "cycle.ask.withdrawn"):
             # A step is blocked on a person answering this. Handled here rather
@@ -2990,11 +3053,364 @@ class MainWindow(QMainWindow):
         elif str(event.get("kind", "")).startswith("cycle."):
             self.cycles.handle_event(event)
 
+    #: A run's service step, as the QCR operation it is.
+    _QCR_OPS = {"service_start": "start", "service_stop": "stop", "service_restart": "restart"}
+
+    def _service_request_via_qcr(self, event):
+        """A run's start/stop/restart of a service with a QCR identity goes
+        through the host, as the run's own actor (ADR-002 2.4). False when it
+        is not one: a wait, no host, a service without an identity, or a name
+        that does not resolve (the bridge then answers with why)."""
+        op = self._QCR_OPS.get(event.get("op") or "")
+        host = getattr(self, "qcr_host", None)
+        if op is None or host is None or host.state == qcrhost.OFF or event.get("id") is None:
+            return False
+        service, key = self.service_bridge.resolve(event.get("project"), event.get("service"))
+        if service is None or not host.handles(*key):
+            return False
+        request_id, actor = event["id"], self._run_actor()
+        host.grant_run(actor)
+
+        def answer(ok, status, message):
+            self.process.send_command(command="service.result", id=request_id, ok=bool(ok),
+                                      status=status or "", message=str(message))
+
+        def replied(reply):
+            if not reply.get("ok"):
+                answer(False, "", "QCR refused: %s" % qcrhost.words(reply.get("error")))
+
+        def finished(execution):
+            status = (execution.get("output") or {}).get("service_status", "")
+            if execution.get("state") == "succeeded":
+                answer(True, status, status)
+            else:
+                answer(False, status, "%s %s: %s" % (op, execution.get("state", "").replace("_", " "),
+                                                     qcrhost.words(execution.get("error"))))
+        # The step is answered as soon as the supervisor has the job, as it always
+        # was: its own wait steps are what wait for the service.
+        host.invoke(op, key[0], key[1], replied, request={"wait_ready": False}, actor=actor, finished=finished)
+        return True
+
+    # -- QCR: scenarios (ADR-003 3.1) -------------------------------------------------
+    def _qcr_inventory(self):
+        """The inventory as the QCR host takes it: scenarios, and each
+        environment with the accounts it has. Ids QCR cannot name are left out."""
+        scenarios = [{"id": s["id"], "name": s.get("name") or s["id"],
+                      "description": s.get("description"), "tags": [str(t) for t in s.get("tags") or ()][:100]}
+                     for s in self.inventory.scenarios
+                     if re.fullmatch(r"[A-Za-z0-9_-]{1,200}", str(s.get("id") or ""))]
+        environments = []
+        for env in self.inventory.envs:
+            name = env.get("alias") or env.get("value")
+            if not name:
+                continue
+            names = {env.get("alias"), env.get("value")}
+            accounts = sorted({u["login"] for u in self.inventory.users if u.get("env") in names and u.get("login")})
+            environments.append({"name": name, "accounts": accounts})
+        cycles = [{"id": c["id"], "name": c.get("name") or c["id"], "description": c.get("description"),
+                   "steps": int(c.get("steps") or 0), "problems": [str(p)[:4000] for p in c.get("problems") or ()][:100]}
+                  for c in (self.inventory.payload.get("cycles") or ())
+                  if re.fullmatch(r"[A-Za-z0-9_-]{1,200}", str(c.get("id") or ""))]
+        return {"schema_version": 1, "project_id": self.settings.project_id,
+                "scenarios": scenarios, "environments": environments, "cycles": cycles}
+
+    def _qcr_label(self, resource_id):
+        """How the Inspector names what an execution acted on."""
+        label = self.services.label_of(resource_id)
+        if label:
+            return label
+        scenario = next((s for s in self.inventory.scenarios if s.get("id") == resource_id), None)
+        if scenario:
+            return "Scenario \u00b7 %s" % (scenario.get("name") or resource_id)
+        cycle = next((c for c in self.inventory.payload.get("cycles") or () if c.get("id") == resource_id), None)
+        return "Cycle \u00b7 %s" % (cycle.get("name") or resource_id) if cycle else ""
+
+    def _qcr_scenario_run(self, execution_id, flow_id, given):
+        """Run one scenario for QCR - through the launcher and command line the
+        Run button uses. One launcher (ADR-003 D3): busy is the answer while it
+        is in use."""
+        host = self.qcr_host
+        if self.process.is_running():
+            host.owner(execution_id, "failed", error={
+                "code": "launcher_busy", "message": "Another run is using QAVector's launcher; ask again when it has finished."})
+            return
+        state = {"--run-tests": flow_id, "--env": given["environment"]}
+        if given.get("accounts"):
+            state["--filter-users"] = ",".join(given["accounts"])
+        if given.get("jobs"):
+            state["--jobs"] = str(given["jobs"])
+        if not given.get("keep_windows"):
+            # A run asked through QCR ends when its scenarios do, so the launcher is free again.
+            state["--close-after"] = True
+        args = commands.build_argv(state)
+        try:
+            argv = self.core.argv(*args)
+        except core_mod.CoreError as exc:
+            host.owner(execution_id, "failed", error={"code": "core_unavailable", "message": str(exc)[:300]})
+            return
+        self.run_state.reset()
+        self.log.clear()
+        self._stopping = False
+        self._step_keys_sent = set()
+        try:
+            display = self.core.display_argv(*args)
+        except core_mod.CoreError:
+            display = " ".join(argv)
+        self._entry_id = self.history.begin(history_mod.COMMAND, {
+            "argv": list(argv), "display_command": display,
+            "summary": "QCR \u00b7 %s \u00b7 %s" % (flow_id, given["environment"]), "command_state": state})
+        self.run.run_started("asked through QCR \u00b7 %s \u00b7 %s \u00b7 events on stdout"
+                             % (flow_id, given["environment"]))
+        self._qcr_run = {"execution_id": execution_id, "kind": "scenario", "running": False}
+        host.on_stop(execution_id, self._qcr_run_stop)
+        host.owner(execution_id, "accepted", payload={"history_entry": str(self._entry_id)})
+        self.process.start(argv, working_dir=self.core.spawn_dir())
+
+    def _qcr_cycle_execute(self, execution_id, cycle_id, given):
+        """Run one cycle for QCR - the Cycles page's command line and launcher,
+        busy by the same rule (a launcher only holding windows is let go)."""
+        host = self.qcr_host
+        if self._cycle_blocked():
+            host.owner(execution_id, "failed", error={
+                "code": "launcher_busy", "message": "Another run is using QAVector's launcher; ask again when it has finished."})
+            return
+        args = self._cycle_run_args(cycle_id, variables=given.get("variables") or {},
+                                    execution_mode=given.get("execution_mode"))
+        try:
+            argv = self.core.argv(*args)
+        except core_mod.CoreError as exc:
+            host.owner(execution_id, "failed", error={"code": "core_unavailable", "message": str(exc)[:300]})
+            return
+        self._begin_cycle_run(cycle_id, args, argv, summary="QCR \u00b7 %s" % cycle_id,
+                              started="cycle %s \u00b7 asked through QCR \u00b7 events on stdout" % cycle_id)
+        self._qcr_run = {"execution_id": execution_id, "kind": "cycle", "run_id": "", "running": False}
+        host.on_stop(execution_id, self._qcr_run_stop)
+        host.owner(execution_id, "accepted", payload={"history_entry": str(self._entry_id)})
+        self.process.start(argv, working_dir=self.core.spawn_dir())
+
+    def _qcr_run_event(self, event):
+        """What the QCR run needs from the launcher's events: each scenario's end, and the run's."""
+        run = self._qcr_run
+        if run is None:
+            return
+        kind = event.get("kind")
+        if run["kind"] == "cycle":
+            if kind == "cycle.run.start":
+                run["run_id"] = str(event.get("run_id") or "")
+                self.qcr_host.owner(run["execution_id"], "progress", kind="run", payload={"run_id": run["run_id"]})
+            elif kind == "cycle.step.end":
+                self.qcr_host.owner(run["execution_id"], "progress", kind="step", payload={
+                    "id": str(event.get("step") or event.get("id") or "")[:256],
+                    "status": str(event.get("status") or "")[:64]})
+            elif kind == "run.finished":
+                self._qcr_run_end(event.get("exit_code"), status=str(event.get("status") or ""))
+            return
+        # Each scenario's result is the launcher feed's digest of these same events.
+        if kind == "run.finished":
+            self._qcr_run_end(event.get("exit_code"))
+
+    def _qcr_run_end(self, exit_code, ended_early=False, status=""):
+        run, self._qcr_run = self._qcr_run, None
+        if run is None:
+            return
+        if run["kind"] == "cycle":
+            cycle = self.run_state.cycle or {}
+            steps = [{"id": str(step_id)[:256], "status": str(info.get("status") or "")[:64]}
+                     for step_id, info in (cycle.get("steps") or {}).items()][:2000]
+            output = {"run_id": run["run_id"] or str(cycle.get("run_id") or ""), "exit_code":
+                      exit_code if isinstance(exit_code, int) else None,
+                      "status": status or str(cycle.get("status") or ("ended" if ended_early else "")),
+                      "steps": steps, "history_entry": str(self._entry_id or "")}
+            if ended_early:
+                self.qcr_host.owner(run["execution_id"], "failed", output=output, error={
+                    "code": "run_ended", "message": "The launcher ended (exit %s) before the cycle run finished." % exit_code})
+            else:
+                self.qcr_host.owner(run["execution_id"], "succeeded", output=output)
+            return
+        digest = self.launcher_feed.summary() or {}
+        scenarios = digest.get("scenarios", [])[:500]
+        statuses = [one["status"] for one in scenarios]
+        outcome = ("none" if not statuses else "error" if "error" in statuses
+                   else "failed" if any(s != "pass" for s in statuses) else "passed")
+        output = {"exit_code": exit_code if isinstance(exit_code, int) else None, "outcome": outcome,
+                  "scenarios": scenarios, "history_entry": str(self._entry_id or "")}
+        if digest.get("run_dir"):
+            output["run_dir"] = digest["run_dir"]
+        if ended_early:
+            output["outcome"] = "error"
+            self.qcr_host.owner(run["execution_id"], "failed", output=output, error={
+                "code": "run_ended", "message": "The launcher ended (exit %s) before the run finished." % exit_code})
+        else:
+            self.qcr_host.owner(run["execution_id"], "succeeded", output=output)
+
+    def _qcr_run_stop(self):
+        """QCR ended the run's execution first (cancel, deadline): stop the run."""
+        self._qcr_run = None
+        self._stop_running()
+
+    # -- QCR: the launcher (ADR-004 L.1) ------------------------------------------------
+    def _qcr_launcher_status(self, message, reply):
+        reply(self.launcher_feed.status())
+
+    def _qcr_launcher_output(self, message, reply):
+        """What the launcher said after a cursor. With wait_seconds and nothing
+        new yet, the answer waits for the next entry (and a moment more, so a
+        burst goes in one answer) or for the time to run out."""
+        feed = self.launcher_feed
+        after = int(message.get("after") or 0)
+        limit = int(message.get("limit") or 200)
+        wait = float(message.get("wait_seconds") or 0)
+        result = feed.read(after, limit)
+        if result["entries"] or wait <= 0:
+            reply(result)
+            return
+        answered = [False]
+
+        def answer():
+            if answered[0]:
+                return
+            answered[0] = True
+            if arrived in feed.listeners:
+                feed.listeners.remove(arrived)
+            reply(feed.read(after, limit))
+
+        def arrived():
+            if arrived in feed.listeners:
+                feed.listeners.remove(arrived)
+            QTimer.singleShot(LAUNCHER_BURST_MS, self, answer)
+        feed.listeners.append(arrived)
+        QTimer.singleShot(int(wait * 1000), self, answer)
+
+    def _qcr_launcher_ended(self, code):
+        """The launcher ended: the feed says so, and each QCR stop that waited for it is done."""
+        self.launcher_feed.finish(code)
+        stops, self._launcher_stops = self._launcher_stops, []
+        for execution_id in stops:
+            self.qcr_host.owner(execution_id, "succeeded",
+                                output={"stopped": True, "run": self.launcher_feed.summary()})
+
+    def _qcr_launcher_stop(self, execution_id, resource_id, given):
+        """Stop what the launcher runs, as Stop does once confirmed - anyone's run
+        (ADR-004: which one is the conversation's to decide). Ends when the launcher has."""
+        host = self.qcr_host
+        if not self.process.is_running():
+            host.owner(execution_id, "succeeded", output={"stopped": False, "run": self.launcher_feed.summary()})
+            return
+        actor = host.actor_of(execution_id) or "qcr"
+        reason = str(given.get("reason") or "").strip()
+        self.log.append({"ts": "", "level": "INFO", "session": "",
+                         "text": "stop asked through QCR by %s%s" % (actor, (": " + reason) if reason else "")})
+        self._launcher_stops.append(execution_id)
+        host.owner(execution_id, "accepted")
+        self._stop_running()
+
+    # -- QCR: cycle approvals (ADR-003 3.3) --------------------------------------------
+    def _qcr_pending(self):
+        """What is open in the cycle run on screen, as ``cycles.<id>.pending`` shows it."""
+        cycle = self.run_state.cycle or {}
+        if not self.run_state.cycle_running or not cycle.get("cycle"):
+            return None
+        items = []
+        for receipt in (cycle.get("node_approvals") or {}).values():
+            if receipt.get("status") != "pending" or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(receipt.get("id") or "")):
+                continue
+            label = str(receipt.get("label") or receipt.get("step") or "")[:256]
+            item = {"id": "node:%s" % receipt["id"], "kind": "node_approval", "step": str(receipt.get("step") or "")[:256],
+                    "label": label, "question": "Run %s?" % label,
+                    "detail": str(receipt.get("purpose") or "")[:20000]}
+            if receipt.get("resolved_inputs") is not None:
+                item["inputs"] = receipt["resolved_inputs"]
+            items.append(item)
+        items += self.ask_bridge.pending_items()
+        return {"cycle": str(cycle["cycle"])[:200], "run_id": str(cycle.get("run_id") or "")[:256], "items": items[:200]}
+
+    def _qcr_push_pending(self, *_):
+        host = getattr(self, "qcr_host", None)
+        if host is not None:
+            host.set_pending(self._qcr_pending())
+
+    def _qcr_cycle_answer(self, execution_id, approvals_id, given):
+        """Answer one open item as the actor QCR names - through the very
+        channel the dialog or the Approve button uses (ADR-003 3.3, D7)."""
+        host, who = self.qcr_host, self.qcr_host.actor_of(execution_id)
+        item = str(given.get("item") or "")
+        kind, _, key = item.partition(":")
+        if kind == "ask":
+            done = self.ask_bridge.answer(key, given.get("answer") if given.get("answer") != "revise" else "", who,
+                                          text=given.get("text"), chosen=given.get("chosen"),
+                                          revise=given.get("answer") == "revise", feedback=given.get("feedback") or "")
+            if not done:
+                host.owner(execution_id, "failed", error={"code": "not_pending", "message": "The question is not open any more."})
+                return
+            host.owner(execution_id, "accepted")
+            host.owner(execution_id, "succeeded", output={
+                "item": item, "decided": "revision_requested" if given.get("answer") == "revise" else "answered"})
+            return
+        cycle = self.run_state.cycle or {}
+        receipt = (cycle.get("node_approvals") or {}).get(key) or {}
+        if kind != "node" or receipt.get("status") != "pending" or not self.run_state.cycle_running:
+            host.owner(execution_id, "failed", error={"code": "not_pending", "message": "The approval is not open any more."})
+            return
+        if not self.process.send_command(command="cycle.node.approval.answer", run_id=cycle.get("run_id"),
+                                         request_id=key, fingerprint=receipt.get("fingerprint"),
+                                         approved=given.get("answer") == "approve", who=who):
+            host.owner(execution_id, "failed", error={"code": "run_ended", "message": "The run no longer takes answers."})
+            return
+        # Decided when the core says so: its receipt changes, or it refuses the answer.
+        self._qcr_answers[key] = (execution_id, item)
+        host.owner(execution_id, "accepted")
+
+    def _qcr_approval_event(self, event):
+        """The core's word on an answer QCR sent: a decided receipt, or a refusal."""
+        kind = event.get("kind")
+        if kind == "cycle.node.approval":
+            receipt = event.get("receipt") or {}
+            waiting = self._qcr_answers.pop(receipt.get("id"), None)
+            if waiting is not None and receipt.get("status") in ("approved", "declined"):
+                self.qcr_host.owner(waiting[0], "succeeded", output={"item": waiting[1], "decided": receipt["status"]})
+            elif waiting is not None:
+                self.qcr_host.owner(waiting[0], "failed", error={
+                    "code": "not_decided", "message": "The approval was %s instead." % receipt.get("status")})
+            self._qcr_push_pending()
+        elif kind == "cycle.control.refused" and event.get("action") == "node_approval" and self._qcr_answers:
+            # One answer refused: the oldest still waiting is the one it is about.
+            key = next(iter(self._qcr_answers))
+            execution_id, _item = self._qcr_answers.pop(key)
+            self.qcr_host.owner(execution_id, "failed", error={
+                "code": "refused", "message": str(event.get("reason") or "The run refused the answer.")[:500]})
+
+    def _show_executions(self, service_label, running=False):
+        """A service's Executions button: the Log page, its QCR mode, that service,
+        and the row that explains it now."""
+        self.show_page("log")
+        self.log.show_executions(service_label, running)
+
+    def _run_actor(self):
+        """Who a request from the launcher is, by the run this window started -
+        never by anything in the request line itself."""
+        cycle = self.run_state.cycle or {}
+        if self.run_state.cycle_running and cycle.get("run_id"):
+            return "cycle:%s" % cycle["run_id"]
+        if self._entry_id is not None:
+            return "run:%s" % self._entry_id
+        return "run:launcher"
+
     def _on_finished(self, code):
         self._set_running(False)
+        self._qcr_launcher_ended(code)
         # Nothing left to answer: the timers would otherwise outlive the run and
         # write into a launcher that has gone.
         self.service_bridge.cancel_all()
+        # And its actor may do nothing more; what it did stays in the journal.
+        self.qcr_host.release_runs()
+        # A QCR run whose launcher ended before it said run.finished.
+        if self._qcr_run is not None:
+            self._qcr_run_end(code, ended_early=True)
+        # Answers the core will never decide now, and nothing is open any more.
+        for execution_id, _item in self._qcr_answers.values():
+            self.qcr_host.owner(execution_id, "failed", error={"code": "run_ended", "message": "The run ended first."})
+        self._qcr_answers.clear()
+        self._qcr_push_pending()
         self.ask_bridge.cancel_all()
         # A core that went without sending cycle.run.end - killed, crashed -
         # would otherwise leave the Cycles page offering Stop for a run that
@@ -3224,6 +3640,27 @@ class MainWindow(QMainWindow):
             self, "A run is in progress", "Autotests are still running.",
             _close_warning(windows), agree="Stop all and close", kind="warn")
 
+    def _aim_qcr(self):
+        """Run the QCR host for the project in use while ``qcr_services_v1`` is on;
+        stop it otherwise. A host of another project is replaced."""
+        host = getattr(self, "qcr_host", None)
+        if host is None:
+            return
+        if not self.settings.qcr_services:
+            host.stop()
+            return
+        try:
+            argv = self.core.qcr_host_argv(self.settings.project_id,
+                                           qcrhost.store_path(self.settings.data_dir()))
+        except Exception as exc:
+            logging.getLogger(__name__).warning("QCR host not started: %s", exc)
+            host.stop()
+            return
+        if not argv:
+            host.stop()
+            return
+        host.start(argv, self.settings.project_id)
+
     def _aim_log_sources(self):
         """Tell the core which logsources.json is in force.
 
@@ -3409,6 +3846,9 @@ class MainWindow(QMainWindow):
         # Always, not only when something is running: shutdown also lets go of
         # any status probe still in flight, which Qt otherwise complains about
         # while the window is being destroyed underneath it.
+        # The host's journal already holds what it was asked; it ends before the
+        # services so nothing it waits for is pulled away underneath it.
+        self.qcr_host.stop()
         stopping = bool(self.services.detained())
         if stopping:
             self.status_right.setText("stopping services before closing…")
