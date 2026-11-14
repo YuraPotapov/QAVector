@@ -280,3 +280,42 @@ def test_what_other_agents_wrote_goes_with_the_next_message(chat):
     assert said.startswith(agentchat.agentcards.INBOX) and "reply from codex: Port 8070." in said
     assert said.endswith("carry on") and "Tests are red." not in said
     assert host.acks == ["m-2", "m-1"] and not _cards(tab, agentchat.agentcards.InboxCard)
+
+
+# -- conversations another one started (ADR-006): beside it, and saying so ---------------
+def test_children_stand_right_below_their_parent_and_say_whose(qapp):
+    from cms_gui.pages import agentchat
+    parent = {"id": "p", "title": "Login is flaky", "source": {"label": "Chat"}}
+    other = {"id": "o", "title": "Other", "source": {"label": "Chat"}}
+    task = {"id": "t", "title": "Fix the test", "connection_name": "Codex",
+            "source": {"label": "Delegated", "parent": "p", "by": "Claude", "record": True}}
+    asked = {"id": "q", "title": "Which port?", "connection_name": "Codex",
+             "source": {"label": "Message", "parent": "p", "by": "Claude", "record": True}}
+    orphan = {"id": "x", "title": "Old", "connection_name": "Codex",
+              "source": {"label": "Delegated", "parent": "gone", "by": "Claude", "record": True}}
+    ordered = agentchat.ordered_with_children([task, other, asked, parent, orphan])
+    assert [one["id"] for one in ordered] == ["o", "p", "t", "q", "x"]
+    assert agentchat.child_title(task) == "Task for Codex: Fix the test"
+    assert agentchat.child_title(asked) == "Question for Codex: Which port?"
+    assert agentchat.child_title(parent) == "Login is flaky"
+    assert agentchat.ordered_with_children([parent, task]) and agentchat.is_child(task)
+    assert agentchat.record_text(task) == "A task Claude delegated to Codex. It is shown here, not carried on."
+
+
+def test_a_task_that_starts_running_lists_its_conversation_at_once(chat, monkeypatch):
+    tab, agentchat = chat
+    loads = []
+    monkeypatch.setattr(tab, "load_sessions", lambda then=None: loads.append(1))
+    # Every step of the child comes as a change of a running execution: read once.
+    for state in ("dispatched", "running", "running", "running", "succeeded", "succeeded"):
+        tab.agent_execution({"execution_id": "e-9", "capability_id": "agents.codex.delegate",
+                             "actor_id": "agent:claude/s-1", "state": state, "input": {"goal": "x"}})
+    assert len(loads) == 2
+
+
+def test_the_head_says_what_the_last_turn_ran_with(qapp):
+    from cms_gui.pages import agentchat
+    assert agentchat.ran_with_text({"turns": []}) == ""
+    assert agentchat.ran_with_text({"turns": [{"model": "", "effort": "", "model_used": "gpt-x",
+                                               "effort_used": "medium"}]}) == "gpt-x · effort medium"
+    assert agentchat.ran_with_text({"turns": [{"model": "sonnet", "effort": "low"}]}) == "sonnet · effort low"

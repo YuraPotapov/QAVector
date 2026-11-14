@@ -23,8 +23,8 @@ is said next to an agent that just did something unexpected.
 import os
 import time
 
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QDesktopServices, QFont, QTextCharFormat, QTextCursor,
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame,
                                QHBoxLayout,
@@ -523,6 +523,76 @@ class ChatFeed(QScrollArea):
 
 
 # -- the composer ------------------------------------------------------------------
+#: How a conversation another one started is named in the list (ADR-006).
+CHILD_WORDS = {"Delegated": "Task for %s", "Message": "Question for %s"}
+
+
+def is_child(session):
+    source = session.get("source") or {}
+    return bool(source.get("parent")) and source.get("label") in CHILD_WORDS
+
+
+def child_title(session):
+    """A delegated or asked conversation says so, and for whom, before its title."""
+    title = session.get("title") or "Untitled"
+    if not is_child(session):
+        return title
+    source = session["source"]
+    who = session.get("connection_name") or session.get("connection") or "an agent"
+    return "%s: %s" % (CHILD_WORDS[source["label"]] % who, title)
+
+
+#: How far a child's row stands in from its parent's, in pixels.
+CHILD_INDENT = 12
+
+
+def _indent_icon():
+    """Nothing to see, only room: what pushes a child's row in from its parent's."""
+    pixmap = QPixmap(CHILD_INDENT, 1)
+    pixmap.fill(Qt.transparent)
+    return QIcon(pixmap)
+
+
+def ordered_with_children(sessions):
+    """The list as it comes, each conversation's children right below it,
+    newest first; a child whose parent is not listed stays where it is."""
+    listed = {one.get("id") for one in sessions}
+    children = {}
+    for one in sessions:
+        if is_child(one) and one["source"]["parent"] in listed:
+            children.setdefault(one["source"]["parent"], []).append(one)
+    ordered = []
+    for one in sessions:
+        if is_child(one) and one["source"]["parent"] in listed:
+            continue
+        ordered.append(one)
+        ordered.extend(children.get(one.get("id"), []))
+    return ordered
+
+
+def ran_with_text(session):
+    """The model and effort the last turn ran with, as the program said them;
+    what was asked for when it said nothing; "" before any turn."""
+    turns = session.get("turns") or []
+    if not turns:
+        return ""
+    last = turns[-1]
+    model = last.get("model_used") or last.get("model") or ""
+    effort = last.get("effort_used") or last.get("effort") or ""
+    return " · ".join(part for part in (model, "effort " + effort if effort else "") if part)
+
+
+def record_text(session):
+    """What stands in for the composer in a conversation that is a record."""
+    source = session.get("source") or {}
+    who = session.get("connection_name") or session.get("connection") or "an agent"
+    if source.get("label") == "Delegated" and source.get("by"):
+        return "A task %s delegated to %s. It is shown here, not carried on." % (source["by"], who)
+    if source.get("label") == "Message" and source.get("by"):
+        return "%s answering a question from %s. It is shown here, not carried on." % (who, source["by"])
+    return "This conversation was held by %s. It is shown here, not carried on." % source.get("label")
+
+
 def _caption(text):
     label = QLabel(text)
     label.setProperty("role", "composerlabel")
@@ -801,8 +871,7 @@ class Composer(QFrame):
         self.set_options_open(not readonly and not bool(chosen.get("folder")))
         self.closed.setVisible(readonly)
         if readonly:
-            self.closed.setText("This conversation was held by %s. It is shown here, "
-                                "not carried on." % (session.get("source") or {}).get("label"))
+            self.closed.setText(record_text(session))
         self.say("")
         self._say_model()
         self._sync_restrictions()
@@ -1180,6 +1249,7 @@ class ChatTab(QWidget):
         #: by execution id; and what other agents sent the conversation open.
         self._requests = {}
         self._inbox = []
+        self._listed_states = {}        # execution id -> the state the list was read for
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 14, 0, 0)
@@ -1193,6 +1263,8 @@ class ChatTab(QWidget):
         column.setSpacing(8)
         panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.table = widgets.Table(0, len(self.HEADERS), reclick_clears=False)
+        # Only a child's row has an icon: room that stands it in from its parent's.
+        self.table.setIconSize(QSize(CHILD_INDENT, 1))
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1465,11 +1537,13 @@ class ChatTab(QWidget):
         chosen = self._key()
         self.table.blockSignals(True)
         self.table.setRowCount(0)
-        for one in self.sessions:
+        for one in ordered_with_children(self.sessions):
             row = self.table.rowCount()
             self.table.insertRow(row)
             source = one.get("source") or {}
-            title = QTableWidgetItem(one.get("title") or "Untitled")
+            title = QTableWidgetItem(child_title(one))
+            if is_child(one):
+                title.setIcon(_indent_icon())
             title.setData(Qt.UserRole, one.get("id"))
             title.setToolTip("\n".join(part for part in (
                 one.get("title"), "%s · %s" % (one.get("connection_name") or one.get("connection"),
@@ -1679,7 +1753,7 @@ class ChatTab(QWidget):
         context = context_text(session.get("context"))
         cost = cost_text(session.get("cost_usd")) if session.get("turns") else ""
         self.usage.setText(" · ".join(part for part in (
-            "context " + context if context else "", cost) if part))
+            ran_with_text(session), "context " + context if context else "", cost) if part))
         tokens = tokens_text(session.get("tokens"))
         self.usage.setToolTip("Tokens so far: %s" % tokens if tokens else "")
         self.changes_button.setVisible(bool(session.get("turns")))
@@ -2015,6 +2089,14 @@ class ChatTab(QWidget):
         actor = str(execution.get("actor_id") or "")
         if capability.endswith(".message") and execution.get("state") == "succeeded":
             self._refresh_inbox()
+        if capability.startswith("agents.") and capability.endswith((".delegate", ".message")):
+            # Its conversation is made when it starts running: listed then, and once
+            # more when it ends - not on each of its steps, which come as changes too.
+            state = execution.get("state")
+            if self._listed_states.get(execution.get("execution_id")) != state:
+                self._listed_states[execution.get("execution_id")] = state
+                if state in ("running", "succeeded", "failed", "canceled", "timed_out"):
+                    self.load_sessions()
         if not (capability.startswith("agents.") and capability.endswith((".delegate", ".message"))
                 and actor.startswith("agent:") and "/" in actor):
             return
@@ -2023,6 +2105,7 @@ class ChatTab(QWidget):
         if request is None:
             request = self._request_of(execution)
             self._requests[execution_id] = request
+        before = (request.get("state"), request.get("session_id"), request.get("detail"))
         state = execution.get("state")
         error = execution.get("error") or {}
         output = execution.get("output") or {}
@@ -2033,7 +2116,9 @@ class ChatTab(QWidget):
         if output.get("session_id"):
             request["session_id"] = output["session_id"]
         request["detail"] = self._request_detail(request, output, error)
-        self._sync_strip()
+        if (request.get("state"), request.get("session_id"), request.get("detail")) != before \
+                or before == ("running", None, None):
+            self._sync_strip()          # not on each step of the task: only when its card changes
 
     def _request_of(self, execution):
         """A card for a task or message that never waited (Auto)."""
