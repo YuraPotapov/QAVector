@@ -319,3 +319,14 @@ def test_the_head_says_what_the_last_turn_ran_with(qapp):
     assert agentchat.ran_with_text({"turns": [{"model": "", "effort": "", "model_used": "gpt-x",
                                                "effort_used": "medium"}]}) == "gpt-x · effort medium"
     assert agentchat.ran_with_text({"turns": [{"model": "sonnet", "effort": "low"}]}) == "sonnet · effort low"
+
+
+def test_an_existing_connection_keeps_its_agent_before_the_list_arrives(qapp, dispose):
+    from cms_gui.pages.agents import ConnectionDialog
+    dialog = ConnectionDialog(None, dict(CODEX), kinds=[])        # the core has not answered yet
+    try:
+        assert dialog.entry()["kind"] == "codex"
+        dialog.set_kinds([{"kind": "claude", "name": "Claude Code"}, {"kind": "codex", "name": "Codex"}])
+        assert dialog.entry()["kind"] == "codex" and dialog.kind.currentText() == "Codex"
+    finally:
+        dispose(dialog)

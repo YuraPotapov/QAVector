@@ -187,6 +187,12 @@ def upsert(entry, path=None):
     if entry["id"] and entry["id"] not in taken:
         return entry, ["No connection %r to change." % entry["id"]]
     found = problems(entry)
+    if entry["id"]:
+        previous = next(one for one in connections if one["id"] == entry["id"])
+        if previous["kind"] != entry["kind"]:
+            # Its conversations were held with that agent's program; another one
+            # cannot carry them on - and it would run with the wrong command line.
+            found.append("A connection's agent cannot change (it is %s)." % previous["kind"])
     others = [one for one in connections if one["id"] != entry["id"]]
     if any(one["name"].lower() == entry["name"].lower() for one in others):
         found.append("A connection called %r already exists." % entry["name"])

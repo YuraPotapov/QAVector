@@ -153,3 +153,10 @@ def test_qavector_access_keeps_only_its_switches_and_only_true_turns_one_on():
     assert normalized["qavector_access"] == {"services": True, "scenarios": False, "cycles": False,
                                              "approvals": False, "jira": False}
     assert store.normalize({"name": "C", "qavector_access": "all"})["qavector_access"]["services"] is False
+
+
+def test_a_connections_agent_cannot_change(path):
+    made, _ = store.upsert({"name": "Codex", "kind": "codex"}, path)
+    changed, found = store.upsert(dict(made, kind="claude"), path)
+    assert found == ["A connection's agent cannot change (it is codex)."]
+    assert store.get(made["id"], path)["kind"] == "codex"

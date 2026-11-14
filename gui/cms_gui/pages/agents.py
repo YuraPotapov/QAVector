@@ -436,7 +436,14 @@ class ConnectionDialog(QDialog):
         answer comes, with whatever was typed meanwhile left as it is."""
         self._kinds = [dict(one) for one in kinds or []] or [
             {"kind": value, "name": name} for name, value in KINDS]
-        wanted = self.kind.currentData() or self.connection.get("kind") or self._kinds[0]["kind"]
+        # A connection that exists keeps its agent, whatever list is shown: the
+        # field is fixed for it, and the list may not even name it yet (the core's
+        # answer comes after the dialog opens). Saving another kind once turned a
+        # Codex connection into a Claude one.
+        own = self.connection.get("kind") if self.connection.get("id") else ""
+        wanted = own or self.kind.currentData() or self._kinds[0]["kind"]
+        if own and not any(one.get("kind") == own for one in self._kinds):
+            self._kinds.append({"kind": own, "name": own})
         self.kind.blockSignals(True)
         self.kind.clear()
         for one in self._kinds:
