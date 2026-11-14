@@ -193,10 +193,16 @@ def others_of(session, connection=None):
 def normal_source(source):
     """``source`` as a session keeps it. None is the chat: a person talking."""
     source = source if isinstance(source, dict) else {}
-    return {"label": str(source.get("label") or "").strip() or "Chat",
+    kept = {"label": str(source.get("label") or "").strip() or "Chat",
             "detail": str(source.get("detail") or "").strip(),
             "ref": str(source.get("ref") or "").strip(),
             "record": bool(source.get("record"))}
+    # A conversation another one started (ADR-006): which one, and whose it was -
+    # so a list shows it beside the conversation it belongs to.
+    for key in ("parent", "by"):
+        if str(source.get(key) or "").strip():
+            kept[key] = str(source[key]).strip()
+    return kept
 
 
 def is_record(session):

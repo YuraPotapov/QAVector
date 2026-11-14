@@ -293,3 +293,10 @@ def test_the_record_on_disk_is_plain_json_a_person_can_open(root, folder):
     session = _new(root, folder)
     path = os.path.join(sessions.directory(root, session["id"]), "session.json")
     assert json.load(open(path, encoding="utf-8"))["id"] == session["id"]
+
+
+def test_a_source_keeps_whose_child_it_is():
+    from integrations.agents import sessions
+    kept = sessions.normal_source({"label": "Delegated", "parent": "s-1", "by": "Claude", "other": "x"})
+    assert kept["parent"] == "s-1" and kept["by"] == "Claude" and "other" not in kept
+    assert "parent" not in sessions.normal_source({"label": "Chat"})

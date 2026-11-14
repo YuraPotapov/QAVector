@@ -220,7 +220,7 @@ class AgentRuntime:
 
 
 def run_turn(job, root, agents_path, session, provider, task_id, metadata, message, mode,
-             model, effort, stop):
+             model, effort, stop, qavector=None):
     """One turn of ``session`` for ``job``: its events become the job's progress
     (normalized, plus ``usage.reported``). Returns ``(runner answer, the turn's
     final text)``. No skills, no planning and no QAVector access: a task is
@@ -236,7 +236,8 @@ def run_turn(job, root, agents_path, session, provider, task_id, metadata, messa
                 job.progress("usage.reported", dict(metadata, tokens=event["tokens"],
                              cost_usd=event.get("cost_usd")))
     answer = runner.send(root, session["id"], message, agents_path=agents_path, mode=mode,
-                         model=model, effort=effort, plan=False, skills=[], emit=emit, stop=stop)
+                         model=model, effort=effort, plan=False, skills=[], emit=emit, stop=stop,
+                         qavector=qavector)
     return answer, said["text"]
 
 

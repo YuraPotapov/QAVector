@@ -76,6 +76,24 @@ CLOSING = ("Work only in this folder. Nobody can answer a question during this t
            "checked it.")
 
 
+def child_grants(parent, connection):
+    """What a delegated turn may do in QAVector (ADR-006 D2): the delegating
+    conversation's own grants that the target connection's switches also allow -
+    never ``agents.*``, so a child cannot hand anything on (depth 1)."""
+    allowed = store.access_permissions(connection)
+    found, seen = [], set()
+    for one in parent or []:
+        permission = one.get("permission")
+        if not isinstance(permission, str) or permission.startswith("agents.") or permission not in allowed:
+            continue
+        key = (permission, one.get("resource_id"))
+        if key not in seen:
+            seen.add(key)
+            found.append({key_: value for key_, value in (("permission", permission),
+                                                         ("resource_id", one.get("resource_id"))) if value})
+    return found
+
+
 def target_resource(connection_id):
     return "agent-connection~" + connection_id
 
@@ -114,7 +132,8 @@ class Delegation:
     """The trusted invoker behind ``agents.<target>.delegate`` and ``agents.tasks.verify``."""
 
     def __init__(self, registry, engine, executions, project_id, sessions_root, agents_path,
-                 policies, notify, context_dir, known_secrets=lambda: (), messages=None):
+                 policies, notify, context_dir, known_secrets=lambda: (), messages=None,
+                 grant=None, revoke=None):
         self.registry, self.engine, self.store = registry, engine, executions
         self.project_id, self.root, self.agents_path = project_id, sessions_root, agents_path
         self._policies = policies          # actor -> policy, kept by the host
@@ -122,6 +141,8 @@ class Delegation:
         self.context_dir = context_dir
         self._known_secrets = known_secrets
         self.messages = messages
+        self._grant = grant                # (actor, grants) -> access for a child turn, or None
+        self._revoke = revoke
         self._owner = object()
         self._lock = threading.RLock()
         self._pending = {}                 # execution id -> (job, context): asked, not answered
@@ -302,11 +323,12 @@ class Delegation:
         except runner.Refused as exc:
             raise QCRError(exc.kind, str(exc)) from None
         artifacts = [self._own(job, one) for one in dict.fromkeys(job.request.get("artifacts") or [])]
+        handed = child_grants(rule.get("grants"), connection)
         document = packages.build(
             goal=job.request["goal"].strip(), criteria=list(job.request.get("acceptance_criteria") or []),
             summary=str(job.request.get("summary") or "").strip(),
             constraints={"mode": mode, "timeout_seconds": job.request.get("timeout_seconds", DEFAULT_SECONDS),
-                         "depth": 1, "qavector_access": False},
+                         "depth": 1, "qavector_access": sorted({one["permission"] for one in handed})},
             folder=rule["folder"], files=job.request.get("files") or (), artifacts=artifacts,
             provenance={"actor": job.actor_id, "session": rule["session"], "connection": rule["connection"],
                         "execution_id": job.execution_id},
@@ -315,7 +337,8 @@ class Delegation:
                 "parent": rule["session"], "parent_name": rule["name"], "folder": rule["folder"],
                 "restrictions": rule["restrictions"], "mode": mode, "others": rule["others"],
                 "goal": document["goal"], "criteria": document["acceptance_criteria"],
-                "package": packages.keep(document, self.context_dir), "document": document}
+                "package": packages.keep(document, self.context_dir), "document": document,
+                "grants": handed}
 
     def _secrets(self):
         try:
@@ -345,7 +368,8 @@ class Delegation:
                 self.root, connection, context["folder"], context["mode"],
                 title=context["goal"], restrictions=context["restrictions"], others="deny",
                 source={"label": "Delegated", "ref": "qcr-task:" + job.execution_id, "record": True,
-                        "detail": "%s: %s" % (context["parent_name"], context["goal"])[:300]})
+                        "detail": "%s: %s" % (context["parent_name"], context["goal"])[:300],
+                        "parent": context["parent"], "by": context["parent_name"]})
             task_id = job.execution_id
             metadata = {"task_id": task_id, "session_id": session["id"], "provider": context["provider"],
                         "target": context["target"], "parent_session": context["parent"]}
@@ -356,8 +380,16 @@ class Delegation:
             stale = packages.freshness(document, context["folder"])
             message = packages.render(document, sender=context["parent_name"], mode=context["mode"],
                                       changed=stale, closing=CLOSING)
-            answer, text = run_turn(job, self.root, self.agents_path, session, context["provider"],
-                                    task_id, metadata, message, context["mode"], "", "", stop)
+            access = self._grant("agent:%s/%s" % (context["target"], session["id"]), context["grants"]) \
+                if self._grant is not None and context["grants"] else None
+            try:
+                answer, text = run_turn(job, self.root, self.agents_path, session, context["provider"],
+                                        task_id, metadata, message, context["mode"], "", "", stop,
+                                        qavector={"socket": access["socket"], "token_file": access["token_file"]}
+                                        if access else None)
+            finally:
+                if access and self._revoke is not None:
+                    self._revoke(access)
             turn = answer["turn"]
             output = {"task_id": task_id, "target": context["target"], "provider": context["provider"],
                       "session_id": session["id"],
@@ -552,7 +584,8 @@ class Delegation:
                 self.root, connection, context["folder"], "read", title=context["body"][:80],
                 restrictions=context["restrictions"], others="deny",
                 source={"label": "Message", "ref": "qcr-message:" + message_id, "record": True,
-                        "detail": "%s asks: %s" % (context["parent_name"], context["body"])[:300]})
+                        "detail": "%s asks: %s" % (context["parent_name"], context["body"])[:300],
+                        "parent": context["parent"], "by": context["parent_name"]})
             metadata = {"message_id": message_id, "session_id": session["id"], "provider": context["provider"],
                         "target": context["target"], "parent_session": context["parent"]}
             if not job.running(metadata) or stop.is_set():

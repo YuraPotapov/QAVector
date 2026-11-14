@@ -131,7 +131,7 @@ def test_auto_runs_the_child_once_as_a_record_with_evidence(world, tmp_path):
     assert len(turns) == 1
     told = turns[0]["params"]["input"][0]["text"]
     assert "Goal: Fix the login test" in told and "1. login passes" in told and "The selector changed." in told
-    # Depth 1: the child's app-server got no QAVector server.
+    # The delegator had no QAVector access of its own, so the child gets none either.
     starts = [row["argv"] for row in _codex_turns(tmp_path) if "argv" in row]
     assert not any("mcp_servers.qavector" in arg for argv in starts for arg in argv)
     kinds = [event.get("type") for event in w.events(done["execution_id"])]
@@ -276,3 +276,47 @@ def test_codex_delegates_to_claude_through_the_real_mcp_server_and_socket(tmp_pa
         assert len(children) == 1 and children[0]["kind"] == "claude" and children[0]["mode"] == "read"
     finally:
         w.close()
+
+
+def test_the_child_gets_the_delegators_access_its_own_connection_allows_never_agents(tmp_path, monkeypatch):
+    """ADR-006 D2 as changed on 2026-11-14: a delegated turn may use QAVector -
+    what the delegator was given and the target's switches allow too, never
+    agents.* (depth 1) - for that one turn."""
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(tmp_path / "codex.jsonl"))
+    w = World(tmp_path, others="auto", mode="read")
+    try:
+        w.host.open_agent_socket(str(tmp_path / "sock"))
+        codex = store.get("codex", w.agents)
+        store.upsert(dict(codex, qavector_access={"services": True}), w.agents)
+        grants = [{"permission": "agents.delegate", "resource_id": delegation.target_resource("codex")},
+                  {"permission": "agents.message", "resource_id": delegation.message_resource("codex")},
+                  {"permission": "services.read"}, {"permission": "services.start"},
+                  {"permission": "scenarios.run"}]
+        w.host._on_actor({"actor": ACTOR, "grants": grants, "agents": {
+            "session": "s-parent", "connection": "claude", "name": "Claude", "folder": str(w.folder),
+            "mode": "read", "others": "auto", "restrictions": {}}})
+        issued = []
+        real = w.host._issue
+        monkeypatch.setattr(w.host, "_issue", lambda actor, given: (issued.append((actor, given)), real(actor, given)))
+        done = w.wait(w.delegate(goal="MCP_LIST")["execution"]["execution_id"])
+        assert done["state"] == "succeeded", done
+        child_actor, given = issued[-1]
+        assert child_actor.startswith("agent:codex/")
+        assert sorted(one["permission"] for one in given) == ["services.read", "services.start"]
+        assert done["output"]["answer"].startswith("Answer: ")       # the child's MCP call went through
+        starts = [row["argv"] for row in _codex_turns(tmp_path) if "argv" in row]
+        assert any(arg.startswith("mcp_servers.qavector=") for argv in starts for arg in argv)
+        # The turn over, its access is gone.
+        assert child_actor not in w.host._callers
+        assert not os.listdir(tmp_path / "sock" / "tokens") if (tmp_path / "sock" / "tokens").exists() else True
+        kept = delegation.packages.load(done["output"]["context_package"], w.host.context_dir)
+        assert kept["constraints"]["qavector_access"] == ["services.read", "services.start"]
+    finally:
+        w.close()
+
+
+def test_the_child_conversation_names_its_parent(world):
+    w = world()
+    done = w.wait(w.delegate()["execution"]["execution_id"])
+    child = sessions.load(w.root, done["output"]["session_id"])
+    assert child["source"]["parent"] == "s-parent" and child["source"]["by"] == "Claude"

@@ -148,7 +148,12 @@ class Server:
                                 "it, invoke, then wait. A service's start ends when its process runs, not "
                                 "when it is ready: if the result says has_criteria, wait on "
                                 "services.<id>.criteria (green = ready, red = failed); without criteria read "
-                                "services.<id>.output; with neither, judge for yourself and say so."})
+                                "services.<id>.output; with neither, judge for yourself and say so. "
+                                "Other agents of this QAVector (Claude Code, Codex and the like) are reached "
+                                "only here, never through a program on PATH: list the agents namespace, then "
+                                "agents.<id>.delegate hands one a task (it runs once, may wait for the "
+                                "person's approval, and is given your QAVector access where its own "
+                                "connection allows it too) and agents.<id>.message sends it a message."})
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":

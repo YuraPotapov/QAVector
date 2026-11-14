@@ -322,6 +322,9 @@ class Host:
         rule = policy(message.get("agents"))
         self._issue(message.get("actor"), message.get("grants"))
         if rule is not None:
+            # What the conversation itself was given: a task it hands on gets
+            # at most this (ADR-006 D2), even after its own turn has ended.
+            rule["grants"] = [dict(one) for one in message.get("grants") or [] if isinstance(one, dict)]
             self._agent_policies[message.get("actor")] = rule
         else:
             self._agent_policies.pop(message.get("actor"), None)
@@ -341,7 +344,8 @@ class Host:
             self.messages = MessageStore(self._messages_path)
             self.delegation = Delegation(self.registry, self.engine, self.store, self.project_id,
                                          root, path, self._agent_policies, self.send,
-                                         self.context_dir, self._known_secrets, self.messages)
+                                         self.context_dir, self._known_secrets, self.messages,
+                                         grant=self._grant_child, revoke=self._end_child)
         elif (root, path) != (self.delegation.root, self.delegation.agents_path):
             raise QCRError("conflict", "Agent storage cannot change during this host's lifetime.")
         self.delegation.configure()
@@ -369,6 +373,41 @@ class Host:
         if self.delegation is None or self.messages is None:
             raise QCRError("not_found", "No delivered message has that id.")
         return {"message": self.delegation.acknowledge(message.get("message_id"), message.get("by", ""))}
+
+    def _grant_child(self, actor, grants):
+        """QAVector for one delegated turn (ADR-006 D2): its actor issued with
+        ``grants``, a fresh token by digest, the token in a 0600 file beside the
+        socket. None without a socket or without grants."""
+        import hashlib
+        import secrets
+        import tempfile
+        if self.gateway is None or not grants:
+            return None
+        folder = os.path.join(os.path.dirname(self.gateway.path), "tokens")
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        os.chmod(folder, 0o700)
+        token = secrets.token_hex(32)
+        descriptor, token_file = tempfile.mkstemp(prefix="t-", dir=folder)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(token)
+        os.chmod(token_file, 0o600)
+        with self._lock:
+            self._issue(actor, grants)
+            self.tokens.add(actor, hashlib.sha256(token.encode()).hexdigest(), time.time() + 12 * 3600)
+        return {"actor": actor, "socket": self.gateway.path, "token_file": token_file}
+
+    def _end_child(self, access):
+        if not access:
+            return
+        with self._lock:
+            caller = self._callers.pop(access["actor"], None)
+            if caller is not None:
+                self.authority.revoke(caller)
+            self.tokens.forget_actor(access["actor"])
+        try:
+            os.unlink(access["token_file"])
+        except OSError:
+            pass
 
     def _known_secrets(self):
         """Every value in the secrets store, for a context package to be checked

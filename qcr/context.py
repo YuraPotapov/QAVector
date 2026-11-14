@@ -208,6 +208,10 @@ def render(document, *, sender, mode, changed=(), closing=""):
             if one["output_excerpt"]:
                 lines.append("  output: " + one["output_excerpt"] + (" ..." if one["truncated"] else ""))
     lines += ["", "Mode: %s." % mode]
+    access = (document.get("constraints") or {}).get("qavector_access")
+    if access:
+        lines.append("QAVector tools are yours for: %s. Use them for what the task asks "
+                     "(list capabilities first); you cannot hand anything on." % ", ".join(access))
     if closing:
         lines.append(closing)
     return "\n".join(lines)

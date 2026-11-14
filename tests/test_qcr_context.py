@@ -137,7 +137,7 @@ def test_the_child_is_told_the_package_and_the_output_names_it(world, tmp_path):
     told = [row for row in _codex_turns(tmp_path) if row.get("method") == "turn/start"][0]["params"]["input"][0]["text"]
     assert "login.py" in told and "(changed since the task was given)" in told
     kept = packages.load(card["context_package"], w.host.context_dir)
-    assert kept["provenance"]["actor"] == ACTOR and kept["constraints"]["qavector_access"] is False
+    assert kept["provenance"]["actor"] == ACTOR and kept["constraints"]["qavector_access"] == []
 
 
 def test_artifacts_must_be_the_delegators_own_runs(world):

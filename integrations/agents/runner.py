@@ -348,6 +348,12 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             sessions.save(root, session)
         if event.get("type") == "file.written":
             written.append(event.get("path"))
+        if event.get("type") == "started":
+            # What the program says it runs with - the answer when the turn
+            # left model or effort to its default.
+            for key in ("model", "effort"):
+                if event.get(key):
+                    turn[key + "_used"] = str(event[key])
         emit(event)
 
     try:

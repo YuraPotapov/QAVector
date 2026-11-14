@@ -410,7 +410,8 @@ class Turn:
         if not self.thread_id:
             raise ProtocolError("Codex started no thread.")
         model = str(result.get("model") or self.spec.get("model") or "")
-        self.say("thread", id=self.thread_id, model=model, resumed=bool(self.spec.get("thread")))
+        effort = str(self.spec.get("effort") or result.get("reasoningEffort") or "")
+        self.say("thread", id=self.thread_id, model=model, effort=effort, resumed=bool(self.spec.get("thread")))
         return model
 
     def _start_turn(self, model):

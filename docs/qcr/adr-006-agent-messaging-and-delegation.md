@@ -31,9 +31,17 @@ restrictions. No profile editor is needed (that stays Phase 7).
 
 **D2. A child never has more than its parent.** Mode = the one the task asks
 for, capped by the parent session's mode; **the parent's mode when not said**
-(user, 2026-11-13). A child turn
-gets no QAVector access, so it cannot delegate or message further: depth 1.
-A deeper chain needs an explicit later decision.
+(user, 2026-11-13).
+
+*Changed 2026-11-14 after the first live delegation.* Claude asked Codex to
+start a service through QAVector, and the child, which had no QAVector access,
+could not. A child turn is now given, for that one turn, the delegating
+conversation's own grants that the target connection's "QAVector access"
+switches also allow (`store.ACCESS_GRANTS`). It never gets `agents.*`, so it
+still cannot delegate or message further: depth 1. The host issues the child's
+actor (`agent:<target>/<child session>`) and token, and revokes both when the
+turn ends. The package's `constraints.qavector_access` lists what the child
+has, and its message says so.
 
 **D3. A chat's "Other agents" mode decides (user, 2026-11-13).** It sits beside
 the chat's access mode and is per conversation:

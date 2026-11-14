@@ -328,3 +328,11 @@ def test_provider_change_leaves_no_turn(world):
     with pytest.raises(runner.Refused, match="provider"):
         runner.send(root, session["id"], "no", agents_path=path)
     assert not logged()
+
+
+def test_a_turn_keeps_the_model_and_effort_codex_ran_with(world):
+    root, path, session, logged, _work = world
+    turn = runner.send(root, session["id"], "hello", agents_path=path)["turn"]
+    assert turn["model"] == "" and turn["model_used"] == "fixture-default"
+    assert sessions.load(root, session["id"])["turns"][0]["model_used"] == "fixture-default"
+    assert codex.events(json.dumps({"qavector": "thread", "id": "t", "model": "m", "effort": "high"}))[0]["effort"] == "high"

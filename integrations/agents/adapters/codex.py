@@ -246,6 +246,8 @@ def _bridge_events(event):
         found = {"type": "started", "provider_session": str(event.get("id") or "")}
         if event.get("model"):
             found["model"] = str(event["model"])
+        if event.get("effort"):
+            found["effort"] = str(event["effort"])
         return [found]
     if kind == "decision" and event.get("decision") == "declined" and event.get("item"):
         return [{"type": "tool.refused", "id": str(event["item"]), "reason": str(event.get("reason") or "")}]

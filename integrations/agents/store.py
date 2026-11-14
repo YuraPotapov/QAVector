@@ -27,6 +27,25 @@ VERSION = 1
 #: each off until somebody turns it on - approvals above all.
 QAVECTOR_ACCESS = ("services", "scenarios", "cycles", "approvals", "jira")
 
+#: The QCR permissions each "QAVector access" switch gives a turn. The GUI
+#: keeps the same table (gui/cms_gui/qcrhost.py AGENT_GRANTS) for the turns it
+#: grants; this one is what a delegated turn may have at most (ADR-006 D2).
+ACCESS_GRANTS = {
+    "services": ("services.read", "services.start", "services.stop", "services.restart"),
+    "scenarios": ("scenarios.read", "scenarios.run"),
+    "cycles": ("cycles.read", "cycles.run"),
+    "approvals": ("cycles.read", "cycles.approve"),
+    "jira": ("integrations.jira.read", "integrations.jira.issue", "integrations.jira.comments",
+             "integrations.jira.search", "integrations.jira.statuses"),
+}
+
+
+def access_permissions(connection):
+    """The permissions a connection's switches allow its turns."""
+    access = (connection or {}).get("qavector_access") or {}
+    return {permission for key, on in access.items() if on is True for permission in ACCESS_GRANTS.get(key, ())}
+
+
 #: What a conversation may do with other agents (ADR-006 D3): delegate and
 #: message them without asking, only once the person approves, or not at all.
 OTHERS = ("auto", "approve", "deny")
