@@ -48,12 +48,14 @@ def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     entry = json.load(open(path, encoding="utf-8"))["connections"][0]
     assert entry == {"id": "claude", "name": "Claude", "kind": "claude",
-                     "binary": "", "model": "sonnet", "effort": "high",
+                     "binary": "", "model": "sonnet", "effort": "high", "role": "",
                      # QAVector through QCR: nothing until somebody turns it on (ADR-003 D6).
                      "qavector_access": {"services": False, "scenarios": False, "cycles": False,
                                          "approvals": False, "jira": False, "jira_write": False, "usage": False},
                      # Other agents: a new connection asks the person each time (ADR-006 D3).
-                     "others_default": "approve", "allowed_agents": []}
+                     "others_default": "approve", "allowed_agents": [],
+                     # When its tasks end, a conversation asks the person (ADR-009 D3).
+                     "wake_default": "ask"}
 
 
 def test_other_agents_defaults_new_old_and_never_itself(path):

@@ -95,6 +95,8 @@ INTEGRATION_ENDED = TERMINAL + ("denied",)
 INTEGRATION_KEPT = 50
 
 OFF, STARTING, READY, DOWN = "off", "starting", "ready", "down"
+#: How a conversation goes on when the tasks it handed on end (ADR-009 D3).
+WAKES = ("continue", "ask", "off")
 CRITERION_COLORS = ("green", "amber", "red", "blue", "grey")
 
 
@@ -115,6 +117,9 @@ class QcrHost(QObject):
     #: An agent's change to an integration (a Jira comment, a transition) arrived,
     #: was answered or ended: :attr:`integration_changes` is different (ADR-007).
     integration_changes_changed = Signal()
+    #: What a conversation handed on to other agents has ended, as it asked
+    #: to be woken for (ADR-009): ``{"session", "condition", "items", "running", "failed"}``.
+    round_finished = Signal(dict)
 
     def __init__(self, supervisor, parent=None, bridge=None):
         """``bridge``: the main window's ServiceBridge, shared with scenarios;
@@ -334,6 +339,8 @@ class QcrHost(QObject):
             self.agent_approval.emit(dict(message))
         elif kind == "integration_approval":
             self._integration_waits(message)
+        elif kind == "round_finished":
+            self.round_finished.emit(dict(message))
         elif kind == "error":
             log.warning("QCR host refused a line: %s", (message.get("error") or {}).get("code"))
 
@@ -574,26 +581,35 @@ class QcrHost(QObject):
     @staticmethod
     def agent_grants(connection, session, mode):
         """``(grants, policy)`` a turn gets for other agents: the connection's
-        allowed agents as targets when the conversation is not Deny, and what the
-        conversation is - nothing at all for Deny or a connection that allows
-        nobody."""
+        allowed agents as targets when the conversation is not Deny - and a task
+        for its own program - and what the conversation is; nothing at all for
+        Deny."""
         connection, session = connection or {}, session or {}
         others = session.get("others")
         if others not in ("auto", "approve") or not session.get("folder"):
             return [], None
         own = connection.get("id")
         targets = [one for one in connection.get("allowed_agents") or [] if one and one != own]
-        if not targets:
+        if not targets and not own:
             return [], None
         grants = [{"permission": permission, "resource_id": prefix + target}
                   for target in targets
                   for permission, prefix in (("agents.delegate", "agent-connection~"),
                                              ("agents.message", "agent-messages~"))]
+        if own:
+            # Its own program too, as another model, say (ADR-009) - a task only:
+            # it does not message itself, and the child hands nothing on.
+            grants.append({"permission": "agents.delegate", "resource_id": "agent-connection~" + own})
         grants.append({"permission": "agents.delegate", "resource_id": "agent-tasks"})
+        # Every role the person made, whatever the Allowed agents list says (ADR-010 D2).
+        grants.append({"permission": "agents.delegate", "resource_id": "agent-roles"})
         policy = {"session": session.get("id") or "", "connection": own or "",
                   "name": connection.get("name") or own or "", "folder": session["folder"],
                   "mode": mode if mode in ("read", "edit", "full") else "read", "others": others,
-                  "restrictions": dict(session.get("restrictions") or {})}
+                  "restrictions": dict(session.get("restrictions") or {}),
+                  # How it goes on when what it hands on ends (ADR-009 D3).
+                  "wake": session.get("wake") if session.get("wake") in WAKES
+                  else connection.get("wake_default") if connection.get("wake_default") in WAKES else "ask"}
         return grants, policy
 
     def grant_agent(self, connection, session_id, session=None, mode=None):

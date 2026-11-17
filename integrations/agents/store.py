@@ -54,6 +54,10 @@ def access_permissions(connection):
 #: What a conversation may do with other agents (ADR-006 D3): delegate and
 #: message them without asking, only once the person approves, or not at all.
 OTHERS = ("auto", "approve", "deny")
+#: How a conversation goes on when the tasks it handed on end (ADR-009 D3):
+#: by itself, after the person says so, or not at all.
+WAKES = ("continue", "ask", "off")
+WAKE_DEFAULT = "ask"
 
 #: What a connection made before ADR-006 says: nothing changes for it.
 OTHERS_BEFORE = "deny"
@@ -96,6 +100,8 @@ def normalize(entry):
         # Blank leaves either choice to the CLI's own configuration.
         "model": str(entry.get("model") or "").strip(),
         "effort": str(entry.get("effort") or "").strip(),
+        # What other agents are told it is good at, when they may hand it work.
+        "role": str(entry.get("role") or "").strip()[:500],
         "qavector_access": {key: (entry.get("qavector_access") or {}).get(key) is True
                             for key in QAVECTOR_ACCESS}
         if isinstance(entry.get("qavector_access"), dict) else {key: False for key in QAVECTOR_ACCESS},
@@ -104,6 +110,7 @@ def normalize(entry):
         "others_default": entry.get("others_default") if entry.get("others_default") in OTHERS
         else OTHERS_BEFORE,
         "allowed_agents": _allowed(entry.get("allowed_agents"), str(entry.get("id") or "").strip()),
+        "wake_default": entry.get("wake_default") if entry.get("wake_default") in WAKES else WAKE_DEFAULT,
     }
     # The known fields first and in one order, whatever order they came in: the
     # file is plain JSON a person may open.

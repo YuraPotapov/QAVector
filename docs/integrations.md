@@ -378,6 +378,7 @@ talk to - Claude Code for now - once for every project. A connection says:
 | Agent | Which program it is. Fixed once made: a conversation held with one program cannot be carried on by another. |
 | Program | The program's path. Blank finds it each time it is used: on PATH, then where its installers put it (Claude Code's own installer, the ChatGPT app for Codex, npm, nvm, Homebrew, `~/.local/bin`). The dialog says where it is now, or how to install it. A path given here is used as it is. |
 | Model, Effort | What it is asked for unless a message or a step says otherwise. Blank is the program's own choice. |
+| Good at | What other agents are told this one is good at when they may hand it a task. They read it, with its models and efforts, through `agents.<id>.describe`, and choose the model and effort for each task they hand it; the card for the task says which. |
 
 The program signs in by itself and keeps its own credentials: nothing typed
 here is a secret, and `agents.json` - beside the user's data, owner-readable -
@@ -481,6 +482,66 @@ itself to the issue through a slot any part of QAVector can use (see
 conversations by the key it gives them when it begins one -
 `jira:<connection>:<KEY>`, which the Agents integration matches exactly and
 never reads.
+
+## Agents working with other agents
+
+With **Other agents** on (Auto or Approve), an agent's conversation may hand
+tasks and questions to other agent connections, or to its own with another
+model ([ADR-006](qcr/adr-006-agent-messaging-and-delegation.md),
+[ADR-009](qcr/adr-009-waking-the-delegator.md)). It works like this:
+
+- **What the agent chooses.** For each task it picks the model and effort,
+  from what `agents.<id>.describe` says the target offers and is **Good at**.
+- **Names and order.** The agent names its tasks and may make one wait for
+  others: `after: ["tests"]` starts it only when `tests` succeeded. When
+  `tests` fails, the task is skipped.
+- **When to be woken.** `agents.tasks.wake_when` says when the conversation is
+  to be woken: all or any of named tasks ended, or at once on a failure.
+  Otherwise it is woken when all of a turn's tasks have ended.
+- **How many at once.** An agent connection works on two tasks at a time; more
+  wait their turn. A conversation has at most three unfinished tasks.
+
+**Roles** (Integrations -> Agents -> Roles, [ADR-010](qcr/adr-010-agent-roles.md))
+are yours to set once, for every project: **dev**, **tester**, **reviewer**, or
+any others. A role says:
+
+- what it does - agents choose a role by this;
+- the agent program it runs as, and its model and effort;
+- the most it may do (Read, Edit, Full) - never more than the conversation
+  handing it work;
+- the instructions put before each of its tasks;
+- whether it ends with a verdict.
+
+A conversation with Other agents on is told its roles in its session, on its
+first turn and again whenever they change. When you name a role ("give dev
+the code, then a review"), the agent uses it; otherwise it picks by what each
+does.
+
+A reviewer with a verdict ends with `approve` or `rework` and its issues:
+
+- `approve` lets what is `after` it start;
+- `rework`, or no verdict at all, skips it and wakes the conversation with
+  the issues.
+
+The tab's empty state offers **Add the usual roles**, filled in for you to
+change. Without roles, agents hand work to agent connections as before.
+
+**When tasks finish** says what happens then. Its default is set on the
+connection; each conversation may change it under Settings -> TASKS.
+
+- **Continue** - the conversation goes on by itself with a message from
+  QAVector: what each task came to, its answer, the criteria still to verify,
+  and what still runs. The message shows as QAVECTOR's, not yours. If a turn
+  is running, it comes first after it.
+- **Ask me** - a TASKS FINISHED card waits in the conversation; **Continue**
+  sends the same message.
+- **Off** - the results stay on the tasks' cards.
+
+So the agent can hand work on and end its turn instead of waiting in it. It
+goes on by itself at most 10 times after your last message, and after 3
+rounds in which something failed it asks you instead. Your next message lets
+it go on by itself again. Nothing is lost when it asks: the card carries the
+same results.
 
 ## Agents changing Jira
 

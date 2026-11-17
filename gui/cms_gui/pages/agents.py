@@ -29,6 +29,7 @@ from .. import background, core as core_mod, search, theme, widgets
 from ..agentmodel import ModelPicker
 from .agentchat import ChatTab
 from .agentskills import SkillsTab
+from .agentroles import RolesTab
 from .agentusage import UsageTab
 from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F401
                          folder_text, kind_name, model_text, program_text, result_text,
@@ -37,7 +38,7 @@ from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F4
 #: Requests that change a file. One of these is never cancelled half way; its
 #: answer is dropped when the page it belonged to has moved on.
 WRITES = ("save", "remove", "test", "session-new", "session-set", "session-delete",
-          "skill-add", "skill-remove")
+          "skill-add", "skill-remove", "role-save", "role-delete")
 
 
 def start_detached(argv):
@@ -288,6 +289,9 @@ class ConnectionsTab(QWidget):
         self.remove_requested.emit(chosen["id"], done)
 
 
+#: How its conversations go on when what they handed on ends (ADR-009 D3).
+WAKE_DEFAULT = (("Ask me", "ask"), ("Continue by itself", "continue"), ("Off", "off"))
+
 #: The "QAVector access" switches, in the order the form shows them.
 QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
                    ("scenarios", "Run scenarios"),
@@ -379,6 +383,14 @@ class ConnectionDialog(QDialog):
             "Default effort", self.effort,
             "How hard the model is asked to think when a conversation or a step "
             "does not say. The program's own choice leaves it to its settings."))
+        self.role = QLineEdit(self.connection.get("role", ""))
+        self.role.setObjectName("agentRole")
+        self.role.setMaxLength(500)
+        self.role.setPlaceholderText("e.g. implementation and tests; careful reviews")
+        column.addWidget(widgets.field(
+            "Good at", self.role,
+            "What other agents are told this one is good at, when they may hand it a task. "
+            "They also choose its model and effort for the task."))
         # What this agent may do in QAVector itself, through QCR (ADR-003 D6).
         # Every switch off until somebody turns it on; a turn gets exactly these.
         access = self.connection.get("qavector_access") or {}
@@ -399,6 +411,17 @@ class ConnectionDialog(QDialog):
             "Everything it does is journalled (Log, Executions mode). Approvals let it answer a cycle's "
             "gates and questions in your place."))
         column.addWidget(self._others_field())
+        # How its conversations go on when what they handed on ends (ADR-009 D3).
+        self.wake_default = QComboBox()
+        self.wake_default.setObjectName("agentWakeDefault")
+        for label, value in WAKE_DEFAULT:
+            self.wake_default.addItem(label, value)
+        self.wake_default.setCurrentIndex(max(0, self.wake_default.findData(
+            self.connection.get("wake_default") or "ask")))
+        column.addWidget(widgets.field(
+            "When tasks finish", widgets.row(self.wake_default, None),
+            "How a conversation goes on when the tasks it handed to other agents end. Continue: by "
+            "itself, with their results. Ask me: a card waits for you. Each conversation can change it."))
         self.check = QPushButton("Check")
         self.check.setToolTip("Ask the program who it is signed in as. Nothing is saved.")
         self.check.clicked.connect(self._check)
@@ -552,8 +575,10 @@ class ConnectionDialog(QDialog):
                       "binary": self.binary.text().strip(),
                       "model": self.model.value(),
                       "effort": self.effort.currentData() or "",
+                      "role": self.role.text().strip(),
                       "qavector_access": {key: box.isChecked() for key, box in self.access.items()},
                       "others_default": self.others_default.currentData(),
+                      "wake_default": self.wake_default.currentData(),
                       "allowed_agents": [key for key, box in self.allowed.items() if box.isChecked()]})
         return entry
 
@@ -711,6 +736,8 @@ class AgentsView(QWidget):
 
     back_requested = Signal()
     connections_changed = Signal()
+    #: A role was added, changed or removed: what agents may hand work to (ADR-010).
+    roles_changed = Signal()
     connections_loaded = Signal(dict)
 
     def __init__(self, settings, parent=None):
@@ -750,8 +777,10 @@ class AgentsView(QWidget):
         self.skills_tab = SkillsTab()
         self.activity = ActivityTab()
         self.usage = UsageTab()
+        self.roles_tab = RolesTab()
         self.tabs.addTab(self.chat, "Chat")
         self.tabs.addTab(self.connections_tab, "Connections")
+        self.tabs.addTab(self.roles_tab, "Roles")
         self.tabs.addTab(self.skills_tab, "Skills")
         self.tabs.addTab(self.activity, "Activity")
         self.tabs.addTab(self.usage, "Usage")
@@ -776,6 +805,9 @@ class AgentsView(QWidget):
         self.connections_tab.check_requested.connect(self.check_connection)
         self.activity.wanted.connect(self.load_activity)
         self.usage.wanted.connect(self.load_usage)
+        self.roles_tab.wanted.connect(self.load_roles)
+        self.roles_tab.save_requested.connect(self.save_role)
+        self.roles_tab.delete_requested.connect(self.delete_role)
         self.usage.turns_wanted.connect(self._turns_of)
 
     # -- the outside ------------------------------------------------------------
@@ -880,6 +912,8 @@ class AgentsView(QWidget):
             self.load_activity()
         elif self.tabs.currentWidget() is self.usage:
             self.usage.shown()
+        elif self.tabs.currentWidget() is self.roles_tab:
+            self.roles_tab.shown()
         elif self.tabs.currentWidget() is self.chat:
             self.chat.shown()
         elif self.tabs.currentWidget() is self.skills_tab:
@@ -1082,6 +1116,39 @@ class AgentsView(QWidget):
 
         self._call("activity", lambda core, cancel: core.agents("activity", cancel=cancel),
                    done)
+
+    # -- roles (ADR-010) ------------------------------------------------------------
+    def load_roles(self):
+        """The roles agents may hand work to - the core's file; no agent is asked."""
+        if self.core is None:
+            return
+
+        def done(payload):
+            if payload.get("ok"):
+                self.roles_tab.say("")
+                self.roles_tab.set_roles(payload.get("roles") or [], payload.get("templates") or [],
+                                         self.connections, self.connections_tab.kinds)
+            else:
+                self.roles_tab.say(payload.get("error") or "The roles could not be read.")
+
+        self._call("roles", lambda core, cancel: core.agents("roles", cancel=cancel), done)
+
+    def save_role(self, role, new, done):
+        def saved(payload):
+            done(payload)
+            if payload.get("ok"):
+                self.roles_changed.emit()
+
+        self._call("role-save", lambda core, cancel: core.agents(
+            "role-save", document={"role": role, "new": new}, cancel=cancel), saved)
+
+    def delete_role(self, role_id, done):
+        def removed(payload):
+            done(payload)
+            if payload.get("ok"):
+                self.roles_changed.emit()
+
+        self._call("role-delete", lambda core, cancel: core.agents("role-delete", role_id, cancel=cancel), removed)
 
     def load_usage(self, wanted):
         """What agent work used, summed by the core from the project's record

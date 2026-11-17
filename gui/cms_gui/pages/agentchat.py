@@ -37,7 +37,7 @@ from ..diffview import ChangesDialog
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
 from . import agentcards
-from .agentcards import ChangesLine, PlanCard, QuestionsCard
+from .agentcards import ChangesLine, IntegrationChangeCard, PlanCard, QuestionsCard
 from .agentwords import (ago_text, clock_text, context_text, cost_text, end_text, folder_text,
                          refused_text, tokens_text, took_text)
 
@@ -48,6 +48,16 @@ MODE_MEANS = ("Read: it reads the folder and changes nothing. Edit: it also chan
               "inside the folder's restrictions.")
 #: What a conversation may do with other agents (ADR-006 D3), as the footer says it.
 OTHERS = (("Auto", "auto"), ("Approve", "approve"), ("Deny", "deny"))
+#: Who said a message QAVector sent for the conversation (ADR-009 D4).
+FROM_QAVECTOR = "QAVECTOR · TASKS FINISHED"
+#: ADR-009 D6: turns QAVector takes by itself per message of the person -
+#: failed rounds, and in all - before it asks instead.
+WAKE_FAILED_ROUNDS, WAKE_ROUNDS = 3, 10
+#: How a conversation goes on when the tasks it handed on end (ADR-009 D3).
+WAKE = (("Continue", "continue"), ("Ask me", "ask"), ("Off", "off"))
+WAKE_MEANS = ("When the tasks this conversation handed to other agents end - Continue: it goes on by "
+              "itself with their results. Ask me: a card waits for you. Off: the results are only on "
+              "their cards.")
 OTHERS_MEANS = ("Other agents - Auto: it hands tasks to and messages the agents its connection "
                 "allows, without asking. Approve: each one waits here for your yes. Deny: it works "
                 "alone.")
@@ -99,16 +109,18 @@ class MessageCard(QFrame):
     removed = Signal()
     interrupt_requested = Signal()
 
-    def __init__(self, text, when="", state="", removable=False, attachments=None):
+    def __init__(self, text, when="", state="", removable=False, attachments=None, who="YOU"):
         super().__init__()
         self.setProperty("role", "message")
+        if who != "YOU":
+            self.setProperty("from", "qavector")     # its own stripe and wash (theme: AUTO)
         self.said = str(text or "")
         column = QVBoxLayout(self)
         column.setContentsMargins(10, 6, 10, 7)
         column.setSpacing(3)
         head = QHBoxLayout()
         head.setSpacing(8)
-        kind = QLabel("YOU")
+        kind = QLabel(who)
         kind.setProperty("role", "msgkind")
         head.addWidget(kind)
         self.meta = QLabel(when)
@@ -264,6 +276,11 @@ class ChatFeed(QScrollArea):
     approve = Signal(str, str)
     #: What a turn changed was asked for: its number.
     changes_wanted = Signal(object)
+    #: The person on a change the agent proposed to an integration (ADR-007):
+    #: Approve / Deny it, and what they typed into one of its fields.
+    change_approved = Signal(str)
+    change_denied = Signal(str)
+    change_edited = Signal(str, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -271,6 +288,9 @@ class ChatFeed(QScrollArea):
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._rows = []                 # (kind, widget) of what is on record
+        self._times = []                # when each row's event happened, beside _rows
+        self._now = None                # the time of the event being taken
+        self._placed = {}               # group -> {key: card} of cards placed by time
         self._waiting = []              # rows of what is not on record yet
         self._tools = {}                # tool call id -> (index in _rows, stage, tool name)
         self._mode = "read"             # the access mode of the turn being shown
@@ -299,7 +319,7 @@ class ChatFeed(QScrollArea):
     def clear(self):
         for _kind, widget in self._rows:
             self._drop(widget)
-        self._rows, self._tools, self._cards = [], {}, []
+        self._rows, self._tools, self._cards, self._times, self._placed = [], {}, [], [], {}
         self._began, self._last_text = None, ""
         self.set_waiting("", [])
         self._follow = True
@@ -326,7 +346,8 @@ class ChatFeed(QScrollArea):
         if sending:
             document = sending if isinstance(sending, dict) else {"message": sending}
             self._add_waiting(MessageCard(document.get("message"), state="sending",
-                                          attachments=document.get("attachments")))
+                                          attachments=document.get("attachments"),
+                                          who=FROM_QAVECTOR if document.get("trigger") else "YOU"))
         for index, text in enumerate(queued or []):
             document = text if isinstance(text, dict) else {"message": text}
             card = MessageCard(document.get("message"), state="queued", removable=True,
@@ -353,6 +374,8 @@ class ChatFeed(QScrollArea):
         for kind, widget in self._rows:
             if kind in ("you", "answer", "plan", "questions", "changes"):
                 found.append(widget.body.said)
+            elif kind in ("change", "request", "inbox"):
+                found.append(widget.body.kind.text())
             else:
                 found.append(widget.stage.get("title", ""))
         return found
@@ -378,6 +401,8 @@ class ChatFeed(QScrollArea):
     # -- events into rows -------------------------------------------------------
     def _take(self, event):
         kind = event.get("type")
+        at = event.get("at")
+        self._now = at if type(at) in (int, float) else time.time()
         if kind == "user":
             self._began, self._last_text = event.get("at"), ""
             self._mode = event.get("mode") or self._mode
@@ -386,7 +411,8 @@ class ChatFeed(QScrollArea):
                     card.settle()
             self._add("you", _Row({"kind": "result"},
                                   MessageCard(event.get("text"), clock_text(event.get("at")),
-                                              attachments=event.get("attachments"))))
+                                              attachments=event.get("attachments"),
+                                              who=FROM_QAVECTOR if event.get("trigger") else "YOU")))
         elif kind == "thinking":
             self._add("thinking", stages.StageRow(
                 {"kind": "thinking", "title": "Thinking", "detail": event.get("text") or ""}))
@@ -490,10 +516,83 @@ class ChatFeed(QScrollArea):
                      "detail": event.get("error") or "The turn ended without a recorded result."}
         self._add("end", stages.StageRow(stage))
 
+    # -- cards placed by time: what the agent asked of others (ADR-006/007) -------
+    def sync_cards(self, group, entries):
+        """Cards that are not events of the record - a change proposed to Jira,
+        a task handed to another agent, a message one wrote here - each where
+        it happened: after the last row from before it. ``entries`` are
+        ``(key, at, make, update)``: a card shown already is updated, never
+        rebuilt (what is typed into it stays); one no longer given goes."""
+        placed = self._placed.setdefault(group, {})
+        given = set()
+        for key, at, make, update in sorted(entries or [], key=lambda one: one[1] or 0):
+            given.add(key)
+            card = placed.get(key)
+            if card is not None:
+                update(card)
+                continue
+            card = make()
+            placed[key] = card
+            index = next((i for i, when in enumerate(self._times) if when > (at or 0)), len(self._rows))
+            self._insert(index, group, _Row({"kind": "text"}, card), at or 0)
+        for key in [one for one in placed if one not in given]:
+            self._remove(placed.pop(key))
+        self._sync()
+
+    def set_changes(self, changes):
+        """The conversation's proposed changes to integrations (ADR-007)."""
+        def make(change):
+            card = IntegrationChangeCard(change, dismissible=False)
+            card.approve.connect(self.change_approved)
+            card.deny.connect(self.change_denied)
+            card.edited.connect(self.change_edited)
+            return card
+
+        def update(change):
+            def told(card):
+                if card.change.get("state") != change.get("state") or \
+                        card.result.text() != (change.get("detail") or ""):
+                    card.set_state(change.get("state") or "waiting", change.get("detail") or "")
+            return told
+        self.sync_cards("change", [(one.get("execution_id"), one.get("at") or 0,
+                                    lambda one=one: make(one), update(one)) for one in changes or []])
+
+    def change_cards(self):
+        return list(self._placed.get("change", {}).values())
+
+    def placed(self, group):
+        return list(self._placed.get(group, {}).values())
+
     # -- rows in the column -----------------------------------------------------
     def _add(self, kind, widget):
         self._column.insertWidget(1 + len(self._rows), widget)
         self._rows.append((kind, widget))
+        self._times.append(self._now if self._now is not None else time.time())
+
+    def _insert(self, index, kind, widget, at):
+        """A row put between others: the tools still running below it move down one."""
+        self._column.insertWidget(1 + index, widget)
+        self._rows.insert(index, (kind, widget))
+        self._times.insert(index, at)
+        self._tools = {key: ((place + 1 if place >= index else place), stage, name)
+                       for key, (place, stage, name) in self._tools.items()}
+
+    def _remove(self, card):
+        index = next((i for i, (_kind, row) in enumerate(self._rows) if getattr(row, "body", None) is card), None)
+        if index is None:
+            return
+        _kind, row = self._rows.pop(index)
+        self._times.pop(index)
+        self._tools = {key: ((place - 1 if place > index else place), stage, name)
+                       for key, (place, stage, name) in self._tools.items()}
+        for name in ("approve", "deny", "open", "dismiss", "edited", "go"):
+            signal = getattr(card, name, None)
+            if signal is not None:
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+        self._drop(row)
 
     def _add_waiting(self, card):
         row = _Row({"status": "running"}, card)
@@ -649,6 +748,7 @@ class Composer(QFrame):
     chosen = Signal()
     #: What the conversation may do with other agents was changed (ADR-006 D3).
     others_changed = Signal(str)
+    wake_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -729,6 +829,9 @@ class Composer(QFrame):
         self.others = widgets.Segmented([label for label, _value in OTHERS])
         self.others.setToolTip(OTHERS_MEANS)
         self.others.changed.connect(lambda label: self.others_changed.emit(dict(OTHERS)[label]))
+        self.wake = widgets.Segmented([label for label, _value in WAKE], "Ask me")
+        self.wake.setToolTip(WAKE_MEANS)
+        self.wake.changed.connect(lambda label: self.wake_changed.emit(dict(WAKE)[label]))
         self.plan = QCheckBox("Plan first")
         self.plan.setToolTip(PLAN_MEANS)
         self.plan.toggled.connect(lambda _on: self.chosen.emit())
@@ -763,6 +866,11 @@ class Composer(QFrame):
         self.where.layout().setStretchFactor(self.folder, 1)      # up to its cap, then the gap takes the rest
         options_layout.addWidget(self.how)
         options_layout.addWidget(self.where)
+        # A short word, as the captions above are: what it means is its tooltip.
+        tasks = _caption("TASKS")
+        tasks.setToolTip(WAKE_MEANS)
+        self.after = widgets.row(tasks, self.wake, None)
+        options_layout.addWidget(self.after)
 
         self.files_area = QScrollArea()
         self.files_area.setWidgetResizable(True)
@@ -877,6 +985,7 @@ class Composer(QFrame):
         self.plan.setChecked(bool(chosen.get("plan")))
         self.plan.blockSignals(False)
         self._others_wanted = chosen.get("others")
+        self._wake_wanted = chosen.get("wake")
         self.model.set_value(chosen.get("model") or "")
         # Another conversation's: what it was set to, not what was on screen.
         self._effort_wanted = chosen.get("effort") or ""
@@ -955,7 +1064,8 @@ class Composer(QFrame):
                 "folder": os.path.abspath(os.path.expanduser(folder)) if folder else "",
                 "mode": dict(MODES)[self.mode.current()],
                 "model": self.model.value(), "effort": self.effort.currentData() or "",
-                "plan": self.plan.isChecked(), "others": dict(OTHERS)[self.others.current()]}
+                "plan": self.plan.isChecked(), "others": dict(OTHERS)[self.others.current()],
+                "wake": dict(WAKE)[self.wake.current()]}
 
     def set_work(self, mode, plan):
         """What the next turn is asked with, as a card in the feed decided it."""
@@ -969,12 +1079,23 @@ class Composer(QFrame):
     def _connection_picked(self, _index):
         # A new conversation starts with what its connection says for other agents.
         self._others_wanted = None
+        self._wake_wanted = None
         if self._session is None:
             self.model.set_value("")
             self._effort_wanted = ""
             self.effort.clear()
         self._say_model()
         self.chosen.emit()
+
+    def _say_wake(self, connection):
+        """How the conversation goes on when its tasks end: its own once begun,
+        else its connection's default (ADR-009 D3)."""
+        wanted = (self._session or {}).get("wake") if self._session is not None \
+            else getattr(self, "_wake_wanted", None)
+        values = [value for _label, value in WAKE]
+        if wanted not in values:
+            wanted = connection.get("wake_default") if connection.get("wake_default") in values else "ask"
+        self.wake.set_current({value: label for label, value in WAKE}[wanted], notify=False)
 
     def _say_others(self, connection):
         """The conversation's mode for other agents: its own once begun, else its
@@ -1006,6 +1127,7 @@ class Composer(QFrame):
                                else "Leave the model choice to the program's own settings.")
         self._fill_efforts(connection)
         self._say_others(connection)
+        self._say_wake(connection)
         if kind:
             modes = kind.get("modes", [value for _, value in MODES])
             for label, value in MODES:
@@ -1291,6 +1413,10 @@ class ChatTab(QWidget):
         #: by execution id; and what other agents sent the conversation open.
         self._requests = {}
         self._inbox = []
+        #: ADR-009: per conversation, the turns QAVector took by itself since the
+        #: person last spoke, and what waits for the person's word to go on.
+        self._woke = {}                 # session id -> {"failed": n, "all": n}
+        self._wakes = {}                # session id -> {key: (found, document, reason)}
         self._listed_states = {}        # execution id -> the state the list was read for
 
         outer = QVBoxLayout(self)
@@ -1379,6 +1505,11 @@ class ChatTab(QWidget):
         self.feed.revise.connect(lambda said: self._card_turn(said, plan=True))
         self.feed.approve.connect(lambda mode, said: self._card_turn(said, plan=False, mode=mode))
         self.feed.changes_wanted.connect(self.show_changes)
+        # A change the agent proposed to Jira is answered where it stands in the conversation.
+        self.feed.change_approved.connect(lambda found: ChatTab.qcr_access.answer_integration(found, True))
+        self.feed.change_denied.connect(lambda found: ChatTab.qcr_access.answer_integration(found, False))
+        self.feed.change_edited.connect(lambda found, field, value:
+                                        ChatTab.qcr_access.set_integration_draft(found, field, value))
         self.feed_skeleton = widgets.Skeleton(self.feed, "lines")
         frame.layout().addWidget(self.feed, 1)
         self.composer = Composer()
@@ -1389,15 +1520,11 @@ class ChatTab(QWidget):
         self.composer.skills_requested.connect(self.choose_skills)
         self.composer.chosen.connect(self._remember_choices)
         self.composer.others_changed.connect(self._others_chosen)
+        self.composer.wake_changed.connect(self._wake_chosen)
         self.composer.model.requested.connect(self._load_models)
         # Other agents (ADR-006): what waits for the person's yes, how the
-        # conversation's tasks went, and what other agents wrote to it.
-        self.strip = QWidget()
-        self._strip_column = QVBoxLayout(self.strip)
-        self._strip_column.setContentsMargins(6, 4, 6, 4)
-        self._strip_column.setSpacing(6)
-        self.strip.setVisible(False)
-        frame.layout().addWidget(self.strip)
+        # conversation's tasks went, and what other agents wrote to it - cards
+        # in the conversation itself, where each happened (see _sync_others).
         frame.layout().addWidget(self.composer)
         # What the composer's place says while there is nobody to ask.
         self.setup = QFrame()
@@ -1742,6 +1869,8 @@ class ChatTab(QWidget):
         self.earlier.setVisible(not self._whole)
         self.feed.set_empty_text("Nothing has been said in this conversation yet.")
         self.feed.load(events)
+        self.integration_changes_changed()
+        self._sync_wakes()
         if (session.get("state") == "interrupted" and events
                 and events[-1].get("type") not in ("completed", "failed", "stopped")):
             self.feed.append({"type": "interrupted"})
@@ -1752,7 +1881,7 @@ class ChatTab(QWidget):
         self.composer.set_attachments(self._draft_files.get(session.get("id") or "", []))
         self._sync_cards()
         self._inbox = []
-        self._sync_strip()
+        self._sync_others()
         self._refresh_inbox()
         self._fill()
         self._refresh_changes()
@@ -2034,6 +2163,9 @@ class ChatTab(QWidget):
 
     def _start(self, session, text, document=None):
         session_id = session["id"]
+        if not (document or {}).get("trigger"):
+            # The person spoke: QAVector may go on by itself again (ADR-009 D6).
+            self._woke.pop(session_id, None)
         if document is None:
             chosen = self.composer.settings() if self._showing(session_id) else {}
             document = {"message": text}
@@ -2047,7 +2179,7 @@ class ChatTab(QWidget):
             for one in waiting:
                 ChatTab.qcr_access.acknowledge_message(one.get("message_id"))
             self._inbox = []
-            self._sync_strip()
+            self._sync_others()
         access = None
         if ChatTab.qcr_access is not None:
             connection = next((one for one in self.connections if one.get("id") == session.get("connection")), None)
@@ -2265,7 +2397,8 @@ class ChatTab(QWidget):
             return
         known = self._requests.get(execution_id) or {}
         self._requests[execution_id] = dict(known, **request, state="waiting")
-        self._sync_strip()
+        self._requests[execution_id].setdefault("at", time.time())
+        self._sync_others()
 
     def agent_execution(self, execution):
         """Any execution the host reports: an agent's task or message from a
@@ -2303,20 +2436,23 @@ class ChatTab(QWidget):
         request["detail"] = self._request_detail(request, output, error)
         if (request.get("state"), request.get("session_id"), request.get("detail")) != before \
                 or before == ("running", None, None):
-            self._sync_strip()          # not on each step of the task: only when its card changes
+            self._sync_others()          # not on each step of the task: only when its card changes
 
     def _request_of(self, execution):
         """A card for a task or message that never waited (Auto)."""
         capability = execution["capability_id"]
-        target = capability.split(".")[1]
+        parts = capability.split(".")
+        role = parts[2] if len(parts) == 4 and parts[1] == "roles" else ""
+        target = "" if role else parts[1]
         name = next((one.get("name") for one in self.connections if one.get("id") == target), target)
         request = dict(execution.get("input") or {})
         return {"execution_id": execution["execution_id"], "session": execution["actor_id"].split("/", 1)[1],
                 "kind": "message" if capability.endswith(".message") else "task", "target": target,
                 "target_name": name, "goal": request.get("goal") or "", "body": request.get("body") or "",
                 "expects_reply": bool(request.get("expects_reply")), "mode": request.get("mode") or "",
+                "model": request.get("model") or "", "effort": request.get("effort") or "",
                 "files": len(request.get("files") or []), "artifacts": len(request.get("artifacts") or []),
-                "state": "running"}
+                "state": "running", "at": execution.get("created_at") or time.time(), "role": role}
 
     @staticmethod
     def _request_detail(request, output, error):
@@ -2343,11 +2479,7 @@ class ChatTab(QWidget):
             return
         ChatTab.qcr_access.answer_agent(execution_id, approve)
         request["state"] = "approved" if approve else "denied"
-        self._sync_strip()
-
-    def _dismiss_request(self, execution_id):
-        self._requests.pop(execution_id, None)
-        self._sync_strip()
+        self._sync_others()
 
     def _refresh_inbox(self):
         """What other agents wrote to the conversation open, or to its
@@ -2366,7 +2498,7 @@ class ChatTab(QWidget):
                 if one.get("recipient_session") in (None, "", session_id):
                     found[one.get("message_id")] = one
             self._inbox = sorted(found.values(), key=lambda one: one.get("created_at") or 0)
-            self._sync_strip()
+            self._sync_others()
 
         host.messages(take, recipient_session=session_id, state="delivered")
         host.messages(take, recipient_connection=connection, state="delivered")
@@ -2375,46 +2507,102 @@ class ChatTab(QWidget):
         if ChatTab.qcr_access is not None:
             ChatTab.qcr_access.acknowledge_message(message_id)
         self._inbox = [one for one in self._inbox if one.get("message_id") != message_id]
-        self._sync_strip()
+        self._sync_others()
 
-    def _sync_strip(self):
-        """The cards for the conversation open: its requests, then its inbox."""
-        while self._strip_column.count():
-            item = self._strip_column.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                # Disconnected first: a deleteLater'd child still connected to a
-                # lambda holding its parent crashes on the deferred delete.
-                for name in ("approve", "deny", "open", "dismiss"):
-                    signal = getattr(widget, name, None)
-                    if signal is not None:
-                        try:
-                            signal.disconnect()
-                        except (RuntimeError, TypeError):
-                            pass
-                widget.hide()
-                widget.setParent(None)
-                widget.deleteLater()
+    def _sync_others(self):
+        """The cards of the conversation open, in it: its tasks and messages
+        for other agents (waiting for a yes, then how they went), and what
+        other agents wrote to it and is not read yet (ADR-006)."""
         session_id = (self.current or {}).get("id")
-        shown = 0
-        for request in self._requests.values():
-            if request.get("session") != session_id:
-                continue
-            card = agentcards.AgentRequestCard(request)
-            card.set_state(request.get("state") or "waiting", request.get("session_id") or "",
-                           request.get("detail") or "")
-            card.approve.connect(lambda execution_id: self._answer_request(execution_id, True))
-            card.deny.connect(lambda execution_id: self._answer_request(execution_id, False))
-            card.open.connect(lambda found: found and self.open_session(found))
-            card.dismiss.connect(self._dismiss_request)
-            self._strip_column.addWidget(card)
-            shown += 1
-        for message in self._inbox:
-            card = agentcards.InboxCard(message)
-            card.dismiss.connect(self._dismiss_message)
-            self._strip_column.addWidget(card)
-            shown += 1
-        self.strip.setVisible(bool(shown))
+
+        def made(request):
+            def make():
+                card = agentcards.AgentRequestCard(request, dismissible=False)
+                card.approve.connect(lambda execution_id: self._answer_request(execution_id, True))
+                card.deny.connect(lambda execution_id: self._answer_request(execution_id, False))
+                card.open.connect(lambda found: found and self.open_session(found))
+                return card
+            return make
+
+        def told(request):
+            return lambda card: card.set_state(request.get("state") or "waiting", request.get("session_id") or "",
+                                               request.get("detail") or "")
+        self.feed.sync_cards("request", [
+            (key, request.get("at") or 0, made(request), told(request))
+            for key, request in self._requests.items() if session_id and request.get("session") == session_id])
+
+        def inbox_card(message):
+            def make():
+                card = agentcards.InboxCard(message)
+                card.dismiss.connect(self._dismiss_message)
+                return card
+            return make
+        self.feed.sync_cards("inbox", [
+            (message.get("message_id"), message.get("created_at") or 0, inbox_card(message), lambda card: None)
+            for message in self._inbox])
+
+    # -- woken when what it handed on ends (ADR-009) ------------------------------------
+    def round_finished(self, found):
+        """What a conversation handed on has ended, as it asked: go on by itself,
+        or wait for the person's word, as the conversation says."""
+        session_id = found.get("session")
+        session = next((one for one in self.sessions if one.get("id") == session_id), None)
+        if session is None:
+            return
+        mode = session.get("wake") if session.get("wake") in ("continue", "ask", "off") else "ask"
+        if mode == "off":
+            return                      # the results are on their cards
+        document = {"message": agentcards.wake_message(found), "trigger": "tasks_finished"}
+        counted = self._woke.setdefault(session_id, {"failed": 0, "all": 0})
+        within = counted["failed"] < WAKE_FAILED_ROUNDS and counted["all"] < WAKE_ROUNDS
+        if mode == "continue" and within:
+            counted["all"] += 1
+            counted["failed"] += 1 if found.get("failed") else 0
+            self._go_on(session, document)
+            return
+        key = "%s/%d" % ((found.get("condition") or {}).get("id") or "", len(self._wakes.get(session_id, {})))
+        self._wakes.setdefault(session_id, {})[key] = (found, document, "ask" if mode == "ask" else "limit")
+        self._sync_wakes()
+
+    def _go_on(self, session, document):
+        """The woken turn: now, or first in line behind the turn running."""
+        session_id = session["id"]
+        if session_id in self.turns:
+            self._queued.setdefault(session_id, []).insert(0, document)
+            if self._showing(session_id):
+                self._waiting()
+            return
+        self._start(session, document["message"], document=document)
+
+    def _wake_answered(self, key, go):
+        session_id = (self.current or {}).get("id")
+        found = self._wakes.get(session_id, {}).pop(key, None)
+        self._sync_wakes()
+        if found is not None and go:
+            # The person's word: QAVector may go on by itself again from here.
+            self._woke.pop(session_id, None)
+            self._go_on(self.current, found[1])
+
+    def _sync_wakes(self):
+        session_id = (self.current or {}).get("id")
+
+        def made(key, found, reason):
+            def make():
+                card = agentcards.WakeCard(key, found, reason)
+                card.go.connect(lambda key: self._wake_answered(key, True))
+                card.dismiss.connect(lambda key: self._wake_answered(key, False))
+                return card
+            return make
+        self.feed.sync_cards("wake", [
+            (key, time.time(), made(key, found, reason), lambda card: None)
+            for key, (found, _document, reason) in self._wakes.get(session_id, {}).items()])
+
+    def integration_changes_changed(self):
+        """An agent's change to Jira waits, was answered or ended (ADR-007): its
+        card, in the conversation whose agent proposed it, where it happened."""
+        session_id = (self.current or {}).get("id")
+        changes = (getattr(ChatTab.qcr_access, "integration_changes", None) or {}).values()
+        self.feed.set_changes([one for one in changes if session_id and one.get("session") == session_id])
 
     def _others_chosen(self, value):
         """A begun conversation keeps what it may do with other agents; a new one
@@ -2433,6 +2621,22 @@ class ChatTab(QWidget):
         session["others"] = value             # the next turn asks with it at once
         self.ask("session-set", lambda core, cancel: core.agents(
             "session-set", session["id"], document={"others": value}), done)
+
+    def _wake_chosen(self, value):
+        """A begun conversation keeps how it goes on when its tasks end."""
+        session = self.current
+        if session is None or session.get("wake") == value:
+            return
+
+        def done(payload):
+            if payload.get("ok"):
+                self._put(payload.get("session") or dict(session, wake=value))
+            else:
+                self.composer.say(payload.get("error") or "The choice was not saved.", bad=True)
+
+        session["wake"] = value
+        self.ask("session-set", lambda core, cancel: core.agents(
+            "session-set", session["id"], document={"wake": value}), done)
 
     # -- restrictions -------------------------------------------------------------
     def edit_restrictions(self):

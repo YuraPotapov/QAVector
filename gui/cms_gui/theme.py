@@ -120,6 +120,13 @@ DIFF_DEL_INK = BAD
 # cannot tell two of these apart reads instead. A family with no entry gets the
 # ordinary node background, which is the right answer for a plugin nobody has
 # chosen a colour for yet.
+#: What QAVector itself says in an agent's conversation - the turn it starts
+#: when the tasks the agent handed on have ended (ADR-009). The agent family's
+#: violet (see PLUGIN_TINT below): agent work going on by itself, apart from
+#: the person's accent and from the amber of a card that waits for an answer.
+AUTO = "#7a62b0"
+AUTO_TINT = "#efe9fb"
+
 PLUGIN_TINT = {
     "agent": "#efe9fb",        # it thinks, it takes minutes, it costs money
     "git": "#e4eefb",          # the repository
@@ -159,6 +166,7 @@ def set_dark_mode(enabled: bool):
     global DIFF_ADD_BG, DIFF_ADD_INK, DIFF_DEL_BG, DIFF_DEL_INK
     global SELECT_BG, SELECT_INK, SELECT_MUTED
     global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
+    global AUTO, AUTO_TINT
 
     if enabled:
         BG = "#1a1b1e"
@@ -175,6 +183,8 @@ def set_dark_mode(enabled: bool):
         }
         
         BAD_TINT = "#4a2522" # Darker wash behind red marks
+        AUTO = "#a48fe0"
+        AUTO_TINT = "#2d2a3a"
         WARN_TINT = "#3d3322"
         DIFF_ADD_BG = "#1f3326"
         DIFF_ADD_INK = "#7fcf95"
@@ -235,6 +245,8 @@ def set_dark_mode(enabled: bool):
         BG = "#f2f2f3"
         SURFACE = "#e9e9ea"
         TEXT = "#1d1f20"
+        AUTO = "#7a62b0"
+        AUTO_TINT = "#efe9fb"
         DIVIDER = "#cfcfd0"
         DIVIDER_STRONG = "#a8a8ab"
         
@@ -1034,6 +1046,9 @@ QFrame[role="message"] {{
     border-left: 3px solid {accent};
 }}
 QFrame[role="message"][state="delivered"] {{ border-left-color: {ok}; }}
+/* QAVector's own message in a conversation: the results it continues with. */
+QFrame[role="message"][from="qavector"] {{ background: {auto_tint}; border-left-color: {auto}; }}
+QFrame[role="message"][from="qavector"] QLabel[role="msgkind"] {{ color: {auto}; }}
 QFrame[role="message"][state="undelivered"],
 QFrame[role="message"][state="rejected"] {{ border-left-color: {bad}; }}
 QFrame[role="message"][state="uncertain"],
@@ -1135,7 +1150,7 @@ def stylesheet():
         cell_v=CELL_INSET_V, cell_h=CELL_INSET_H,
         tb_bg=TITLEBAR_BG, tb_text=TITLEBAR_TEXT, tb_muted=TITLEBAR_MUTED,
         select_bg=SELECT_BG, select_ink=SELECT_INK, section=SECTION_BG,
-        diff_add_ink=DIFF_ADD_INK, diff_del_ink=DIFF_DEL_INK,
+        diff_add_ink=DIFF_ADD_INK, diff_del_ink=DIFF_DEL_INK, auto=AUTO, auto_tint=AUTO_TINT,
         chevron=_chevron(NEUTRAL[600]), chevron_off=_chevron(NEUTRAL[400]),
     )
 

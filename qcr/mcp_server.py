@@ -39,7 +39,19 @@ TOOLS = [
                     "its actions: status, criteria (wait on readiness) and output (its log lines). agents: hand "
                     "another agent a task (agents.<id>.delegate), send it a message or ask it a question "
                     "(agents.<id>.message; expects_reply for an answer), record whether a task's criteria "
-                    "passed (agents.tasks.verify). These may wait for the person's approval.",
+                    "passed (agents.tasks.verify). These may wait for the person's approval. Delegate a part "
+                    "another agent does better or in parallel, or an independent check - not small things "
+                    "or what needs this conversation's context. Read agents.<id>.describe first and give "
+                    "the model and effort the task needs: a cheaper model and lower effort for simple work. "
+                    "Roles (agents.roles.<id>.delegate) are the person's own: use the one they name, else pick by "
+                    "what it does; a reviewer's rework skips what is after it. "
+                    "Name tasks; after: [names] starts one only when those succeed; agents.tasks.wake_when "
+                    "says when you are woken with results. The invoke answer's next says whether to end "
+                    "your turn. "
+                    "integrations: "
+                    "Jira reads, and changes (comment, transition, assign, edit, comment_edit, create, attach "
+                    "from your folder) that the person sees, may edit, and approves or denies - invoke, then "
+                    "wait; one change per connection at a time.",
      "inputSchema": {"type": "object", "additionalProperties": False,
                      "properties": {"namespace": {"type": "string", "description": "services, scenarios, cycles, "
                                                                                    "integrations, agents"}}}},

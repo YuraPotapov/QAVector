@@ -194,9 +194,14 @@ def _tail(path, limit=ERROR_CHARS):
     return text[-limit:]
 
 
+#: Who else may start a turn than the person: QAVector, when tasks this
+#: conversation handed on have ended (ADR-009).
+TRIGGERS = ("tasks_finished",)
+
+
 def send(root, session_id, message, agents_path=None, mode=None, model=None,
          effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None,
-         plan=None, qavector=None):
+         plan=None, qavector=None, trigger=None):
     """Take one turn. Returns ``{"session", "turn"}``; raises :class:`Refused`.
 
     ``mode``, ``model``, ``effort``, ``skills`` (names in the library at
@@ -219,7 +224,7 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     stop = stop or threading.Event()
     chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
               "skills_root": skills_root, "attachments": attachments if attachments is not None else [],
-              "qavector": qavector}
+              "qavector": qavector, "trigger": trigger if trigger in TRIGGERS else None}
     try:
         sessions.load(root, session_id)             # not there: said before the lock
         with sessions.lock(root, session_id):
@@ -234,6 +239,7 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
 
 def _turn(root, session, message, agents_path, chosen, emit, stop):
     mode, model, effort = chosen["mode"], chosen["model"], chosen["effort"]
+    trigger = chosen.get("trigger")
     connection = store.get(session["connection"], agents_path)
     if connection is None:
         raise Refused("no_connection", "The agent connection %r this session was started "
@@ -308,6 +314,20 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     else:
         attachments_dir = ""
     prompt = attachment_files.prompt(message, session_dir, attached)
+    # Who it may hand work to - the roles and the connections (ADR-010 D3):
+    # told when the conversation works with other agents and this turn has
+    # QAVector, on its first such turn and whenever the list changed. In the
+    # prompt only; what the person wrote is recorded as they wrote it.
+    told = session.get("others_told") or ""
+    if chosen.get("qavector") and not planning and sessions.others_of(session, connection) != "deny":
+        from . import roles as roles_mod
+        try:
+            preface, fingerprint = roles_mod.preface(agents_path, connection)
+        except roles_mod.RoleError:
+            preface, fingerprint = "", told
+        if preface and fingerprint != told:
+            prompt = preface + "\n\n" + prompt
+            told = fingerprint
     if planning:
         prompt = adapter.plan_prompt(prompt)
     provider = session["provider_session"] if resume else ("" if features.assigns_session_id else str(uuid.uuid4()))
@@ -330,7 +350,9 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             "steps": None, "error": ""}
     if attached:
         turn["attachments"] = attached
-    session.update(mode=mode, model=session_model, effort=session_effort, skills=names,
+    if trigger in TRIGGERS:
+        turn["trigger"] = trigger         # started by QAVector, not the person (ADR-009)
+    session.update(others_told=told, mode=mode, model=session_model, effort=session_effort, skills=names,
                    plan=planning, provider_session=provider, updated=turn["started"],
                    title=session.get("title") or sessions.title_from(
                        message or ", ".join(one["name"] for one in attached)))
@@ -358,6 +380,10 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
 
     try:
         said = {"type": "user", "text": message, "mode": mode}
+        if trigger in TRIGGERS:
+            # Not the person's message: QAVector's, with what other agents
+            # came back with (ADR-009 D4).
+            said["trigger"] = trigger
         if planning:
             said["plan"] = True
         if names:

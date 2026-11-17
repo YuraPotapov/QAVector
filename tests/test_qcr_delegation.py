@@ -99,7 +99,7 @@ def _codex_turns(tmp_path):
     return rows
 
 
-def test_only_granted_targets_are_offered_and_never_the_agents_own(world):
+def test_only_granted_targets_are_offered_and_its_own_connection_when_granted(world):
     w = world()
     listed = w.ask("capabilities")
     ids = {one["capability_id"] for one in listed["capabilities"]}
@@ -107,10 +107,13 @@ def test_only_granted_targets_are_offered_and_never_the_agents_own(world):
     assert "agents.claude.delegate" not in ids
     refused = w.delegate("claude")
     assert not refused["ok"]
-    # Even granted, its own connection is refused before anything runs.
+    # Granted, its own connection takes a task too - another model of the same
+    # program, say (ADR-009); the child cannot hand anything on in turn.
     w.grant(targets=("codex", "claude"))
     own = w.delegate("claude")
-    assert own["ok"] and w.wait(own["execution"]["execution_id"])["error"]["code"] == "authorization_denied"
+    assert own["ok"], own
+    done = w.wait(own["execution"]["execution_id"])
+    assert done["state"] == "succeeded", done
 
 
 def test_auto_runs_the_child_once_as_a_record_with_evidence(world, tmp_path):
@@ -320,3 +323,46 @@ def test_the_child_conversation_names_its_parent(world):
     done = w.wait(w.delegate()["execution"]["execution_id"])
     child = sessions.load(w.root, done["output"]["session_id"])
     assert child["source"]["parent"] == "s-parent" and child["source"]["by"] == "Claude"
+
+
+# -- the delegator chooses the child's model and effort --------------------------------
+def test_describe_reads_the_target_s_models_and_role_from_its_program(world):
+    w = world()
+    store.upsert(dict(store.get("codex", w.agents), role="implementation and tests"), w.agents)
+    answer = w.ask("read", capability="agents.codex.describe", input={})
+    assert answer["ok"], answer
+    found = answer["result"]
+    assert found["role"] == "implementation and tests" and found["provider"] == "Codex"
+    assert found["models_known"] is True and found["models"][0]["value"] == "fixture-model"
+    assert found["models"][0]["efforts"] == ["high"] and "minimal" in found["efforts"]
+
+
+def test_the_chosen_model_and_effort_run_the_child(world, tmp_path):
+    w = world()
+    w.ask("read", capability="agents.codex.describe", input={})
+    started = w.delegate(model="fixture-model", effort="high")
+    assert started["ok"], started
+    done = w.wait(started["execution"]["execution_id"])
+    assert done["state"] == "succeeded", done
+    [turn] = [row for row in _codex_turns(tmp_path) if row.get("method") == "turn/start"]
+    assert turn["params"].get("model") == "fixture-model" and turn["params"].get("effort") == "high"
+
+
+def test_a_model_or_effort_the_target_does_not_offer_is_refused_before_anything_is_written(world):
+    w = world()
+    w.ask("read", capability="agents.codex.describe", input={})
+    for task, said in (({"model": "no-such-model"}, "fixture-model"), ({"effort": "max"}, "minimal"),
+                       ({"model": "fixture-model", "effort": "low"}, "high")):
+        refused = w.delegate(**task)
+        assert not refused["ok"] and refused["error"]["code"] == "invalid_input", refused
+        assert said in refused["error"]["message"]
+    assert w.host.store.list(project_id="p") == []
+
+
+def test_a_model_chosen_before_the_list_was_read_is_checked_before_the_child_starts(world, tmp_path):
+    w = world()
+    started = w.delegate(model="no-such-model")
+    assert started["ok"], "nothing known yet: checked when it runs"
+    done = w.wait(started["execution"]["execution_id"])
+    assert done["error"]["code"] == "invalid_input" and "fixture-model" in done["error"]["message"]
+    assert not [row for row in _codex_turns(tmp_path) if row.get("method") == "turn/start"]

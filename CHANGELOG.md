@@ -38,6 +38,22 @@ app-agnostic, since that will break things on purpose.
   same Jira code as the page and is logged in Activity as `Agent <name>`.
   The agent never sees the token or Jira's error text. Nothing is retried; a
   lost answer is reported as `unknown_outcome`.
+- **Agent roles** (QCR ADR-010): Integrations -> Agents -> **Roles** - dev,
+  tester, reviewer or your own. Each has what it does, its program, model,
+  effort, the most it may do, instructions, and whether it gives a verdict.
+  Conversations with other agents on are told them in their session. An agent
+  hands a task to a role (`agents.roles.<id>.delegate`). A reviewer's
+  `rework` skips what was after it and wakes the conversation with the issues.
+  **Add the usual roles** fills in three to start from.
+- **Agents hand work on and are woken with the results** (QCR ADR-009). An
+  agent names its tasks and makes them wait for others (`after`). It says when
+  it is to be woken (`wake_when`: all, any, or at once on a failure). Then it
+  ends its turn instead of waiting in it. **When tasks finish** - Continue,
+  Ask me or Off, set per connection and per conversation - says whether the
+  conversation goes on by itself with QAVector's message of the results, or a
+  card waits for you. After 3 failed rounds since your last message it asks.
+  An agent may hand a task to its own program with another model. Two tasks
+  per agent run at once, and more wait their turn.
 - **Agents -> Usage** adds up what agents used in the project (QCR ADR-008):
   conversations, turns, tokens and the estimated cost for 7 days, 30 days or
   all time, by model, connection, source or cycle, with CSV/JSON export. Every
@@ -49,6 +65,15 @@ app-agnostic, since that will break things on purpose.
 - Costs are called **est.** everywhere: they are the agent program's own
   estimate, priced as its API would be, and on a subscription not what is
   charged. A turn without a reported cost is counted as such, never as 0.
+- **An agent handing a task to another chooses its model and effort** for the
+  task (ADR-006 D9a), from what the other offers: `agents.<id>.describe` says
+  its models, efforts, defaults and what it is **Good at** - a new field of
+  the connection. A choice it does not offer is refused before anything runs;
+  none keeps the connection's defaults. The task's card says which.
+- Agent chat cards - a task or a message for another agent, a reply from
+  one, a change proposed to Jira - stand in the conversation where they
+  happened, instead of in a strip above the message box. An ended one stays
+  as the conversation's record of it.
 - Agent chats offer **Interrupt & send** for a new or queued message. The
   current turn is stopped before the same conversation resumes with the
   selected message; other queued messages keep their order. Failed stops

@@ -301,13 +301,19 @@ class AgentRequestCard(QFrame):
     open = Signal(str)
     dismiss = Signal(str)
 
-    def __init__(self, request):
+    def __init__(self, request, dismissible=True):
         super().__init__()
         self.setProperty("role", "agentcard")
         self.request = dict(request)
+        #: In a conversation an ended task stays as its record.
+        self.dismissible = dismissible
         self.execution_id = self.request.get("execution_id") or ""
         message = self.request.get("kind") == "message"
-        target = self.request.get("target_name") or self.request.get("target") or "another agent"
+        program = self.request.get("target_name") or self.request.get("target") or ""
+        target = program or "another agent"
+        if self.request.get("role"):
+            # A role the person made: named first, its program after when known (ADR-010).
+            target = "%s (%s)" % (self.request["role"], program) if program else self.request["role"]
         column = QVBoxLayout(self)
         column.setContentsMargins(10, 6, 10, 8)
         column.setSpacing(6)
@@ -320,9 +326,14 @@ class AgentRequestCard(QFrame):
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         column.addWidget(self.text)
         details = []
+        if not message and self.request.get("mode"):
+            details.append("Mode: %s" % self.request["mode"].capitalize())
+        # What the asking agent chose for the other's turn; none is its defaults.
+        if not message or self.request.get("expects_reply"):
+            for key, word in (("model", "Model"), ("effort", "Effort")):
+                if self.request.get(key):
+                    details.append("%s: %s" % (word, self.request[key]))
         if not message:
-            if self.request.get("mode"):
-                details.append("Mode: %s" % self.request["mode"].capitalize())
             for key, word in (("files", "file"), ("artifacts", "earlier run")):
                 count = int(self.request.get(key) or 0)
                 if count:
@@ -365,7 +376,7 @@ class AgentRequestCard(QFrame):
         self.deny_button.setVisible(waiting)
         self.approve_button.setVisible(waiting)
         self.open_button.setVisible(bool(self.request.get("session_id")))
-        self.dismiss_button.setVisible(ended)
+        self.dismiss_button.setVisible(ended and self.dismissible)
         self.result.setText(detail)
         self.result.setVisible(bool(detail))
         _settled(self, ended)
@@ -543,6 +554,102 @@ class IntegrationChangeCard(QFrame):
         self.result.setText(detail)
         self.result.setVisible(bool(detail))
         _settled(self, not waiting and state not in ("approved", "running"))
+
+
+#: What starts the turn QAVector takes for a conversation whose tasks ended (ADR-009 D4).
+WAKE_HEAD = "[QAVector: what you handed on to other agents has ended]"
+WAKE_WHY = {"all": "everything you asked to be woken for has ended",
+            "any": "one of the tasks you asked about has ended",
+            "failure": "one of them did not succeed",
+            "round": "everything you handed on in your last turn has ended"}
+WAKE_STATES = {"succeeded": "done", "failed": "failed", "skipped": "skipped - what it waited for failed",
+               "rework": "sent back for rework",
+               "denied": "denied by the person", "canceled": "canceled", "timed_out": "ran out of time",
+               "unknown": "outcome unknown"}
+WAKE_TODO = ("Check each acceptance criterion against evidence and record it with agents.tasks.verify. "
+             "Then carry on with what the person asked - hand on more work if it is needed - and tell "
+             "the person what came of it.")
+
+
+def wake_message(found):
+    """What the woken turn is told: why, each ended item, what still runs, what to do."""
+    lines = [WAKE_HEAD, "Why now: %s." % WAKE_WHY.get((found.get("condition") or {}).get("why"), "they ended"), ""]
+    for one in found.get("items") or []:
+        who = one.get("target_name") or one.get("target") or "another agent"
+        if one.get("role"):
+            who = "%s (%s)" % (one["role"], who)
+        with_ = " ".join(part for part in (one.get("model"), one.get("effort")) if part)
+        head = "- %s%s (%s for %s%s): %s." % (
+            one.get("name") + " - " if one.get("name") else "", (one.get("goal") or "")[:200],
+            "question" if one.get("kind") == "question" else "task", who, ", " + with_ if with_ else "",
+            WAKE_STATES.get(one.get("state"), one.get("state") or ""))
+        lines.append(head)
+        if one.get("answer"):
+            lines.append("  Answer: " + one["answer"])
+        if one.get("error") and one.get("state") != "succeeded":
+            lines.append("  Why: " + one["error"])
+        if one.get("verdict") == "no_verdict":
+            lines.append("  It gave no verdict, so it counts as sent back.")
+        for issue in one.get("issues") or []:
+            lines.append("  Issue: " + issue)
+        criteria = [str(c.get("criterion") or "") for c in one.get("acceptance") or [] if isinstance(c, dict)]
+        if criteria:
+            lines.append("  Acceptance criteria, not verified yet: " + "; ".join(criteria))
+        if one.get("files_changed"):
+            lines.append("  Files changed: %d." % one["files_changed"])
+        lines.append("  Execution: %s." % one.get("execution_id"))
+    if found.get("running"):
+        lines.append("Still running: %s." % ", ".join(found["running"]))
+    lines += ["", WAKE_TODO]
+    return "\n".join(lines)
+
+
+class WakeCard(QFrame):
+    """Tasks a conversation handed on have ended, and it waits for the person's
+    word to go on with their results (ADR-009 D3/D6)."""
+
+    go = Signal(str)
+    dismiss = Signal(str)
+
+    def __init__(self, key, found, reason="ask"):
+        super().__init__()
+        self.setProperty("role", "agentcard")
+        self.key = key
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 6, 10, 8)
+        column.setSpacing(6)
+        items = found.get("items") or []
+        head, self.kind, self.meta = _head("TASKS FINISHED", "waits for you")
+        column.addLayout(head)
+        self.lines = []
+        for one in items:
+            who = one.get("target_name") or one.get("target") or "another agent"
+            line = QLabel("%s - %s: %s" % (one.get("name") or (one.get("goal") or "")[:60], who,
+                                           WAKE_STATES.get(one.get("state"), one.get("state") or "")))
+            line.setWordWrap(True)
+            column.addWidget(line)
+            self.lines.append(line)
+        notes = []
+        if found.get("running"):
+            notes.append("Still running: %s." % ", ".join(found["running"]))
+        if reason == "limit":
+            notes.append("It went on by itself as far as allowed after failed rounds; it waits for you now.")
+        self.note = QLabel("\n".join(notes))
+        self.note.setProperty("role", "hint")
+        self.note.setWordWrap(True)
+        self.note.setVisible(bool(notes))
+        column.addWidget(self.note)
+        self.dismiss_button = QPushButton("Dismiss")
+        self.dismiss_button.setProperty("variant", "ghost")
+        self.dismiss_button.setToolTip("Leave it; the results stay on their cards.")
+        self.dismiss_button.clicked.connect(lambda: self.dismiss.emit(self.key))
+        self.go_button = QPushButton("Continue")
+        self.go_button.setProperty("variant", "primary")
+        self.go_button.setToolTip("The agent goes on with these results.")
+        self.go_button.clicked.connect(lambda: self.go.emit(self.key))
+        column.addWidget(widgets.row(None, self.dismiss_button, self.go_button))
+        widgets.see_through(self)
+
 
 def inbox_prefix(messages):
     """What the next message starts with: each waiting message, who sent it."""

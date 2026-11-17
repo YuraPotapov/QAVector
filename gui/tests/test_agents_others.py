@@ -44,16 +44,28 @@ def test_a_turn_gets_its_targets_and_its_conversation(qapp, tmp_path):
     actor = host.sent[0]
     assert actor["type"] == "actor" and actor["actor"] == "agent:claude/s-1"
     assert sorted((g["permission"], g["resource_id"]) for g in actor["grants"]) == [
-        ("agents.delegate", "agent-connection~codex"), ("agents.delegate", "agent-tasks"),
+        ("agents.delegate", "agent-connection~claude"), ("agents.delegate", "agent-connection~codex"),
+        ("agents.delegate", "agent-roles"), ("agents.delegate", "agent-tasks"),
         ("agents.message", "agent-messages~codex")]
     assert actor["agents"] == {"session": "s-1", "connection": "claude", "name": "Claude",
                                "folder": str(tmp_path), "mode": "edit", "others": "auto",
-                               "restrictions": {"network": "on"}}
+                               "restrictions": {"network": "on"}, "wake": "ask"}
     host.end_agent(access)
 
 
-@pytest.mark.parametrize("connection, others", [(CLAUDE, "deny"), (CLAUDE, None), (CODEX, "auto")])
-def test_deny_or_nobody_allowed_gives_nothing(qapp, tmp_path, connection, others):
+def test_a_connection_that_allows_nobody_may_still_hand_its_own_program_a_task(qapp, tmp_path):
+    """ADR-009: another model of the same program, say - a task, never a message."""
+    host = ready_host(tmp_path)
+    access = host.grant_agent(CODEX, "s-1", session={"folder": str(tmp_path), "others": "auto"}, mode="full")
+    assert access is not None
+    assert [(g["permission"], g["resource_id"]) for g in host.sent[0]["grants"]] == [
+        ("agents.delegate", "agent-connection~codex"), ("agents.delegate", "agent-tasks"),
+        ("agents.delegate", "agent-roles")]
+    host.end_agent(access)
+
+
+@pytest.mark.parametrize("connection, others", [(CLAUDE, "deny"), (CLAUDE, None)])
+def test_deny_gives_nothing(qapp, tmp_path, connection, others):
     host = ready_host(tmp_path)
     assert host.grant_agent(connection, "s-1", session={"folder": str(tmp_path), "others": others},
                             mode="full") is None
@@ -204,7 +216,11 @@ def chat(qapp, tmp_path):
 
 
 def _cards(tab, kind):
-    return tab.strip.findChildren(kind)
+    """The cards of the kind in the conversation's feed, in the order they stand."""
+    group = {"AgentRequestCard": "request", "InboxCard": "inbox"}[kind.__name__]
+    placed = tab.feed.placed(group)
+    rows = [row.body for _kind, row in tab.feed._rows if getattr(row, "body", None) in placed]
+    return rows
 
 
 SESSION = {"id": "s-1", "connection": "claude", "folder": "/tmp", "mode": "edit", "others": "approve",
@@ -232,10 +248,20 @@ def test_a_request_waits_for_a_yes_then_follows_its_task(chat):
                                     "acceptance": [{"criterion": "passes", "status": "unverified"}]}})
     (card,) = _cards(tab, agentchat.agentcards.AgentRequestCard)
     assert card.meta.text() == "done" and not card.approve_button.isVisibleTo(tab)
-    assert card.open_button.isVisibleTo(tab) and card.dismiss_button.isVisibleTo(tab)
+    assert card.open_button.isVisibleTo(tab)
     assert "Fixed it." in card.result.text() and "not verified" in card.result.text()
-    card.dismiss_button.click()
-    assert not _cards(tab, agentchat.agentcards.AgentRequestCard) and not tab.strip.isVisibleTo(tab)
+    # In the conversation, an ended task stays as its record, where it was asked.
+    assert not card.dismiss_button.isVisibleTo(tab) and tab.feed.kinds() == ["request"]
+
+
+def test_a_task_card_says_the_model_and_effort_the_agent_chose(chat):
+    tab, agentchat = chat
+    agentchat.ChatTab.qcr_access = FakeHost()
+    tab._show(dict(SESSION), [], whole=True)
+    tab.agent_request({"execution_id": "e-7", "session": "s-1", "target": "codex", "target_name": "Codex",
+                       "goal": "Small rename", "mode": "edit", "model": "fixture-model", "effort": "low"})
+    (card,) = _cards(tab, agentchat.agentcards.AgentRequestCard)
+    assert card.details.text() == "Mode: Edit · Model: fixture-model · Effort: low"
 
 
 def test_a_denial_and_an_auto_task_of_another_conversation(chat):

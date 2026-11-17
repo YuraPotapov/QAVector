@@ -80,6 +80,9 @@ class CapabilityDescriptor:
     supports_cancel: bool = False
     supports_idempotency: bool = False
     read_only: bool = False
+    #: One unfinished execution per resource (ADR-002 D6). An invoker that
+    #: keeps its own limits - delegation's per-target count - says False.
+    exclusive: bool = True
 
     def __post_init__(self):
         text(self.capability_id, "capability id")
@@ -91,7 +94,8 @@ class CapabilityDescriptor:
         text(self.permission, "permission")
         if self.risk_level not in ("low", "medium", "high", "critical") or self.mode not in ("sync", "long_running"):
             raise QCRError("invalid_contract", "Invalid risk or mode.")
-        if any(type(value) is not bool for value in (self.supports_cancel, self.supports_idempotency, self.read_only)):
+        if any(type(value) is not bool for value in (self.supports_cancel, self.supports_idempotency, self.read_only,
+                                                     self.exclusive)):
             raise QCRError("invalid_contract", "Invalid capability support flags.")
         duration(self.timeout_seconds)
 

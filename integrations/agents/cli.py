@@ -45,6 +45,11 @@ line itself is wrong.
                               turn with {"turn": N}. Running turns use a live
                               git snapshot; completed turns read saved patches
 
+    roles                     the roles agents may hand work to, and the usual
+                              ones as a start (ADR-010)
+    role-save --from=F        add or change one: {"role": {...}, "new": bool}
+    role-delete ID            remove one
+
     skills                    the skills library, and what each agent has by
                               itself
     skill-look --from=F       fetch {"url"} or read {"folder"} and say what is
@@ -158,6 +163,40 @@ def _list(call):
             "connections": store.load(call.path)}
 
 
+def _roles(call):
+    """The roles agents may hand work to (ADR-010), and the usual ones as a start."""
+    from integrations.agents import roles, store
+    try:
+        found = roles.load(call.path)
+    except roles.RoleError as exc:
+        return _refusal("unreadable", str(exc))
+    connections = store.load(call.path)
+    names = {one["id"] for one in connections}
+    return {"ok": True, "path": roles.path_for(call.path),
+            "roles": [dict(one, broken=one["connection"] not in names) for one in found],
+            "templates": roles.templates(connections)}
+
+
+def _role_save(call):
+    """``{"role": {...}, "new": true}``: add a role, or change one."""
+    from integrations.agents import roles
+    if not call.source:
+        raise Usage("role-save needs --from=FILE with the role.")
+    document = _document(call.source)
+    role, found = roles.upsert(document.get("role") or {}, call.path, new=bool(document.get("new")))
+    if found:
+        return _refusal("invalid", " ".join(found), problems=found)
+    return {"ok": True, "role": role}
+
+
+def _role_delete(call):
+    from integrations.agents import roles
+    role_id = _one(call, "role-delete")
+    if not roles.delete(role_id, call.path):
+        return _refusal("not_found", "No role %r." % role_id)
+    return {"ok": True, "id": role_id}
+
+
 def _models(call):
     from integrations.agents import adapters
     entry, _saved, refusal = _named(call, "models")
@@ -261,6 +300,12 @@ def _settings(document, adapter, current=None, skills_root=None):
     for key in ("model", "effort"):
         if key in document:
             changed[key] = str(document.get(key) or "").strip()
+    if "wake" in document:
+        from integrations.agents import store
+        if document["wake"] not in store.WAKES:
+            found.append("When tasks finish must be one of %s." % ", ".join(store.WAKES))
+        else:
+            changed["wake"] = document["wake"]
     if "others" in document:
         from integrations.agents import store
         if document["others"] not in store.OTHERS:
@@ -358,7 +403,7 @@ def _session_new(call):
             call.sessions, connection, document.get("folder") or "", settings["mode"],
             settings.get("model", ""), settings.get("effort", ""), settings.get("title", ""),
             _source(document), settings.get("restrictions"), settings.get("skills"),
-            plan=settings.get("plan", False), others=settings.get("others"))
+            plan=settings.get("plan", False), others=settings.get("others"), wake=settings.get("wake"))
     except sessions.SessionError as exc:
         return _refusal(exc.kind, str(exc))
     return {"ok": True, "session": sessions.described(call.sessions, session)}
@@ -445,7 +490,8 @@ def _send(call):
                              model=document.get("model"), effort=document.get("effort"),
                              skills=document.get("skills"), skills_root=call.skills,
                              emit=emit, stop=stop, attachments=document.get("attachments"),
-                             plan=document.get("plan"), qavector=document.get("qavector"))
+                             plan=document.get("plan"), qavector=document.get("qavector"),
+                             trigger=document.get("trigger"))
     except runner.Refused as exc:
         return _refusal(exc.kind, str(exc))
     finally:
@@ -589,6 +635,7 @@ def _import(call):
 
 
 COMMANDS = {"kinds": _kinds, "models": _models, "list": _list, "save": _save, "delete": _delete,
+            "roles": _roles, "role-save": _role_save, "role-delete": _role_delete,
             "test": _test, "sign-in": _sign_in,
             "sessions": _sessions, "session": _session, "usage": _usage, "session-new": _session_new,
             "session-set": _session_set, "session-delete": _session_delete,

@@ -130,7 +130,7 @@ class Engine:
         execution, created = self._store.create(
             project_id, cap.capability_id, cap.version, caller.actor_id, request,
             resource_id=cap.resource.resource_id, idempotency_key=idempotency_key, parent_id=parent_id,
-            correlation_id=correlation_id, exclusive=True)
+            correlation_id=correlation_id, exclusive=cap.exclusive)
         if not created:
             return execution
         job = Job(self, execution, cap, copy.deepcopy(request))

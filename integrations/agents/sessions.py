@@ -133,7 +133,7 @@ def title_from(message):
 
 
 def create(root, connection, folder, mode, model="", effort="", title="",
-           source=None, restrictions=None, skills=None, plan=False, others=None):
+           source=None, restrictions=None, skills=None, plan=False, others=None, wake=None):
     """Start a conversation. Returns the session; nothing is asked of anybody.
 
     ``connection`` is the connection as its store holds it: its id is what the
@@ -174,10 +174,22 @@ def create(root, connection, folder, mode, model="", effort="", title="",
         # What it may do with other agents (ADR-006 D3): its connection's
         # default unless said; a conversation from before then is "deny".
         "others": others_of({"others": others}, connection),
+        # How it goes on when the tasks it handed on end (ADR-009 D3).
+        "wake": wake_of({"wake": wake}, connection),
         "created": now, "updated": now, "state": "", "cost_usd": 0.0, "turns": [],
     }
     save(root, session)
     return session
+
+
+def wake_of(session, connection=None):
+    """How a conversation goes on when its tasks end: its own choice, else its
+    connection's default, else "ask"."""
+    from integrations.agents import store
+    for value in ((session or {}).get("wake"), (connection or {}).get("wake_default")):
+        if value in store.WAKES:
+            return value
+    return store.WAKE_DEFAULT
 
 
 def others_of(session, connection=None):
@@ -199,7 +211,7 @@ def normal_source(source):
             "record": bool(source.get("record"))}
     # A conversation another one started (ADR-006): which one, and whose it was -
     # so a list shows it beside the conversation it belongs to.
-    for key in ("parent", "by"):
+    for key in ("parent", "by", "role"):
         if str(source.get(key) or "").strip():
             kept[key] = str(source[key]).strip()
     return kept

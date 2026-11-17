@@ -91,6 +91,7 @@ class FakeCore:
         self.events = {key: list(value) for key, value in (events or {}).items()}
         self.answers = answers
         self.calls = []
+        self.roles = [dict(one) for one in answers.pop("roles", None) or []]
 
     def _session(self, session_id):
         return next((one for one in self.sessions if one["id"] == session_id), None)
@@ -136,6 +137,23 @@ class FakeCore:
                     "detail": "Claude Code opens your browser and keeps the credentials itself."}
         if command == "activity":
             return {"ok": True, "activity": [dict(one) for one in self.turns]}
+        if command == "roles":
+            known = {one["id"] for one in self.connections}
+            return {"ok": True, "roles": [dict(one, broken=one.get("connection") not in known)
+                                          for one in self.roles],
+                    "templates": [{"id": "dev", "name": "Developer", "does": "Changes code.",
+                                   "connection": "claude-code", "mode": "edit"},
+                                  {"id": "reviewer", "name": "Reviewer", "does": "Reviews.",
+                                   "connection": "claude-code", "mode": "read", "verdict": True}]}
+        if command == "role-save":
+            role = dict(document["role"])
+            if document.get("new") and any(one["id"] == role["id"] for one in self.roles):
+                return {"ok": False, "kind": "invalid", "error": "There is a role %r already." % role["id"]}
+            self.roles = [one for one in self.roles if one["id"] != role["id"]] + [role]
+            return {"ok": True, "role": role}
+        if command == "role-delete":
+            self.roles = [one for one in self.roles if one["id"] != args[1]]
+            return {"ok": True, "id": args[1]}
         if command == "usage":
             # As the core sums an issue's ref: its own conversations, and with
             # those they handed on (source.parent) - figures kept apart.
@@ -547,10 +565,10 @@ def test_a_first_connection_needs_no_thought(make, dispose):
             "", "low", "medium", "high", "xhigh", "max"]
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
-            "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "",
+            "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "", "role": "",
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
-            "others_default": "approve", "allowed_agents": []}})
+            "others_default": "approve", "allowed_agents": [], "wake_default": "ask"}})
         assert dialog.result() == QDialog.Accepted
     finally:
         dispose(dialog)
@@ -647,10 +665,10 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
             "id": "claude", "name": "Claude", "kind": "claude",
-            "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high",
+            "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high", "role": "",
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
-            "others_default": "deny", "allowed_agents": []}})
+            "others_default": "deny", "allowed_agents": [], "wake_default": "ask"}})
     finally:
         dispose(dialog)
     assert page.agents.connections_tab.table.item(0, 2).text() == "/opt/claude/bin/claude"
@@ -872,6 +890,18 @@ def test_a_found_conversation_skill_or_connection_is_shown_where_it_lives(make):
 
 
 
+def test_what_an_agent_is_good_at_is_kept_with_its_connection(qapp):
+    """Told to other agents that may hand it a task, with its models and efforts."""
+    from cms_gui.pages.agents import ConnectionDialog
+    dialog = ConnectionDialog(None, {"id": "codex", "name": "Codex", "kind": "codex", "role": "tests"})
+    try:
+        assert dialog.role.text() == "tests"
+        dialog.role.setText("  implementation and tests  ")
+        assert dialog.entry()["role"] == "implementation and tests"
+    finally:
+        dialog.close()
+
+
 def test_qavector_access_is_off_until_a_switch_is_turned_on(qapp):
     """QCR ADR-003 D6: what an agent may do in QAVector, per connection, nothing by default."""
     from cms_gui.pages.agents import ConnectionDialog
@@ -959,3 +989,63 @@ def test_no_turns_in_the_period_says_so(make):
     assert tab.table.rowCount() == 0 and tab.note.text() == "No agent turn in this period. Choose a longer one, or All."
 
 
+# -- Roles (QCR ADR-010) ----------------------------------------------------------------
+ROLE = {"id": "tester", "name": "Tester", "does": "Runs the tests.", "connection": "claude-code", "model": "",
+        "effort": "", "mode": "read", "instructions": "Report failures.", "verdict": False}
+
+
+def test_roles_are_read_when_their_tab_opens_and_the_usual_ones_are_offered(make):
+    core = FakeCore()
+    page = make(core)
+    assert "roles" not in core.asked()
+    page.agents.tabs.setCurrentWidget(page.agents.roles_tab)
+    tab = page.agents.roles_tab
+    assert "roles" in core.asked() and tab.table.rowCount() == 0
+    assert "Add the usual ones" in tab.note.text() and tab.usual_button.isVisibleTo(page)
+    changed = []
+    page.agents.roles_changed.connect(lambda: changed.append(1))
+    tab.usual_button.click()
+    saved = [doc for args, doc in core.calls if args[0] == "role-save"]
+    assert [one["role"]["id"] for one in saved] == ["dev", "reviewer"] and all(one["new"] for one in saved)
+    assert tab.table.rowCount() == 2 and not tab.usual_button.isVisibleTo(page) and changed
+
+
+def test_a_role_is_read_only_until_edit_and_saved_where_it_stands(make):
+    core = FakeCore(roles=[ROLE])
+    page = make(core)
+    page.agents.tabs.setCurrentWidget(page.agents.roles_tab)
+    tab = page.agents.roles_tab
+    assert tab.name.isReadOnly() and not tab.verdict.isEnabled() and tab.role_id.text() == "tester"
+    tab.edit_button.click()
+    assert not tab.name.isReadOnly() and tab.role_id.isReadOnly(), "an id is fixed once made"
+    tab.instructions.setPlainText("Report failures with steps.")
+    assert tab.has_unsaved()
+    tab.save_button.click()
+    [saved] = [doc for args, doc in core.calls if args[0] == "role-save"]
+    assert saved["new"] is False and saved["role"]["instructions"] == "Report failures with steps."
+    assert tab.name.isReadOnly() and not tab.has_unsaved()
+
+
+def test_a_new_role_says_what_is_wrong_and_cancel_puts_it_down(make):
+    core = FakeCore(roles=[ROLE])
+    page = make(core)
+    page.agents.tabs.setCurrentWidget(page.agents.roles_tab)
+    tab = page.agents.roles_tab
+    tab.new_button.click()
+    assert not tab.role_id.isReadOnly() and not tab.table.isEnabled()
+    tab.role_id.setText("tester")
+    tab.name.setText("Another")
+    tab.save_button.click()
+    assert tab.problem.text() == "There is a role 'tester' already." and tab.problem.isVisibleTo(page)
+    tab.cancel_button.click()
+    assert tab.table.isEnabled() and tab.role_id.text() == "tester" and tab.name.text() == "Tester"
+
+
+def test_a_role_is_removed_once_agreed(make, monkeypatch):
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: True)
+    core = FakeCore(roles=[ROLE])
+    page = make(core)
+    page.agents.tabs.setCurrentWidget(page.agents.roles_tab)
+    page.agents.roles_tab.remove_button.click()
+    assert ("role-delete", "tester") in [args for args, _doc in core.calls]
+    assert page.agents.roles_tab.table.rowCount() == 0

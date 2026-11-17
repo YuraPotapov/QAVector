@@ -80,6 +80,17 @@ _PR_SET_PDEATHSIG = 1
 #: What an agent may ask on the socket; everything else is the GUI's alone.
 AGENT_KINDS = ("capabilities", "describe", "read", "invoke", "get", "events", "wait", "cancel", "list")
 WAIT_SECONDS = 60
+#: What an agent is told after handing work on, by its conversation's "When tasks finish" (ADR-009 D7).
+NEXT = {
+    "continue": "This conversation continues by itself with the results: when all you handed on in this "
+                "turn has ended, or as agents.tasks.wake_when says. Hand on the rest, tell the person what "
+                "you started, and end your turn - do not wait in it.",
+    "ask": "When what you handed on has ended, the person is asked to continue this conversation with the "
+           "results. Tell them what you started and end your turn, or wait here with qavector_wait for "
+           "something short.",
+    "off": "This conversation is not continued by itself: wait with qavector_wait if you need the results "
+           "in this turn.",
+}
 #: How long an owner read (a service's output) may take the GUI to answer.
 OWNER_READ_SECONDS = 5
 
@@ -152,9 +163,14 @@ class Host:
 
     def _changed(self, execution_id):
         try:
-            self.send({"type": "execution", "execution": self.store.get(execution_id)})
+            execution = self.store.get(execution_id)
+            self.send({"type": "execution", "execution": execution})
         except Exception:
             log.debug("could not push execution %s", execution_id)
+            return
+        if self.delegation is not None:
+            # A task or question that ended may start what was after it, and wake its conversation.
+            self.delegation.execution_changed(execution)
 
     def open_integrations(self, integrations_path="", secrets_path="", environments_path=""):
         """Register the project's integration reads (Jira) - the 1B adapter -
@@ -364,6 +380,9 @@ class Host:
             # at most this (ADR-006 D2), even after its own turn has ended.
             rule["grants"] = [dict(one) for one in message.get("grants") or [] if isinstance(one, dict)]
             self._agent_policies[message.get("actor")] = rule
+            if self.delegation is not None:
+                # A turn of a delegating conversation begins: what it hands on is its round (ADR-009).
+                self.delegation.rounds.turn_started(message.get("actor"), rule["session"])
         else:
             self._agent_policies.pop(message.get("actor"), None)
         return {}
@@ -490,6 +509,9 @@ class Host:
         return {}
 
     def _on_revoke(self, message):
+        if self.delegation is not None:
+            # The turn is over: what it asked to be woken for may fire now.
+            self.delegation.rounds.turn_ended(message.get("actor"))
         caller = self._callers.pop(message.get("actor"), None)
         if caller is not None:
             self.authority.revoke(caller)
@@ -619,10 +641,17 @@ class Host:
                     raise QCRError("invalid_message", "Timeout is a number of seconds.")
                 with self._lock:
                     caller = self._caller(request)
-                return {"ok": True, "execution": self.engine.wait(caller, message.get("execution_id"),
-                                                                  min(float(timeout), WAIT_SECONDS))}
+                execution = self.engine.wait(caller, message.get("execution_id"), min(float(timeout), WAIT_SECONDS))
+                self._saw(execution)
+                return {"ok": True, "execution": execution}
             if kind == "read":
                 capability_id = str(message.get("capability") or "")
+                parts = capability_id.split(".")
+                if (len(parts) == 3 and parts[0] == "agents" and parts[2] == "describe"
+                        and self.delegation is not None):
+                    # The target's models come from its program: read them here,
+                    # outside the lock the GUI's messages need.
+                    self.delegation.warm(parts[1])
                 special = (self._service_read(request) if capability_id.startswith("services.")
                            else self._launcher_read(request) if capability_id.startswith("launcher.") else None)
                 if special is not None:
@@ -644,14 +673,32 @@ class Host:
             caller, self.project_id, message.get("capability"), message.get("input", {}),
             idempotency_key=message.get("idempotency_key"), correlation_id=message.get("correlation_id"),
             parent_id=message.get("parent_id"))
-        return {"execution": execution}
+        answer = {"execution": execution}
+        capability = str(message.get("capability") or "")
+        handed = capability.startswith("agents.") and (capability.endswith(".delegate") or (
+            capability.endswith(".message") and (message.get("input") or {}).get("expects_reply")))
+        if handed:
+            # What comes next, said outright (ADR-009 D7): an agent that knows it
+            # will be continued ends its turn instead of waiting in it.
+            wake = (self._agent_policies.get(message.get("actor")) or {}).get("wake", "ask")
+            answer["next"] = NEXT[wake]
+        return answer
 
     def _on_cancel(self, message):
         return {"execution": self.engine.cancel(self._caller(message), message.get("execution_id"),
                                                 message.get("reason"))}
 
     def _on_get(self, message):
-        return {"execution": self.engine.get(self._caller(message), message.get("execution_id"))}
+        execution = self.engine.get(self._caller(message), message.get("execution_id"))
+        if str(message.get("actor") or "").startswith("agent:"):
+            self._saw(execution)
+        return {"execution": execution}
+
+    def _saw(self, execution):
+        """The delegator got an ended task's result itself: no need to wake it for that (ADR-009 D2)."""
+        if self.delegation is not None and execution.get("state") in ("succeeded", "failed", "canceled",
+                                                                      "timed_out", "unknown"):
+            self.delegation.rounds.seen(execution["execution_id"])
 
     def _on_events(self, message):
         after = message.get("after", 0)

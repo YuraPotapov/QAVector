@@ -187,6 +187,26 @@ criterion has a recorded passing verdict.
   with a correlation id (the root execution) and a hop count.
 * Agents → Activity lists messages and tasks.
 
+**D9a. The delegator chooses the child's model and effort** (user,
+2026-11-17, option (a): no limit yet; limits come with the budgets of plan
+§22). The delegating agent knows how hard the task is.
+* `agents.<id>.delegate` and `agents.<id>.message` (for its reply turn) take
+  optional `model` and `effort`. Without them the target connection's defaults
+  apply, as before.
+* `agents.<id>.describe` (a read, permission `agents.delegate`) says what the
+  target is for (the connection's **Good at**, `role`), its provider, default
+  model and effort, its efforts, and its models with their descriptions (for
+  Codex, each model's efforts). The models come from the program's own list
+  (`models()`), read when asked, outside the host's lock, and believed for 10
+  minutes.
+* A choice the target does not offer is refused (`invalid_input`, naming what
+  it offers) before anything is journalled. If the list was not read yet, the
+  model is checked in the child's thread before it starts.
+* The Approve card and an Auto task's card say the model and effort chosen.
+* The MCP tool text says when to delegate (another agent does a part better or
+  in parallel, or checks independently; not small things or what needs this
+  conversation's context) and to choose model and effort to fit the task.
+
 **D10. Where it runs.** The child turn runs in the project's QCR host, which
 the GUI owns, as the Phase 4 runtime already does. Closing QAVector cancels
 running children. On the next start their executions reconcile to `unknown`

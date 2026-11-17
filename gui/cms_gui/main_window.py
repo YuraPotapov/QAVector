@@ -311,7 +311,10 @@ class MainWindow(QMainWindow):
         self.qcr_host.execution_changed.connect(self.integrations.agents.chat.agent_execution)
         # An agent's change to Jira waits for the person there, and on the
         # Integrations page (ADR-007 D7).
+        self.qcr_host.integration_changes_changed.connect(self.integrations.agents.chat.integration_changes_changed)
         self.integrations.set_change_source(self.qcr_host)
+        # What a conversation handed on has ended: it goes on, or asks (ADR-009).
+        self.qcr_host.round_finished.connect(self.integrations.agents.chat.round_finished)
         self._qcr_answers = {}          # node approval request id -> (execution id, item id)
         self._qcr_run = None
         self._aim_qcr()
@@ -854,6 +857,9 @@ class MainWindow(QMainWindow):
         self.integrations.search_sources_changed.connect(self._search_sources_changed)
         # A connection added, changed or removed: the host's delegation targets follow.
         self.integrations.agents.connections_changed.connect(
+            lambda: getattr(self, "qcr_host", None) is not None and self.qcr_host.refresh_agents())
+        # Roles are delegation targets too: the core offers them anew (ADR-010).
+        self.integrations.agents.roles_changed.connect(
             lambda: getattr(self, "qcr_host", None) is not None and self.qcr_host.refresh_agents())
         self.cycles.set_run_state(self.run_state)
         self.cycles.interaction_requested.connect(self._send_cycle_interaction)
