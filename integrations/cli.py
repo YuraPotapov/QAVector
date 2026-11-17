@@ -18,6 +18,11 @@ printed: the only thing anybody is told about it is ``token_set``.
                                   F holding its request
     activity                      what was changed in Jira through QAVector,
                                   newest first
+    notes --from=F                private notes on an issue: {"connection", "key"}
+    note-save --from=F            keep one, new or changed: {"connection", "key",
+                                  "body", "files", "id"} - never sent to Jira
+    note-delete --from=F          forget one: {"id"}
+    note-publish --from=F         post it as a comment, then forget it: {"id"}
     export [ID...] --to=F         connections with their tokens into F, owner-
                                   readable only - for Export; prints the ids
     import --from=F               put exported connections in: {"connections",
@@ -306,6 +311,70 @@ def _activity(rest, source, path, secrets_path, environments=None):
     return {"ok": True, "activity": activity.read(path)}
 
 
+# -- private notes: kept here, never sent until published -------------------
+def _flavour(connection_id, path):
+    from integrations import store
+    entry = store.get(connection_id, path)
+    if entry is None:
+        return None
+    return entry.get("flavour") or "cloud"
+
+
+def _notes(rest, source, path, secrets_path, environments=None):
+    """The private notes on one issue: ``{"connection", "key"}``."""
+    from integrations import notes
+    document = _document(source)
+    flavour = _flavour(document.get("connection"), path)
+    if flavour is None:
+        return {"ok": False, "kind": "not_found", "error": "No connection %r." % document.get("connection")}
+    try:
+        found = notes.notes_for(path, document.get("connection"), document.get("key"))
+    except notes.NoteError as exc:
+        return {"ok": False, "kind": exc.kind, "error": str(exc)}
+    return {"ok": True, "notes": [notes.shown(one, flavour) for one in found]}
+
+
+def _note_save(rest, source, path, secrets_path, environments=None):
+    """A private note, new or changed: ``{"connection", "key", "body", "files", "id"}``.
+    Kept in QAVector only; nothing is sent to Jira."""
+    from integrations import notes
+    document = _document(source)
+    flavour = _flavour(document.get("connection"), path)
+    if flavour is None:
+        return {"ok": False, "kind": "not_found", "error": "No connection %r." % document.get("connection")}
+    try:
+        made = notes.save(path, document.get("connection"), document.get("key"), document.get("body"),
+                          document.get("files") or (), str(document.get("id") or ""))
+    except notes.NoteError as exc:
+        return {"ok": False, "kind": exc.kind, "error": str(exc)}
+    return {"ok": True, "note": notes.shown(made, flavour)}
+
+
+def _note_delete(rest, source, path, secrets_path, environments=None):
+    from integrations import notes
+    note_id = str(_document(source).get("id") or "")
+    if not notes.delete(path, note_id):
+        return {"ok": False, "kind": "not_found", "error": "There is no such note any more."}
+    return {"ok": True, "id": note_id}
+
+
+def _note_publish(rest, source, path, secrets_path, environments=None):
+    """Publish a private note: posted as a comment by the page's own write -
+    logged in Activity as any comment is - and then no longer kept as a note."""
+    from integrations import notes
+    note_id = str(_document(source).get("id") or "")
+    note = notes.get(path, note_id)
+    if note is None:
+        return {"ok": False, "kind": "not_found", "error": "There is no such note any more."}
+    request = {"key": note["key"], "body": note.get("body")}
+    if note.get("files"):
+        request["files"] = list(note["files"])
+    answer = _call(note["connection"], "comment", request, path, secrets_path, environments)
+    if answer.get("ok"):
+        notes.delete(path, note_id)
+    return dict(answer, note=note_id)
+
+
 def _app(rest, source, path, secrets_path, environments=None):
     from integrations import oauth
     return {"ok": True, "app": oauth.app(path, secrets_path)}
@@ -373,4 +442,5 @@ def _scope(rest, source, path, secrets_path, environments=None):
 COMMANDS = {"scope": _scope, "list": _list, "save": _save, "delete": _delete, "test": _test,
             "call": _call_command, "app": _app, "app-save": _app_save,
             "sign-in": _sign_in, "activity": _activity, "export": _export,
-            "import": _import}
+            "import": _import, "notes": _notes, "note-save": _note_save, "note-delete": _note_delete,
+            "note-publish": _note_publish}

@@ -19,14 +19,14 @@ import re
 import threading
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QKeySequence, QPen,
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QKeySequence, QPainter, QPen,
                            QShortcut, QTextCursor)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QCompleter,
                                QDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMenu, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
-                               QStyle, QStyledItemDelegate, QTabBar, QTabWidget, QToolButton,
+                               QStyle, QStyledItemDelegate, QStyleOption, QTabBar, QTabWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import (background, core as core_mod, icons, launchprojectsfile as lpf, search,
@@ -502,16 +502,24 @@ class CommentView(QWidget):
     #: Editing was put down, nothing sent.
     put_down = Signal(object)
     people_wanted = Signal(str)
+    #: A private note is to be posted to Jira as a comment.
+    publish_requested = Signal(dict)
 
     def __init__(self, comment, parent=None):
         super().__init__(parent)
         self.setObjectName("jiraComment")
         self.comment = dict(comment)
+        #: A note kept in QAVector only, never sent to Jira until published.
+        self.private = bool(comment.get("private"))
+        if self.private:
+            self.setProperty("private", "true")
+            self.setAttribute(Qt.WA_StyledBackground, True)     # its stripe is drawn by the theme
         self.editor = None
         self._baseline = ""
         self._busy = False
         box = QVBoxLayout(self)
-        box.setContentsMargins(0, 0, 0, 0)
+        # A note stands in from its dashed stripe; a comment from nothing.
+        box.setContentsMargins(10 if self.private else 0, 2 if self.private else 0, 0, 2 if self.private else 0)
         box.setSpacing(4)
         head = QHBoxLayout()
         head.setSpacing(6)
@@ -521,20 +529,31 @@ class CommentView(QWidget):
         head.addWidget(self.author)
         self.when = _label("", "muted")
         head.addWidget(self.when)
+        if self.private:
+            badge = QLabel("PRIVATE · ONLY IN QAVECTOR")
+            badge.setProperty("role", "privatebadge")
+            badge.setToolTip("Kept in QAVector only. Nobody in Jira sees it until you publish it.")
+            head.addWidget(badge)
         head.addStretch(1)
         self.more = QToolButton()
         self.more.setObjectName("jiraCommentMore")
         icons.button(self.more, "more", "")
         self.more.setAccessibleName("Comment actions")
-        self.more.setToolTip("Reply, edit or delete")
+        self.more.setToolTip("Edit, publish to Jira or delete" if comment.get("private")
+                             else "Reply, edit or delete")
         self.more.setPopupMode(QToolButton.InstantPopup)
         self.more.setProperty("menuglyph", "false")
         self.more.setProperty("variant", "icon")
         menu = QMenu(self.more)
         self.reply_action = menu.addAction("Reply", self._reply)
         self.edit_action = menu.addAction("Edit", lambda: self.edit_requested.emit(self))
+        self.publish_action = menu.addAction("Publish to Jira",
+                                             lambda: self.publish_requested.emit(dict(self.comment)))
         menu.addSeparator()
         self.delete_action = menu.addAction("Delete", self._delete)
+        # A note is nobody else's to reply to, and is published, not posted.
+        self.reply_action.setVisible(not self.private)
+        self.publish_action.setVisible(self.private)
         self.more.setMenu(menu)
         head.addWidget(self.more, 0, Qt.AlignTop)
         box.addLayout(head)
@@ -552,7 +571,8 @@ class CommentView(QWidget):
         buttons.setSpacing(8)
         self.save = QPushButton("Save")
         self.save.setProperty("variant", "primary")
-        self.save.setToolTip("Send the changed comment to Jira (Ctrl+S)")
+        self.save.setToolTip("Keep the changed note in QAVector - nothing is sent (Ctrl+S)"
+                             if comment.get("private") else "Send the changed comment to Jira (Ctrl+S)")
         self.save.clicked.connect(self._save)
         buttons.addWidget(self.save)
         self.cancel = QPushButton("Cancel")
@@ -582,6 +602,17 @@ class CommentView(QWidget):
         super().changeEvent(event)
         if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
             icons.button(self.more, "more", "")
+
+    def paintEvent(self, event):
+        """A plain QWidget subclass draws its style sheet's border only when it
+        asks to: a private note's stripe."""
+        if self.private:
+            option = QStyleOption()
+            option.initFrom(self)
+            painter = QPainter(self)
+            self.style().drawPrimitive(QStyle.PE_Widget, option, painter, self)
+            painter.end()
+        super().paintEvent(event)
 
     def show_comment(self, comment):
         """The comment as Jira holds it now. One being edited keeps what was
@@ -694,6 +725,20 @@ class CommentView(QWidget):
         self.delete_requested.emit(dict(self.comment))
 
 
+#: The comment box's modes: Public posts to Jira; Private keeps a note in QAVector.
+COMMENT_MODES = ("Public", "Private")
+#: A private note's id - never a Jira comment's, which is a number.
+NOTE_PREFIX = "n-"
+
+
+def _moment(value):
+    """A comment's time, to put comments and notes in one order."""
+    try:
+        return datetime.datetime.strptime(str(value or ""), "%Y-%m-%dT%H:%M:%S.%f%z").timestamp()
+    except ValueError:
+        return 0.0
+
+
 def quoted(comment, limit=QUOTE_CHARS):
     """The start of a comment, as a reply quotes it: one line, cut at a word."""
     text = " ".join(str(comment.get("text") or "").split())
@@ -734,6 +779,12 @@ class IssueDetail(QFrame):
     comment_save_requested = Signal(dict)
     #: ``{key, id}`` of a comment to delete - asked about already.
     comment_delete_requested = Signal(dict)
+    #: Private notes: ``{body, files}`` of a new one; ``{key, id, body}`` of a
+    #: change; ``{id}`` to delete or to publish - asked about already.
+    note_requested = Signal(dict)
+    note_save_requested = Signal(dict)
+    note_delete_requested = Signal(dict)
+    note_publish_requested = Signal(dict)
     #: Files to go with the next comment are wanted.
     files_wanted = Signal()
     #: Editing a comment began.
@@ -751,6 +802,8 @@ class IssueDetail(QFrame):
         self.setProperty("role", "panel-fixed")
         self.setMinimumWidth(320)
         self.issue = None
+        #: The private notes on the issue shown, as the core keeps them.
+        self._notes = []
         #: The issue as it was when Edit was pressed; None when not editing.
         self.editing = None
         self._editable = None
@@ -986,6 +1039,14 @@ class IssueDetail(QFrame):
         layout.addLayout(self.pending_box)
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
+        # Public posts to Jira; Private keeps a note in QAVector only, never
+        # sent until it is published from its menu. One button for both.
+        self.comment_mode = widgets.Segmented(list(COMMENT_MODES), "Public")
+        self.comment_mode.setObjectName("jiraCommentMode")
+        self.comment_mode.setToolTip("Public: post it to Jira. Private: keep it as a note in QAVector only - "
+                                     "nothing is sent until you publish it.")
+        self.comment_mode.changed.connect(lambda _mode: self._say_mode())
+        bottom.addWidget(self.comment_mode)
         self.post = QPushButton("Post comment")
         self.post.setEnabled(False)
         self.post.clicked.connect(self._post)
@@ -1145,6 +1206,9 @@ class IssueDetail(QFrame):
             self._stop_comment()
             # What was just done was done to the issue shown before.
             self.tell("")
+            # Its own notes come from the core; a comment starts as a public one.
+            self._notes = []
+            self.comment_mode.set_current("Public")
         if issue.get("key") != self._people_of:
             self._people_of, self._people = issue.get("key"), []
             for editor in self._editors():
@@ -1574,7 +1638,11 @@ class IssueDetail(QFrame):
         _empty_layout(self.comments)
         items = list(comments.get("items") or [])
         total = int(comments.get("total") or len(items))
-        self.comments_title.setText(("COMMENTS  ·  %d" % total) if total else "COMMENTS")
+        notes = list(self._notes)
+        title = ("COMMENTS  ·  %d" % total) if total else "COMMENTS"
+        if notes:
+            title += "  ·  %d PRIVATE" % len(notes)
+        self.comments_title.setText(title)
         hidden = max(0, total - len(items))
         self.earlier.setVisible(bool(hidden))
         self.earlier.setText("Show earlier comments (%d)" % hidden)
@@ -1586,12 +1654,14 @@ class IssueDetail(QFrame):
             kept.deleteLater()
             kept = None
             self.tell("The comment you were editing was deleted in Jira.")
-        if not items:
+        if not items and not notes:
             if not partial:
                 self.comments.addWidget(_label("No comments yet.", "muted"))
             return
-        # Newest first from the core; read top to bottom as a conversation.
-        for one in reversed(items):
+        # Newest first from the core; read top to bottom as a conversation, with
+        # the private notes where they were written.
+        shown = sorted(list(reversed(items)) + notes, key=lambda one: _moment(one.get("created")))
+        for one in shown:
             if kept is not None and one.get("id") == kept.comment.get("id"):
                 view = kept
                 view.show_comment(one)
@@ -1603,6 +1673,7 @@ class IssueDetail(QFrame):
                 view.save_requested.connect(self._save_comment)
                 view.put_down.connect(self._put_down_comment)
                 view.people_wanted.connect(self._want_people)
+                view.publish_requested.connect(self._publish_note)
             self._comment_views.append(view)
             self.comments.addWidget(view)
         self._apply_mode()
@@ -1654,10 +1725,31 @@ class IssueDetail(QFrame):
     def _save_comment(self, request):
         if self.issue is None or self._working:
             return
+        if str(request.get("id") or "").startswith(NOTE_PREFIX):
+            self.note_save_requested.emit(dict(request, key=self.issue.get("key")))
+            return
         self.comment_save_requested.emit(dict(request, key=self.issue.get("key")))
+
+    def _publish_note(self, note):
+        if self.issue is None or self._working:
+            return
+        if not widgets.confirm(
+                self, "Publish to Jira",
+                "Post this private note to %s as a comment?" % self.issue.get("key", ""),
+                "Everyone who can see the issue in Jira will see it, and it is no longer kept as a "
+                "private note.", agree="Publish", refuse="Keep it private"):
+            return
+        self.note_publish_requested.emit({"id": note.get("id")})
 
     def _delete_comment(self, comment):
         if self.issue is None or self._working:
+            return
+        if comment.get("private"):
+            if widgets.confirm(self, "Delete private note",
+                               "Delete your private note on %s?" % self.issue.get("key", ""),
+                               "It was never sent to Jira; it is gone for good.",
+                               agree="Delete", refuse="Keep it", kind="warn"):
+                self.note_delete_requested.emit({"id": comment.get("id")})
             return
         who = comment.get("author") or "this"
         if not widgets.confirm(
@@ -1750,8 +1842,22 @@ class IssueDetail(QFrame):
             return
         if not self.composer.toPlainText().strip() and not self.pending:
             return
-        self.comment_requested.emit({"body": self.composer.body(),
-                                     "files": list(self.pending)})
+        comment = {"body": self.composer.body(), "files": list(self.pending)}
+        if self.comment_mode.current() == "Private":
+            self.note_requested.emit(comment)
+            return
+        self.comment_requested.emit(comment)
+
+    def _say_mode(self):
+        private = self.comment_mode.current() == "Private"
+        self.post.setToolTip("Private: kept in QAVector only - nothing is sent to Jira" if private
+                             else "Post the comment to Jira")
+
+    def set_notes(self, notes):
+        """The private notes on the issue shown, as the core keeps them."""
+        self._notes = [dict(one) for one in notes or []]
+        if self.issue is not None:
+            self._fill_comments(self.issue.get("comments") or {}, self._partial)
 
     def posted(self):
         """The comment was taken: the box and its files are emptied."""
@@ -2287,10 +2393,16 @@ class JiraView(QWidget):
         detail.comment_requested.connect(self.post_comment)
         detail.comment_save_requested.connect(self.save_comment)
         detail.comment_delete_requested.connect(self.delete_comment)
+        detail.note_requested.connect(self.save_note)
+        detail.note_save_requested.connect(self.save_note)
+        detail.note_delete_requested.connect(self.delete_note)
+        detail.note_publish_requested.connect(self.publish_note)
         detail.files_wanted.connect(self.pick_comment_files)
         detail.people_wanted.connect(self.find_mentionable)
         #: What outside Jira adds to an opened issue (add_issue_extension).
         self.extensions = []
+        #: (connection, issue key) whose private notes were last asked for.
+        self._notes_of = None
         detail.shown.connect(self._issue_shown)
         detail.emptied.connect(self._issue_emptied)
         self.activity.wanted.connect(self.load_activity)
@@ -2410,6 +2522,8 @@ class JiraView(QWidget):
     def _issue_shown(self, issue, partial):
         for extension in self.extensions:
             extension.show_issue(self._connection_id(), issue, partial)
+        if (self._connection_id(), issue.get("key")) != self._notes_of:
+            self.load_notes()
 
     def _issue_emptied(self):
         for extension in self.extensions:
@@ -2873,7 +2987,7 @@ class JiraView(QWidget):
                 or self.issues.detail.has_changes()
                 or self.settings_tab.save.isEnabled())
 
-    def _write(self, operation, request, then=None, note=""):
+    def _write(self, operation, request, then=None, note="", work=None):
         """One change to Jira. The answer carries the issue as it is now, so the
         list and the detail take it without asking again."""
         connection = self.current()
@@ -2897,8 +3011,8 @@ class JiraView(QWidget):
             if then is not None:
                 then(payload)
 
-        self._call("write", lambda core, cancel: core.integrations(
-            "call", connection_id, operation, document=request, cancel=cancel),
+        self._call("write", work or (lambda core, cancel: core.integrations(
+            "call", connection_id, operation, document=request, cancel=cancel)),
             answered, quiet=True)
 
     def _took(self, connection, issue):
@@ -3060,6 +3174,66 @@ class JiraView(QWidget):
 
     def delete_comment(self, request):
         self._write("comment_delete", request, note="Deleting the comment…")
+
+    # -- private notes: kept in QAVector, never sent until published ----------------
+    def load_notes(self):
+        """The private notes on the issue shown - the project's own file; Jira is not asked."""
+        issue = self.issues.detail.issue or {}
+        connection_id = self._connection_id()
+        if not issue.get("key") or not connection_id:
+            return
+        wanted = (connection_id, issue.get("key"))
+        self._notes_of = wanted
+
+        def done(payload):
+            if wanted == (self._connection_id(), (self.issues.detail.issue or {}).get("key")) and payload.get("ok"):
+                self.issues.detail.set_notes(payload.get("notes") or [])
+
+        self._call("notes", lambda core, cancel: core.integrations(
+            "notes", document={"connection": connection_id, "key": issue.get("key")}, cancel=cancel),
+            done, quiet=True)
+
+    def save_note(self, request):
+        """A new private note (``{body, files}``) or a change to one (``{id, body}``)."""
+        detail = self.issues.detail
+        issue = detail.issue or {}
+        connection_id = self._connection_id()
+        if not issue.get("key") or not connection_id:
+            return
+        document = {"connection": connection_id, "key": issue["key"], "body": request.get("body"),
+                    "files": list(request.get("files") or [])}
+        if request.get("id"):
+            document["id"] = request["id"]
+
+        def done(payload):
+            if not payload.get("ok"):
+                detail.say(payload.get("error") or "The note was not kept.")
+                return
+            if request.get("id"):
+                detail.comment_done()
+            else:
+                detail.posted()
+            detail.tell("Kept as a private note - only in QAVector; nothing was sent to Jira.")
+            self.load_notes()
+
+        self._call("note-save", lambda core, cancel: core.integrations(
+            "note-save", document=document, cancel=cancel), done, quiet=True)
+
+    def delete_note(self, request):
+        def done(payload):
+            if not payload.get("ok"):
+                self.issues.detail.say(payload.get("error") or "The note was not deleted.")
+            self.load_notes()
+
+        self._call("note-delete", lambda core, cancel: core.integrations(
+            "note-delete", document={"id": request.get("id")}, cancel=cancel), done, quiet=True)
+
+    def publish_note(self, request):
+        """Post a private note to Jira as a comment - the page's own write - after which
+        it is a comment, not a note."""
+        self._write("comment", None, lambda payload: self.load_notes(), note="Publishing the note…",
+                    work=lambda core, cancel: core.integrations(
+                        "note-publish", document={"id": request.get("id")}, cancel=cancel))
 
     def pick_comment_files(self):
         issue = self.issues.detail.issue or {}

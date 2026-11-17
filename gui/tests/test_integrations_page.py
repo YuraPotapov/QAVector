@@ -58,6 +58,7 @@ class FakeCore:
         self.rows = list(rows if rows is not None else [_row("QA-142"), _row("QA-139")])
         self.answers = answers
         self.calls = []
+        self.notes = [dict(one) for one in answers.pop("notes", None) or []]
 
     def integrations(self, *args, document=None, timeout=120, cancel=None):
         self.calls.append((args, document))
@@ -88,6 +89,29 @@ class FakeCore:
             return {"ok": True, "app": dict(document, secret_set=True)}
         if command == "activity":
             return {"ok": True, "activity": list(self.answers.get("activity_rows") or [])}
+        if command == "notes":
+            # As the core keeps private notes: the issue's own, never asked of Jira.
+            return {"ok": True, "notes": [dict(one) for one in self.notes
+                                          if one["key"] == document.get("key")]}
+        if command == "note-save":
+            if document.get("id"):
+                note = next(one for one in self.notes if one["id"] == document["id"])
+                note.update(html="<p>%s</p>" % document["body"], text=document["body"])
+            else:
+                note = {"id": "n-%d" % (len(self.notes) + 1), "key": document["key"], "author": "You",
+                        "created": "2026-11-05T12:00:00.000+0000", "updated": "2026-11-05T12:00:00.000+0000",
+                        "html": "<p>note</p>", "text": "note", "doc": None, "lost": [], "private": True}
+                self.notes.append(note)
+            return {"ok": True, "note": dict(note)}
+        if command == "note-delete":
+            self.notes = [one for one in self.notes if one["id"] != document["id"]]
+            return {"ok": True, "id": document["id"]}
+        if command == "note-publish":
+            note = next(one for one in self.notes if one["id"] == document["id"])
+            self.notes.remove(note)
+            answer = self.integrations("call", "product-team", "comment",
+                                       document={"key": note["key"], "body": note.get("text")})
+            return dict(answer, note=document["id"])
         if command == "scope":
             answer = self.answers.get("scope")
             if callable(answer):
@@ -839,7 +863,7 @@ def _type(editor, text):
 
 def _actions(view):
     held = view.more.menu().actions()
-    return {one.text(): one for one in held if one.text()}, held
+    return {one.text(): one for one in held if one.text() and one.isVisible()}, held
 
 
 def test_each_comment_offers_reply_edit_and_delete(make):
@@ -940,6 +964,73 @@ def test_a_comment_is_deleted_only_once_agreed(make, monkeypatch):
                               {"key": "QA-142", "id": "7"})
     assert asked[0] == "Delete Olena O's comment on QA-142?"
     assert detail.note.text() == "Comment deleted."
+
+
+# -- private notes: kept in QAVector, never sent until published ------------------------
+NOTE = {"id": "n-1", "key": "QA-142", "author": "You", "created": "2026-11-05T10:00:00.000+0000",
+        "updated": "2026-11-05T10:00:00.000+0000", "html": "<p>Ask the backend first</p>",
+        "text": "Ask the backend first", "doc": None, "lost": [], "private": True}
+
+
+def _jira_ops(core):
+    return [args[2] for args, _doc in core.calls if args and args[0] == "call"]
+
+
+def test_the_comment_box_starts_public_and_private_keeps_a_note_only_here(make):
+    core, page, detail = _opened(make)
+    assert detail.comment_mode.current() == "Public" and detail.post.text() == "Post comment"
+    detail.comment_mode.set_current("Private")
+    assert detail.post.text() == "Post comment", "one button for both"
+    assert "nothing is sent" in detail.post.toolTip()
+    detail.composer.setPlainText("Ask the backend first")
+    detail.post.click()
+    sent = [doc for args, doc in core.calls if args[0] == "note-save"]
+    assert sent and sent[0]["connection"] == "product-team" and sent[0]["key"] == "QA-142"
+    assert "comment" not in _jira_ops(core)                 # nothing went to Jira
+    assert detail.composer.toPlainText() == ""
+    assert "only in QAVector" in detail.note.text()
+    view = next(one for one in detail._comment_views if one.private)
+    assert view.property("private") == "true"
+
+
+def test_a_note_stands_among_the_comments_by_time_and_offers_edit_publish_delete(make):
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", comments={"items": [CLOUD_COMMENT], "total": 1, "start": 0})}}, notes=[NOTE])
+    _core, page, detail = _opened(make, core)
+    QApplication.processEvents()
+    assert [one.comment["id"] for one in detail._comment_views] == ["7", "n-1"]
+    assert "1 PRIVATE" in detail.comments_title.text()
+    note = detail._comment_views[1]
+    actions, _held = _actions(note)
+    assert sorted(actions) == ["Delete", "Edit", "Publish to Jira"]
+
+
+def test_publishing_a_note_asks_then_posts_it_as_a_comment(make, monkeypatch):
+    answers = [False, True]
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: answers.pop(0))
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue("QA-142")}}, notes=[NOTE])
+    _core, page, detail = _opened(make, core)
+    QApplication.processEvents()
+    note, = [one for one in detail._comment_views if one.private]
+    actions, _held = _actions(note)
+    actions["Publish to Jira"].trigger()
+    assert "note-publish" not in [args[0] for args, _doc in core.calls]
+    actions["Publish to Jira"].trigger()
+    assert [doc for args, doc in core.calls if args[0] == "note-publish"] == [{"id": "n-1"}]
+    assert "comment" in _jira_ops(core) and core.notes == []
+    assert not [one for one in detail._comment_views if one.private]
+
+
+def test_a_note_is_deleted_without_jira_once_agreed(make, monkeypatch):
+    asked = []
+    monkeypatch.setattr(widgets, "confirm", lambda *args, **kw: asked.append(args[2]) or True)
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue("QA-142")}}, notes=[NOTE])
+    _core, page, detail = _opened(make, core)
+    QApplication.processEvents()
+    note, = [one for one in detail._comment_views if one.private]
+    _actions(note)[0]["Delete"].trigger()
+    assert asked == ["Delete your private note on QA-142?"]
+    assert core.notes == [] and "comment_delete" not in _jira_ops(core)
 
 
 def test_reply_quotes_the_comment_and_mentions_its_author_in_the_box(make):
@@ -1546,7 +1637,8 @@ def test_creating_an_issue_asks_step_by_step_and_opens_the_new_one(make, monkeyp
     page.jira.issues.create.click()
     ops = [args[-1] for args, _doc in core.calls if args[0] == "call"]
     assert ops == ["search", "projects", "create_meta", "create_meta", "create"]
-    sent = core.calls[-1][1]
+    # The new issue opens, and its private notes - none - are read from the project's file.
+    sent = next(doc for args, doc in core.calls if args[-1] == "create")
     assert sent["project"] == "QA" and sent["type"] == "10001"
     assert sent["fields"]["summary"] == "Empty result message"
     rows = page.jira.issues.rows()

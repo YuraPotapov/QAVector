@@ -1046,6 +1046,13 @@ QFrame[role="message"] {{
     border-left: 3px solid {accent};
 }}
 QFrame[role="message"][state="delivered"] {{ border-left-color: {ok}; }}
+/* A private note on a Jira issue: kept in QAVector only, never sent until
+   published - a dashed stripe, as a draft that has not gone anywhere. */
+QWidget#jiraComment[private="true"] {{ border-left: 2px dashed {n500}; }}
+QLabel[role="privatebadge"] {{
+    color: {n600}; border: 1px dashed {n400}; padding: 0px 5px;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.6px;
+}}
 /* QAVector's own message in a conversation: the results it continues with. */
 QFrame[role="message"][from="qavector"] {{ background: {auto_tint}; border-left-color: {auto}; }}
 QFrame[role="message"][from="qavector"] QLabel[role="msgkind"] {{ color: {auto}; }}

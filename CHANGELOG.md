@@ -45,6 +45,10 @@ app-agnostic, since that will break things on purpose.
   hands a task to a role (`agents.roles.<id>.delegate`). A reviewer's
   `rework` skips what was after it and wakes the conversation with the issues.
   **Add the usual roles** fills in three to start from.
+- **Private notes on Jira issues.** The comment box has a mode: **Public**
+  (default) or **Private**. A private note is kept in QAVector only. It is
+  shown among the comments, marked as private, and never sent to Jira until
+  **Publish to Jira** posts it as a comment.
 - **Agents hand work on and are woken with the results** (QCR ADR-009). An
   agent names its tasks and makes them wait for others (`after`). It says when
   it is to be woken (`wake_when`: all, any, or at once on a failure). Then it

@@ -167,6 +167,26 @@ While an issue is being edited, nothing else is written to it from the page.
 Refresh leaves what was typed alone. Opening another issue, picking another
 connection or switching projects asks first when there are changes.
 
+### Private notes
+
+Beside **Post comment**, the comment box has a mode: **Public**, the default,
+or **Private**.
+
+- **Private** keeps what you wrote as a note in QAVector only. The button is
+  still **Post comment**; nothing is sent to Jira.
+- **Where notes show.** They appear among the issue's comments where they were
+  written, marked **PRIVATE · ONLY IN QAVECTOR** with a dashed stripe. The
+  comments heading counts them.
+- **The note's menu** offers Edit, **Publish to Jira** and Delete. Editing and
+  deleting never ask Jira.
+- **Publish to Jira** asks first. It then posts the note as a comment, through
+  the same write as **Post comment**, and logs it in Activity. From then on it
+  is Jira's comment and no longer a note. If Jira refuses, the note stays.
+
+Notes are kept in `integrations-notes.json`, beside `integrations.json`,
+readable by its owner only. The core's `--integrations notes / note-save /
+note-delete / note-publish` commands read and change them.
+
 ## Search, export and import
 
 **Ctrl+K** finds the project's connections, and the issues that are already
