@@ -81,6 +81,9 @@ _PR_SET_PDEATHSIG = 1
 AGENT_KINDS = ("capabilities", "describe", "read", "invoke", "get", "events", "wait", "cancel", "list")
 WAIT_SECONDS = 60
 #: What an agent is told after handing work on, by its conversation's "When tasks finish" (ADR-009 D7).
+#: Executions that are part of the task their input names (ADR-012 D3).
+PART_OF_TASK = ("agents.tasks.reply", "agents.tasks.verify")
+
 NEXT = {
     "continue": "This conversation continues by itself with the results: when all you handed on in this "
                 "turn has ended, or as agents.tasks.wake_when says. Hand on the rest, tell the person what "
@@ -545,6 +548,17 @@ class Host:
                     self.authority.revoke(temporary)
         return {"execution": execution}
 
+    def _on_tasks(self, message):
+        """Every task and question agents handed on in the project (ADR-012 D4)."""
+        return {"tasks": self.delegation.board() if self.delegation is not None else []}
+
+    def _on_task_history(self, message):
+        """One task as it went (ADR-012 D5)."""
+        task = message.get("task")
+        if not isinstance(task, str) or not task or self.delegation is None:
+            raise QCRError("invalid_message", "A history names its task.")
+        return self.delegation.history(task)
+
     def _on_integration_answer(self, message):
         """The person approved - perhaps with the comment changed - or denied an
         integration write that waits (ADR-007 D3)."""
@@ -721,10 +735,16 @@ class Host:
 
     def _on_invoke(self, message):
         caller = self._caller(message)
+        parent_id = message.get("parent_id")
+        given = message.get("input") if isinstance(message.get("input"), dict) else {}
+        if message.get("capability") in PART_OF_TASK and isinstance(given.get("task"), str):
+            # An answer to a task, or a verdict on it, is part of it (ADR-012 D3) -
+            # said by the host, whatever the caller sent.
+            parent_id = given["task"]
         execution = self.engine.invoke(
             caller, self.project_id, message.get("capability"), message.get("input", {}),
             idempotency_key=message.get("idempotency_key"), correlation_id=message.get("correlation_id"),
-            parent_id=message.get("parent_id"))
+            parent_id=parent_id)
         answer = {"execution": execution}
         capability = str(message.get("capability") or "")
         handed = capability == "agents.tasks.reply" or capability.startswith("agents.") and (

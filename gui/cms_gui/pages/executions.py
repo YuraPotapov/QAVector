@@ -310,7 +310,8 @@ class ExecutionsView(QWidget):
             cells = (
                 _item(_clock(execution.get("created_at")), mono=True, tip=_date_time(execution.get("created_at"))),
                 _item(service, tip=execution.get("resource_id") or ""),
-                _item(op),
+                _item(op + (" (part of %s)" % execution["parent_id"][:8] if execution.get("parent_id") else ""),
+                      tip=("Part of %s" % execution["parent_id"]) if execution.get("parent_id") else ""),
                 _item(actor_words(execution.get("actor_id")), tip=execution.get("actor_id") or ""),
                 _item(words, tone=tone),
                 _item(_took(execution), mono=True),

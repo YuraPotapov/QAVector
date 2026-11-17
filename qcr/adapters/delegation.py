@@ -70,6 +70,10 @@ CATALOG_SECONDS = 600
 QUESTION_CHARS = 2000
 #: What a task that asks is, for rounds and dependencies: not failed, not done.
 ASKS = "asks"
+#: The workbench (ADR-012): how many agent executions it reads, newest first,
+#: and how many events of one execution a task's history reads.
+BOARD_LIMIT = 1000
+EVENT_PAGE = 500
 
 _EXECUTION = {"type": "string", "minLength": 1, "maxLength": 200}
 _MODEL = {"type": "string", "minLength": 1, "maxLength": 200}
@@ -964,6 +968,155 @@ class Delegation:
             job.progress("answered", {"task": task_id, "root": root_id, "by": context["by"],
                                       "answer": context["answer"][:QUESTION_CHARS]})
             self._start_when_ready(job, context)
+
+    # -- the workbench: every task handed on, and its history (ADR-012) -------------
+    def board(self, limit=BOARD_LIMIT):
+        """Every task and question handed on in the project, newest first: one row
+        a task, its answers folded in, its state as the person would act on it."""
+        rows = self.store.list(self.project_id, capability_prefix="agents.", limit=limit)
+        tasks, root_of, verdicts = {}, {}, {}
+        for row in sorted(rows, key=lambda one: one.get("created_at") or 0):
+            capability = row["capability_id"]
+            output = row.get("output") or {}
+            if capability.endswith(".delegate") or (capability.endswith(".message")
+                                                    and (row.get("input") or {}).get("expects_reply")):
+                root_of[row["execution_id"]] = row["execution_id"]
+                tasks[row["execution_id"]] = {"root": row, "chain": [row]}
+            elif capability == "agents.tasks.reply":
+                root = root_of.get((row.get("input") or {}).get("task")) or output.get("root")
+                if root in tasks:
+                    root_of[row["execution_id"]] = root
+                    tasks[root]["chain"].append(row)
+            elif capability == "agents.tasks.verify" and row.get("state") == "succeeded":
+                root = root_of.get(output.get("task"))
+                if root:
+                    verdicts.setdefault(root, {})[output.get("criterion")] = output.get("verdict")
+        made = [self._board_row(found, verdicts.get(root, {})) for root, found in tasks.items()]
+        return sorted(made, key=lambda one: -(one["updated_at"] or 0))
+
+    def _board_row(self, found, verdicts):
+        root, latest = found["root"], found["chain"][-1]
+        given, output = root.get("input") or {}, latest.get("output") or {}
+        error = latest.get("error") or {}
+        target_id, is_role = split_target(root["capability_id"])
+        role = roles.get(target_id, self.agents_path) if is_role else None
+        connection = store.get(role["connection"] if role else target_id, self.agents_path)
+        actor = root.get("actor_id") or ""
+        from_connection = actor[len("agent:"):].split("/", 1)[0] if actor.startswith("agent:") else ""
+        with self._lock:
+            pending = latest["execution_id"] in self._pending
+            blocked = latest["execution_id"] in self._blocked
+            stopped = self._stopped.get(root["execution_id"])
+        state = latest.get("state")
+        if pending:
+            state = "approval"
+        elif blocked:
+            state = "waiting"
+        elif stopped and state not in ("running", "dispatched", "accepted"):
+            state = "stopped"
+        elif state == "succeeded" and output.get("needs_input"):
+            state = ASKS
+        elif state == "succeeded" and output.get("verdict") in ("rework", "no_verdict"):
+            state = "rework"
+        elif error.get("code") in ("skipped", "denied", "stopped"):
+            state = error["code"]
+        criteria = list(given.get("acceptance_criteria") or [])
+        session = (root.get("output") or {}).get("session_id") or output.get("session_id") or ""
+        return {"task": root["execution_id"], "latest": latest["execution_id"],
+                "kind": "question" if root["capability_id"].endswith(".message") else "task",
+                "state": state, "needs_person": state in ("approval", ASKS),
+                "goal": str(given.get("goal") or given.get("body") or "")[:500], "name": given.get("name") or "",
+                "target": (connection or {}).get("id") or target_id,
+                "target_name": (connection or {}).get("name") or target_id,
+                "role": (role or {}).get("name") or "", "model": given.get("model") or "",
+                "effort": given.get("effort") or "", "actor": actor,
+                "from_connection": from_connection,
+                "from_name": (store.get(from_connection, self.agents_path) or {}).get("name") or from_connection,
+                "from_session": actor.split("/", 1)[1] if "/" in actor else "",
+                "child_session": session, "question": output.get("question") or "",
+                "questions": int(output.get("asked") or 0),
+                "files_changed": _count_files((output.get("changes") or {}).get("files")),
+                "criteria": len(criteria), "passed": sum(1 for one in verdicts.values() if one == "passed"),
+                "error": str(error.get("message") or "")[:500],
+                "created_at": root.get("created_at"), "updated_at": latest.get("updated_at")}
+
+    def history(self, task_id):
+        """One task as it went, oldest first: handed on, approved, waited, each turn,
+        each question and answer, each verdict - with what it cost."""
+        found = next((row for row in self.board() if row["task"] == task_id), None)
+        if found is None:
+            raise QCRError("not_found", "No such task.")
+        rows = self.store.list(self.project_id, capability_prefix="agents.tasks.", limit=BOARD_LIMIT)
+        chain, ids = [self.store.get(task_id)], {task_id}
+        for row in sorted(rows, key=lambda one: one.get("created_at") or 0):
+            if row["capability_id"] == "agents.tasks.reply" and (row.get("input") or {}).get("task") in ids:
+                chain.append(row)
+                ids.add(row["execution_id"])
+        entries = []
+        for number, row in enumerate(chain):
+            entries.extend(self._history_of(row, number == 0, found))
+        for row in rows:
+            output = row.get("output") or {}
+            if row["capability_id"] == "agents.tasks.verify" and row.get("state") == "succeeded" \
+                    and output.get("task") in ids:
+                entries.append({"at": row.get("updated_at"), "kind": "verified", "execution_id": row["execution_id"],
+                                "text": "Criterion %d %s" % (int(output.get("criterion") or 0) + 1,
+                                                             output.get("verdict")),
+                                "evidence": (output.get("evidence") or {}).get("execution_id") or ""})
+        entries.sort(key=lambda one: one.get("at") or 0)
+        cost = {}
+        if found["child_session"]:
+            try:
+                from integrations.agents import usage
+                cost = usage.conversation(self.root, found["child_session"]).get("own") or {}
+            except Exception:
+                cost = {}
+        return {"task": found, "entries": entries, "usage": cost}
+
+    def _history_of(self, row, first, found):
+        made = []
+        given, output, error = row.get("input") or {}, row.get("output") or {}, row.get("error") or {}
+        if first:
+            made.append({"at": row.get("created_at"), "kind": "handed", "execution_id": row["execution_id"],
+                         "text": given.get("goal") or given.get("body") or "", "by": found["from_name"],
+                         "to": found["role"] or found["target_name"]})
+        try:
+            events = self.store.events(row["execution_id"], limit=EVENT_PAGE)
+        except QCRError:
+            events = []
+        for event in events:
+            kind, payload = event.get("type"), event.get("payload") or {}
+            if kind == "approval.requested":
+                made.append({"at": event.get("at"), "kind": "approval", "text": "Waits for the person's approval."})
+            elif kind == "approval.answered":
+                made.append({"at": event.get("at"), "kind": "approved", "text": "Approved by %s." % (
+                    payload.get("by") or "the person")})
+            elif kind == "waiting":
+                made.append({"at": event.get("at"), "kind": "waiting", "text": (
+                    "Waits for %s to succeed." % ", ".join(payload.get("after") or ()) if payload.get("after")
+                    else "Waits for a free place with its agent.")})
+            elif kind == "answered":
+                made.append({"at": event.get("at"), "kind": "answer", "execution_id": row["execution_id"],
+                             "text": payload.get("answer") or "", "by": payload.get("by") or ""})
+            elif kind == "state" and event.get("state") == "running":
+                made.append({"at": event.get("at"), "kind": "started", "execution_id": row["execution_id"],
+                             "text": "%s works on it." % (found["role"] or found["target_name"])})
+        state = row.get("state")
+        if state in TERMINAL:
+            at = row.get("finished_at") or row.get("updated_at")
+            if state == "succeeded" and output.get("needs_input"):
+                made.append({"at": at, "kind": "asked", "execution_id": row["execution_id"],
+                             "text": output.get("question") or "", "number": int(output.get("asked") or 0)})
+            elif state == "succeeded":
+                made.append({"at": at, "kind": "done", "execution_id": row["execution_id"],
+                             "text": str(output.get("answer") or (output.get("reply") or {}).get("body") or "")[:4000],
+                             "files_changed": _count_files((output.get("changes") or {}).get("files")),
+                             "verdict": output.get("verdict") or ""})
+            elif error.get("code") not in ("not_waiting",):
+                made.append({"at": at, "kind": "stopped" if error.get("code") == "stopped" or (
+                    state == "canceled" and found["state"] == "stopped") else state,
+                    "execution_id": row["execution_id"], "text": str(error.get("message") or "")[:1000]})
+        return made
 
     # -- verification ------------------------------------------------------------
     def _verify(self, job):

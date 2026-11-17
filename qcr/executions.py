@@ -305,9 +305,14 @@ class ExecutionStore:
                 for item in self._call(lambda: self._journal.events(execution_id, after, limit))]
 
     def list(self, project_id, *, state=None, capability_id=None, actor_id=None, resource_id=None,
-             limit=100, before=None):
-        """Newest first. ``before`` is a ``created_at`` to page back from."""
+             limit=100, before=None, capability_prefix=None):
+        """Newest first. ``before`` is a ``created_at`` to page back from;
+        ``capability_prefix`` keeps capabilities that start with it (``agents.``)."""
         where, args = ["m.project_id=?"], [_text(project_id, "project id")]
+        if capability_prefix is not None:
+            prefix = _text(capability_prefix, "capability prefix")
+            where.append("substr(m.capability_id, 1, ?)=?")
+            args.extend((len(prefix), prefix))
         for column, value in (("m.capability_id", capability_id), ("m.actor_id", actor_id),
                               ("m.resource_id", resource_id), ("e.state", state)):
             if value is not None:

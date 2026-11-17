@@ -305,6 +305,8 @@ class MainWindow(QMainWindow):
         self.qcr_host.set_handler("launcher.stop", self._qcr_launcher_stop)
         # An agent conversation's turns reach QAVector through this host (ADR-003 6a).
         agentchat_mod.ChatTab.qcr_access = self.qcr_host
+        # Every task agents handed on, in one place (ADR-012).
+        self.integrations.agents.tasks.set_host(self.qcr_host)
         # What an agent here hands other agents: its cards in the chat (ADR-006 D3/D9).
         # Here, not with the pages: they are built before the host is.
         self.qcr_host.agent_approval.connect(self.integrations.agents.chat.agent_request)

@@ -2517,6 +2517,33 @@ class ChatTab(QWidget):
         request["detail"] = self._request_detail(request, output, error)
         self._sync_others()
 
+    # -- the person acts on a task: here, or from Agents -> Tasks (ADR-012) ------------
+    def reply_task(self, asked, text):
+        """The person answers a task's question - from its card here, or from the
+        board. Both show the same: the answer is the person's."""
+        if ChatTab.qcr_access is None:
+            return
+        if self._requests.get(self._root_of.get(asked)) is None:
+            ChatTab.qcr_access.reply_task(asked, text, "You")       # a task no chat here knows yet
+            return
+        self._reply_task(asked, text)
+
+    def stop_task(self, task):
+        if ChatTab.qcr_access is None:
+            return
+        if task in self._requests:
+            self._stop_task(task)
+        else:
+            ChatTab.qcr_access.stop_task(task)
+
+    def answer_request(self, execution_id, approve):
+        if ChatTab.qcr_access is None:
+            return
+        if execution_id in self._requests:
+            self._answer_request(execution_id, approve)
+        else:
+            ChatTab.qcr_access.answer_agent(execution_id, approve)
+
     def _reply_task(self, asked, text):
         """The person's answer, from the question's card (ADR-011 D3)."""
         request = self._requests.get(self._root_of.get(asked))

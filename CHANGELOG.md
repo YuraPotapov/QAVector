@@ -27,6 +27,12 @@ app-agnostic, since that will break things on purpose.
   time, with a Continue action and a bounded scrolling list.
 
 ### Added
+- **Agents -> Tasks** (QCR ADR-012): every task and question agents handed on,
+  across all conversations, read from the project's journal. What waits for
+  the person comes first: approvals and questions. Selecting a task shows its
+  history - handed on, each turn, each question and answer, each verdict - and
+  what it cost, with Approve / Deny, Answer, Stop and both conversations at
+  hand.
 - **A delegated task can ask, and is answered in the same conversation** (QCR
   ADR-011): a child that cannot go on ends with a question; the task waits and
   wakes the agent that delegated it. `agents.tasks.reply` - or **Answer** on the

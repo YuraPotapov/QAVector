@@ -1114,6 +1114,13 @@ QTextBrowser[role="answer"] {{
     background: transparent; border: none; padding: 0; font-size: 13px; color: {text};
 }}
 /* A conversation's head: what it is called, then whom it is with and where. */
+/* A task picked on Agents -> Tasks: what it is, what can be done, its history. */
+QFrame[role="taskdetail"] {{ background: {surface}; border: 1px solid {divider}; }}
+QFrame[role="taskdetail"] QScrollArea, QFrame[role="taskdetail"] QScrollArea > QWidget > QWidget,
+QFrame[role="taskdetail"] QWidget[seethrough="true"] {{ background: transparent; }}
+QFrame[role="taskdetail"] QPlainTextEdit {{ background: {bg}; }}
+QFrame[role="taskdetail"] QPushButton[variant="ghost"] {{ color: {n800}; }}
+QFrame[role="taskdetail"] QPushButton[variant="ghost"]:hover {{ background: {select_bg}; color: {select_ink}; }}
 /* A figure of a period (Agents -> Usage): a small caption over a large value. */
 QFrame[role="stattile"] {{ background: {surface}; border: 1px solid {divider}; }}
 QLabel[role="statlabel"] {{ font-size: 10px; font-weight: 600; letter-spacing: 0.8px; color: {n600}; }}

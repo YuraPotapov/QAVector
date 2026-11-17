@@ -169,3 +169,16 @@ def test_a_wake_with_only_questions_is_not_counted(chat):
                             "running": [], "failed": False})
     assert len(started) == 15 and tab._woke["s-1"] == {"failed": 0, "all": 0}
 
+
+def test_an_answer_from_the_board_is_the_person_s_in_the_chat_too(chat):
+    tab = chat
+    tab.agent_execution(task())
+    tab.agent_execution(asked("e-1", 1, "Which database?", 110.0, capability_id="agents.codex.delegate",
+                              input={"goal": "Fix the login tests"}, created_at=100.0))
+    tab.reply_task("e-1", "Use the sqlite fixture.")             # what Agents -> Tasks calls
+    assert tab.fake_qcr.replies == [("e-1", "Use the sqlite fixture.", "You")]
+    tab.agent_execution(reply("r-1", "e-1", "Use the sqlite fixture.", at=120.0))
+    [answer] = tab.feed.placed("answer")
+    assert answer.meta.text() == "from you"
+    [question] = tab.feed.placed("question")
+    assert question.answer_box.isHidden()

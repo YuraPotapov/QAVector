@@ -94,6 +94,15 @@ def test_the_list_says_who_did_what_and_how_it_ended(view):
     assert view.count.text() == "2" and note(view) == ""
 
 
+def test_an_action_that_is_part_of_another_says_so(view):
+    """An answer to a task, or a verdict on it, names the task it is part of (ADR-012 D3)."""
+    host = Host(executions=[execution("e2", op="reply", parent_id="0123456789abcdef"), execution("e1")])
+    view.set_host(host, name_of=lambda resource_id: "Demo Shop · Web")
+    assert view.table.item(0, ex.C_ACTION).text() == "reply (part of 01234567)"
+    assert view.table.item(0, ex.C_ACTION).toolTip() == "Part of 0123456789abcdef"
+    assert view.table.item(1, ex.C_ACTION).text() == "start"
+
+
 def test_a_push_updates_in_place_or_comes_in_on_top(view):
     host = Host(executions=[execution("e1", "dispatched")])
     view.set_host(host)

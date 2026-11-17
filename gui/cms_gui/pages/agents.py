@@ -31,6 +31,7 @@ from .agentchat import ChatTab
 from .agentskills import SkillsTab
 from .agentroles import RolesTab
 from .agentusage import UsageTab
+from .agenttasks import TasksTab
 from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F401
                          folder_text, kind_name, model_text, program_text, result_text,
                          status_text, tokens_text, tokens_total, took_text, when_text)
@@ -778,7 +779,12 @@ class AgentsView(QWidget):
         self.activity = ActivityTab()
         self.usage = UsageTab()
         self.roles_tab = RolesTab()
+        self.tasks = TasksTab()
+        self.tasks.open_conversation.connect(self.open_session)
+        # What the person does on the board goes through the chat: its cards say the same.
+        self.tasks.detail.acts = self.chat
         self.tabs.addTab(self.chat, "Chat")
+        self.tabs.addTab(self.tasks, "Tasks")
         self.tabs.addTab(self.connections_tab, "Connections")
         self.tabs.addTab(self.roles_tab, "Roles")
         self.tabs.addTab(self.skills_tab, "Skills")
@@ -912,6 +918,8 @@ class AgentsView(QWidget):
             self.load_activity()
         elif self.tabs.currentWidget() is self.usage:
             self.usage.shown()
+        elif self.tabs.currentWidget() is self.tasks:
+            self.tasks.shown()
         elif self.tabs.currentWidget() is self.roles_tab:
             self.roles_tab.shown()
         elif self.tabs.currentWidget() is self.chat:
