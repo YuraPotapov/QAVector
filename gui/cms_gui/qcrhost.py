@@ -75,6 +75,10 @@ AGENT_GRANTS = {
     "approvals": ("cycles.read", "cycles.approve"),
     "jira": ("integrations.jira.read", "integrations.jira.issue", "integrations.jira.comments",
              "integrations.jira.search", "integrations.jira.statuses"),
+    # Each change waits for the person's Approve (ADR-007).
+    "jira_write": ("integrations.jira.write", "integrations.jira.comment", "integrations.jira.transition",
+                   "integrations.jira.assign", "integrations.jira.edit", "integrations.jira.comment_edit",
+                   "integrations.jira.create", "integrations.jira.attach"),
 }
 #: How long one turn's token is good for at most; it is revoked when the turn ends.
 AGENT_TOKEN_SECONDS = 12 * 3600
@@ -85,6 +89,9 @@ RESTARTS = 3
 SNAPSHOT_DEBOUNCE_MS = 150
 STOP_WAIT_MS = 3000
 TERMINAL = ("succeeded", "failed", "timed_out", "canceled", "unknown")
+#: An integration change that waits for nobody any more, and how many such are kept.
+INTEGRATION_ENDED = TERMINAL + ("denied",)
+INTEGRATION_KEPT = 50
 
 OFF, STARTING, READY, DOWN = "off", "starting", "ready", "down"
 CRITERION_COLORS = ("green", "amber", "red", "blue", "grey")
@@ -104,6 +111,9 @@ class QcrHost(QObject):
     state_changed = Signal(str)
     #: A delegation or a message waits for the person (ADR-006 D3): the host's card.
     agent_approval = Signal(dict)
+    #: An agent's change to an integration (a Jira comment, a transition) arrived,
+    #: was answered or ended: :attr:`integration_changes` is different (ADR-007).
+    integration_changes_changed = Signal()
 
     def __init__(self, supervisor, parent=None, bridge=None):
         """``bridge``: the main window's ServiceBridge, shared with scenarios;
@@ -129,6 +139,10 @@ class QcrHost(QObject):
         self._last = {}            # execution id -> latest execution seen (bounded)
         self._inventory = None     # scenarios/environments/accounts, as the host needs them
         self._agent_storage = None  # (sessions root, agents.json): delegation targets (ADR-006)
+        #: execution id -> one agent change to an integration and how it stands
+        #: (ADR-007 D7): the chat and the Integrations page both show these.
+        self.integration_changes = {}
+        self._agent_names = {}     # agent connection id -> its name, from the turns granted
         self._handlers = {}        # dispatch op -> handler(execution_id, resource_id, input)
         self._readers = {}         # owner_read op -> reader(message, reply)
         self._waits = {}           # bridge request id -> (execution id, callback)
@@ -238,6 +252,7 @@ class QcrHost(QObject):
             self.state_changed.emit(state)
 
     def _abandon(self, why):
+        self._integration_host_gone()
         for request_id in list(self._replies):
             self._reply_failed(request_id, "host_unavailable", why)
         for message in self._queue:
@@ -309,12 +324,15 @@ class QcrHost(QObject):
         elif kind == "execution":
             execution = message.get("execution") or {}
             self._remember(execution)
+            self._integration_execution(execution)
             self.execution_changed.emit(execution)
             if execution.get("actor_id") == GUI_ACTOR and execution.get("state") in TERMINAL \
                     and execution.get("state") != "succeeded":
                 self.finished_badly.emit(execution)
         elif kind == "agent_approval":
             self.agent_approval.emit(dict(message))
+        elif kind == "integration_approval":
+            self._integration_waits(message)
         elif kind == "error":
             log.warning("QCR host refused a line: %s", (message.get("error") or {}).get("code"))
 
@@ -455,6 +473,95 @@ class QcrHost(QObject):
         self._send_when_ready({"type": "agent_answer", "id": next(self._ids),
                                "execution_id": execution_id, "approve": bool(approve), "by": by})
 
+    # -- agents' changes to integrations (ADR-007) ----------------------------------
+    def _integration_waits(self, message):
+        execution_id = message.get("execution_id")
+        if not execution_id:
+            return
+        card = dict(message.get("card") or {})
+        actor = str(message.get("actor") or "")
+        self.integration_changes[execution_id] = {
+            "execution_id": execution_id, "actor": actor, "capability": message.get("capability") or "",
+            "session": actor.split("/", 1)[1] if actor.startswith("agent:") and "/" in actor else "",
+            "agent": self._agent_name(actor),
+            "card": card, "editable": list(message.get("editable") or ()), "draft": dict(
+                (key, str(((card.get("edit") or {}).get(key) or {}).get("value") or ""))
+                for key in message.get("editable") or ()),
+            "state": "waiting", "detail": "", "at": time.time()}
+        self._trim_integration_changes()
+        self.integration_changes_changed.emit()
+
+    def _agent_name(self, actor):
+        if not actor.startswith("agent:"):
+            return actor
+        connection_id = actor[len("agent:"):].split("/", 1)[0]
+        return self._agent_names.get(connection_id, connection_id)
+
+    def _trim_integration_changes(self):
+        ended = [key for key, one in self.integration_changes.items() if one["state"] in INTEGRATION_ENDED]
+        for key in ended[:max(0, len(ended) - INTEGRATION_KEPT)]:
+            self.integration_changes.pop(key, None)
+
+    def _integration_execution(self, execution):
+        change = self.integration_changes.get(execution.get("execution_id"))
+        if change is None:
+            return
+        state, error = execution.get("state"), execution.get("error") or {}
+        if state in TERMINAL:
+            change["state"] = "denied" if error.get("code") == "denied" else state
+            change["detail"] = ((execution.get("output") or {}).get("summary") or "") if state == "succeeded" \
+                else ("" if error.get("code") == "denied" else error.get("message") or error.get("code") or "")
+        elif state == "running" and change["state"] in ("waiting", "approved"):
+            change["state"] = "running"
+        else:
+            return
+        self.integration_changes_changed.emit()
+
+    def set_integration_draft(self, execution_id, field, value):
+        """What the person typed into a waiting change, so a rebuilt card keeps it."""
+        change = self.integration_changes.get(execution_id)
+        if change is not None and field in change["editable"]:
+            change["draft"][field] = value
+
+    def answer_integration(self, execution_id, approve, by="you"):
+        """Approve - with the draft as the person left it - or deny a waiting change."""
+        change = self.integration_changes.get(execution_id)
+        if change is None or change["state"] != "waiting":
+            return
+        offered = change["card"].get("edit") or {}
+        changes = {key: value for key, value in change["draft"].items()
+                   if value != str((offered.get(key) or {}).get("value") or "")} if approve else {}
+
+        def answered(reply):
+            if not reply.get("ok") and change["state"] in ("approved", "denied"):
+                change["state"] = "failed"
+                change["detail"] = "It no longer waited for an answer; nothing was changed by it."
+                self.integration_changes_changed.emit()
+        change["state"] = "approved" if approve else "denied"
+        self.integration_changes_changed.emit()
+        self.ask("integration_answer", answered, execution_id=execution_id, approve=bool(approve), by=by,
+                 changes=changes)
+
+    def dismiss_integration(self, execution_id):
+        change = self.integration_changes.get(execution_id)
+        if change is not None and change["state"] in INTEGRATION_ENDED:
+            self.integration_changes.pop(execution_id, None)
+            self.integration_changes_changed.emit()
+
+    def _integration_host_gone(self):
+        """The host ended: what waited for the person waits no more, and was not sent."""
+        gone = False
+        for change in self.integration_changes.values():
+            if change["state"] in ("waiting", "approved", "running"):
+                sent = change["state"] != "waiting"
+                change["state"] = "unknown" if sent else "failed"
+                change["detail"] = ("QAVector's core stopped while it was being made; read the issue to see "
+                                    "whether it was." if sent else "QAVector's core stopped before you answered; "
+                                    "nothing was changed.")
+                gone = True
+        if gone:
+            self.integration_changes_changed.emit()
+
     def messages(self, done, **filters):
         """Messages from the host's store (ADR-006 D4): ``done(list)``."""
         self.ask("messages", lambda reply: done(reply.get("messages") or [] if reply.get("ok") else []),
@@ -498,6 +605,9 @@ class QcrHost(QObject):
         registered, and the token itself is written to a 0600 file beside the
         socket - the turn gets its *path*.
         """
+        if (connection or {}).get("id"):
+            # What a change it proposes is said to come from (ADR-007).
+            self._agent_names[connection["id"]] = connection.get("name") or connection["id"]
         access = (connection or {}).get("qavector_access") or {}
         permissions = sorted({p for key, on in access.items() if on is True for p in AGENT_GRANTS.get(key, ())})
         others, policy = self.agent_grants(connection, dict(session or {}, id=session_id), mode)
@@ -521,6 +631,9 @@ class QcrHost(QObject):
                    "grants": [{"permission": p} for p in permissions] + others}
         if policy is not None:
             message["agents"] = policy
+        if os.path.isabs(str((session or {}).get("folder") or "")):
+            # The only place a file it asks to attach may come from (ADR-007).
+            message["folder"] = session["folder"]
         self._send(message)
         self._send({"type": "agent_token", "id": next(self._ids), "actor": actor,
                     "token_sha256": hashlib.sha256(token.encode()).hexdigest(),

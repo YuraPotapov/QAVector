@@ -533,7 +533,7 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "",
-            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False},
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
             "others_default": "approve", "allowed_agents": []}})
         assert dialog.result() == QDialog.Accepted
@@ -633,7 +633,7 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
         assert core.calls[-1] == (("save",), {"connection": {
             "id": "claude", "name": "Claude", "kind": "claude",
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high",
-            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False},
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
             "others_default": "deny", "allowed_agents": []}})
     finally:
@@ -864,10 +864,10 @@ def test_qavector_access_is_off_until_a_switch_is_turned_on(qapp):
                                      "qavector_access": {"services": True}})
     try:
         assert dialog.entry()["qavector_access"] == {"services": True, "scenarios": False, "cycles": False,
-                                                      "approvals": False, "jira": False}
+                                                      "approvals": False, "jira": False, "jira_write": False, "usage": False}
         dialog.access["approvals"].setChecked(True)
         assert dialog.entry()["qavector_access"]["approvals"] is True
         assert ConnectionDialog(None).entry()["qavector_access"] == dict.fromkeys(
-            ("services", "scenarios", "cycles", "approvals", "jira"), False)
+            ("services", "scenarios", "cycles", "approvals", "jira", "jira_write", "usage"), False)
     finally:
         dialog.close()

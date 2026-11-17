@@ -1,10 +1,20 @@
-"""One adapter for provider-declared reads; no Jira/Teams HTTP knowledge."""
+"""One adapter for provider-declared reads and writes; no Jira/Teams HTTP knowledge.
+
+Reads are explicit registry reads on ``integrations.<provider>.<connection>``.
+Writes (ADR-007) are executions on ``integrations.<provider>.<connection>~writes``
+that wait for a person: the provider prepares what the person decides on, the
+person approves - possibly with the editable fields changed - or denies, and
+only the approved version is written. One unfinished write per connection.
+"""
 
 import copy
+import logging
+import os
 import re
+import threading
 import time
 
-from integrations.contracts import READ_ERRORS, Provider, ReadError
+from integrations.contracts import READ_ERRORS, WRITE_ERRORS, Provider, ReadError, WriteError
 
 from ..contracts import (CapabilityDescriptor, PropertyDescriptor, PropertySnapshot,
                          ResourceDescriptor, ResourceRef, text)
@@ -12,11 +22,30 @@ from ..errors import QCRError
 from ..registry import Registration
 
 
+log = logging.getLogger("qcr.integrations")
+
+#: A write's resource: apart from the connection, so the write switch does not
+#: open reading, and "one unfinished write" is about writes only.
+WRITES = "%s~writes"
+#: How long a write may wait for the person, and then be made.
+WRITE_SECONDS = 3600
+
+
+def _thread(work):
+    threading.Thread(target=work, name="qcr-integration-write", daemon=True).start()
+
+
 class IntegrationAdapter:
-    def __init__(self, registry, project_id, source, *, clock=time.time):
+    def __init__(self, registry, project_id, source, *, clock=time.time, notify=None, label=None, folder=None,
+                 spawn=_thread):
+        """``notify(message)`` tells the GUI a write waits for the person;
+        ``label(actor_id)`` names who asked, for the activity log;
+        ``folder(actor_id)`` is where that actor may take a file from, or None."""
         text(project_id, "project id")
         self.registry, self.project_id = registry, project_id
         self._source, self._clock, self._owner = source, clock, object()
+        self.writer = WriteInvoker(source, notify or (lambda message: None), label or (lambda actor: actor),
+                                   spawn, folder or (lambda actor: None))
         self._providers = copy.deepcopy(source.providers)
         for name, provider in self._providers.items():
             if not isinstance(provider, Provider) or name != provider.name:
@@ -41,7 +70,7 @@ class IntegrationAdapter:
 
     def refresh(self):
         """Metadata-only refresh. Unknown/unimplemented providers are not exposed."""
-        registrations = []
+        registrations, targets = [], {}
         for row in self._connections():
             provider = self._providers.get(row["provider"])
             if provider is None:
@@ -58,7 +87,22 @@ class IntegrationAdapter:
                 for op in provider.contracts.values() if op.access == "read")
             registrations.append(Registration(resource, caps,
                 self._properties(connection_id, provider.name), self._read(connection_id, provider, prefix)))
+            writes = [op for op in provider.contracts.values() if op.access == "write"]
+            if writes:
+                wref = ResourceRef(self.project_id, WRITES % prefix, "integration_writes")
+                wcaps = tuple(CapabilityDescriptor(prefix + "." + op.name, wref, op.version, op.description,
+                    op.input_schema, op.output_schema, "integrations.%s.%s" % (provider.name, op.name),
+                    risk_level=op.risk, mode="long_running", timeout_seconds=WRITE_SECONDS,
+                    supports_cancel=True, supports_idempotency=True) for op in writes)
+                for op in writes:
+                    targets[prefix + "." + op.name] = (connection_id, provider.name, op.name, row["name"],
+                                                       op.local_paths)
+                registrations.append(Registration(
+                    ResourceDescriptor(wref, "integrations", "%s changes" % row["name"],
+                                       "integrations.%s.write" % provider.name),
+                    wcaps, lambda ref, names: {}, invoker=self.writer))
         self.registry.replace(self._owner, registrations)
+        self.writer.targets = targets
 
     def _properties(self, connection_id, provider_name):
         def read(ref, names):
@@ -81,3 +125,136 @@ class IntegrationAdapter:
                 # The code and its fixed sentence only; never the cause.
                 raise QCRError(exc.code, READ_ERRORS[exc.code]) from None
         return read
+
+
+class WriteInvoker:
+    """Carries out integration writes for the Engine (ADR-007 D3)."""
+
+    def __init__(self, source, notify, label, spawn, folder):
+        self._source, self._notify, self._label, self._spawn = source, notify, label, spawn
+        self._folder = folder
+        self._lock = threading.Lock()
+        self._pending = {}       # execution id -> (job, prepared, target)
+        self._closed = False
+        #: capability id -> (connection id, provider, operation, connection name, local path fields)
+        self.targets = {}
+
+    def requirements(self, capability, request):
+        if self._closed:
+            raise QCRError("source_unavailable", "QAVector is closing.")
+        return ()
+
+    def start(self, job):
+        target = self.targets.get(job.capability.capability_id)
+        if target is None:
+            job.fail("not_found", "Capability is not available.")
+            return
+        request = dict(job.request)
+        for field in target[4]:
+            found = self._local(job.actor_id, request.get(field))
+            if found is None:
+                job.fail("out_of_folder", "A file is taken only from the asking conversation's own folder.")
+                return
+            request[field] = found
+        # A read of the service: never on the host's lock.
+        self._spawn(lambda: self._prepare(job, target, request))
+
+    def _local(self, actor, given):
+        """``given`` as a real path inside the actor's folder, or None."""
+        folder = self._folder(actor)
+        if not folder or not isinstance(given, str) or not given.strip():
+            return None
+        root = os.path.realpath(folder)
+        found = os.path.realpath(os.path.join(root, os.path.expanduser(given)))
+        try:
+            inside = os.path.commonpath([root, found]) == root and found != root
+        except ValueError:
+            return None
+        return found if inside else None
+
+    def _prepare(self, job, target, request):
+        connection_id, provider, operation, name, _paths = target
+        try:
+            prepared = self._source.prepare(connection_id, provider, operation, request)
+        except WriteError as exc:
+            job.fail(exc.code, str(exc))
+            return
+        except Exception:
+            log.exception("preparing %s failed", job.capability.capability_id)
+            job.fail("failed", WRITE_ERRORS["failed"])
+            return
+        if prepared["noop"] is not None:
+            job.succeed(prepared["noop"])
+            return
+        card = dict(prepared["card"], connection=connection_id, connection_name=name)
+        with self._lock:
+            if self._closed:
+                job.fail("source_unavailable", "QAVector closed before the person answered.")
+                return
+            self._pending[job.execution_id] = (job, prepared, target)
+        if not job.dispatched({"approval": "requested"}) or not job.progress("approval.requested", card):
+            with self._lock:
+                self._pending.pop(job.execution_id, None)
+            return
+        self._notify({"type": "integration_approval", "execution_id": job.execution_id,
+                      "actor": job.actor_id, "capability": job.capability.capability_id,
+                      "card": card, "editable": list(prepared["editable"])})
+
+    def pending(self):
+        with self._lock:
+            return list(self._pending)
+
+    def answer(self, execution_id, approved, by="", changes=None):
+        """The person's word on a waiting write; ``changes`` may set its
+        editable fields. False when no write waits for it."""
+        with self._lock:
+            slot = self._pending.pop(execution_id, None)
+        if slot is None:
+            return False
+        job, prepared, target = slot
+        by = str(by or "the person")[:200]
+        if not approved:
+            job.fail("denied", "Denied by %s." % by)
+            return True
+        request = copy.deepcopy(prepared["request"])
+        edited = False
+        for key, value in (changes or {}).items():
+            if key in prepared["editable"] and isinstance(value, str):
+                *path, last = key.split(".")
+                place = request
+                for part in path:
+                    place = place.setdefault(part, {})
+                if place.get(last) != value:
+                    place[last], edited = value, True
+        if not job.progress("approval.answered", {"approved": True, "by": by, "edited": edited}):
+            return True
+        job.running()
+        self._spawn(lambda: self._write(job, target, request))
+        return True
+
+    def _write(self, job, target, request):
+        connection_id, provider, operation, _name, _paths = target
+        source = {"label": str(self._label(job.actor_id))[:200], "detail": job.execution_id}
+        try:
+            result = self._source.write(connection_id, provider, operation, request, source)
+        except WriteError as exc:
+            job.fail(exc.code, str(exc))
+            return
+        except Exception:
+            log.exception("writing %s failed", job.capability.capability_id)
+            job.fail("failed", WRITE_ERRORS["failed"])
+            return
+        job.succeed(result)
+
+    def cancel(self, job):
+        """Canceled or out of time: a write still waiting is dropped. One
+        already approved is in flight and is not stopped (ADR-007, known limits)."""
+        with self._lock:
+            self._pending.pop(job.execution_id, None)
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            pending, self._pending = list(self._pending.values()), {}
+        for job, _prepared, _target in pending:
+            job.fail("source_unavailable", "QAVector closed before the person answered.")

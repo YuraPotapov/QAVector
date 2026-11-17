@@ -101,6 +101,11 @@ class IntegrationsPage(QWidget):
         from ..delegation import Delegation
         self.delegation = Delegation(self.jira, self.agents, settings, self._show_conversation)
         self.jira.add_issue_extension(self.delegation)
+        # What agents asked to change in Jira, waiting for the person (ADR-007):
+        # added from here, so Jira knows nothing of agents.
+        from .integrationchanges import IntegrationChangesTab
+        self.changes = IntegrationChangesTab("jira")
+        self.jira.add_tab(self.changes, self.changes.title())
         QApplication.instance().aboutToQuit.connect(self.shutdown)
         self._fill()
         self._restore()
@@ -114,6 +119,15 @@ class IntegrationsPage(QWidget):
         if changed:
             self._restore()
             self._fill()
+
+    def set_change_source(self, source):
+        """QAVector's core, whose agents' changes to integrations the page lists."""
+        self.changes.set_source(source)
+        source.integration_changes_changed.connect(self._changes_changed)
+
+    def _changes_changed(self):
+        self.changes.refresh()
+        self.jira.set_tab_title(self.changes, self.changes.title())
 
     def set_project_name(self, name):
         for host in self.hosts.values():

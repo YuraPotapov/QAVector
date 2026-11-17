@@ -17,7 +17,7 @@ GUI -> host::
     {"type": "inventory", "inventory": {...}}          scenarios, environments, accounts (the GUI's --describe)
     {"type": "pending", "pending": {...} | null}       what is open in the cycle run on screen
     {"type": "hello", "protocol": 1, "actors": {"gui-user": [{"permission": "services.start"}, ...]}}
-    {"type": "actor", "actor": "cycle:r1", "grants": [...]} / {"type": "revoke", "actor": ...}
+    {"type": "actor", "actor": "cycle:r1", "grants": [...], "folder": "/abs"?} / {"type": "revoke", "actor": ...}
     {"type": "invoke", "id": 7, "actor": "gui-user", "capability": "services.<id>.start",
      "input": {...}, "idempotency_key": "...", "correlation_id": "..."}
     {"type": "cancel" | "get" | "events" | "list", "id": 8, "actor": ..., ...}
@@ -27,6 +27,8 @@ GUI -> host::
     {"type": "agent_token", "id": 9, "actor": "agent:<connection>/<session>",
      "token_sha256": "...", "expires_at": 1731500000}    an issued actor's token, by digest
     {"type": "capabilities" | "describe" | "read", "id": 10, "actor": ..., ...}
+    {"type": "integration_answer", "id": 11, "execution_id": ..., "approve": true,
+     "by": "you", "changes": {"body": "..."}}      the person on a waiting integration write
     {"type": "shutdown"}
 
 **Agents** reach the host on its agent socket (:mod:`qcr.agent_socket`, ADR-003
@@ -41,6 +43,8 @@ host -> GUI::
     {"type": "reply", "id": 7, "ok": true, ...} / {"type": "reply", "id": 7, "ok": false, "error": {...}}
     {"type": "dispatch", "execution_id": ..., "op": "start", "resource_id": ..., "input": {...}}
     {"type": "stop_waiting", "execution_id": ...}
+    {"type": "integration_approval", "execution_id": ..., "actor": ..., "capability": ...,
+     "card": {...}, "editable": ["body"]}               an integration write waits for the person (ADR-007)
     {"type": "owner_read", "id": 4, "op": "service.output", "resource_id": ..., "lines": 50}
     {"type": "owner_read", "id": 5, "op": "launcher.status" | "launcher.output", "resource_id": "main", ...}
     {"type": "execution", "execution": {...}}           after every change
@@ -99,6 +103,8 @@ class Host:
         self.context_dir = os.path.join(os.path.dirname(os.path.abspath(store_path)), "context")
         self._messages_path = os.path.join(os.path.dirname(os.path.abspath(store_path)), "messages.sqlite")
         self.messages = None
+        #: Integration reads and writes, once the GUI names the project's connections file.
+        self.integrations = None
         self._secrets_path = None
         extra = {} if schedule is None else {"schedule": schedule}
         self.engine = Engine(self.registry, self.store, on_change=self._changed, **extra)
@@ -130,6 +136,7 @@ class Host:
         #: they are; and what each agent actor's conversation is, as the GUI said.
         self.delegation = None
         self._agent_policies = {}
+        self._folders = {}                # agent actor -> its conversation's folder, as the GUI said
         #: Told when a snapshot arrives - what a criteria wait wakes on.
         self._snapshot_seen = threading.Condition(threading.Lock())
         self._owner_reads = {}            # id -> [Event, reply]
@@ -159,8 +166,27 @@ class Host:
         self._secrets_path = secret_store.resolve_path(secrets_path)
         reader = ProjectReader(integrations_path, secret_store.resolve_path(secrets_path),
                                environments_path or scope.default_environments_path(integrations_path))
-        self.integrations = IntegrationAdapter(self.registry, self.project_id, reader)
+        self.integrations = IntegrationAdapter(self.registry, self.project_id, reader,
+                                               notify=self.send, label=self._actor_label,
+                                               folder=self._folders.get)
         self.integrations.refresh()
+
+    def _actor_label(self, actor):
+        """Who asked for a change, as the activity log names them: an agent by
+        its connection's name, anybody else by their actor id."""
+        actor = str(actor or "")
+        if not actor.startswith("agent:"):
+            return actor
+        connection_id = actor[len("agent:"):].split("/", 1)[0]
+        name = connection_id
+        if self.delegation is not None:
+            try:
+                from integrations.agents import store as agent_store
+                found = agent_store.get(connection_id, self.delegation.agents_path)
+                name = (found or {}).get("name") or connection_id
+            except Exception:
+                pass
+        return "Agent " + name
 
     def open_agent_socket(self, directory=None):
         """Start listening for agents (ADR-003 D4). Returns the socket's path."""
@@ -175,6 +201,8 @@ class Host:
             self.agent_runtime.close()
         if self.delegation is not None:
             self.delegation.close()
+        if self.integrations is not None:
+            self.integrations.writer.close()
         self.engine.close()
         if self.messages is not None:
             self.messages.close()
@@ -320,7 +348,15 @@ class Host:
         is (``agents``: ADR-006 policy) - kept after the turn, for its tasks."""
         from .adapters.delegation import policy
         rule = policy(message.get("agents"))
+        folder = message.get("folder")
+        if folder is not None and (not isinstance(folder, str) or not os.path.isabs(folder) or len(folder) > 4000):
+            raise QCRError("invalid_message", "An actor's folder is an absolute path.")
         self._issue(message.get("actor"), message.get("grants"))
+        # Where the conversation works: the one place its files may be taken from (ADR-007 7.3).
+        if folder:
+            self._folders[message.get("actor")] = folder
+        else:
+            self._folders.pop(message.get("actor"), None)
         if rule is not None:
             # What the conversation itself was given: a task it hands on gets
             # at most this (ADR-006 D2), even after its own turn has ended.
@@ -429,6 +465,21 @@ class Host:
         if self.delegation is None or not self.delegation.answer(
                 message.get("execution_id"), approved, str(message.get("by") or "")):
             raise QCRError("not_found", "No delegation waits for that answer.")
+        return {}
+
+    def _on_integration_answer(self, message):
+        """The person approved - perhaps with the comment changed - or denied an
+        integration write that waits (ADR-007 D3)."""
+        approved, changes = message.get("approve"), message.get("changes") or {}
+        if type(approved) is not bool:
+            raise QCRError("invalid_message", "An answer approves or not.")
+        if not isinstance(changes, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+                                                for key, value in changes.items()):
+            raise QCRError("invalid_message", "Changes are text fields.")
+        writer = self.integrations.writer if self.integrations is not None else None
+        if writer is None or not writer.answer(message.get("execution_id"), approved,
+                                               str(message.get("by") or ""), changes):
+            raise QCRError("not_found", "No change waits for that answer.")
         return {}
 
     def _on_revoke(self, message):

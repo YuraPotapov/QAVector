@@ -2377,6 +2377,16 @@ class JiraView(QWidget):
             dialog.reject()
 
     # -- what others add to an opened issue -----------------------------------
+    def add_tab(self, widget, title):
+        """Something outside Jira adds a tab of its own after Jira's - as with
+        :meth:`add_issue_extension`, Jira does not know what it shows."""
+        self.tabs.addTab(widget, title)
+
+    def set_tab_title(self, widget, title):
+        index = self.tabs.indexOf(widget)
+        if index >= 0 and self.tabs.tabText(index) != title:
+            self.tabs.setTabText(index, title)
+
     def add_issue_extension(self, extension):
         """Let something outside Jira add to the opened issue - a button
         beside Edit, a tab beside the issue - without Jira knowing what it is.

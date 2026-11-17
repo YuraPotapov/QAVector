@@ -292,7 +292,9 @@ QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
                    ("scenarios", "Run scenarios"),
                    ("cycles", "Run cycles"),
                    ("approvals", "Answer a cycle's approvals and questions"),
-                   ("jira", "Read Jira"))
+                   ("jira", "Read Jira"),
+                   ("jira_write", "Change Jira: comment, move issues - you approve each"),
+                   ("usage", "Read agent usage and est. cost"))
 
 
 #: What a connection's conversations start with for other agents (ADR-006 D3).

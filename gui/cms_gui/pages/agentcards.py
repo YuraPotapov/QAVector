@@ -400,6 +400,150 @@ class InboxCard(QFrame):
         widgets.see_through(self)
 
 
+#: How an agent's change to an integration stands, as its card says it (ADR-007).
+CHANGE_STATES = {"waiting": "waits for you", "approved": "approved - sending", "running": "sending",
+                 "succeeded": "done", "failed": "not made", "denied": "denied",
+                 "canceled": "canceled", "timed_out": "not answered in time",
+                 "unknown": "outcome unknown"}
+
+
+def change_title(card):
+    """What a change does, as its provider says it: ``Comment on QA-142``."""
+    return str(card.get("title") or "%s %s" % (str(card.get("operation") or "change").capitalize(),
+                                               card.get("key") or "")).strip()
+
+
+class IntegrationChangeCard(QFrame):
+    """A change an agent proposes to an integration - a Jira comment, a move to
+    another status, an edit - waiting for the person. What it would change is
+    as the provider says it (``changes``: from - to); its text fields
+    (``edit``) can be changed before Approve, and what is approved is what is
+    written (ADR-007 D7)."""
+
+    approve = Signal(str)
+    deny = Signal(str)
+    dismiss = Signal(str)
+    #: ``(execution id, field, text)`` while the person changes an editable field.
+    edited = Signal(str, str, str)
+
+    def __init__(self, change, show_agent=False, dismissible=True):
+        super().__init__()
+        self.setProperty("role", "agentcard")
+        self.change = dict(change)
+        #: In a conversation an ended change stays as its record; a list may let it go.
+        self.dismissible = dismissible
+        self.execution_id = self.change.get("execution_id") or ""
+        card = self.change.get("card") or {}
+        draft = self.change.get("draft") or {}
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 6, 10, 8)
+        column.setSpacing(6)
+        head, self.kind, self.meta = _head(change_title(card).upper())
+        column.addLayout(head)
+        where = [card.get("summary") or "", "Jira: %s" % (card.get("connection_name") or card.get("connection") or "")]
+        if show_agent and self.change.get("agent"):
+            where.append("asked by %s" % self.change["agent"])
+        self.where = QLabel(" · ".join(one for one in where if one))
+        self.where.setProperty("role", "hint")
+        self.where.setWordWrap(True)
+        column.addWidget(self.where)
+        #: One line per change that is not text to edit: "Status: from In Progress to Review".
+        self.lines = []
+        for one in card.get("changes") or []:
+            said = ("%s: from %s to %s" % (one.get("label"), one.get("from"), one.get("to")) if one.get("from")
+                    else "%s: %s" % (one.get("label"), one.get("to")))
+            line = QLabel(said)
+            line.setWordWrap(True)
+            line.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            column.addWidget(line)
+            self.lines.append(line)
+        #: field -> its editor; a required one cannot be approved empty.
+        self.fields, self._required, self.shown = {}, set(), {}
+        for name, spec in (card.get("edit") or {}).items():
+            label = QLabel(str(spec.get("label") or name).upper())
+            label.setProperty("role", "kicker")
+            column.addWidget(label)
+            value = draft.get(name, spec.get("value") or "")
+            if spec.get("multiline", True):
+                editor = QPlainTextEdit()
+                editor.setPlainText(value)
+                editor.setMaximumHeight(140)
+                editor.textChanged.connect(lambda name=name, editor=editor: self.edited.emit(
+                    self.execution_id, name, editor.toPlainText()))
+            else:
+                editor = QLineEdit(value)
+                editor.textChanged.connect(lambda text, name=name: self.edited.emit(self.execution_id, name, text))
+            editor.setAccessibleName(str(spec.get("label") or name))
+            column.addWidget(editor)
+            # Once answered, the text as it went - no empty box around it.
+            shown = QLabel("")
+            shown.setWordWrap(True)
+            shown.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            shown.setVisible(False)
+            column.addWidget(shown)
+            self.shown[name] = shown
+            if spec.get("was"):
+                was = QLabel("Now: %s" % spec["was"])
+                was.setProperty("role", "hint")
+                was.setWordWrap(True)
+                column.addWidget(was)
+            self.fields[name] = editor
+            if spec.get("required"):
+                self._required.add(name)
+        self.notes = QLabel("\n".join(card.get("notes") or []))
+        self.notes.setProperty("role", "hint")
+        self.notes.setWordWrap(True)
+        self.notes.setVisible(bool(card.get("notes")))
+        column.addWidget(self.notes)
+        self.result = QLabel("")
+        self.result.setProperty("role", "hint")
+        self.result.setWordWrap(True)
+        self.result.setVisible(False)
+        column.addWidget(self.result)
+        self.deny_button = QPushButton("Deny")
+        self.deny_button.setToolTip("Nothing is changed in Jira; the agent hears it was denied.")
+        self.deny_button.clicked.connect(lambda: self.deny.emit(self.execution_id))
+        self.approve_button = QPushButton("Approve")
+        self.approve_button.setProperty("variant", "primary")
+        self.approve_button.setToolTip("Make this change in Jira, as it reads now. It cannot be taken back here.")
+        self.approve_button.clicked.connect(self._approve)
+        self.dismiss_button = QPushButton("Dismiss")
+        self.dismiss_button.setProperty("variant", "ghost")
+        self.dismiss_button.clicked.connect(lambda: self.dismiss.emit(self.execution_id))
+        column.addWidget(widgets.row(None, self.dismiss_button, self.deny_button, self.approve_button))
+        widgets.see_through(self)
+        self.set_state(self.change.get("state") or "waiting", self.change.get("detail") or "")
+
+    def text_of(self, name):
+        editor = self.fields[name]
+        return editor.toPlainText() if isinstance(editor, QPlainTextEdit) else editor.text()
+
+    def _approve(self):
+        empty = [name for name in self._required if not self.text_of(name).strip()]
+        if empty:
+            label = ((self.change.get("card") or {}).get("edit") or {}).get(empty[0], {}).get("label") or empty[0]
+            self.result.setText("%s cannot be empty." % label)
+            self.result.setVisible(True)
+            return
+        self.approve.emit(self.execution_id)
+
+    def set_state(self, state, detail=""):
+        self.change["state"] = state
+        self.meta.setText(CHANGE_STATES.get(state, state))
+        waiting = state == "waiting"
+        self.deny_button.setVisible(waiting)
+        self.approve_button.setVisible(waiting)
+        self.dismiss_button.setVisible(self.dismissible and state in (
+            "succeeded", "failed", "denied", "canceled", "timed_out", "unknown"))
+        for name, editor in self.fields.items():
+            editor.setReadOnly(not waiting)
+            editor.setVisible(waiting)
+            self.shown[name].setText(self.text_of(name) or "(empty)")
+            self.shown[name].setVisible(not waiting)
+        self.result.setText(detail)
+        self.result.setVisible(bool(detail))
+        _settled(self, not waiting and state not in ("approved", "running"))
+
 def inbox_prefix(messages):
     """What the next message starts with: each waiting message, who sent it."""
     lines = [INBOX]

@@ -309,6 +309,9 @@ class MainWindow(QMainWindow):
         # Here, not with the pages: they are built before the host is.
         self.qcr_host.agent_approval.connect(self.integrations.agents.chat.agent_request)
         self.qcr_host.execution_changed.connect(self.integrations.agents.chat.agent_execution)
+        # An agent's change to Jira waits for the person there, and on the
+        # Integrations page (ADR-007 D7).
+        self.integrations.set_change_source(self.qcr_host)
         self._qcr_answers = {}          # node approval request id -> (execution id, item id)
         self._qcr_run = None
         self._aim_qcr()

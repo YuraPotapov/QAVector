@@ -453,6 +453,53 @@ conversations by the key it gives them when it begins one -
 `jira:<connection>:<KEY>`, which the Agents integration matches exactly and
 never reads.
 
+## Agents changing Jira
+
+An agent connection with **Change Jira** turned on in its QAVector access may
+propose changes to Jira. Each one waits for you before anything is sent
+([ADR-007](qcr/adr-007-jira-writes.md)):
+
+| Change | What the card shows | What you can change first |
+|---|---|---|
+| Comment | the text | the text |
+| Move to another status | from which status to which; the transition | - |
+| Assign | from whom to whom (a name or email is looked up) | - |
+| Edit summary, description, labels, priority | each field, old and new | summary, description |
+| Edit a comment | the old text and the new | the new text |
+| Create an issue | project, type, priority, other fields | summary, description |
+| Attach a file | the file's name and size, and its folder | - |
+
+- The proposal appears as a card in the agent's conversation, and on Jira's
+  **Agent changes** tab, which lists the proposals from every conversation.
+  Answering in either place answers both. **Deny** sends nothing, and the
+  agent is told it was denied. The version you approve is the one that is
+  written.
+- Before the card appears, QAVector reads the issue, within the connection's
+  predefined query. A new issue is allowed only in a project that the query
+  reaches. A change that is already in place asks nobody: the issue is
+  already in that status, has that assignee, or already reads that way. What
+  cannot be done is refused with what can: the statuses offered, the people
+  who match, the priorities, or the fields a create screen requires.
+- An edit, or a comment edit, is refused if the issue or the comment changed in
+  Jira after the card was shown. Someone else's change is never overwritten.
+- A file is taken only from the conversation's own folder; a path outside it is
+  refused before anything is read.
+- The agent gets the issue as it is after the change. It never gets the token
+  or Jira's own error text, only a code: `denied`, `fields_required`,
+  `not_offered`, `conflict`, `out_of_folder`, `auth`, and so on.
+  `unknown_outcome` means the request was sent but no answer came, so the agent
+  must read the issue before trying again. Nothing is retried.
+- One change per connection waits at a time. A second one is refused as busy
+  until the first is answered.
+- Each change made, or failed in Jira, is a line in Activity whose source is
+  `Agent <connection name>`. As for this page's own changes, the line has no
+  text of the change.
+
+Agents cannot delete comments. Proposals live in QAVector's core: if it stops,
+they end unanswered and nothing is sent. Text is plain: no editor document and
+no mentions on Cloud. A description or comment with formatting is replaced by
+plain text, and the card says so.
+
 ## Command line: agents
 
 Codex connections use the same chat UI and CLI commands as Claude Code.

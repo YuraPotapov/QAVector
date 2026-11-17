@@ -27,6 +27,17 @@ app-agnostic, since that will break things on purpose.
   time, with a Continue action and a bounded scrolling list.
 
 ### Added
+- **Agents can propose Jira changes** (QCR ADR-007): with the new **Change
+  Jira** access switch (off by default), an agent may propose a comment, a
+  move to another status, an assignment, an edit of summary, description,
+  labels or priority, a comment edit, a new issue, or a file from its own
+  folder. Each one waits for the person on a card in the agent's
+  conversation and on Jira's new **Agent changes** tab. Text can be edited
+  before Approve; Deny sends nothing; a change made in Jira meanwhile is not
+  overwritten. The change runs through the
+  same Jira code as the page and is logged in Activity as `Agent <name>`.
+  The agent never sees the token or Jira's error text. Nothing is retried; a
+  lost answer is reported as `unknown_outcome`.
 - Agent chats offer **Interrupt & send** for a new or queued message. The
   current turn is stopped before the same conversation resumes with the
   selected message; other queued messages keep their order. Failed stops

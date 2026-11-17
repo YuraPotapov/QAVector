@@ -14,7 +14,7 @@ from urllib.parse import quote, quote_plus
 
 from qavector_sdk.validation import compile_output
 
-from .contracts import ReadError
+from .contracts import WRITE_ERRORS, WRITE_SAYS, ReadError, WriteError
 
 
 def builtin_providers():
@@ -55,7 +55,7 @@ class ProjectReader:
         # Each contract's schemas checked once, not on every read (see compile_output).
         self._checks = {(name, op): (compile_output(contract.input_schema), compile_output(contract.output_schema))
                         for name, provider in self.providers.items()
-                        for op, contract in provider.contracts.items() if contract.access == "read"}
+                        for op, contract in provider.contracts.items() if contract.access in ("read", "write")}
 
     def connections(self):
         from . import store
@@ -93,13 +93,104 @@ class ProjectReader:
             raise ReadError(_code_of(exc)) from None
         try:
             check_output(result)
-            basic = base64.b64encode((connection.get("email", "") + ":" + token).encode()).decode()
-            result = _redact(result, [token, basic, connection.get("api"),
-                                      connection.get("webhook"), connection.get("webhook_url")])
+            result = _redact(result, _secrets_of(connection, token))
             check_output(result)
         except Exception:
             raise ReadError("invalid_response") from None
         return result
+
+    # -- writes (QCR ADR-007): prepared, shown to a person, then made ------------------
+    def _writable(self, provider_name, operation, request):
+        provider = self.providers.get(provider_name)
+        contract = provider.contracts.get(operation) if provider is not None else None
+        if contract is None or contract.access != "write":
+            raise WriteError("unsupported")
+        check_input, check_output = self._checks[(provider_name, operation)]
+        try:
+            check_input(request)
+        except Exception:
+            raise WriteError("invalid_request") from None
+        return provider, check_output
+
+    def _connection(self, connection_id, provider_name):
+        from . import store
+        entry = store.get(connection_id, self._path)
+        if entry is None or entry["provider"] != provider_name:
+            raise WriteError("unavailable")
+        connection = store.credentials(connection_id, self._path, self._secrets, self._environments)
+        if connection["provider"] != provider_name:
+            raise WriteError("unavailable")
+        return connection
+
+    def prepare(self, connection_id, provider_name, operation, request):
+        """What a person decides a write on: ``{request, card, editable, noop}`` -
+        ``editable`` being the request fields the card lets the person change.
+        Asks the service (a read); changes nothing. Raises :class:`WriteError`."""
+        provider, check_output = self._writable(provider_name, operation, request)
+        try:
+            connection = self._connection(connection_id, provider_name)
+            token = connection["token"]
+            made = provider.prepare(operation, connection, token, copy.deepcopy(request))
+        except Exception as exc:
+            raise _write_error(exc) from None
+        try:
+            made = _redact(made, _secrets_of(connection, token))
+            if made.get("noop") is not None:
+                check_output(made["noop"])
+            elif made.get("request") is not None:
+                self._checks[(provider_name, operation)][0](made["request"])
+            else:
+                raise ValueError("Nothing to make.")
+        except Exception:
+            raise WriteError("invalid_response") from None
+        card = made.get("card") or {}
+        return {"request": made.get("request"), "card": card,
+                "editable": list((card.get("edit") or {}).keys()), "noop": made.get("noop")}
+
+    def write(self, connection_id, provider_name, operation, request, source=None):
+        """Make one approved write; the result its contract promises. Made or
+        failed, it is a line in the activity log under ``source`` - without its
+        text. Raises :class:`WriteError`."""
+        from . import activity
+        provider, check_output = self._writable(provider_name, operation, request)
+        target = str(request.get("key") or request.get("project") or "")
+        try:
+            connection = self._connection(connection_id, provider_name)
+            token = connection["token"]
+        except Exception as exc:
+            raise _write_error(exc) from None
+        try:
+            result = provider.write(operation, connection, token, copy.deepcopy(request))
+        except Exception as exc:
+            error = _write_error(exc)
+            # Refused before anything was changed (fields asked for, changed
+            # meanwhile): nothing to log, as for the page's own writes.
+            if error.code not in WRITE_SAYS:
+                activity.record(self._path, connection_id, operation, target, False, WRITE_ERRORS[error.code],
+                                source)
+            raise error from None
+        try:
+            result = _redact(result, _secrets_of(connection, token))
+            check_output(result)
+        except Exception:
+            # Made, but its answer is unusable: say what is known.
+            activity.record(self._path, connection_id, operation, target, True, operation, source)
+            raise WriteError("invalid_response") from None
+        made = (result.get("issue") or {}).get("key") or target      # a new issue's own key
+        activity.record(self._path, connection_id, operation, made, True,
+                        str(result.get("summary") or operation)[:200], source)
+        return result
+
+
+def _secrets_of(connection, token):
+    basic = base64.b64encode((connection.get("email", "") + ":" + token).encode()).decode()
+    return [token, basic, connection.get("api"), connection.get("webhook"), connection.get("webhook_url")]
+
+
+def _write_error(exc):
+    if isinstance(exc, WriteError):
+        return exc
+    return WriteError(_code_of(exc))
 
 
 #: What a refused connection's ``store.Unavailable.kind`` means to a caller.

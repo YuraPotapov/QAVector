@@ -52,7 +52,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["capability"],
                      "properties": {"capability": _ID, "input": {"type": "object"}}}},
     {"name": "qavector_invoke",
-     "description": "Start an action (start a service, run a scenario or cycle, answer an approval). Returns the "
+     "description": "Start an action (start a service, run a scenario or cycle, answer an approval, change "
+                    "Jira). Returns the "
                     "execution, usually still running: follow it with qavector_wait. Everything is journalled.",
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["capability"],
                      "properties": {"capability": _ID, "input": {"type": "object"},
