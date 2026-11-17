@@ -11,9 +11,10 @@ adds itself to Jira's opened issue through the form's generic slot
 reads nothing into it; this is the only place that writes it or knows what it
 means. Every conversation about the issue is found by it, whoever opened it.
 
-**The conversation is in the chat.** Delegate begins it there - the turn runs
-where every turn runs - and the issue shows the record: Agent work, Summary and
-Changes, read from the project's conversations, never from an agent.
+**The conversation is in the chat.** Delegate opens it with an editable draft.
+The person sends it when ready; only then does the agent run. The issue shows
+the record: Agent work, Summary and Changes, read from the project's
+conversations, never from an agent.
 
 **What came before goes along.** A new conversation about an issue starts with
 the issue as its task and, when there were conversations about it before, what
@@ -301,7 +302,7 @@ class Delegation:
         self.open_agents(session_id)
 
     def delegate(self, chosen, message):
-        """Begin the conversation in the agents' chat, the issue's ref on it."""
+        """Prepare a chat draft with the issue's ref; the person sends it."""
         issue = self.issue or {}
         key = issue.get("key") or ""
         folders = dict(self._memory().get("folders") or {})

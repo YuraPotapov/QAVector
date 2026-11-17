@@ -341,7 +341,7 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     core = FakeCore(sessions=[session], events={session["id"]: _events()})
     chat = make(core).agents.chat
     chat.table.selectRow(0)
-    assert core.calls[-1] == (("session", session["id"]), {"limit": agentchat.EVENTS_SHOWN})
+    assert (("session", session["id"]), {"limit": agentchat.EVENTS_SHOWN}) in core.calls
     assert chat.title.text() == "Flaky login test"
     assert chat.sub.text() == "Claude · /home/someone/src/shop"
     assert chat.feed.kinds() == ["you", "thinking", "tool", "answer", "end"]
@@ -376,7 +376,7 @@ def test_only_the_newest_part_of_a_long_conversation_is_read_until_asked(make):
     chat.table.selectRow(0)
     assert chat.earlier.isVisible()
     chat.earlier.click()
-    assert core.calls[-1] == (("session", session["id"]), {"limit": 0})
+    assert (("session", session["id"]), {"limit": 0}) in core.calls
     assert not chat.earlier.isVisible()
 
 
@@ -509,6 +509,52 @@ def test_a_message_written_while_the_agent_answers_waits_its_turn(make):
     FakeTurn.made[1].say(_events("second", first=10)[0])
     FakeTurn.made[1].finish()
     assert [turn.document["message"] for turn in FakeTurn.made] == ["first", "second", "third"]
+
+
+@pytest.mark.parametrize("state", ["stopped", "completed"])
+def test_interrupt_sends_selected_message_after_turn_ends(make, state):
+    chat = make(FakeCore()).agents.chat
+    _say(chat, "first")
+    first = FakeTurn.made[0]
+    first.say(_events("first")[0])
+    _say(chat, "later")
+    _say(chat, "do not commit")
+    chat.feed._waiting[-1].body.interrupt.click()
+    assert first.stopped and len(FakeTurn.made) == 1
+    first.finish(state)
+    assert FakeTurn.made[1].session_id == first.session_id
+    assert FakeTurn.made[1].document["message"] == "do not commit"
+    assert chat._queued[first.session_id][0]["message"] == "later"
+
+
+def test_interrupt_from_composer_preserves_files_and_does_not_retry_failure(make, tmp_path):
+    chat = make(FakeCore()).agents.chat
+    _say(chat, "first")
+    first = FakeTurn.made[0]
+    first.say(_events("first")[0])
+    path = tmp_path / "instructions.txt"
+    path.write_text("Do not commit")
+    chat.composer.set_draft("use these instructions")
+    chat.composer.set_attachments([str(path)])
+    chat.composer.interrupt.click()
+    assert first.stopped and len(FakeTurn.made) == 1
+    first.finish("failed")
+    assert len(FakeTurn.made) == 1
+    assert chat.composer.draft() == "use these instructions"
+    assert chat.composer.attachments() == [str(path)]
+
+
+def test_stop_cancels_interrupt_resume(make):
+    chat = make(FakeCore()).agents.chat
+    _say(chat, "first")
+    first = FakeTurn.made[0]
+    first.say(_events("first")[0])
+    _say(chat, "do not commit")
+    chat.interrupt_queued(0)
+    chat.stop()
+    first.finish("stopped")
+    assert len(FakeTurn.made) == 1
+    assert chat.composer.draft() == "do not commit"
 
 
 def test_a_queued_message_can_be_taken_back(make):
@@ -1248,6 +1294,66 @@ def test_plan_first_goes_with_the_turn_and_is_the_next_conversation_s_choice(mak
     turn.finish(phase="questions")
     chat.new_button.click()
     assert chat.composer.plan.isChecked()
+
+
+def test_changes_are_visible_and_refresh_before_the_first_turn_finishes(make):
+    found = {"ok": True, "live": True, "files": [], "patch": "", "added": 0, "removed": 0}
+    core = FakeCore(changes=lambda args, document: dict(found))
+    chat = make(core).agents.chat
+    _say(chat, "Change the file")
+    (turn,) = FakeTurn.made
+    assert not chat.current["turns"] and chat.running()
+    assert not chat.changes_button.isHidden()
+    assert chat.changes_button.text() == "Changes +0 -0"
+    found.update(files=[{"path": "app.py", "status": "modified", "added": 100, "removed": 20}],
+                 added=100, removed=20,
+                 patch="diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n")
+    chat._changes_timer.timeout.emit()
+    assert chat.changes_button.text() == "Changes +100 -20"
+    chat.changes_button.click()
+    dialog = chat.changes_dialog
+    assert dialog.isVisible() and dialog._refresh.isActive()
+    dialog.view.sections[0].set_expanded(True)
+    found.update(added=101)
+    dialog._refresh.timeout.emit()
+    assert dialog.view.summary.text() == "1 file changed · +101 -20"
+    assert chat.changes_button.text() == "Changes +101 -20"
+    assert dialog.view.sections[0].is_expanded()
+    reads = core.asked().count("changes")
+    chat._poll_changes()
+    assert core.asked().count("changes") == reads
+    assert chat.running()  # inspection has not stopped or finished the agent
+    found.update(live=False, added=102)
+    turn.finish()
+    assert chat.changes_button.text() == "Changes +102 -20"
+    dialog._refresh.timeout.emit()
+    assert not dialog._refresh.isActive()
+    dialog.close()
+
+
+def test_live_changes_coalesce_slow_reads_and_do_not_update_another_chat(make):
+    chat = make().agents.chat
+    ask = chat.host.ask
+    pending = []
+
+    def delayed(kind, work, done):
+        if kind.startswith("changes:"):
+            pending.append(done)
+        else:
+            ask(kind, work, done)
+
+    chat.host.ask = delayed
+    _say(chat, "Work")
+    chat._poll_changes()
+    chat._poll_changes()
+    assert len(pending) == 1
+    chat.changes_button.click()
+    assert len(pending) == 1  # the window shares the button's pending read
+    chat.new_conversation()
+    pending.pop()({"ok": True, "live": True, "files": [], "added": 100, "removed": 20})
+    assert chat.changes_button.isHidden()
+    assert chat.changes_dialog.view.summary.text() == "No files changed."
+    chat.changes_dialog.close()
 
 
 def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):

@@ -36,6 +36,9 @@ in a plain folder would otherwise be one opaque entry.
 **Kept as text.** After each turn its patch, and the whole conversation's so
 far, are written out as files; reading them never runs git, and a repository
 that has since dropped objects cannot take an old patch with it.
+
+During a turn, readers compare its published baseline against a live snapshot
+using temporary private indexes. These previews never replace saved patches.
 """
 
 import hashlib
@@ -43,6 +46,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 
 import runtime_paths
@@ -271,17 +275,18 @@ def _objects(root):
 
 def _part_file(git, part, suffix):
     name = hashlib.sha1(part["key"].encode("utf-8")).hexdigest()[:16]
-    return os.path.join(git.where, "%s.%s" % (name, suffix))
+    return os.path.join(getattr(git, "scratch", None) or git.where, "%s.%s" % (name, suffix))
 
 
 # -- snapshots ------------------------------------------------------------------
-def snapshot(session_dir, folder, run=None, layout=None):
+def snapshot(session_dir, folder, run=None, layout=None, scratch=None):
     """The folder now: ``{"at", "parts"}``, each part with its ``tree`` - or,
     for one too large to keep, without. ``layout`` is an earlier snapshot whose
     parts to take again rather than looking through the folder anew - the
     turn's own first one, for the snapshot after it. Raises
     :class:`ChangesError`."""
     git = Git(session_dir, run)
+    git.scratch = scratch
     taken = []
     for part in (layout or {}).get("parts") or parts(folder):
         part = {key: value for key, value in part.items() if key != "tree"}
@@ -309,6 +314,14 @@ def _index(git, part, objects):
     a repository, a copy of the repository's own; else - a copy this git
     cannot read - the commit the repository has checked out."""
     index = _part_file(git, part, "index")
+    if getattr(git, "scratch", None):
+        # Git replaces its index atomically. Copy the last cached index into
+        # this reader's private directory; never contend with the turn writer
+        # or another live reader for an index/exclude file.
+        cached = os.path.join(git.where, os.path.basename(index))
+        if os.path.isfile(cached):
+            shutil.copyfile(cached, index)
+            os.chmod(index, 0o600)
     if os.path.isfile(index) or part["kind"] != "git":
         return index
     gitdir = _git_dir(part["root"])[0]
@@ -489,6 +502,38 @@ def _patch(git, part, old, objects):
 
 
 # -- kept per turn and per conversation -------------------------------------------
+def begin(session_dir, turn_dir, before):
+    """Publish the baseline before the agent starts changing the folder."""
+    if not before.get("error"):
+        _base(session_dir, before)
+    path = os.path.join(turn_dir, "changes-before.json")
+    _write(path + ".tmp", json.dumps(before))
+    os.replace(path + ".tmp", path)
+
+
+def preview(session_dir, turn_dir, folder, whole=True):
+    """Compare a running turn without replacing any completed turn's patch.
+
+    Each reader owns its temporary index; the shared git object store supports
+    concurrent writers. Repository configuration is never executed.
+    """
+    try:
+        with open(os.path.join(turn_dir, "changes-before.json"), encoding="utf-8") as handle:
+            before = json.load(handle)
+    except (OSError, ValueError):
+        return dict(read(session_dir, None if whole else turn_dir), live=True, pending=True)
+    if before.get("error"):
+        raise ChangesError("The folder could not be read before the turn: %s" % before["error"])
+    base = before
+    if whole:
+        with open(os.path.join(store(session_dir), "base.json"), encoding="utf-8") as handle:
+            base = json.load(handle)
+    with tempfile.TemporaryDirectory(prefix="preview-", dir=store(session_dir)) as scratch:
+        after = snapshot(session_dir, folder, layout=before, scratch=scratch)
+        found = compare(session_dir, base, after)
+    return dict(found, live=True, kept="partial" if found["unkept"] else "all")
+
+
 def keep(session_dir, turn_dir, folder, before, after, written=(), run=None):
     """Compare a turn's snapshots and keep what changed: the turn's, and the
     conversation's so far. Returns the turn's summary for its record -

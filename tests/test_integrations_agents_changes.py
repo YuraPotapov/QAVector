@@ -78,6 +78,48 @@ def _repo_state(repo):
 
 
 # ------------------------------------------------------------------ a repository
+def test_live_changes_include_new_files_and_reverts_without_overwriting_history(repo, session_dir):
+    before = changes.snapshot(session_dir, str(repo))
+    first = _turn(session_dir, 1)
+    changes.begin(session_dir, first, before)
+    _write(str(repo / "app.py"), "one\nTWO\nthree\nfour\n")
+    _write(str(repo / "new.md"), "hello\n")
+    state = _repo_state(repo)
+    live = changes.preview(session_dir, first, str(repo))
+    assert live["live"] and (live["added"], live["removed"]) == (3, 1)
+    assert {one["path"] for one in live["files"]} == {"app.py", "new.md"}
+    assert changes.read(session_dir)["files"] == []
+    after = changes.snapshot(session_dir, str(repo), layout=before)
+    changes.keep(session_dir, first, str(repo), before, after)
+    saved = changes.read(session_dir)
+    second = _turn(session_dir, 2)
+    changes.begin(session_dir, second, after)
+    _write(str(repo / "app.py"), "one\ntwo\nthree\n")
+    whole = changes.preview(session_dir, second, str(repo))
+    turn = changes.preview(session_dir, second, str(repo), whole=False)
+    assert [one["path"] for one in whole["files"]] == ["new.md"]
+    assert (whole["added"], whole["removed"]) == (1, 0)
+    assert (turn["added"], turn["removed"]) == (1, 2)
+    assert changes.read(session_dir) == saved
+    assert _repo_state(repo) == state
+
+
+def test_live_readers_have_separate_indexes_from_each_other_and_the_final_snapshot(repo, session_dir):
+    from concurrent.futures import ThreadPoolExecutor
+
+    before = changes.snapshot(session_dir, str(repo))
+    turn = _turn(session_dir)
+    changes.begin(session_dir, turn, before)
+    _write(str(repo / "new.txt"), "new\n")
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        reads = [pool.submit(changes.preview, session_dir, turn, str(repo)) for _ in range(2)]
+        final = pool.submit(changes.snapshot, session_dir, str(repo), layout=before)
+        for result in reads:
+            assert [one["path"] for one in result.result()["files"]] == ["new.txt"]
+        assert changes.compare(session_dir, before, final.result())["added"] == 1
+    assert not any(name.startswith("preview-") for name in os.listdir(changes.store(session_dir)))
+
+
 def test_a_turn_in_a_repository_is_every_file_it_changed(repo, session_dir):
     before = changes.snapshot(session_dir, str(repo))
     _write(str(repo / "app.py"), "one\nTWO\nthree\nfour\n")

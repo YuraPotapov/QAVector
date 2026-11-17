@@ -4,10 +4,12 @@ import pytest
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog
 
 from cms_gui import main_window
 from cms_gui.hotkeys import portable
 from cms_gui.settings import Settings
+from test_agents_page import FakeCore
 
 
 def _address_editor(window):
@@ -33,14 +35,55 @@ def window(qapp, tmp_path, monkeypatch, dispose):
 def test_real_catalogue_includes_menus_components_and_unassigned_actions(window):
     registry = window.action_registry
     entries = {spec.id for spec in registry.specs()}
-    assert {"application.search", "application.settings", "application.refresh",
+    assert {"application.search", "application.quick_agent", "application.settings", "application.refresh",
             "credentials.save", "run.start", "navigate.cycles", "cycles.save",
             "find.open"} <= entries
     assert registry.bindings()["application.settings"] == ""
     assert registry.bindings() == registry.defaults()
     assert registry.validate(registry.bindings()) == []
     assert registry.spec("application.search").scope == "application"
+    assert registry.shortcut("application.quick_agent").toString() == "Ctrl+Shift+A"
     assert registry.spec("application.refresh").scope == "component/main_window"
+
+
+@pytest.mark.parametrize("page", ["launch", "artifacts", "cycles", "integrations"])
+def test_quick_agent_shortcut_focuses_message_from_every_page(window, qapp, page):
+    window.integrations.agents.set_core(FakeCore())
+    window.show_page(page)
+    if page == "integrations":
+        window.integrations.open_provider("agents")
+    target = _address_editor(window) if page == "launch" else window._pages[page]
+    target.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(target, Qt.Key_A, Qt.ControlModifier | Qt.ShiftModifier)
+    qapp.processEvents()
+    popup = window.integrations.agents.quick_composer
+    assert popup is not None and popup.isVisible()
+    assert QApplication.focusWidget() is popup.composer.text
+    assert "Ctrl+Shift+A" in popup.keys.text()
+    popup.dismiss()
+
+
+def test_quick_agent_respects_rebinding_and_modal_dialogs(window, qapp):
+    window.integrations.agents.set_core(FakeCore())
+    window.action_registry.apply({"application.quick_agent": "Alt+F10"})
+    field = _address_editor(window)
+    field.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(field, Qt.Key_A, Qt.ControlModifier | Qt.ShiftModifier)
+    assert window.integrations.agents.quick_composer is None
+    QTest.keyClick(field, Qt.Key_F10, Qt.AltModifier)
+    qapp.processEvents()
+    popup = window.integrations.agents.quick_composer
+    assert popup.isVisible() and "Alt+F10" in popup.keys.text()
+    popup.dismiss()
+    dialog = QDialog(window)
+    dialog.setModal(True)
+    dialog.show()
+    qapp.processEvents()
+    window.quick_agent_action.trigger()
+    assert not popup.isVisible()
+    dialog.close()
 
 
 def test_apply_updates_menu_button_and_dispatches_only_the_new_key(window, qapp):

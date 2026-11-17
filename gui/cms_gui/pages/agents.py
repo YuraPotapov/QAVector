@@ -708,6 +708,7 @@ class AgentsView(QWidget):
 
     back_requested = Signal()
     connections_changed = Signal()
+    connections_loaded = Signal(dict)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -741,6 +742,7 @@ class AgentsView(QWidget):
         self.tabs.setObjectName("agentsTabs")
         self.chat = ChatTab(settings)
         self.chat.host = self
+        self.quick_composer = None
         self.connections_tab = ConnectionsTab()
         self.skills_tab = SkillsTab()
         self.activity = ActivityTab()
@@ -786,13 +788,16 @@ class AgentsView(QWidget):
         self.activity.say("")
         self.activity.set_rows([])
         self.chat.reset()
+        if self.quick_composer is not None:
+            self.quick_composer.reset()
         if self.isVisible():
             self.list_connections()
             self._tab_changed(0)
 
     def has_unsaved(self):
         """A message typed and not sent is the one thing leaving would lose."""
-        return self.chat.has_draft()
+        return self.chat.has_draft() or (self.quick_composer is not None
+                                         and self.quick_composer.has_draft())
 
     def busy_reason(self, include_dialogs=True):
         if self.chat.running():
@@ -814,6 +819,8 @@ class AgentsView(QWidget):
 
     def shutdown(self):
         self._closing = True
+        if self.quick_composer is not None:
+            self.quick_composer.hide()
         self._cancel_requests()
         self.chat.shutdown()
         for dialog in self.findChildren(QDialog):
@@ -843,9 +850,9 @@ class AgentsView(QWidget):
         self.chat.open_session(session_id)
 
     def delegate(self, chosen, source, message, done=None):
-        """Begin a conversation something else hands a task to, in the chat."""
+        """Open a task's conversation with a draft for the person to send."""
         self.tabs.setCurrentWidget(self.chat)
-        return self.chat.delegate(chosen, source, message, done)
+        return self.chat.delegate(chosen, source, message, done, send=False)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -971,6 +978,7 @@ class AgentsView(QWidget):
             else:
                 self.connections_tab.say(payload.get("error")
                                          or "The connections could not be read.")
+            self.connections_loaded.emit(payload)
             if then is not None:
                 then()
 

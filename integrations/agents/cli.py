@@ -41,9 +41,9 @@ line itself is wrong.
                               answer as its last line. SIGTERM stops the agent.
     activity [--from=F]       every turn of every session, newest first:
                               {"limit", "ref"}
-    changes ID [--from=F]     what changed in the conversation's folder, kept
-                              after each turn: the conversation's so far, or
-                              one turn's with {"turn": N}. Runs nothing
+    changes ID [--from=F]     changes so far, including a running turn; or one
+                              turn with {"turn": N}. Running turns use a live
+                              git snapshot; completed turns read saved patches
 
     skills                    the skills library, and what each agent has by
                               itself
@@ -462,7 +462,18 @@ def _changes(call):
                 1 <= turn <= len(session.get("turns") or [])):
             return _refusal("invalid", "This conversation has no turn %r." % (turn,))
         turn_dir = sessions.turn_directory(call.sessions, session_id, turn)
-    return dict(changes.read(where, turn_dir), ok=True, session=session_id, turn=turn)
+    turns = session.get("turns") or []
+    active = turns[-1] if turns else {}
+    if (active.get("state") == sessions.RUNNING and turn in (None, active.get("n"))
+            and sessions.held(call.sessions, session_id)):
+        try:
+            found = changes.preview(where, sessions.turn_directory(
+                call.sessions, session_id, active["n"]), session["folder"], whole=turn is None)
+        except (changes.ChangesError, OSError, ValueError) as exc:
+            return _refusal("changes_unavailable", str(exc))
+    else:
+        found = changes.read(where, turn_dir)
+    return dict(found, ok=True, session=session_id, turn=turn)
 
 
 # -- skills ---------------------------------------------------------------------

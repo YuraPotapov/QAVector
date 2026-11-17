@@ -148,6 +148,37 @@ match lit; `Enter`/`F3` go on, `Shift+Enter`/`Shift+F3` go back, `Esc` closes.
 `Ctrl+Shift+M` clarifies the running cycle and `Ctrl+Shift+S` goes to its
 Stages, from any window too.
 
+`Ctrl+Shift+A` opens **Quick Agent** from any page (if that key is free).
+Change it under Settings → Hotkeys → Quick Agent. The message field takes
+focus immediately: type a task and press `Enter`; `Shift+Enter` starts a line,
+and `Esc` closes the panel and returns focus. Opening creates no session.
+The initial connection, access mode and folder use the existing Chat choices;
+model and effort inherit the selected connection's settings. Changing the
+connection resets model and effort to that connection's defaults. An unsent
+draft stays in memory when the panel closes, including a visit to Connections.
+Settings always start collapsed when Quick Agent opens, even if expanded last
+time. Expand Settings to change the connection, model or folder. Connections
+are managed on the existing Integrations → Agents → Connections page.
+The panel height is fixed at 560 px (capped to fit the screen). History loads
+independently with a skeleton for slow reads; results, empty states and errors
+never resize the window. Long composer content and recent conversations scroll
+inside their own regions.
+
+Send opens the new conversation in **Integrations → Agents → Chat**, which
+owns streaming, Stop, approvals and retry. Recent conversations open that same
+Chat with their own folders and configuration; they are never restarted.
+Closing Quick Agent does not stop a running agent. Recent conversations belong
+to the current QAVector project and include all its connections. The compact
+streaming Quick Chat panel is not part of this first version.
+
+During a running turn, **Queue** waits until the agent finishes. Use
+**Interrupt & send** beside the composer or on a queued message for an urgent
+correction. QAVector stops the current turn and waits for its result before
+resuming the same conversation with that message. Existing changes remain;
+the remaining queued messages retain their order. If stopping fails, unsent
+messages and attachments return to the draft. This is stop-and-resume, not
+injection into an already running tool command.
+
 The recorder uses Qt key codes and canonicalizes the standard Ukrainian and
 English keyboard positions; the number row and the punctuation keys are named
 by where they are, so `Ctrl+Shift+2` is recorded as that in both layouts (not
@@ -168,6 +199,13 @@ plugins are retained. Ordinary widget navigation, text editing, and modal
 dialog acceptance remain managed by their Qt widgets.
 
 ## The pages
+
+**Agents Chat** — **Changes +100 -20** shows the conversation's current added
+and deleted line totals, including its running turn. The button and the open
+diff refresh about every two seconds while the agent works. Expanded files
+stay open. Totals compare the folder with the conversation's initial snapshot,
+so they also include edits made there by someone else; completed turns keep
+their saved patches.
 
 **Environments** — the environments `--env` can select, derived from the
 distinct `env` values in `users.json`, with their origin and user count. URL

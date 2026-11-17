@@ -16,7 +16,25 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Fixed
+- Agent chat **Changes** is available during the first turn, updates while
+  the agent works, and shows added/deleted line totals on the button. The
+  open diff also refreshes while keeping expanded files open.
+- Jira's **Delegate…** opens a chat with the task as an editable draft. The
+  agent starts only when the user sends it.
+- Jira's Delegate panel stays open when choosing an agent or using an owned
+  dialog. Previous conversations have separate titles, context, status and
+  time, with a Continue action and a bounded scrolling list.
+
 ### Added
+- Agent chats offer **Interrupt & send** for a new or queued message. The
+  current turn is stopped before the same conversation resumes with the
+  selected message; other queued messages keep their order. Failed stops
+  restore the unsent messages instead of starting another turn.
+- **Quick Agent Composer:** a configurable global shortcut (Ctrl+Shift+A when
+  available) opens a focused new-chat draft with existing connection, model,
+  effort, folder and access controls plus recent conversations. Send hands off
+  to the existing Agents Chat lifecycle; opening alone creates no session.
 - QCR Phase 1A internal registry and read API: versioned capability descriptors,
   project/resource-scoped discovery, property permissions and freshness, with
   an adapter for allowlisted snapshots from the existing service supervisor.

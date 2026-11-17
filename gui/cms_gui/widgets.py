@@ -79,8 +79,18 @@ class FloatingPanel(QFrame):
         QApplication.instance().focusWindowChanged.connect(self._focus_moved)
 
     def _focus_moved(self, window):
-        if window is not None and self.isVisible() and window is not self.windowHandle():
-            self.hide()
+        if window is None or not self.isVisible() or not _alive_widget(window):
+            return
+        # A combo's list or an owned dialog is another native window, but
+        # still part of this panel. Only focus outside that family dismisses it.
+        ancestor = window
+        while ancestor is not None:
+            if not _alive_widget(ancestor):
+                return
+            if ancestor is self.windowHandle():
+                return
+            ancestor = ancestor.transientParent()
+        self.hide()
 
 
 class Tag(QLabel):

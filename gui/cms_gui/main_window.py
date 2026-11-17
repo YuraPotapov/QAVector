@@ -351,6 +351,15 @@ class MainWindow(QMainWindow):
         self.addAction(self.search_action)
         self._register_action(self.search_action, "application.search", "Search",
                               "Search records across the application.", "Application")
+        self.quick_agent_action = QAction("Quick Agent", self)
+        candidate = "Ctrl+Shift+A"
+        if candidate not in self.action_registry.bindings().values():
+            self.quick_agent_action.setShortcut(QKeySequence(candidate))
+        self.quick_agent_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.quick_agent_action.triggered.connect(self.open_quick_agent)
+        self.addAction(self.quick_agent_action)
+        self._register_action(self.quick_agent_action, "application.quick_agent", "Quick Agent",
+                              "Start an agent conversation from any page.", "Application")
         self.action_registry.changed.connect(self._refresh_hotkey_hints)
         self._refresh_hotkey_hints()
         # Planned entries somebody asked to start later. Started when their
@@ -2632,7 +2641,31 @@ class MainWindow(QMainWindow):
         self.run_state.mark_stopping(name)
         self.status_right.setText("stopping %s — the others carry on" % name)
 
-    # -- search (Ctrl+K) --------------------------------------------------------
+    # -- global composers and search -------------------------------------------
+    def open_quick_agent(self):
+        if (QApplication.activeModalWidget() is not None
+                or QApplication.activePopupWidget() is not None
+                or self.action_registry.suspended):
+            return
+        from .quickagent import QuickAgentPopup
+
+        agents = self.integrations.agents
+        if agents.quick_composer is None:
+            agents.quick_composer = QuickAgentPopup(agents,
+                lambda: self.quick_agent_action.shortcut().toString(QKeySequence.NativeText), self)
+            agents.quick_composer.chat_wanted.connect(self._quick_agent_chat)
+        agents.quick_composer.open_over(QApplication.activeWindow() or self)
+
+    def _quick_agent_chat(self, session_id=""):
+        self.show_page("integrations")
+        self.integrations.open_provider("agents")
+        agents = self.integrations.agents
+        agents.tabs.setCurrentWidget(agents.chat)
+        if session_id:
+            agents.open_session(session_id)
+        agents.window().activateWindow()
+        agents.chat.composer.text.setFocus(Qt.OtherFocusReason)
+
     def open_search(self):
         """Search, over whichever window of the application is in front."""
         if self._search is None:

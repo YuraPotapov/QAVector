@@ -366,6 +366,10 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             said["attachments"] = attached
         emit(record.add(said))
         before = _snapshot(session_dir, folder)
+        try:
+            changes_mod.begin(session_dir, where, before)
+        except (OSError, ValueError):
+            pass  # Live inspection must not prevent a turn from running.
         outcome = _run(adapter, argv, folder, effective, seen, prompt, where, record, tell, stop,
                        cost_before=sessions.cost_so_far(session) if resume else None)
         turn["changes"] = _changed(session_dir, where, folder, before, written)

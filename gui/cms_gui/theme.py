@@ -976,6 +976,25 @@ QFrame[role="clarifyhead"] {{
     background: {n200}; border: none; border-bottom: 1px solid {divider};
 }}
 QFrame[role="clarifypopup"] QFrame[role="composer"] {{ border-top: none; }}
+/* Quick Agent has a single header surface and distinct recent conversations. */
+QFrame[role="quickagenthead"] {{
+    background: {n100}; border: none; border-bottom: 1px solid {divider};
+}}
+QListWidget[role="quickrecentlist"] {{
+    background: {bg}; border: none; border-top: 1px solid {divider}; outline: none;
+}}
+QListWidget[role="quickrecentlist"]::item {{
+    border: none; padding: 0; background: transparent;
+}}
+QListWidget[role="quickrecentlist"]::item:selected {{ background: transparent; }}
+QFrame[role="quickrecent"] {{
+    background: {bg}; border: none; border-bottom: 1px solid {divider};
+}}
+QFrame[role="quickrecent"]:hover {{ background: {n100}; }}
+QFrame[role="quickrecent"][current="true"] {{ background: {select_bg}; }}
+QLabel[role="quickrecenttitle"] {{ font-size: 13px; font-weight: 600; color: {text}; }}
+QLabel[role="quickrecentdetail"] {{ font-size: 11px; color: {n600}; }}
+QFrame[role="quickrecent"][current="true"] QLabel {{ color: {select_ink}; }}
 QLabel[role="composernote"] {{ font-size: 11px; color: {n700}; }}
 QLabel[role="composernote"][bad="true"] {{ color: {bad_ink}; }}
 
@@ -1004,6 +1023,9 @@ QLabel[role="searchdetail"] {{ font-family: {mono}; font-size: 11px; color: {n60
 QFrame[role="searchhit"][current="true"] QLabel[role="searchtitle"],
 QFrame[role="searchhit"][current="true"] QLabel[role="searchdetail"] {{ color: {select_ink}; }}
 QLabel[role="searchmore"] {{ font-size: 11px; color: {accent}; }}
+/* Previous conversations in Jira's Delegate panel. */
+QFrame[role="delegaterecent"] {{ background: {n100}; border: 1px solid {divider}; }}
+QLabel[role="delegaterecenttitle"] {{ font-size: 13px; font-weight: 600; color: {text}; }}
 
 /* One message in the feed. The stripe down its left edge is what became of
    it, in the same three inks a step's stripe uses on the canvas. */

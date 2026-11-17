@@ -11,14 +11,14 @@ them; they ask the core nothing - the bridge does.
   cost where the agent's program reports it, how full each one's context is,
   and the files changed.
 - **Changes**: each conversation's changes, folded until opened.
-- **Delegate**: carry on a conversation, or begin one with the issue as its
-  task.
+- **Delegate**: carry on a conversation, or open one with the issue as an
+  editable draft; the person sends it when ready.
 """
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QHeaderView, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
+                               QHeaderView, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
                                QFrame, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import icons, theme, widgets
@@ -384,6 +384,44 @@ class ChangesTab(_Shown):
 
 
 # -- the panel ---------------------------------------------------------------------
+class _ConversationChoice(QFrame):
+    """A previous conversation, with context distinct from its title and state."""
+
+    def __init__(self, session, key, parent):
+        super().__init__(parent)
+        self.setProperty("role", "delegaterecent")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 9, 8, 9)
+        row.setSpacing(12)
+        text = QVBoxLayout()
+        text.setSpacing(4)
+        self.title = widgets.ElidedLabel(title_text(session, key), Qt.ElideRight, self)
+        self.title.setTextFormat(Qt.PlainText)
+        self.title.setProperty("role", "delegaterecenttitle")
+        text.addWidget(self.title)
+        detail = " · ".join(part for part in (
+            session.get("connection_name") or session.get("connection"),
+            folder_text(session.get("folder"))) if part)
+        self.detail = widgets.ElidedLabel(detail, Qt.ElideMiddle, self)
+        self.detail.setTextFormat(Qt.PlainText)
+        self.detail.setProperty("role", "hint")
+        text.addWidget(self.detail)
+        row.addLayout(text, 1)
+        meta = QVBoxLayout()
+        meta.setSpacing(4)
+        self.state = QLabel(state_text(session), self)
+        self.when = QLabel(ago_text(session.get("updated")), self)
+        for label in (self.state, self.when):
+            label.setProperty("role", "hint")
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            meta.addWidget(label)
+        row.addLayout(meta)
+        self.continue_button = QPushButton("Continue", self)
+        self.continue_button.setProperty("variant", "ghost")
+        self.continue_button.setAccessibleName("Continue " + title_text(session, key))
+        row.addWidget(self.continue_button)
+
+
 class DelegatePanel(widgets.FloatingPanel):
     """Hand the issue to an agent: carry on a conversation about it, or begin one."""
 
@@ -411,17 +449,18 @@ class DelegatePanel(widgets.FloatingPanel):
         column = QVBoxLayout(body)
         column.setContentsMargins(12, 10, 12, 12)
         column.setSpacing(8)
-        self.earlier_label = QLabel("Carry on a conversation about it")
-        self.earlier_label.setProperty("role", "composerlabel")
+        self.earlier_label = widgets.kicker("Recent conversations")
         column.addWidget(self.earlier_label)
         self.earlier = QWidget()
         self.earlier_rows = QVBoxLayout(self.earlier)
         self.earlier_rows.setContentsMargins(0, 0, 0, 0)
-        self.earlier_rows.setSpacing(2)
-        column.addWidget(self.earlier)
-        self.new_label = QLabel("Or begin a new one")
-        self.new_label.setProperty("role", "composerlabel")
-        column.addWidget(self.new_label)
+        self.earlier_rows.setSpacing(6)
+        self.earlier_area = QScrollArea()
+        self.earlier_area.setFrameShape(QFrame.NoFrame)
+        self.earlier_area.setWidgetResizable(True)
+        self.earlier_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.earlier_area.setWidget(self.earlier)
+        column.addWidget(self.earlier_area)
         self.connection = widgets.capped(QComboBox(), 200)
         self.connection.setAccessibleName("Agent")
         self.mode = widgets.Segmented([label for label, _mode in MODES])
@@ -452,6 +491,7 @@ class DelegatePanel(widgets.FloatingPanel):
         self.cancel = QPushButton("Cancel")
         self.cancel.clicked.connect(self.hide)
         self.go = QPushButton("Delegate")
+        self.go.setToolTip("Open the task in Chat as a draft. Edit it or send it when ready.")
         self.go.setProperty("variant", "primary")
         self.go.clicked.connect(self._go)
         column.addWidget(widgets.row(None, self.cancel, self.go))
@@ -466,24 +506,21 @@ class DelegatePanel(widgets.FloatingPanel):
         while self.earlier_rows.count():
             item = self.earlier_rows.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
         shown = [one for one in sessions or [] if not one.get("record")][:self.SHOWN]
+        height = 0
         for one in shown:
-            said = " · ".join(part for part in (
-                title_text(one, key), state_text(one), ago_text(one.get("updated")),
-                one.get("connection_name") or "", folder_text(one.get("folder"))) if part)
-            label = widgets.ElidedLabel(mode=Qt.ElideRight)
-            label.setText(said)
-            label.setToolTip(said)
-            go = QPushButton("Carry on")
-            go.setProperty("variant", "ghost")
-            go.clicked.connect(lambda _c=False, sid=one.get("id"): self._carry_on(sid))
-            row = widgets.row(label, go)
-            row.layout().setStretchFactor(label, 1)
+            row = _ConversationChoice(one, key, self.earlier)
+            row.continue_button.clicked.connect(
+                lambda _c=False, sid=one.get("id"): self._carry_on(sid))
             self.earlier_rows.addWidget(row)
+            row.ensurePolished()
+            height += row.sizeHint().height()
+        self.earlier_area.setFixedHeight(min(210, height + max(0, len(shown) - 1) * 6))
         self.earlier_label.setVisible(bool(shown))
         self.earlier.setVisible(bool(shown))
-        self.new_label.setText("Or begin a new one" if shown else "Begin a conversation")
+        self.earlier_area.setVisible(bool(shown))
         self.connection.clear()
         for one in connections or []:
             self.connection.addItem(one.get("name") or one.get("id"), one.get("id"))

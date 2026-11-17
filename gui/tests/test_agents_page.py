@@ -105,6 +105,8 @@ class FakeCore:
         if command in self.answers:
             answer = self.answers[command]
             return answer(args, document) if callable(answer) else answer
+        if command == "changes":
+            return {"ok": True, "files": [], "patch": "", "added": 0, "removed": 0}
         if command == "list":
             return {"ok": True, "connections": [dict(one) for one in self.connections]}
         if command == "kinds":

@@ -97,6 +97,7 @@ class MessageCard(QFrame):
     """What a person said: a card, so it is told from what the agent said."""
 
     removed = Signal()
+    interrupt_requested = Signal()
 
     def __init__(self, text, when="", state="", removable=False, attachments=None):
         super().__init__()
@@ -116,6 +117,11 @@ class MessageCard(QFrame):
         head.addStretch(1)
         self.remove = None
         if removable:
+            self.interrupt = QPushButton("Interrupt & send")
+            self.interrupt.setProperty("variant", "ghost")
+            self.interrupt.setToolTip("Stop the current turn, then send this message in the same chat. Existing changes remain.")
+            self.interrupt.clicked.connect(self.interrupt_requested)
+            head.addWidget(self.interrupt)
             self.remove = QPushButton("Remove")
             self.remove.setProperty("variant", "ghost")
             self.remove.setCursor(Qt.PointingHandCursor)
@@ -249,6 +255,7 @@ class ChatFeed(QScrollArea):
 
     #: The person took the queued message at this index out of the queue.
     unqueued = Signal(int)
+    interrupt_requested = Signal(int)
     #: A planning card was acted on: answers sent, a plan sent back with
     #: comments - each the message to send as the next planning turn.
     answered = Signal(str)
@@ -310,7 +317,7 @@ class ChatFeed(QScrollArea):
         self._take(event)
         self._sync()
 
-    def set_waiting(self, sending, queued):
+    def set_waiting(self, sending, queued, interrupting=False):
         """What has been typed and is not on record yet: the message being
         handed over, and the ones waiting for the agent to finish."""
         for widget in self._waiting:
@@ -325,6 +332,11 @@ class ChatFeed(QScrollArea):
             card = MessageCard(document.get("message"), state="queued", removable=True,
                                attachments=document.get("attachments"))
             card.removed.connect(lambda index=index: self.unqueued.emit(index))
+            card.interrupt_requested.connect(lambda index=index: self.interrupt_requested.emit(index))
+            card.remove.setEnabled(not interrupting)
+            card.interrupt.setEnabled(not interrupting)
+            if interrupting and index == 0:
+                card.state.setText("STOPPING TO SEND")
             self._add_waiting(card)
         self._sync()
 
@@ -605,6 +617,12 @@ class MessageEdit(QPlainTextEdit):
 
     files_dropped = Signal(list)
 
+    composing = False
+
+    def inputMethodEvent(self, event):
+        self.composing = bool(event.preeditString())
+        super().inputMethodEvent(event)
+
     def canInsertFromMimeData(self, source):
         if source.hasUrls() and all(url.isLocalFile() for url in source.urls()):
             return True
@@ -621,6 +639,8 @@ class Composer(QFrame):
     """Whom to ask, where, how much it may do - and the box to ask in."""
 
     submitted = Signal(str)
+    interrupt_requested = Signal()
+    content_changed = Signal()
     stop_requested = Signal()
     restrictions_requested = Signal()
     #: Somebody wants to choose which skills the agent is handed.
@@ -772,12 +792,16 @@ class Composer(QFrame):
         self.send_button = QPushButton("Send")
         self.send_button.setProperty("variant", "primary")
         self.send_button.clicked.connect(self.send)
+        self.interrupt = QPushButton("Interrupt & send")
+        self.interrupt.setToolTip("Stop the current turn, then send this message in the same chat. Existing changes remain.")
+        self.interrupt.clicked.connect(self.interrupt_requested)
+        self.interrupt.hide()
         for button in (self.attach, self.stop, self.send_button):
             button.setStyleSheet("min-height: 30px; max-height: 30px; padding-top: 0px; padding-bottom: 0px;")
         for button in (self.stop, self.send_button):
             button.setFixedWidth(80)
         self.footer = widgets.row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
-                                  10, _caption("OTHERS"), self.others, None, self.stop, self.send_button)
+                                  10, _caption("OTHERS"), self.others, None, self.interrupt, self.stop, self.send_button)
         outer.addWidget(self.footer)
         self.text.textChanged.connect(self._sync_send)
         self._sync_send()
@@ -945,6 +969,10 @@ class Composer(QFrame):
     def _connection_picked(self, _index):
         # A new conversation starts with what its connection says for other agents.
         self._others_wanted = None
+        if self._session is None:
+            self.model.set_value("")
+            self._effort_wanted = ""
+            self.effort.clear()
         self._say_model()
         self.chosen.emit()
 
@@ -1017,6 +1045,7 @@ class Composer(QFrame):
         self.effort.blockSignals(False)
         self.effort.setToolTip("How hard the model is asked to think. Default leaves it to "
                                "the connection, else to the program's own settings.")
+        self.effort.setEnabled(bool(levels))
 
     def _folder_changed(self, _text):
         self._sync_restrictions()
@@ -1060,10 +1089,11 @@ class Composer(QFrame):
         self._animate()
         self._tick()
         self.stop.setVisible(bool(running))
+        self.interrupt.setVisible(bool(running))
         self.stop.setEnabled(True)
         self.send_button.setText("Queue" if running else "Send")
         self.text.setPlaceholderText(
-            "The agent is answering - what you write now is sent when it finishes"
+            "Queue a follow-up, or use Interrupt & send to change the current work"
             if running else "Message - Enter sends, Shift+Enter starts a new line")
 
     def working_text(self):
@@ -1151,6 +1181,7 @@ class Composer(QFrame):
 
     def _sync_send(self):
         self.send_button.setEnabled(bool(self.draft().strip() or self._attachments))
+        self.content_changed.emit()
 
     def say(self, text, bad=False):
         self.note.setText(text or "")
@@ -1184,6 +1215,8 @@ class Composer(QFrame):
         if (watched is self.text and event.type() == QEvent.KeyPress
                 and event.key() in (Qt.Key_Return, Qt.Key_Enter)
                 and not event.modifiers() & ~Qt.KeypadModifier):
+            if self.text.composing:
+                return False
             self.send()
             return True
         return super().eventFilter(watched, event)
@@ -1233,7 +1266,16 @@ class ChatTab(QWidget):
         self._fresh = set()             # sessions made for a turn not yet recorded
         self._drafts = {}               # session id ("" for new) -> what was typed
         self._draft_files = {}
+        self._changes_cache = {}
+        self._changes_pending = {}
+        self._changes_final = set()
+        self._changes_dialog_session = None
+        self._changes_timer = QTimer(self)
+        self._changes_timer.setInterval(2000)
+        self._changes_timer.timeout.connect(self._poll_changes)
+        self._changes_timer.start()
         self._stopping = set()
+        self._redirecting = set()
         self._creating = False
         self._view_serial = 0           # discard reads after navigation to New
         self._reading = None           # events arriving while history is read
@@ -1332,6 +1374,7 @@ class ChatTab(QWidget):
         frame = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.feed = ChatFeed()
         self.feed.unqueued.connect(self._unqueue)
+        self.feed.interrupt_requested.connect(self.interrupt_queued)
         self.feed.answered.connect(lambda said: self._card_turn(said, plan=True))
         self.feed.revise.connect(lambda said: self._card_turn(said, plan=True))
         self.feed.approve.connect(lambda mode, said: self._card_turn(said, plan=False, mode=mode))
@@ -1340,6 +1383,7 @@ class ChatTab(QWidget):
         frame.layout().addWidget(self.feed, 1)
         self.composer = Composer()
         self.composer.submitted.connect(self.submit)
+        self.composer.interrupt_requested.connect(self.interrupt_submit)
         self.composer.stop_requested.connect(self.stop)
         self.composer.restrictions_requested.connect(self.edit_restrictions)
         self.composer.skills_requested.connect(self.choose_skills)
@@ -1461,6 +1505,9 @@ class ChatTab(QWidget):
         self.sessions, self.current = [], None
         self._sending, self._queued, self._drafts = {}, {}, {}
         self._draft_files = {}
+        self._changes_cache = {}
+        self._changes_pending = {}
+        self._changes_final = set()
         self._stopping = set()
         self._creating = False
         self._fresh = set()
@@ -1495,6 +1542,10 @@ class ChatTab(QWidget):
                 or any(self._draft_files.values()) or any(self._queued.values()))
 
     def shutdown(self):
+        self._changes_pending = {}
+        if self.changes_dialog is not None:
+            self.changes_dialog.close()
+        self._redirecting.clear()
         self._stopping.update(self.turns)
         for turn in list(self.turns.values()):
             turn.shutdown()
@@ -1511,6 +1562,7 @@ class ChatTab(QWidget):
     def load_sessions(self, then=None):
         if self.core() is None:
             return
+        serial = self._view_serial
         self.skeleton.start()
 
         def done(payload):
@@ -1523,7 +1575,7 @@ class ChatTab(QWidget):
                 return
             self.sessions = list(payload.get("sessions") or [])
             self._fill()
-            if first and self.current is None:
+            if first and self.current is None and serial == self._view_serial:
                 wanted = self._memory().get("session") or ""
                 if any(one.get("id") == wanted for one in self.sessions):
                     self.open_session(wanted)
@@ -1596,7 +1648,9 @@ class ChatTab(QWidget):
         self.composer.setVisible(not nobody)
         self.composer.set_running(self._key() in self.turns,
                                   self._turn_began.get(self._key()))
-        self.composer.stop.setEnabled(self._key() not in self._stopping)
+        self.composer.stop.setEnabled(self._key() not in self._stopping or
+                                      self._key() in self._redirecting)
+        self.composer.interrupt.setEnabled(self._key() not in self._stopping)
         self.table.setEnabled(not self._creating)
         self.new_button.setEnabled(not self._creating)
         self.composer.text.setEnabled(not self._creating)
@@ -1701,6 +1755,7 @@ class ChatTab(QWidget):
         self._sync_strip()
         self._refresh_inbox()
         self._fill()
+        self._refresh_changes()
 
     def _sync_cards(self):
         """The newest planning card waits for the person only while the
@@ -1732,16 +1787,90 @@ class ChatTab(QWidget):
             return
         session_id = session["id"]
         turns = [one.get("n") for one in session.get("turns") or []
-                 if (one.get("changes") or {}).get("files")]
+                 if (one.get("changes") or {}).get("files") or one.get("state") == "running"]
 
         def read(number, done):
-            self.ask("changes", lambda core, cancel: core.agents(
-                "changes", session_id, document={"turn": number} if number else {},
-                cancel=cancel), done)
+            self._read_changes(session_id, number, done)
 
         if self.changes_dialog is None:
             self.changes_dialog = ChangesDialog(parent=self)
+        self._changes_dialog_session = session_id
         self.changes_dialog.show_for(session.get("title") or "Untitled", turns, read, turn)
+
+    def _read_changes(self, session_id, number, done):
+        """Coalesce a dialog and button reading the same live snapshot."""
+        key = (session_id, number)
+        if key in self._changes_pending:
+            self._changes_pending[key].append(done)
+            return
+        pending = self._changes_pending
+        pending[key] = [done]
+
+        def ready(payload):
+            if pending is not self._changes_pending:
+                return
+            if number is None and session_id in self.turns and payload.get("ok"):
+                # The first request may arrive before the core has persisted
+                # the new turn. Keep the window following it in that gap.
+                payload = dict(payload, live=True)
+            if number is None:
+                # The button needs totals, not a potentially multi-megabyte
+                # patch for every conversation visited in this window.
+                self._changes_cache[session_id] = {name: payload[name] for name in (
+                    "ok", "added", "removed", "live", "pending", "error", "unkept") if name in payload}
+                if self._showing(session_id):
+                    self._changes_label()
+            for callback in pending.pop(key, []):
+                callback(payload)
+
+        self.ask("changes:%s:%s" % key, lambda core, cancel: core.agents(
+            "changes", session_id, document={"turn": number} if number else {},
+            cancel=cancel), ready)
+
+    def _poll_changes(self):
+        session = self.current or {}
+        # An open whole-session diff already polls; its answer also updates
+        # the button, so do not snapshot the folder a second time.
+        if (self.changes_dialog is not None and self.changes_dialog.isVisible()
+                and self._changes_dialog_session == self._key()
+                and self.changes_dialog.scope.currentData() is None):
+            return
+        found = self._changes_cache.get(self._key()) or {}
+        remote = (session.get("running") or session.get("state") == "running") and (
+            not found.get("ok") or found.get("live"))
+        if self.isVisible() and (self._key() in self.turns or remote):
+            self._refresh_changes()
+
+    def _refresh_changes(self, final=False):
+        if self.current is None or self.core() is None:
+            return
+        session_id = self.current["id"]
+        if not (self.current.get("turns") or self.current.get("running") or session_id in self.turns):
+            return
+        if (session_id, None) in self._changes_pending:
+            if final:
+                self._changes_final.add(session_id)
+            return
+
+        def done(payload):
+            if self._showing(session_id):
+                if session_id in self._changes_final:
+                    self._changes_final.discard(session_id)
+                    self._refresh_changes()
+
+        self._read_changes(session_id, None, done)
+
+    def _changes_label(self):
+        session = self.current or {}
+        found = self._changes_cache.get(session.get("id")) or {}
+        visible = bool(session.get("turns") or session.get("running") or self._key() in self.turns)
+        self.changes_button.setVisible(visible)
+        available = found.get("ok") and not found.get("pending")
+        self.changes_button.setText("Changes +%d -%d" % (
+            found.get("added") or 0, found.get("removed") or 0) if available else "Changes")
+        self.changes_button.setToolTip(found.get("error") or (
+            "Current changes in the conversation's folder. Includes edits made by others."
+            + (" Some files could not be compared." if found.get("unkept") else "")))
 
     def _head(self):
         session = self.current or {}
@@ -1756,11 +1885,12 @@ class ChatTab(QWidget):
             ran_with_text(session), "context " + context if context else "", cost) if part))
         tokens = tokens_text(session.get("tokens"))
         self.usage.setToolTip("Tokens so far: %s" % tokens if tokens else "")
-        self.changes_button.setVisible(bool(session.get("turns")))
+        self._changes_label()
 
     def _waiting(self):
         key = self._key()
-        self.feed.set_waiting(self._sending.get(key, ""), self._queued.get(key, []))
+        self.feed.set_waiting(self._sending.get(key, ""), self._queued.get(key, []),
+                              interrupting=key in self._redirecting)
 
     # -- saying something --------------------------------------------------------
     def submit(self, text):
@@ -1839,13 +1969,16 @@ class ChatTab(QWidget):
         self.ask("session-new", lambda core, cancel: core.agents(
             "session-new", document=document), done)
 
-    def delegate(self, chosen, source, message, done=None):
+    def delegate(self, chosen, source, message, done=None, *, send=True):
         """Open a conversation another part of QAVector hands a task to, and
-        say its first message - shown here, as any conversation is.
+        say its first message, or leave it as an editable draft when
+        ``send=False``. A draft starts no agent turn.
 
         ``chosen`` is what the composer would say: ``connection``, ``folder``,
-        ``mode``, ``plan`` and ``title``; ``source`` who handed it over, with
-        the ``ref`` it finds its conversations by. Whatever is typed in the
+        ``mode``, ``plan``, ``model``, ``effort`` and ``title``, plus optional
+        restrictions, skills, attachments and other-agent policy; ``source``
+        who handed it over, with the ``ref`` it finds its conversations by.
+        Whatever is typed in the
         composer for a new conversation stays as it was. ``done`` hears the
         conversation, or an answer that is not ``ok``.
         """
@@ -1853,11 +1986,18 @@ class ChatTab(QWidget):
             return False
         document = {"connection": chosen.get("connection") or "",
                     "folder": chosen.get("folder") or "", "mode": chosen.get("mode") or "read",
-                    "plan": bool(chosen.get("plan")), "model": "", "title": chosen.get("title") or "",
-                    "restrictions": dict(chosen.get("restrictions") or {}), "skills": [],
+                    "plan": bool(chosen.get("plan")), "model": chosen.get("model") or "",
+                    "effort": chosen.get("effort") or "", "title": chosen.get("title") or "",
+                    "restrictions": dict(chosen.get("restrictions") or {}),
+                    "skills": list(chosen.get("skills") or []),
                     "source": dict(source or {})}
-        first = {"message": message, "mode": document["mode"], "model": "",
+        if "others" in chosen:
+            document["others"] = chosen["others"]
+        first = {"message": message, "mode": document["mode"], "model": document["model"],
+                 "effort": document["effort"],
                  "plan": document["plan"]}
+        if chosen.get("attachments"):
+            first["attachments"] = list(chosen["attachments"])
         self._creating = True
         self._sync()
 
@@ -1874,8 +2014,14 @@ class ChatTab(QWidget):
             self._remember(folders=folders[:RECENT_FOLDERS])
             self._fresh.add(session.get("id"))
             self.sessions.insert(0, session)
+            self._leave()
+            if not send:
+                self._drafts[session["id"]] = message
+                self._draft_files[session["id"]] = list(chosen.get("attachments") or [])
             self._show(session, [], whole=True)
-            self._start(session, message, document=first)
+            if send:
+                self._start(session, message, document=first)
+            self.composer.text.setFocus()
             self.conversation_changed.emit(session.get("id") or "")
             if done is not None:
                 done(payload)
@@ -1926,6 +2072,13 @@ class ChatTab(QWidget):
             self._waiting()
         self._fill()
         turn.start()
+        if self._showing(session_id):
+            self._changes_label()
+            self._refresh_changes()
+        if (self.changes_dialog is not None and self.changes_dialog.isVisible()
+                and self._changes_dialog_session == session_id
+                and self.changes_dialog.scope.currentData() is None):
+            self.changes_dialog.load(refresh=True)
 
     def _heard(self, session_id, event):
         if self._reading is not None and self._reading[0] == session_id:
@@ -1952,6 +2105,8 @@ class ChatTab(QWidget):
         unsent = self._sending.pop(session_id, None)
         queued = self._queued.pop(session_id, [])
         stopped = session_id in self._stopping
+        redirecting = session_id in self._redirecting
+        self._redirecting.discard(session_id)
         self._stopping.discard(session_id)
         fresh = session_id in self._fresh
         self._fresh.discard(session_id)
@@ -1964,7 +2119,8 @@ class ChatTab(QWidget):
         if showing and not reported and (state or answer.get("record_unknown")):
             self.feed.append({"type": state or "interrupted",
                               "error": answer.get("error", "")})
-        if state == "completed" and queued and not stopped:
+        if queued and ((state == "completed" and not stopped) or
+                       (redirecting and state in ("completed", "stopped"))):
             # It finished, and somebody had more to say: said now, in order.
             session = next((one for one in self.sessions if one.get("id") == session_id), None)
             if session is not None:
@@ -2000,6 +2156,8 @@ class ChatTab(QWidget):
             self.composer.say(answer.get("error") or "The message could not be sent.",
                               bad=True)
         self._fill()
+        if showing:
+            self._refresh_changes(final=True)
 
     def _forget(self, session_id):
         """Take back a conversation that never began: what was chosen for it
@@ -2013,12 +2171,37 @@ class ChatTab(QWidget):
             "session-delete", session_id), lambda _payload: None)
 
     def _unqueue(self, index):
+        if self._key() in self._redirecting:
+            return
         queued = self._queued.get(self._key(), [])
         if 0 <= index < len(queued):
             del queued[index]
             self._waiting()
 
+    def interrupt_submit(self):
+        key = self._key()
+        if key not in self.turns or key in self._stopping:
+            return
+        if not self.composer.draft().strip() and not self.composer.attachments():
+            return
+        self.submit(self.composer.draft())
+        self.interrupt_queued(len(self._queued.get(key, [])) - 1)
+
+    def interrupt_queued(self, index):
+        key = self._key()
+        queued = self._queued.get(key, [])
+        if key not in self.turns or key in self._stopping or not 0 <= index < len(queued):
+            return
+        queued.insert(0, queued.pop(index))
+        self._redirecting.add(key)
+        self._stopping.add(key)
+        self._waiting()
+        self.composer.interrupt.setEnabled(False)
+        self.composer.say("Stopping the current turn; your message will be sent next.")
+        self.turns[key].stop()
+
     def stop(self):
+        self._redirecting.discard(self._key())
         turn = self.turns.get(self._key())
         if turn is not None:
             self._stopping.add(self._key())

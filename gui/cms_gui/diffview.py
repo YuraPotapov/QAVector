@@ -12,7 +12,7 @@ the turn, which is the agent's work plus anything somebody else did there
 meanwhile, and it says so.
 """
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtGui import QColor, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (QDialog, QComboBox, QFrame, QLabel, QPlainTextEdit,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
@@ -222,10 +222,17 @@ class DiffView(QWidget):
             self.scroll = None
             column.addWidget(self._body)
         self.sections = []
+        self._shown_changes = None
         self.set_changes({})
 
-    def set_changes(self, found):
+    def set_changes(self, found, preserve=False):
         found = found or {}
+        if preserve and found == self._shown_changes:
+            return
+        self._shown_changes = found
+        expanded = {section.entry.get("path") for section in self.sections
+                    if preserve and section.is_expanded()}
+        position = self.scroll.verticalScrollBar().value() if preserve and self.scroll else 0
         for section in self.sections:
             self._files.removeWidget(section)
             section.hide()                  # not a window of its own when shown late
@@ -234,6 +241,8 @@ class DiffView(QWidget):
         self.sections = []
         self.summary.setText(summary_text(found))
         notes = [WHOSE]
+        if found.get("live"):
+            notes.append("Updating while the agent works.")
         if found.get("unkept"):
             where = ", ".join("the folder itself" if one == "." else one
                               for one in found["unkept"])
@@ -250,6 +259,10 @@ class DiffView(QWidget):
             section = FileSection(entry, parts.get(entry.get("path", ""), ""))
             self._files.insertWidget(len(self.sections), section)
             self.sections.append(section)
+            if entry.get("path") in expanded:
+                section.set_expanded(True)
+        if preserve and self.scroll:
+            self.scroll.verticalScrollBar().setValue(position)
         for button in (self.expand, self.collapse):
             button.setVisible(bool(self.sections))
 
@@ -271,6 +284,11 @@ class ChangesDialog(QDialog):
         self.resize(900, 640)
         self._read = None
         self._serial = 0
+        self._pending = False
+        self._refresh = QTimer(self)
+        self._refresh.setSingleShot(True)
+        self._refresh.setInterval(2000)
+        self._refresh.timeout.connect(lambda: self.isVisible() and self.load(refresh=True))
         column = QVBoxLayout(self)
         column.setSpacing(8)
         self.scope = widgets.capped(QComboBox(), 360)
@@ -297,21 +315,34 @@ class ChangesDialog(QDialog):
         self.raise_()
         self.activateWindow()
 
-    def load(self):
+    def load(self, refresh=False):
         if self._read is None:
             return
+        if refresh and self._pending:
+            return
+        self._refresh.stop()
         self._serial += 1
         serial = self._serial
-        self.view.set_changes({})
-        self.view.summary.setText("Reading...")
+        self._pending = True
+        if not refresh:
+            self.view.set_changes({})
+            self.view.summary.setText("Reading...")
 
         def done(payload):
             if serial != self._serial:
                 return
+            self._pending = False
             if not payload.get("ok"):
-                self.view.set_changes({"error": payload.get("error")
-                                       or "What changed could not be read."})
+                self.view._shown_changes = None
+                if not refresh:
+                    self.view.summary.setText("Changes unavailable")
+                self.view.note.setText(payload.get("error") or "What changed could not be read.")
+                self._refresh.start()
                 return
-            self.view.set_changes(payload)
+            self.view.set_changes(payload, preserve=refresh)
+            if payload.get("pending"):
+                self.view.summary.setText("Reading current changes...")
+            if payload.get("live"):
+                self._refresh.start()
 
         self._read(self.scope.currentData(), done)

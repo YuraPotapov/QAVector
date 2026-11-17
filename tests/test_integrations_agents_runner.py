@@ -62,6 +62,31 @@ def world(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ a turn taken
+def test_changes_command_sees_files_before_the_running_turn_finishes(world):
+    from types import SimpleNamespace
+    from integrations.agents import cli as agent_cli
+
+    session = world.session(mode="edit")
+    observed = []
+
+    def inspect(event):
+        if event.get("type") == "file.written":
+            found = agent_cli._changes(SimpleNamespace(
+                sessions=world.root, rest=[session["id"]], source=None))
+            assert sessions.load(world.root, session["id"])["turns"][-1]["state"] == "running"
+            observed.append(found)
+
+    answer = runner.send(world.root, session["id"], "Write a note", agents_path=world.agents,
+                         emit=inspect)
+    assert answer["turn"]["state"] == "completed" and len(observed) == 1
+    assert observed[0]["ok"] and observed[0]["live"]
+    assert observed[0]["added"] == 1
+    assert [one["path"] for one in observed[0]["files"]] == ["notes.md"]
+    final = agent_cli._changes(SimpleNamespace(
+        sessions=world.root, rest=[session["id"]], source=None))
+    assert not final.get("live") and final["added"] == 1
+
+
 def test_a_turn_is_said_answered_and_all_of_it_kept(world):
     session = world.session()
     answer, seen = world.send(session, "Why does the login test fail?")
