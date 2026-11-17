@@ -214,7 +214,67 @@ def normal_source(source):
     for key in ("parent", "by", "role"):
         if str(source.get(key) or "").strip():
             kept[key] = str(source[key]).strip()
+    # What it was linked to since (ADR-014): an issue it read the details of.
+    links = [str(one).strip() for one in source.get("links") or [] if str(one).strip()]
+    if links:
+        kept["links"] = links[:MAX_LINKS]
     return kept
+
+
+#: Issues one conversation is linked to, beyond what it was started for (ADR-014).
+MAX_LINKS = 20
+_LINKS = "links.json"
+
+
+def links_of(root, session_id):
+    """The refs a conversation was linked to since it began - kept beside its
+    record, not in it: a running turn rewrites the record, and a link made
+    during that turn must not be lost."""
+    try:
+        with open(os.path.join(directory(root, session_id), _LINKS), encoding="utf-8") as handle:
+            found = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    return [str(one) for one in (found.get("refs") if isinstance(found, dict) else None) or []
+            if isinstance(one, str) and one.strip()][:MAX_LINKS]
+
+
+def _save_links(root, session_id, refs):
+    folder = directory(root, session_id)
+    if not os.path.isdir(folder):
+        raise SessionError("There is no session %s." % session_id, "not_found")
+    path = os.path.join(folder, _LINKS)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump({"refs": refs[:MAX_LINKS]}, handle)
+    os.replace(temporary, path)
+
+
+def link(root, session_id, ref):
+    """Link a conversation to ``ref`` (``jira:<connection>:<KEY>``). True when it
+    was not linked yet - neither so started nor so linked."""
+    ref = str(ref or "").strip()
+    session = load(root, session_id)
+    if not ref or ref in refs_of(session):
+        return False
+    _save_links(root, session_id, links_of(root, session_id) + [ref])
+    return True
+
+
+def unlink(root, session_id, ref):
+    """Undo a link; what a conversation was started for stays its own."""
+    refs = links_of(root, session_id)
+    if ref not in refs:
+        return False
+    _save_links(root, session_id, [one for one in refs if one != ref])
+    return True
+
+
+def refs_of(session):
+    """Every ref a conversation has: what it was started for, then its links."""
+    source = (session or {}).get("source") or {}
+    found = [source.get("ref")] + list(source.get("links") or [])
+    return list(dict.fromkeys(one for one in found if one))
 
 
 def is_record(session):
@@ -301,10 +361,21 @@ def load(root, session_id):
         raise SessionError("cannot read %s: %s" % (path, exc))
     if not isinstance(session, dict) or session.get("id") != session_id:
         raise SessionError("%s is not this session's record." % path)
+    source = dict(session.get("source") or {})
+    source.pop("links", None)
+    links = links_of(root, session_id)
+    if links:
+        source["links"] = links
+    session["source"] = source
     return session
 
 
 def save(root, session):
+    # Its links are kept beside it (links.json), never in the record.
+    source = dict(session.get("source") or {})
+    if "links" in source:
+        source.pop("links")
+        session = dict(session, source=source)
     _write(os.path.join(directory(root, session["id"]), "session.json"), session)
 
 
@@ -326,6 +397,12 @@ def described(root, session):
     shown["state"] = RUNNING if running else (turns[-1]["state"] if turns else "")
     shown["source"] = dict(normal_source(session.get("source")),
                            record=is_record(session))
+    # Its links as they are now, not as the copy in hand had them: a turn's copy
+    # was read before its agent linked an issue (ADR-014).
+    shown["source"].pop("links", None)
+    links = links_of(root, session["id"])
+    if links:
+        shown["source"]["links"] = links
     shown["record"] = shown["source"]["record"]
     return settle(shown)
 
@@ -350,7 +427,7 @@ def listing(root, limit=0, offset=0, query="", ref=""):
             continue                    # half made, or not ours: not a session
     ref = str(ref or "").strip()
     if ref:
-        found = [one for one in found if (one.get("source") or {}).get("ref") == ref]
+        found = [one for one in found if ref in refs_of(one)]
     needle = " ".join(str(query or "").lower().split())
     if needle:
         def text(one):

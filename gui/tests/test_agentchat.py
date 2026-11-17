@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QWidget
+from PySide6.QtWidgets import QDialog, QPushButton, QWidget
 
 from cms_gui import widgets
 from cms_gui.pages import agentchat
@@ -1449,3 +1449,24 @@ def test_a_row_taken_out_of_the_feed_never_becomes_a_window(qapp, dispose):
     assert [one for one in QApplication.topLevelWidgets()
             if one.isVisible() and type(one).__name__ in ("StageRow", "_Row")] == []
     dispose(holder)
+
+
+# -- the issues a conversation is about (QCR ADR-014) ---------------------------------
+def test_a_conversation_shows_the_issues_it_is_about_and_a_link_can_be_undone(make):
+    session = _session(source={"label": "Jira", "detail": "", "ref": "jira:team:QA-1"})
+    core = FakeCore(sessions=[session], events={session["id"]: _events()})
+    chat = make(core).agents.chat
+    chat.table.selectRow(0)
+    chips = lambda: [one.text() for one in chat.links.findChildren(QPushButton, "issueLink")]
+    assert chips() == ["QA-1"] and chat.links.findChildren(QPushButton, "issueUnlink") == []
+    # Its agent read another issue's details: linked, and said so at once.
+    chat.conversation_linked({"session": session["id"], "ref": "jira:team:QA-7"})
+    assert chips() == ["QA-1", "QA-7"]
+    opened = []
+    chat.issue_wanted.connect(lambda connection_id, key: opened.append((connection_id, key)))
+    [chip for chip in chat.links.findChildren(QPushButton, "issueLink") if chip.text() == "QA-7"][0].click()
+    assert opened == [("team", "QA-7")]
+    [undo] = chat.links.findChildren(QPushButton, "issueUnlink")       # only the link: QA-1 it began with
+    undo.click()
+    assert (("session-link", session["id"]), {"unlink": "jira:team:QA-7"}) in core.calls
+    assert chips() == ["QA-1"]

@@ -313,6 +313,8 @@ class MainWindow(QMainWindow):
         self.qcr_host.execution_changed.connect(self.integrations.agents.chat.agent_execution)
         # A turn waits at a budget: a card where it was handed on (ADR-013).
         self.qcr_host.budget_reached.connect(self.integrations.agents.chat.budget_reached)
+        # An agent read an issue's details: the conversation shows it is about it (ADR-014).
+        self.qcr_host.conversation_linked.connect(self.integrations.agents.chat.conversation_linked)
         # An agent's change to Jira waits for the person there, and on the
         # Integrations page (ADR-007 D7).
         self.qcr_host.integration_changes_changed.connect(self.integrations.agents.chat.integration_changes_changed)

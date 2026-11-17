@@ -1461,6 +1461,8 @@ class ChatTab(QWidget):
     #: A conversation was begun, or one of its turns ended: its id. For
     #: whatever shows conversations elsewhere and wants to read them again.
     conversation_changed = Signal(str)
+    #: (connection id, key) - an issue a conversation is about, to open (ADR-014).
+    issue_wanted = Signal(str, str)
 
     #: What reads a turn as it happens. A test puts a stand-in here.
     turn_factory = AgentTurn
@@ -1594,6 +1596,15 @@ class ChatTab(QWidget):
         sub_row = widgets.row(self.sub, self.usage, self.changes_button)
         sub_row.layout().setStretchFactor(self.sub, 1)
         column.addWidget(sub_row)
+        # The issues it is about: started for one, or linked because its agent read
+        # one's details (ADR-014). A link can be undone; what it began with stays.
+        self.links = QWidget()
+        self.links.setObjectName("conversationLinks")
+        self._links_row = QHBoxLayout(self.links)
+        self._links_row.setContentsMargins(0, 0, 0, 0)
+        self._links_row.setSpacing(4)
+        self.links.setVisible(False)
+        column.addWidget(self.links)
         self.earlier = QPushButton("Show the whole conversation")
         self.earlier.setProperty("variant", "ghost")
         self.earlier.setToolTip("Only its newest part is shown. Read the rest too.")
@@ -2129,7 +2140,80 @@ class ChatTab(QWidget):
             budget + " budget" if budget else "") if part))
         tokens = tokens_text(session.get("tokens"))
         self.usage.setToolTip("Tokens so far: %s" % tokens if tokens else "")
+        self._show_links(session)
         self._changes_label()
+
+    def _show_links(self, session):
+        while self._links_row.count():
+            item = self._links_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                # Off the header at once, its slots cut first: a slot still holding
+                # this tab must not outlive it in the deferred delete.
+                if isinstance(widget, QPushButton):
+                    try:
+                        widget.clicked.disconnect()
+                    except (RuntimeError, TypeError):
+                        pass
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        source = (session or {}).get("source") or {}
+        refs = [one for one in [source.get("ref")] + list(source.get("links") or []) if one and one.startswith("jira:")]
+        refs = list(dict.fromkeys(refs))
+        if refs:
+            said = QLabel("ABOUT")
+            said.setProperty("role", "composerlabel")
+            self._links_row.addWidget(said)
+        for ref in refs:
+            _kind, connection_id, key = (ref.split(":", 2) + ["", ""])[:3]
+            chip = QPushButton(key)
+            chip.setProperty("variant", "ghost")
+            chip.setObjectName("issueLink")
+            chip.setToolTip("Open %s in Jira." % key)
+            chip.clicked.connect(lambda _checked=False, c=connection_id, k=key: self.issue_wanted.emit(c, k))
+            self._links_row.addWidget(chip)
+            if ref != source.get("ref"):
+                undo = QPushButton()
+                undo.setIcon(icons.icon("close", theme.NEUTRAL[600]))
+                undo.setProperty("variant", "ghost")
+                undo.setObjectName("issueUnlink")
+                undo.setFixedWidth(22)
+                undo.setToolTip("This conversation is not about %s: undo the link. What it said stays." % key)
+                undo.clicked.connect(lambda _checked=False, r=ref: self._unlink(r))
+                self._links_row.addWidget(undo)
+        self._links_row.addStretch(1)
+        self.links.setVisible(bool(refs))
+
+    def conversation_linked(self, found):
+        """An agent read an issue's details: the conversation is about it now."""
+        session = next((one for one in self.sessions if one.get("id") == found.get("session")), None)
+        if session is None:
+            return
+        source = dict(session.get("source") or {})
+        links = list(source.get("links") or [])
+        if found.get("ref") and found["ref"] not in links:
+            source["links"] = links + [found["ref"]]
+            session["source"] = source
+        if self._showing(session["id"]):
+            self._show_links(session)
+
+    def _unlink(self, ref):
+        session = self.current
+        if session is None:
+            return
+
+        def done(payload):
+            if payload.get("ok"):
+                shown = payload.get("session") or {}
+                self._put(shown)
+                if self._showing(shown.get("id")):
+                    self.current = shown
+                    self._show_links(shown)
+            else:
+                self.composer.say(payload.get("error") or "The link was not undone.", bad=True)
+        self.ask("session-link", lambda core, cancel: core.agents(
+            "session-link", session["id"], document={"unlink": ref}, cancel=cancel), done)
 
     def _waiting(self):
         key = self._key()

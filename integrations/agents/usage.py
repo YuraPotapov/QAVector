@@ -197,7 +197,7 @@ def for_ref(root, ref, found=None):
     """The conversations with exactly ``ref`` - an issue's, say - own and
     inclusive of what they handed on."""
     found = _all(root) if found is None else found
-    owned = [one for one in found if (one.get("source") or {}).get("ref") == ref]
+    owned = [one for one in found if ref in sessions.refs_of(one)]
     children = []
     for one in owned:
         children += [child for child in children_of(found, one["id"]) if child not in children]

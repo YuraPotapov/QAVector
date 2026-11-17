@@ -43,6 +43,8 @@ class IntegrationAdapter:
         ``folder(actor_id)`` is where that actor may take a file from, or None."""
         text(project_id, "project id")
         self.registry, self.project_id = registry, project_id
+        #: Called with the connections' rows after each refresh: what registers beside them.
+        self.refreshed = []
         self._source, self._clock, self._owner = source, clock, object()
         self.writer = WriteInvoker(source, notify or (lambda message: None), label or (lambda actor: actor),
                                    spawn, folder or (lambda actor: None))
@@ -71,7 +73,8 @@ class IntegrationAdapter:
     def refresh(self):
         """Metadata-only refresh. Unknown/unimplemented providers are not exposed."""
         registrations, targets = [], {}
-        for row in self._connections():
+        rows = self._connections()
+        for row in rows:
             provider = self._providers.get(row["provider"])
             if provider is None:
                 continue
@@ -103,6 +106,8 @@ class IntegrationAdapter:
                     wcaps, lambda ref, names: {}, invoker=self.writer))
         self.registry.replace(self._owner, registrations)
         self.writer.targets = targets
+        for hook in self.refreshed:
+            hook(rows)
 
     def _properties(self, connection_id, provider_name):
         def read(ref, names):
@@ -120,11 +125,29 @@ class IntegrationAdapter:
             if operation.version != version:
                 raise QCRError("not_found", "Operation version is unavailable.")
             try:
-                return self._source.read(connection_id, provider.name, operation.name, request)
+                return text_only(self._source.read(connection_id, provider.name, operation.name, request))
             except ReadError as exc:
                 # The code and its fixed sentence only; never the cause.
                 raise QCRError(exc.code, READ_ERRORS[exc.code]) from None
         return read
+
+
+#: What a page needs to draw and edit an issue, not what an agent reads: through
+#: QCR they come empty - the text beside them is whole (ADR-014). The schema
+#: keeps the fields; a description three times over did not fit an agent's read.
+_PAGE_ONLY = {"description_html": "", "description_doc": None, "description_lost": [],
+              "html": "", "doc": None, "lost": []}
+
+
+def text_only(found):
+    """An issue or comments page with the page's HTML and editor documents emptied."""
+    def slim(value):
+        if isinstance(value, dict):
+            return {key: (_PAGE_ONLY[key] if key in _PAGE_ONLY else slim(one)) for key, one in value.items()}
+        if isinstance(value, list):
+            return [slim(one) for one in value]
+        return value
+    return slim(found)
 
 
 class WriteInvoker:

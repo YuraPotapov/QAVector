@@ -122,6 +122,8 @@ class QcrHost(QObject):
     round_finished = Signal(dict)
     #: A turn waits at a budget for the person's word (ADR-013 D3).
     budget_reached = Signal(dict)
+    #: An agent read an issue's details: its conversation is linked to it (ADR-014).
+    conversation_linked = Signal(dict)
 
     def __init__(self, supervisor, parent=None, bridge=None):
         """``bridge``: the main window's ServiceBridge, shared with scenarios;
@@ -345,6 +347,8 @@ class QcrHost(QObject):
             self.round_finished.emit(dict(message))
         elif kind == "budget_reached":
             self.budget_reached.emit(dict(message))
+        elif kind == "conversation_linked":
+            self.conversation_linked.emit(dict(message))
         elif kind == "error":
             log.warning("QCR host refused a line: %s", (message.get("error") or {}).get("code"))
 

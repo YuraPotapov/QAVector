@@ -1777,6 +1777,38 @@ def test_a_found_issue_opens_even_when_the_list_does_not_have_it(make):
                               {"key": "QA-500", "comments": jira_module.COMMENTS})
 
 
+def test_an_issue_a_conversation_is_about_opens_by_its_key_whatever_the_filters(make):
+    """From a chat's ABOUT chip (ADR-014): not in the list as it is filtered, the
+    issue is looked up by its key, then opened as Ctrl+K opens what it found."""
+    core = FakeCore(search=_found_in_jira)
+    page = make(core)
+    assert all(row["key"] != "QA-500" for row in page.jira.issues.rows())
+    page.agents.chat.issue_wanted.emit("product-team", "QA-500")
+    assert page.stack.currentWidget() is page.jira
+    assert page.jira.tabs.currentWidget() is page.jira.issues
+    assert page.jira.issues.rows()[0]["key"] == "QA-500"
+    assert core.calls[-1] == (("call", "product-team", "issue"),
+                              {"key": "QA-500", "comments": jira_module.COMMENTS})
+
+
+def test_the_way_from_a_conversation_to_its_issue_and_back_is_in_the_breadcrumbs(make):
+    core = FakeCore(search=_found_in_jira)
+    page = make(core)
+    chat = page.agents.chat
+    chat.current = {"id": "20261117-213312-735942", "title": "What is on me in To Do?"}
+    opened = []
+    page.agents.open_session = opened.append
+    chat.issue_wanted.emit("product-team", "QA-500")
+    assert page.jira.crumbs.trail() == ["Agents", "What is on me in To Do?"]
+    page.jira.crumbs.parts[1].click()                       # back to the conversation
+    assert page.stack.currentWidget() is page.agents and opened == ["20261117-213312-735942"]
+    assert page.agents.crumbs.trail() == ["Jira", "QA-500"]
+    page.agents.crumbs.parts[1].click()                     # and to the issue again
+    assert page.stack.currentWidget() is page.jira
+    assert page.jira.issues.rows()[0]["key"] == "QA-500"
+    assert page.jira.crumbs.trail() == ["Agents", "What is on me in To Do?"]
+
+
 def test_a_failed_search_says_why(make):
     core = FakeCore(search={"ok": False, "kind": "signin", "error": "Sign-in refused."})
     page = make(core)

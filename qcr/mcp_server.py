@@ -50,7 +50,9 @@ TOOLS = [
                     "your turn. A task that asks you a question waits: answer it with agents.tasks.reply, "
                     "which goes on in its own conversation - never delegate it again. "
                     "integrations: "
-                    "Jira reads, and changes (comment, transition, assign, edit, comment_edit, create, attach "
+                    "Jira reads - for one issue start with integrations.jira.<id>.context: Jira's fields and "
+                    "comments with what QAVector knows (conversations, tasks, cost, private notes); reading an "
+                    "issue's details links this conversation to it -, and changes (comment, transition, assign, edit, comment_edit, create, attach "
                     "from your folder) that the person sees, may edit, and approves or denies - invoke, then "
                     "wait; one change per connection at a time.",
      "inputSchema": {"type": "object", "additionalProperties": False,

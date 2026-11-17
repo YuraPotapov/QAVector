@@ -3405,6 +3405,23 @@ class JiraView(QWidget):
                            cancel=cancel),
                        lambda payload, one=connection: answered(one, payload), quiet=True)
 
+    def open_key(self, connection_id, key):
+        """Open one issue by its key, whatever the list's filters are - from a
+        conversation that is about it, say (ADR-014). Not in the list: it is
+        looked up by its key first, then opened as Ctrl+K opens what it found."""
+        if self.show_found(("issue", connection_id, key)):
+            return
+
+        def answered(payload):
+            self._heard(connection_id, payload)
+            if payload.get("ok"):
+                for row in (payload.get("result") or {}).get("rows") or []:
+                    self._found[(connection_id, row.get("key"))] = dict(row)
+            self.show_found(("issue", connection_id, key))
+        self._call("found:%s" % connection_id, lambda core, cancel: core.integrations(
+            "call", connection_id, "search", document={"text": key, "size": FOUND_ROWS, "everywhere": True},
+            cancel=cancel), answered, quiet=True)
+
     def show_found(self, target):
         if not target:
             return False

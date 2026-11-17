@@ -169,7 +169,9 @@ def test_the_project_s_jira_reads_are_there_for_a_granted_agent(world, tmp_path)
     world.host.open_integrations(*paths)
     world.grant(grants=[{"permission": "integrations.jira.read"}, {"permission": "integrations.jira.issue"}])
     listed = world.host.handle_agent(AGENT, {"type": "capabilities", "namespace": "integrations"})
-    assert [c["capability_id"] for c in listed["capabilities"]] == ["integrations.jira.product-team.issue"]
+    # The issue's context comes with reading the issue (ADR-014): the same permission.
+    assert sorted(c["capability_id"] for c in listed["capabilities"]) == [
+        "integrations.jira.product-team.context", "integrations.jira.product-team.issue"]
 
 
 def test_an_agent_can_tell_the_services_apart_and_read_a_status(world):

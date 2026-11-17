@@ -54,6 +54,7 @@ Nothing is printed on stdout but these lines; logging goes to stderr.
 """
 
 import json
+import re
 import os
 import logging
 import signal
@@ -81,6 +82,8 @@ _PR_SET_PDEATHSIG = 1
 AGENT_KINDS = ("capabilities", "describe", "read", "invoke", "get", "events", "wait", "cancel", "list")
 WAIT_SECONDS = 60
 #: What an agent is told after handing work on, by its conversation's "When tasks finish" (ADR-009 D7).
+#: Reads of one issue's details: the reading conversation is linked to it (ADR-014).
+ISSUE_DETAILS = re.compile(r"^integrations\.jira\.([A-Za-z0-9_-]+)\.(issue|comments|context)$")
 #: Executions that are part of the task their input names (ADR-012 D3).
 PART_OF_TASK = ("agents.tasks.reply", "agents.tasks.verify")
 
@@ -190,6 +193,11 @@ class Host:
         self.integrations = IntegrationAdapter(self.registry, self.project_id, reader,
                                                notify=self.send, label=self._actor_label,
                                                folder=self._folders.get)
+        # One read with everything known about an issue, beside its Jira reads (ADR-014).
+        from .adapters.issue_context import IssueContext
+        self.issue_context = IssueContext(self.registry, self.project_id, reader, integrations_path,
+                                          lambda: self.delegation.root if self.delegation is not None else None)
+        self.integrations.refreshed.append(self.issue_context.refresh)
         self.integrations.refresh()
 
     def _actor_label(self, actor):
@@ -752,12 +760,30 @@ class Host:
                 if not self._ready:
                     raise QCRError("not_ready", "QAVector is not ready yet.")
                 answer = getattr(self, "_on_" + kind)(request)
+            if kind == "read":
+                self._linked(actor, request)
             return dict({"ok": True}, **answer)
         except QCRError as exc:
             error = _error(exc.code, str(exc))
             if getattr(exc, "execution_id", None):
                 error["execution_id"] = exc.execution_id
             return {"ok": False, "error": error}
+
+    def _linked(self, actor, request):
+        """An agent read an issue's details: its conversation is about that issue
+        from now on - the issue lists it, and counts what it cost (ADR-014 D2).
+        A search is not reading details; it links nothing."""
+        found = ISSUE_DETAILS.match(str(request.get("capability") or ""))
+        key = str((request.get("input") or {}).get("key") or "").strip().upper()
+        if not found or not key or not actor.startswith("agent:") or "/" not in actor or self.delegation is None:
+            return
+        from integrations.agents import sessions
+        session_id, ref = actor.split("/", 1)[1], "jira:%s:%s" % (found.group(1), key)
+        try:
+            if sessions.link(self.delegation.root, session_id, ref):
+                self.send({"type": "conversation_linked", "session": session_id, "ref": ref})
+        except (sessions.SessionError, OSError):
+            pass                          # a turn with no record of its own: nothing to link
 
     def _on_invoke(self, message):
         caller = self._caller(message)

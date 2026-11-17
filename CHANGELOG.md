@@ -33,6 +33,13 @@ app-agnostic, since that will break things on purpose.
   time, with a Continue action and a bounded scrolling list.
 
 ### Added
+- **A Jira issue as the context of a conversation** (QCR ADR-014): when an
+  agent reads an issue's details (not a search), its conversation is linked
+  to the issue. The issue then lists it, and counts it in its usage. The
+  chat's header shows the issues a conversation is about (ABOUT); a click
+  opens one, and a link can be undone. `integrations.jira.<connection>.context`
+  gives an agent, in one read, the issue as text, its newest comments, and
+  what QAVector knows: conversations, their tasks, cost and private notes.
 - **Budgets for agent work** (QCR ADR-013). A connection's default for a task
   it hands on and for a conversation, and a conversation's own budget in its
   Settings, in dollars, tokens or both. From 80% a warning is shown; at the

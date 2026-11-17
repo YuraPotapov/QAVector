@@ -85,6 +85,8 @@ class IntegrationsPage(QWidget):
         self.jira.connections_changed.connect(self._fill)
         self.jira.connections_changed.connect(self.search_sources_changed)
         self.agents = AgentsView(settings)
+        # A conversation's issue, opened from its header (ADR-014).
+        self.agents.chat.issue_wanted.connect(self._issue_from_chat)
         self.agents.back_requested.connect(self._back_to_catalog)
         self.agents.connections_changed.connect(self._fill)
         # All providers are registered through a host: separate-window support
@@ -257,8 +259,25 @@ class IntegrationsPage(QWidget):
             trail.append((key, lambda: self._back_to_issue(connection_id, key)))
         return trail
 
+    def _issue_from_chat(self, connection_id, key):
+        """An issue a conversation is about, opened from its ABOUT chip (ADR-014):
+        Jira's breadcrumb leads back to that conversation, and the conversation's
+        own, once there, to the issue again - the way taken, both ways."""
+        session = self.agents.chat.current or {}
+        session_id = session.get("id") or ""
+        title = session.get("title") or "Chat"
+        title = title if len(title) <= 40 else title[:39] + "..."
+
+        def back():
+            self.open_provider("agents", [("Jira", lambda: self.open_provider("jira")),
+                                          (key, lambda: self._issue_from_chat(connection_id, key))])
+            if session_id:
+                self.agents.open_session(session_id)
+        self.jira.open_key(connection_id, key)
+        self.open_provider("jira", [("Agents", lambda: self.open_provider("agents")), (title, back)])
+
     def _back_to_issue(self, connection_id, key):
-        self.jira.show_found(("issue", connection_id, key))
+        self.jira.open_key(connection_id, key)
         self.open_provider("jira")
 
     def open_provider(self, provider, trail=()):

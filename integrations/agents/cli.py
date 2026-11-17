@@ -372,6 +372,22 @@ def _usage(call):
         return _refusal(exc.kind, str(exc))
 
 
+def _session_link(call):
+    """Link a conversation to an issue, or undo a link (QCR ADR-014):
+    ``{"link": "jira:<connection>:<KEY>"}`` or ``{"unlink": ...}``."""
+    from integrations.agents import sessions
+    session_id = _one(call, "session")
+    document = _document(call.source)
+    try:
+        if document.get("link"):
+            sessions.link(call.sessions, session_id, str(document["link"]))
+        if document.get("unlink"):
+            sessions.unlink(call.sessions, session_id, str(document["unlink"]))
+        return {"ok": True, "session": sessions.described(call.sessions, sessions.load(call.sessions, session_id))}
+    except sessions.SessionError as exc:
+        return _refusal(exc.kind, str(exc))
+
+
 def _budget(call):
     """A conversation's budget and how far it is spent (QCR ADR-013): read it, or
     with ``{"budget": {"usd", "tokens"}}`` set its own (``{}``: none)."""
@@ -656,7 +672,7 @@ def _import(call):
 COMMANDS = {"kinds": _kinds, "models": _models, "list": _list, "save": _save, "delete": _delete,
             "roles": _roles, "role-save": _role_save, "role-delete": _role_delete,
             "test": _test, "sign-in": _sign_in,
-            "sessions": _sessions, "session": _session, "usage": _usage, "budget": _budget, "session-new": _session_new,
+            "sessions": _sessions, "session": _session, "usage": _usage, "budget": _budget, "session-link": _session_link, "session-new": _session_new,
             "session-set": _session_set, "session-delete": _session_delete,
             "send": _send, "activity": _activity, "changes": _changes,
             "skills": _skills, "skill-look": _skill_look, "skill-add": _skill_add,

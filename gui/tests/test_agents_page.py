@@ -208,6 +208,15 @@ class FakeCore:
             session = self._session(args[1])
             session.update(document)
             return {"ok": True, "session": dict(session)}
+        if command == "session-link":
+            session = self._session(args[1])
+            source = dict(session.get("source") or {})
+            links = [one for one in source.get("links") or [] if one != (document or {}).get("unlink")]
+            if (document or {}).get("link") and document["link"] not in links:
+                links.append(document["link"])
+            source["links"] = links
+            session["source"] = source
+            return {"ok": True, "session": dict(session)}
         if command == "budget":
             # A conversation's budget (QCR ADR-013): none, unless a test set one.
             if "budget" in (document or {}):
