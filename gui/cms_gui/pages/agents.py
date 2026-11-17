@@ -31,6 +31,7 @@ from .agentchat import ChatTab
 from .agentskills import SkillsTab
 from .agentroles import RolesTab
 from .agentusage import UsageTab
+from .agentbudget import BUDGET_NOTE, BudgetFields
 from .agenttasks import TasksTab
 from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F401
                          folder_text, kind_name, model_text, program_text, result_text,
@@ -291,7 +292,8 @@ class ConnectionsTab(QWidget):
 
 
 #: How its conversations go on when what they handed on ends (ADR-009 D3).
-WAKE_DEFAULT = (("Ask me", "ask"), ("Continue by itself", "continue"), ("Off", "off"))
+WAKE_DEFAULT = (("Ask - a card waits for you", "ask"), ("Auto - go on by itself", "continue"),
+                ("Off - only show the results", "off"))
 
 #: The "QAVector access" switches, in the order the form shows them.
 QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
@@ -304,8 +306,8 @@ QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
 
 
 #: What a connection's conversations start with for other agents (ADR-006 D3).
-OTHERS_DEFAULT = (("Approve each one", "approve"), ("Auto - without asking", "auto"),
-                  ("Deny - work alone", "deny"))
+OTHERS_DEFAULT = (("Ask - each one waits for your yes", "approve"), ("Auto - without asking", "auto"),
+                  ("Off - work alone", "deny"))
 
 
 class ConnectionDialog(QDialog):
@@ -420,9 +422,20 @@ class ConnectionDialog(QDialog):
         self.wake_default.setCurrentIndex(max(0, self.wake_default.findData(
             self.connection.get("wake_default") or "ask")))
         column.addWidget(widgets.field(
-            "When tasks finish", widgets.row(self.wake_default, None),
-            "How a conversation goes on when the tasks it handed to other agents end. Continue: by "
-            "itself, with their results. Ask me: a card waits for you. Each conversation can change it."))
+            "When delegated tasks finish", widgets.row(self.wake_default, None),
+            "The next step when the tasks a conversation handed on are done. Auto: it goes on by itself "
+            "with their results. Ask: a card waits for you. Each conversation can change it (Steps)."))
+        # What a task it hands on, and one of its conversations, may cost before
+        # you are asked (ADR-013). None unless set.
+        self.budget_task = BudgetFields(self.connection.get("budget_task"))
+        self.budget_task.setObjectName("agentBudgetTask")
+        self.budget_conversation = BudgetFields(self.connection.get("budget_conversation"))
+        self.budget_conversation.setObjectName("agentBudgetConversation")
+        column.addWidget(widgets.field("Budget per task", self.budget_task,
+                                       "What one task this agent hands on may cost. " + BUDGET_NOTE))
+        column.addWidget(widgets.field("Budget per conversation", self.budget_conversation,
+                                       "What one conversation may cost, with what it hands on. Each conversation "
+                                       "can change its own in Settings."))
         self.check = QPushButton("Check")
         self.check.setToolTip("Ask the program who it is signed in as. Nothing is saved.")
         self.check.clicked.connect(self._check)
@@ -560,10 +573,10 @@ class ConnectionDialog(QDialog):
         stack.addWidget(widgets.row(self.others_default, None))
         stack.addLayout(boxes)
         return widgets.field(
-            "Other agents", holder,
+            "Delegation mode", holder,
             "Its conversations may hand tasks to, and message, the agents ticked here - each "
-            "conversation can change the mode for itself. Approve shows you every one first; "
-            "Deny keeps it to its own provider.")
+            "conversation can change the mode for itself. Ask shows you every one first; Off keeps it "
+            "to its own provider.")
 
     def _sync_others(self, *_args):
         working = self.others_default.currentData() != "deny"
@@ -580,6 +593,8 @@ class ConnectionDialog(QDialog):
                       "qavector_access": {key: box.isChecked() for key, box in self.access.items()},
                       "others_default": self.others_default.currentData(),
                       "wake_default": self.wake_default.currentData(),
+                      "budget_task": self.budget_task.budget(),
+                      "budget_conversation": self.budget_conversation.budget(),
                       "allowed_agents": [key for key, box in self.allowed.items() if box.isChecked()]})
         return entry
 

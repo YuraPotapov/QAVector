@@ -923,9 +923,14 @@ def test_the_composer_s_choices_stand_on_one_line_each(make, qapp):
     first = [centre(widget) for widget in (composer.folder, composer.restrict,
                                            composer.browse)]
     assert max(first) - min(first) <= 1, first
-    second = [centre(widget) for widget in (composer.connection, composer.skills_button,
-                                            composer.model)]
+    second = [centre(widget) for widget in (composer.connection, composer.model)]
     assert max(second) - min(second) <= 1, second
+    third = [centre(widget) for widget in (composer.effort, composer.skills_button)]
+    assert max(third) - min(third) <= 1, third
+    # One grid: the fields of the first column, delegation's included, start where the agent's does.
+    left = composer.connection.mapTo(composer, composer.connection.rect().topLeft()).x()
+    for widget in (composer.effort, composer.folder, composer.others, composer.wake, composer.budget):
+        assert widget.mapTo(composer, widget.rect().topLeft()).x() == left, widget
     # The box is as wide as the rows of choices over it.
     assert composer.text.width() == composer.where.width() == composer.how.width()
 

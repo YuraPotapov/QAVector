@@ -157,7 +157,7 @@ def test_a_begun_conversation_shows_its_own_and_says_a_change(qapp, dispose):
         composer.set_session({"id": "s", "connection": "claude", "folder": "/tmp", "others": "auto",
                               "source": {"label": "Chat"}})
         assert composer.settings()["others"] == "auto"
-        composer.others.button("Deny").click()
+        composer.others.button("Off").click()
         assert heard == ["deny"] and composer.settings()["others"] == "deny"
         # A conversation from before ADR-006 has no mode of its own: Deny, whatever the default.
         composer.set_session({"id": "old", "connection": "claude", "folder": "/tmp", "source": {"label": "Chat"}})

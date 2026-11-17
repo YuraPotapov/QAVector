@@ -16,6 +16,12 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- The chat's delegation settings moved from beside the message into a framed
+  **Delegation** group in Settings: **Mode** (Off / Ask / Auto, formerly
+  "Others"), **Steps** (Off / Ask / Auto, formerly "Tasks") and **Budget**. The
+  Settings panel is laid out on one grid. Connections use the same words.
+
 ### Fixed
 - Agent chat **Changes** is available during the first turn, updates while
   the agent works, and shows added/deleted line totals on the button. The
@@ -27,6 +33,13 @@ app-agnostic, since that will break things on purpose.
   time, with a Continue action and a bounded scrolling list.
 
 ### Added
+- **Budgets for agent work** (QCR ADR-013). A connection's default for a task
+  it hands on and for a conversation, and a conversation's own budget in its
+  Settings, in dollars, tokens or both. From 80% a warning is shown; at the
+  limit the next turn waits for **Continue** (budget raised by the same
+  amount) or **Stop**. Nothing is cut off midway. Costs show as
+  `$1.20 / 12k`: on task cards, on the board, and in the conversation's
+  header.
 - **Agents -> Tasks** (QCR ADR-012): every task and question agents handed on,
   across all conversations, read from the project's journal. What waits for
   the person comes first: approvals and questions. Selecting a task shows its

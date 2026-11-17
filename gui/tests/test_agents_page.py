@@ -91,6 +91,8 @@ class FakeCore:
         self.events = {key: list(value) for key, value in (events or {}).items()}
         self.answers = answers
         self.calls = []
+        #: Conversations' own budgets (QCR ADR-013), by session id.
+        self.budgets = {}
         self.roles = [dict(one) for one in answers.pop("roles", None) or []]
 
     def _session(self, session_id):
@@ -206,6 +208,14 @@ class FakeCore:
             session = self._session(args[1])
             session.update(document)
             return {"ok": True, "session": dict(session)}
+        if command == "budget":
+            # A conversation's budget (QCR ADR-013): none, unless a test set one.
+            if "budget" in (document or {}):
+                self.budgets[args[1]] = dict(document["budget"] or {})
+            budget = self.budgets.get(args[1], {})
+            return {"ok": True, "session": args[1], "scope": "conversation", "budget": budget,
+                    "spent": {"usd": 0, "tokens": 0}, "share": 0.0 if budget else None,
+                    "warn": False, "reached": False}
         if command == "session-delete":
             self.sessions = [one for one in self.sessions if one["id"] != args[1]]
             self.events.pop(args[1], None)
@@ -568,7 +578,8 @@ def test_a_first_connection_needs_no_thought(make, dispose):
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "", "role": "",
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
-            "others_default": "approve", "allowed_agents": [], "wake_default": "ask"}})
+            "others_default": "approve", "allowed_agents": [], "wake_default": "ask",
+            "budget_task": {}, "budget_conversation": {}}})
         assert dialog.result() == QDialog.Accepted
     finally:
         dispose(dialog)
@@ -668,7 +679,8 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high", "role": "",
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
-            "others_default": "deny", "allowed_agents": [], "wake_default": "ask"}})
+            "others_default": "deny", "allowed_agents": [], "wake_default": "ask",
+            "budget_task": {}, "budget_conversation": {}}})
     finally:
         dispose(dialog)
     assert page.agents.connections_tab.table.item(0, 2).text() == "/opt/claude/bin/claude"

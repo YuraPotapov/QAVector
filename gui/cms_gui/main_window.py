@@ -311,6 +311,8 @@ class MainWindow(QMainWindow):
         # Here, not with the pages: they are built before the host is.
         self.qcr_host.agent_approval.connect(self.integrations.agents.chat.agent_request)
         self.qcr_host.execution_changed.connect(self.integrations.agents.chat.agent_execution)
+        # A turn waits at a budget: a card where it was handed on (ADR-013).
+        self.qcr_host.budget_reached.connect(self.integrations.agents.chat.budget_reached)
         # An agent's change to Jira waits for the person there, and on the
         # Integrations page (ADR-007 D7).
         self.qcr_host.integration_changes_changed.connect(self.integrations.agents.chat.integration_changes_changed)

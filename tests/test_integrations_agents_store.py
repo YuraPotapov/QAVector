@@ -55,7 +55,9 @@ def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
                      # Other agents: a new connection asks the person each time (ADR-006 D3).
                      "others_default": "approve", "allowed_agents": [],
                      # When its tasks end, a conversation asks the person (ADR-009 D3).
-                     "wake_default": "ask"}
+                     "wake_default": "ask",
+                     # No budget unless the person sets one (ADR-013).
+                     "budget_task": {}, "budget_conversation": {}}
 
 
 def test_other_agents_defaults_new_old_and_never_itself(path):

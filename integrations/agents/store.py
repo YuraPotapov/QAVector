@@ -111,6 +111,10 @@ def normalize(entry):
         else OTHERS_BEFORE,
         "allowed_agents": _allowed(entry.get("allowed_agents"), str(entry.get("id") or "").strip()),
         "wake_default": entry.get("wake_default") if entry.get("wake_default") in WAKES else WAKE_DEFAULT,
+        # What a task it hands on, and one of its conversations, may cost before
+        # the person is asked (ADR-013); none unless set.
+        "budget_task": _budget(entry.get("budget_task")),
+        "budget_conversation": _budget(entry.get("budget_conversation")),
     }
     # The known fields first and in one order, whatever order they came in: the
     # file is plain JSON a person may open.
@@ -288,3 +292,8 @@ def remove(connection_id, path=None):
         return False
     save(kept, path)
     return True
+
+
+def _budget(value):
+    from integrations.agents import budgets
+    return budgets.normal(value)

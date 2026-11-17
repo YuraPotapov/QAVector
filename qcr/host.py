@@ -559,6 +559,32 @@ class Host:
             raise QCRError("invalid_message", "A history names its task.")
         return self.delegation.history(task)
 
+    def _on_budget_answer(self, message):
+        """The person's word on a turn held at a budget (ADR-013 D3): go on, with
+        the budget raised by what it was first set to, or stop."""
+        go = message.get("go")
+        if type(go) is not bool:
+            raise QCRError("invalid_message", "A budget answer goes on or not.")
+        if self.delegation is None or not self.delegation.budget_answer(
+                message.get("execution_id"), go, str(message.get("by") or "")):
+            raise QCRError("not_found", "Nothing waits at a budget.")
+        return {}
+
+    def _on_budget_raise(self, message):
+        """Continue on a conversation woken at its budget: the budget goes up by
+        what it was first set to, and the conversation goes on."""
+        from integrations.agents import budgets, store
+        session = message.get("session")
+        if not isinstance(session, str) or not session or self.delegation is None:
+            raise QCRError("invalid_message", "A raise names its conversation.")
+        policy = next((one for one in self._agent_policies.values() if one.get("session") == session), {})
+        connection = store.get(policy.get("connection") or "", self.delegation.agents_path)
+        try:
+            budget = budgets.raised(budgets.load(self.delegation.root, session, connection))
+            return {"budget": budgets.save(self.delegation.root, session, budget)}
+        except Exception as exc:          # no record for that conversation, or an unwritable one
+            raise QCRError("not_found", str(exc)) from None
+
     def _on_integration_answer(self, message):
         """The person approved - perhaps with the comment changed - or denied an
         integration write that waits (ADR-007 D3)."""

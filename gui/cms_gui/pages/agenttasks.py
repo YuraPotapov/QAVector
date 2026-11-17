@@ -21,18 +21,19 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QHeaderView, QLabel, QPlainT
                                QSplitter, QVBoxLayout, QWidget)
 
 from .. import icons, theme, widgets
+from .agentbudget import share_text, spend_text
 from .agentwords import cost_text, count_text
 from .jiraconnections import _cell, _table
 
 #: What goes on still, or waits: a task in one of these has not ended.
-ACTIVE = ("approval", "waiting", "running", "dispatched", "accepted", "asks")
+ACTIVE = ("approval", "waiting", "running", "dispatched", "accepted", "asks", "budget")
 #: Which tasks are shown, and which rows each keeps.
 FILTERS = (("All", lambda row: True),
            ("Needs you", lambda row: row.get("needs_person")),
            ("Active", lambda row: row.get("state") in ACTIVE),
            ("Ended", lambda row: row.get("state") not in ACTIVE))
 #: A task's state, as the person reads it.
-STATES = {"approval": "Waits for your approval", "asks": "Asks a question", "waiting": "Waits its turn",
+STATES = {"approval": "Waits for your approval", "asks": "Asks a question", "budget": "Reached its budget", "waiting": "Waits its turn",
           "running": "Working", "dispatched": "Starting", "accepted": "Starting", "succeeded": "Done",
           "failed": "Failed", "rework": "Sent back for rework", "skipped": "Skipped", "denied": "Denied",
           "canceled": "Canceled", "stopped": "Stopped", "timed_out": "Ran out of time",
@@ -50,13 +51,19 @@ def _when(at):
     return time.strftime("%d %b %H:%M", time.localtime(at))
 
 
+def _cost(row):
+    """What the task's conversation has cost: ``$0.40 / 12k``, or ``- / 12k``."""
+    spent = (row.get("budget") or {}).get("spent") or {}
+    return spend_text(spent) if (spent.get("usd") or spent.get("tokens")) else ""
+
+
 def _to(row):
     program = row.get("target_name") or row.get("target") or ""
     return "%s (%s)" % (row["role"], program) if row.get("role") and program else (row.get("role") or program)
 
 
 class TasksTab(QWidget):
-    HEADERS = ("State", "Task", "From", "To", "Questions", "Files", "Updated")
+    HEADERS = ("State", "Task", "From", "To", "Questions", "Files", "Cost", "Updated")
 
     #: A conversation the person wants to see: the delegating one or the task's own.
     open_conversation = Signal(str)
@@ -83,7 +90,7 @@ class TasksTab(QWidget):
         self.table = _table(self.HEADERS)
         self.table.setObjectName("agentTasksTable")
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        for index, width in ((0, 168), (2, 120), (3, 150), (4, 84), (5, 56), (6, 92)):
+        for index, width in ((0, 168), (2, 120), (3, 150), (4, 84), (5, 56), (6, 110), (7, 92)):
             self.table.setColumnWidth(index, width)
         self.table.itemSelectionChanged.connect(self._picked)
         self.search = widgets.SearchRow(self.table)
@@ -121,6 +128,8 @@ class TasksTab(QWidget):
             host.execution_changed.connect(self._changed)
             # A task that starts waiting for the person: on the board at once.
             host.agent_approval.connect(lambda _found: self._timer.start())
+            if hasattr(host, "budget_reached"):
+                host.budget_reached.connect(lambda _found: self._timer.start())
 
     def shown(self):
         """Read the list again - when the tab comes in front, and after a change."""
@@ -172,7 +181,7 @@ class TasksTab(QWidget):
             criteria = row.get("criteria") or 0
             values = (STATES.get(row.get("state"), row.get("state") or ""), goal,
                       row.get("from_name") or "", _to(row), str(row.get("questions") or "") or "",
-                      str(row.get("files_changed") or "") or "", _when(row.get("updated_at")))
+                      str(row.get("files_changed") or "") or "", _cost(row), _when(row.get("updated_at")))
             for column, value in enumerate(values):
                 item = _cell(value)
                 if column == 0:
@@ -181,6 +190,10 @@ class TasksTab(QWidget):
                         item.setForeground(QColor(theme.WARN_INK))
                     elif row.get("state") in ("failed", "rework", "timed_out"):
                         item.setForeground(QColor(theme.BAD_INK))
+                if column == 6 and (row.get("budget") or {}).get("share") is not None:
+                    item.setToolTip(share_text(row["budget"]) + " budget")
+                    if row["budget"].get("warn"):
+                        item.setForeground(QColor(theme.WARN_INK))
                 if column == 1 and criteria:
                     item.setToolTip("%d of %d acceptance criteria verified as passed." % (
                         row.get("passed") or 0, criteria))
@@ -275,8 +288,15 @@ class TaskDetail(QFrame):
         self.answer_button = QPushButton("Answer")
         self.answer_button.setProperty("variant", "primary")
         self.answer_button.clicked.connect(self._answer)
+        self.budget_stop = QPushButton("Stop")
+        self.budget_stop.setToolTip("End the task at its budget. What it found stays.")
+        self.budget_stop.clicked.connect(lambda: self._budget(False))
+        self.budget_go = QPushButton("Continue")
+        self.budget_go.setProperty("variant", "primary")
+        self.budget_go.setToolTip("Raise its budget by what it was first set to, and go on.")
+        self.budget_go.clicked.connect(lambda: self._budget(True))
         column.addWidget(widgets.row(self.open_from, self.open_child, None, self.stop_button, self.deny_button,
-                                     self.approve_button, self.answer_button))
+                                     self.approve_button, self.answer_button, self.budget_stop, self.budget_go))
         self.heading = QLabel("HISTORY")
         self.heading.setProperty("role", "statlabel")
         column.addWidget(self.heading)
@@ -314,6 +334,8 @@ class TaskDetail(QFrame):
         self.answer_button.setVisible(state == "asks")
         self.approve_button.setVisible(state == "approval")
         self.deny_button.setVisible(state == "approval")
+        self.budget_go.setVisible(state == "budget")
+        self.budget_stop.setVisible(state == "budget")
         self.stop_button.setVisible(state in ("running", "asks", "waiting") and (task or {}).get("kind") == "task")
         self.open_from.setVisible(bool((task or {}).get("from_session")))
         self.open_child.setVisible(bool((task or {}).get("child_session")))
@@ -354,6 +376,9 @@ class TaskDetail(QFrame):
             parts.append("%s tokens" % count_text(usage["tokens_total"]))
         if usage.get("estimate_usd"):
             parts.append("est. " + cost_text(usage["estimate_usd"]))
+        budget = share_text(task.get("budget"))
+        if budget:
+            parts.append(budget + " budget")
         self.meta.setText(" · ".join(part for part in parts if part))
 
     def _show_entries(self, entries):
@@ -389,6 +414,14 @@ class TaskDetail(QFrame):
                 self.host.answer_agent(self.task["latest"], approve)
             self.acted.emit()
 
+    def _budget(self, go):
+        if self.task and self.host is not None:
+            if self.acts is not None:
+                self.acts.budget_answer(self.task["latest"], go)
+            else:
+                self.host.budget_answer(self.task["latest"], go)
+            self.acted.emit()
+
     def _stop(self):
         if self.task and self.host is not None:
             if self.acts is not None:
@@ -399,7 +432,7 @@ class TaskDetail(QFrame):
 
 
 #: What each kind of history line says before its text, and its mark if any.
-HISTORY_WORDS = {"handed": "Handed on", "approval": "Approval", "approved": "Approved", "waiting": "Waits",
+HISTORY_WORDS = {"budget": "Budget", "budget_raised": "Budget raised", "handed": "Handed on", "approval": "Approval", "approved": "Approved", "waiting": "Waits",
                  "started": "Started", "asked": "Asked", "answer": "Answered", "done": "Done",
                  "verified": "Verified", "failed": "Failed", "canceled": "Canceled", "stopped": "Stopped",
                  "timed_out": "Ran out of time", "unknown": "Outcome unknown"}

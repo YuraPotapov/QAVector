@@ -120,6 +120,8 @@ class QcrHost(QObject):
     #: What a conversation handed on to other agents has ended, as it asked
     #: to be woken for (ADR-009): ``{"session", "condition", "items", "running", "failed"}``.
     round_finished = Signal(dict)
+    #: A turn waits at a budget for the person's word (ADR-013 D3).
+    budget_reached = Signal(dict)
 
     def __init__(self, supervisor, parent=None, bridge=None):
         """``bridge``: the main window's ServiceBridge, shared with scenarios;
@@ -341,6 +343,8 @@ class QcrHost(QObject):
             self._integration_waits(message)
         elif kind == "round_finished":
             self.round_finished.emit(dict(message))
+        elif kind == "budget_reached":
+            self.budget_reached.emit(dict(message))
         elif kind == "error":
             log.warning("QCR host refused a line: %s", (message.get("error") or {}).get("code"))
 
@@ -481,6 +485,15 @@ class QcrHost(QObject):
         in its own conversation, as the conversation that delegated it."""
         self._send_when_ready({"type": "task_reply", "id": next(self._ids), "task": task,
                                "answer": answer, "by": by})
+
+    def budget_answer(self, execution_id, go, by="you"):
+        """Go on past a budget (raised by what it was first set to), or stop."""
+        self._send_when_ready({"type": "budget_answer", "id": next(self._ids), "execution_id": execution_id,
+                               "go": bool(go), "by": by})
+
+    def budget_raise(self, session, done=None):
+        """A conversation woken at its budget goes on: its budget goes up first."""
+        self.ask("budget_raise", done or (lambda reply: None), session=session)
 
     def stop_task(self, task, by="you"):
         """The person stops a task that goes on through answers (ADR-011)."""

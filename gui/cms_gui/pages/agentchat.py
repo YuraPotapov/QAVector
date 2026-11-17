@@ -26,14 +26,13 @@ import time
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame,
-                               QHBoxLayout,
-                               QHeaderView, QLabel, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QTableWidgetItem, QTextBrowser,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QHeaderView, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
+                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
 from .. import icons, restrictions as restrictions_mod, stages, theme, widgets
 from ..diffview import ChangesButton, ChangesDialog
+from .agentbudget import BUDGET_NOTE, BudgetCard, BudgetFields, share_text, spend_text
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
 from . import agentcards
@@ -47,20 +46,29 @@ MODE_MEANS = ("Read: it reads the folder and changes nothing. Edit: it also chan
               "files. Full: it also runs commands - everything this account can do "
               "inside the folder's restrictions.")
 #: What a conversation may do with other agents (ADR-006 D3), as the footer says it.
-OTHERS = (("Auto", "auto"), ("Approve", "approve"), ("Deny", "deny"))
+OTHERS = (("Off", "deny"), ("Ask", "approve"), ("Auto", "auto"))
 #: Who said a message QAVector sent for the conversation (ADR-009 D4).
 FROM_QAVECTOR = "QAVECTOR · TASKS FINISHED"
 #: ADR-009 D6: turns QAVector takes by itself per message of the person -
 #: failed rounds, and in all - before it asks instead.
 WAKE_FAILED_ROUNDS, WAKE_ROUNDS = 3, 10
 #: How a conversation goes on when the tasks it handed on end (ADR-009 D3).
-WAKE = (("Continue", "continue"), ("Ask me", "ask"), ("Off", "off"))
-WAKE_MEANS = ("When the tasks this conversation handed to other agents end - Continue: it goes on by "
-              "itself with their results. Ask me: a card waits for you. Off: the results are only on "
-              "their cards.")
-OTHERS_MEANS = ("Other agents - Auto: it hands tasks to and messages the agents its connection "
-                "allows, without asking. Approve: each one waits here for your yes. Deny: it works "
-                "alone.")
+WAKE = (("Off", "off"), ("Ask", "ask"), ("Auto", "continue"))
+WAKE_MEANS = ("The next step when the tasks this conversation handed on are done - Off: their results "
+              "only stay on their cards. Ask: a card waits for you. Auto: the conversation goes on by "
+              "itself with their results.")
+OTHERS_MEANS = ("Handing tasks to other agents - Off: it works alone. Ask: each task or message waits "
+                "here for your yes. Auto: it hands them to the agents its connection allows, without "
+                "asking.")
+#: The settings' grid: a caption column, fields of one width, the gap between.
+SETTINGS_CAPTION, SETTINGS_FIELD, SETTINGS_GAP = 64, 264, 10
+#: The delegation box sits in the grid with a 1 px border and 10 px inside it:
+#: its captions are that much narrower, so its fields stand under the others.
+DELEGATION_INSET = 11
+DELEGATION_CAPTION = SETTINGS_CAPTION - DELEGATION_INSET
+DELEGATION_BUTTON = SETTINGS_FIELD // 3
+#: Said where delegation's own settings are, while it is off.
+DELEGATION_OFF = "Delegation is off for this conversation."
 OTHERS_NONE = ("This connection allows no other agents. Tick them in its settings "
                "(Integrations > Agents > Connections) to let a conversation work with them.")
 PLAN_MEANS = ("The agent first looks through the folder, changing nothing, and answers "
@@ -585,7 +593,7 @@ class ChatFeed(QScrollArea):
         self._times.pop(index)
         self._tools = {key: ((place - 1 if place > index else place), stage, name)
                        for key, (place, stage, name) in self._tools.items()}
-        for name in ("approve", "deny", "open", "dismiss", "edited", "go", "reply", "stop"):
+        for name in ("approve", "deny", "open", "dismiss", "edited", "go", "reply", "stop", "answered"):
             signal = getattr(card, name, None)
             if signal is not None:
                 try:
@@ -704,10 +712,10 @@ def record_text(session):
     return "This conversation was held by %s. It is shown here, not carried on." % source.get("label")
 
 
-def _caption(text):
+def _caption(text, width=44):
     label = QLabel(text)
     label.setProperty("role", "composerlabel")
-    label.setFixedWidth(44)
+    label.setFixedWidth(width)
     return label
 
 
@@ -749,6 +757,8 @@ class Composer(QFrame):
     #: What the conversation may do with other agents was changed (ADR-006 D3).
     others_changed = Signal(str)
     wake_changed = Signal(str)
+    #: The conversation's own budget, as the person set it (ADR-013): {} is none.
+    budget_changed = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -829,7 +839,8 @@ class Composer(QFrame):
         self.others = widgets.Segmented([label for label, _value in OTHERS])
         self.others.setToolTip(OTHERS_MEANS)
         self.others.changed.connect(lambda label: self.others_changed.emit(dict(OTHERS)[label]))
-        self.wake = widgets.Segmented([label for label, _value in WAKE], "Ask me")
+        self.others.changed.connect(lambda _label: self._sync_delegation())
+        self.wake = widgets.Segmented([label for label, _value in WAKE], "Ask")
         self.wake.setToolTip(WAKE_MEANS)
         self.wake.changed.connect(lambda label: self.wake_changed.emit(dict(WAKE)[label]))
         self.plan = QCheckBox("Plan first")
@@ -856,21 +867,73 @@ class Composer(QFrame):
         self.skills_button = QPushButton("Skills")
         self.skills_button.setToolTip("Hand the agent skills from the library")
         self.skills_button.clicked.connect(self.skills_requested)
-        self.how = widgets.row(_caption("AGENT"), self.connection, 6,
-                               _caption("MODEL"), self.model, 6, _caption("EFFORT"), self.effort,
-                               None, self.skills_button)
-        # Browse as wide as its word; the room the capped folder leaves goes before
-        # Restrictions, the way the row above leaves it before Skills.
+        # One grid for every setting: captions of one width, fields of one width,
+        # two columns of them; the folder across both; delegation framed below,
+        # its fields under the first column's.
+        self.settings_grid = QWidget()
+        self.settings_grid.setObjectName("composerSettingsGrid")
+        grid = QGridLayout(self.settings_grid)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(SETTINGS_GAP)
+        grid.setVerticalSpacing(6)
+        for widget in (self.connection, self.model, self.effort):
+            widget.setMinimumWidth(SETTINGS_FIELD)
+            widget.setMaximumWidth(SETTINGS_FIELD)
+        for row, column, word, control in ((0, 0, "AGENT", self.connection), (0, 3, "MODEL", self.model),
+                                           (1, 0, "EFFORT", self.effort), (1, 3, "SKILLS", self.skills_button)):
+            grid.addWidget(_caption(word, SETTINGS_CAPTION), row, column, Qt.AlignVCenter)
+            grid.addWidget(control, row, column + 1, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.setColumnMinimumWidth(2, 6)
+        grid.setColumnStretch(5, 1)
+        # The folder across both columns: Browse beside it, Restrictions at the end.
         self.browse.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self.where = widgets.row(_caption("FOLDER"), self.folder, self.browse, None, self.restrict)
-        self.where.layout().setStretchFactor(self.folder, 1)      # up to its cap, then the gap takes the rest
-        options_layout.addWidget(self.how)
-        options_layout.addWidget(self.where)
-        # A short word, as the captions above are: what it means is its tooltip.
-        tasks = _caption("TASKS")
-        tasks.setToolTip(WAKE_MEANS)
-        self.after = widgets.row(tasks, self.wake, None)
-        options_layout.addWidget(self.after)
+        self.folder.setMaximumWidth(16777215)
+        folder_row = widgets.row(self.folder, self.browse, self.restrict)
+        folder_row.layout().setStretchFactor(self.folder, 1)
+        grid.addWidget(_caption("FOLDER", SETTINGS_CAPTION), 2, 0, Qt.AlignVCenter)
+        grid.addWidget(folder_row, 2, 1, 1, 5)
+        self.how = self.where = self.settings_grid
+        options_layout.addWidget(self.settings_grid)
+        # Handing tasks to other agents: whether, what happens when they are done,
+        # and what it may cost - together, since one makes sense only with the others.
+        # In a frame of its own: one group, apart from the agent and its folder.
+        self.delegation = QFrame()
+        self.delegation.setObjectName("composerDelegation")
+        self.delegation.setProperty("role", "delegationbox")
+        # One grid: captions in one column, controls of one width in the next,
+        # what they say in the last - so the three rows line up.
+        grid = QGridLayout(self.delegation)
+        grid.setContentsMargins(DELEGATION_INSET - 1, 8, DELEGATION_INSET - 1, 10)
+        grid.setHorizontalSpacing(SETTINGS_GAP)
+        grid.setVerticalSpacing(6)
+        title = QLabel("DELEGATION - handing tasks to other agents")
+        title.setProperty("role", "composerlabel")
+        grid.addWidget(title, 0, 0, 1, 3)
+        for segmented, options in ((self.others, OTHERS), (self.wake, WAKE)):
+            for label, _value in options:
+                segmented.button(label).setFixedWidth(DELEGATION_BUTTON)
+        self.budget = BudgetFields(width=(SETTINGS_FIELD - 6) // 2)
+        self.budget.setObjectName("conversationBudget")
+        self.budget.setToolTip("What this conversation may cost, with what it hands on. " + BUDGET_NOTE)
+        for field in (self.budget.usd, self.budget.tokens):
+            field.editingFinished.connect(self._budget_edited)
+        self.delegation_off = QLabel(DELEGATION_OFF)
+        self.delegation_off.setProperty("role", "hint")
+        self.budget_state = QLabel("")
+        self.budget_state.setProperty("role", "hint")
+        rows = (("MODE", OTHERS_MEANS, self.others, self.delegation_off),
+                ("STEPS", WAKE_MEANS, self.wake, None),
+                ("BUDGET", BUDGET_NOTE, self.budget, self.budget_state))
+        for index, (word, means, control, said) in enumerate(rows, start=1):
+            caption = _caption(word, DELEGATION_CAPTION)
+            caption.setToolTip(means)
+            grid.addWidget(caption, index, 0, Qt.AlignVCenter)
+            grid.addWidget(control, index, 1, Qt.AlignLeft | Qt.AlignVCenter)
+            if said is not None:
+                grid.addWidget(said, index, 2, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.setColumnStretch(2, 1)
+        self.after = self.delegation
+        options_layout.addWidget(self.delegation)
 
         self.files_area = QScrollArea()
         self.files_area.setWidgetResizable(True)
@@ -909,7 +972,7 @@ class Composer(QFrame):
         for button in (self.stop, self.send_button):
             button.setFixedWidth(80)
         self.footer = widgets.row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
-                                  10, _caption("OTHERS"), self.others, None, self.interrupt, self.stop, self.send_button)
+                                  None, self.interrupt, self.stop, self.send_button)
         outer.addWidget(self.footer)
         self.text.textChanged.connect(self._sync_send)
         self._sync_send()
@@ -1113,6 +1176,40 @@ class Composer(QFrame):
         for label, _value in OTHERS:
             self.others.set_enabled(label, allowed, "" if allowed else OTHERS_NONE)
         self.others.setToolTip(OTHERS_MEANS if allowed else OTHERS_NONE)
+        self._sync_delegation()
+
+    def _sync_delegation(self):
+        """When done and Budget mean something only while delegation is on."""
+        off = self.others.current() == "Off"
+        self.wake.setEnabled(not off)
+        self.budget.setEnabled(not off)
+        self.delegation_off.setVisible(off)
+
+    def _budget_edited(self):
+        wanted = self.budget.budget()
+        if wanted != getattr(self, "_budget_said", None):
+            self._budget_said = wanted
+            self.budget_changed.emit(wanted)
+
+    def set_budget(self, found):
+        """The conversation's budget and how far it is spent, from the core - or
+        None: a new conversation, with its connection's default."""
+        found = found or {}
+        budget = {key: value for key, value in (found.get("budget") or {}).items() if key in ("usd", "tokens")}
+        self._budget_said = budget
+        if not (self.budget.usd.hasFocus() or self.budget.tokens.hasFocus()):
+            self.budget.set_budget(budget)
+        said = ""
+        if found.get("spent") and (found["spent"].get("usd") or found["spent"].get("tokens")):
+            said = spend_text(found["spent"]) + " spent"
+            if found.get("share") is not None:
+                said += " - " + share_text(found)
+        self.budget_state.setText(said)
+        warn = bool(found.get("warn"))
+        if self.budget_state.property("bad") != ("true" if warn else "false"):
+            self.budget_state.setProperty("bad", "true" if warn else "false")
+            self.budget_state.style().unpolish(self.budget_state)
+            self.budget_state.style().polish(self.budget_state)
 
     def _say_model(self):
         chosen = self.connection.currentData()
@@ -1419,6 +1516,10 @@ class ChatTab(QWidget):
         self._wakes = {}                # session id -> {key: (found, document, reason)}
         #: A task's execution that asked -> the task it belongs to (ADR-011).
         self._root_of = {}
+        #: session id -> its budget as the core last said it (ADR-013).
+        self._budgets = {}
+        #: execution id or wake key -> a turn waiting at a budget, and the card's answer.
+        self._budget_waits = {}
         self._listed_states = {}        # execution id -> the state the list was read for
 
         outer = QVBoxLayout(self)
@@ -1523,6 +1624,7 @@ class ChatTab(QWidget):
         self.composer.chosen.connect(self._remember_choices)
         self.composer.others_changed.connect(self._others_chosen)
         self.composer.wake_changed.connect(self._wake_chosen)
+        self.composer.budget_changed.connect(self._budget_chosen)
         self.composer.model.requested.connect(self._load_models)
         # Other agents (ADR-006): what waits for the person's yes, how the
         # conversation's tasks went, and what other agents wrote to it - cards
@@ -1822,6 +1924,8 @@ class ChatTab(QWidget):
         self._leave()
         self._remember(session="")
         self._show_new()
+        self._budget_wanted = None
+        self.composer.set_budget(None)          # its connection's default, until the person says
         self.composer.text.setFocus()
 
     def open_session(self, session_id, limit=EVENTS_SHOWN):
@@ -1873,6 +1977,11 @@ class ChatTab(QWidget):
         self.feed.load(events)
         self.integration_changes_changed()
         self._sync_wakes()
+        self._sync_budget_cards()
+        record = session.get("record") or (session.get("source") or {}).get("record")
+        self.composer.set_budget(self._budgets.get(session.get("id")))
+        if not record:
+            self.read_budget(session.get("id"))
         if (session.get("state") == "interrupted" and events
                 and events[-1].get("type") not in ("completed", "failed", "stopped")):
             self.feed.append({"type": "interrupted"})
@@ -2013,8 +2122,11 @@ class ChatTab(QWidget):
         # The program's own estimate, priced as its API would be (ADR-008 D3).
         cost = cost_text(session.get("cost_usd")) if session.get("turns") else ""
         cost = "est. " + cost if cost else ""
+        # How far into its budget, with what it handed on (ADR-013).
+        budget = share_text(self._budgets.get(session.get("id")))
         self.usage.setText(" · ".join(part for part in (
-            ran_with_text(session), "context " + context if context else "", cost) if part))
+            ran_with_text(session), "context " + context if context else "", cost,
+            budget + " budget" if budget else "") if part))
         tokens = tokens_text(session.get("tokens"))
         self.usage.setToolTip("Tokens so far: %s" % tokens if tokens else "")
         self._changes_label()
@@ -2092,6 +2204,11 @@ class ChatTab(QWidget):
             self._new_skills = []
             self._fresh.add(session.get("id"))
             self.sessions.insert(0, session)
+            wanted = getattr(self, "_budget_wanted", None)
+            if wanted is not None:
+                # Set before the first message: the conversation keeps it.
+                self._budget_wanted = None
+                self._save_budget(session["id"], wanted)
             self._show(session, [], whole=True)
             self.composer.set_draft("")
             self.composer.set_attachments([])
@@ -2233,6 +2350,7 @@ class ChatTab(QWidget):
 
     def _answered(self, session_id, answer):
         self.conversation_changed.emit(session_id)
+        self.read_budget(session_id)             # what it has cost now, against its budget
         turn = self.turns.pop(session_id, None)
         self._turn_began.pop(session_id, None)
         if turn is not None:
@@ -2436,6 +2554,8 @@ class ChatTab(QWidget):
         elif state == "running" or (state == "dispatched" and request.get("state") != "waiting"):
             request["state"] = "running" if request.get("state") != "approved" else "approved"
         self._took_question(request, execution, output)
+        if output.get("budget"):
+            request["budget"] = output["budget"]
         if output.get("session_id"):
             request["session_id"] = output["session_id"]
         request["detail"] = self._request_detail(request, output, error)
@@ -2514,6 +2634,8 @@ class ChatTab(QWidget):
             request["state"] = state if state in ("succeeded", "failed", "canceled", "timed_out", "unknown") \
                 else "running"
         self._took_question(request, execution, output)
+        if output.get("budget"):
+            request["budget"] = output["budget"]
         request["detail"] = self._request_detail(request, output, error)
         self._sync_others()
 
@@ -2640,8 +2762,11 @@ class ChatTab(QWidget):
             return make
 
         def told(request):
-            return lambda card: card.set_state(request.get("state") or "waiting", request.get("session_id") or "",
-                                               request.get("detail") or "", len(request.get("questions") or []))
+            def update(card):
+                card.set_state(request.get("state") or "waiting", request.get("session_id") or "",
+                               request.get("detail") or "", len(request.get("questions") or []))
+                card.set_cost(request.get("budget"))
+            return update
         self.feed.sync_cards("request", [
             (key, request.get("at") or 0, made(request), told(request))
             for key, request in self._requests.items() if session_id and request.get("session") == session_id])
@@ -2693,6 +2818,58 @@ class ChatTab(QWidget):
             (message.get("message_id"), message.get("created_at") or 0, inbox_card(message), lambda card: None)
             for message in self._inbox])
 
+    # -- a turn waits at a budget (ADR-013 D3) --------------------------------------------
+    def budget_reached(self, found):
+        """The core holds a turn at a budget: a card in the conversation it is for."""
+        key = found.get("execution_id")
+        if not key:
+            return
+        self._budget_waits[key] = {"found": dict(found), "session": found.get("conversation") or "",
+                                   "at": time.time(), "answered": None}
+        self._sync_budget_cards()
+
+    def budget_answer(self, key, go):
+        """The person's word - on the card here, or from Agents -> Tasks."""
+        slot = self._budget_waits.get(key)
+        host = ChatTab.qcr_access
+        if host is None:
+            return
+        if slot is None:
+            host.budget_answer(key, go)
+            return
+        if slot["answered"] is not None:
+            return
+        slot["answered"] = go
+        if slot.get("wake"):
+            session = next((one for one in self.sessions if one.get("id") == slot["session"]), None)
+            if go and session is not None:
+                # Its budget goes up first, then it goes on with the results.
+                host.budget_raise(slot["session"], lambda reply, session=session, slot=slot: (
+                    self.read_budget(slot["session"]), self._go_on(session, slot["document"])))
+        else:
+            host.budget_answer(key, go)
+        self._sync_budget_cards()
+
+    def _sync_budget_cards(self):
+        session_id = (self.current or {}).get("id")
+
+        def made(key, slot):
+            def make():
+                card = BudgetCard(key, slot["found"])
+                card.answered.connect(self.budget_answer)
+                return card
+            return make
+
+        def told(slot):
+            def update(card):
+                if slot["answered"] is not None and card.actions.isVisible():
+                    card.meta.setText("continued" if slot["answered"] else "stopped")
+                    card.actions.setVisible(False)
+            return update
+        self.feed.sync_cards("budget", [
+            (key, slot["at"], made(key, slot), told(slot))
+            for key, slot in self._budget_waits.items() if session_id and slot["session"] == session_id])
+
     # -- woken when what it handed on ends (ADR-009) ------------------------------------
     def round_finished(self, found):
         """What a conversation handed on has ended, as it asked: go on by itself,
@@ -2705,6 +2882,16 @@ class ChatTab(QWidget):
         if mode == "off":
             return                      # the results are on their cards
         document = {"message": agentcards.wake_message(found), "trigger": "tasks_finished"}
+        if found.get("budget"):
+            self._budgets[session_id] = dict(self._budgets.get(session_id) or {}, **found["budget"])
+        if mode == "continue" and (found.get("budget") or {}).get("reached"):
+            # At its budget it does not go on by itself: the person decides (ADR-013 D3).
+            key = "wake:%s:%d" % ((found.get("condition") or {}).get("id") or "", len(self._budget_waits))
+            self._budget_waits[key] = {"found": dict(found["budget"], scope="conversation", why="wake"),
+                                       "session": session_id, "at": time.time(), "answered": None,
+                                       "wake": True, "document": document}
+            self._sync_budget_cards()
+            return
         counted = self._woke.setdefault(session_id, {"failed": 0, "all": 0})
         # A task asking is a dialogue, not a loop: it goes on as long as it needs, and
         # the person sees how many questions and stops it when they decide (ADR-011).
@@ -2777,6 +2964,41 @@ class ChatTab(QWidget):
         session["others"] = value             # the next turn asks with it at once
         self.ask("session-set", lambda core, cancel: core.agents(
             "session-set", session["id"], document={"others": value}), done)
+
+    # -- budgets (ADR-013) --------------------------------------------------------------
+    def _budget_chosen(self, budget):
+        """The conversation's own budget; one not begun yet takes it when it starts."""
+        session = self.current
+        if session is None:
+            self._budget_wanted = budget
+            return
+        self._save_budget(session["id"], budget)
+
+    def _save_budget(self, session_id, budget):
+        def done(payload):
+            if payload.get("ok"):
+                self._budgets[session_id] = payload
+                if self._showing(session_id):
+                    self.composer.set_budget(payload)
+                    self._head()
+            else:
+                self.composer.say(payload.get("error") or "The budget was not saved.", bad=True)
+        self.ask("budget:%s" % session_id, lambda core, cancel: core.agents(
+            "budget", session_id, document={"budget": budget}, cancel=cancel), done)
+
+    def read_budget(self, session_id):
+        """How far a conversation is into its budget, as the core sums it."""
+        if not session_id:
+            return
+
+        def done(payload):
+            if payload.get("ok"):
+                self._budgets[session_id] = payload
+                if self._showing(session_id):
+                    self.composer.set_budget(payload)
+                    self._head()
+        self.ask("budget:%s" % session_id, lambda core, cancel: core.agents(
+            "budget", session_id, cancel=cancel), done)
 
     def _wake_chosen(self, value):
         """A begun conversation keeps how it goes on when its tasks end."""

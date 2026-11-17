@@ -40,7 +40,7 @@ import time
 
 import json
 
-from integrations.agents import adapters, roles, runner, sessions, store
+from integrations.agents import adapters, budgets, roles, runner, sessions, store
 from qcr import context as packages
 from qcr.contracts import CapabilityDescriptor, ResourceDescriptor, ResourceRef
 from qcr.errors import QCRError
@@ -92,7 +92,10 @@ DELEGATE_INPUT = {
         "artifacts": {"type": "array", "maxItems": 20, "items": _EXECUTION},
         "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": MAX_SECONDS},
         "model": _MODEL, "effort": _EFFORT, "name": _NAME,
-        "after": {"type": "array", "maxItems": 5, "uniqueItems": True, "items": _NAME}}}
+        "after": {"type": "array", "maxItems": 5, "uniqueItems": True, "items": _NAME},
+        # A budget for this task, lower than what it would get (ADR-013 D4).
+        "budget_usd": {"type": "number", "exclusiveMinimum": 0, "maximum": 100000},
+        "budget_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000000000}}}
 DELEGATE_OUTPUT = {"type": "object"}
 MESSAGE_INPUT = {
     "type": "object", "additionalProperties": False, "required": ["body"],
@@ -270,8 +273,9 @@ class Delegation:
         self._follow = {}                  # a task that asked -> the execution its answer runs as (ADR-011)
         self._by_person = {}               # (actor, task) -> who: the next reply is the person's
         self._stopped = {}                 # a task the person stopped -> by whom: no more answers
+        self._budget_holds = {}            # execution id -> (job, context, info, go on): held at a budget
         #: What the delegating conversations handed on, and when to wake them (ADR-009).
-        self.rounds = Rounds(notify, self._summary)
+        self.rounds = Rounds(self._round_finished, self._summary)
         # Ends are taken off the Engine's own notification, one at a time, in order.
         self._ends = queue.Queue()
         threading.Thread(target=self._take_ends, name="qcr-delegation-ends", daemon=True).start()
@@ -540,7 +544,7 @@ class Delegation:
                               actor=job.actor_id))
             return
         if job.dispatched({"approval": "not_needed"}):
-            self._start_when_ready(job, context)
+            self._within_budget(job, context, lambda: self._start_when_ready(job, context))
 
     def answer(self, execution_id, approved, by=""):
         """The person's word on a delegation that waits for it. False when none waits."""
@@ -559,13 +563,14 @@ class Delegation:
             if context.get("kind") == "message":
                 self._deliver(job, context)
             else:
-                self._start_when_ready(job, context)
+                self._within_budget(job, context, lambda: self._start_when_ready(job, context))
         return True
 
     def cancel(self, job):
         with self._lock:
             waiting = self._pending.pop(job.execution_id, None)
             self._blocked.pop(job.execution_id, None)
+            self._budget_holds.pop(job.execution_id, None)
             slot = self._running.get(job.execution_id)
         if waiting and waiting[1].get("kind") == "message":
             self._message_state(waiting[1]["message_id"], "failed", {"reason": "canceled"})
@@ -575,9 +580,11 @@ class Delegation:
     def close(self):
         with self._lock:
             self._closed = True
-            pending = list(self._pending.values()) + list(self._blocked.values())
+            pending = list(self._pending.values()) + list(self._blocked.values()) + [
+                (slot[0], slot[1]) for slot in self._budget_holds.values()]
             self._pending.clear()
             self._blocked.clear()
+            self._budget_holds.clear()
             running = list(self._running.values())
         for job, context in pending:
             if context.get("kind") == "message":
@@ -593,7 +600,9 @@ class Delegation:
     def _unfinished(self, parent):
         return (sum(1 for slot in self._running.values() if slot[2] == parent)
                 + sum(1 for _job, other in self._pending.values() if other["parent"] == parent)
-                + sum(1 for _job, other in self._blocked.values() if other["parent"] == parent))
+                + sum(1 for _job, other in self._blocked.values() if other["parent"] == parent)
+                + sum(1 for slot in self._budget_holds.values()
+                      if slot[1]["parent"] == parent and not slot[1].get("session_id")))
 
     def _start_when_ready(self, job, context):
         """Start it now, or keep it until the tasks it is ``after`` succeed and its
@@ -675,6 +684,14 @@ class Delegation:
             return
         job.succeed({"condition": made, kind: list(request[kind]), "on_failure": bool(request.get("on_failure")),
                      "wake": rule.get("wake", "ask")})
+
+    def _round_finished(self, message):
+        """A round to wake a conversation for, with how far it is into its budget:
+        at its limit the person is asked first, not the agent (ADR-013 D3)."""
+        if message.get("type") == "round_finished" and message.get("session"):
+            policy = next((one for one in self._policies.values() if one.get("session") == message["session"]), {})
+            message = dict(message, budget=self._conversation_budget(message["session"], policy.get("connection")))
+        self._notify(message)
 
     def _summary(self, execution_id):
         """One ended task or question, as the woken agent is told it (ADR-009 D4)."""
@@ -758,7 +775,15 @@ class Delegation:
             provenance={"actor": job.actor_id, "session": rule["session"], "connection": rule["connection"],
                         "execution_id": job.execution_id},
             known_secrets=self._secrets())
+        # What it may cost (ADR-013 D4): its connection's default for a task, never
+        # more than the conversation has left, lower if the agent said so.
+        own = self._conversation_budget(rule["session"], rule["connection"])
+        given = [budgets.normal((store.get(rule["connection"], self.agents_path) or {}).get("budget_task")),
+                 budgets.normal({"usd": job.request.get("budget_usd"), "tokens": job.request.get("budget_tokens")})]
+        if own["budget"]:
+            given.append(budgets.left(own["spent"], own["budget"]))
         return {"target": target, "target_name": connection["name"], "provider": connection["kind"],
+                "budget": budgets.smaller(*given), "parent_connection": rule["connection"],
                 "model": job.request.get("model") or (role or {}).get("model") or "",
                 "effort": job.request.get("effort") or (role or {}).get("effort") or "",
                 "role": role,
@@ -804,6 +829,8 @@ class Delegation:
                                  "detail": "%s: %s" % (context["parent_name"], context["goal"])[:300],
                                  "parent": context["parent"], "by": context["parent_name"]},
                                 **({"role": context["role"]["id"]} if context.get("role") else {})))
+                # Its budget, kept beside its record: none is said as none (ADR-013).
+                budgets.save(self.root, session["id"], context.get("budget") or {})
             task_id = job.execution_id
             metadata = {"task_id": task_id, "session_id": session["id"], "provider": context["provider"],
                         "target": context["target"], "parent_session": context["parent"]}
@@ -853,6 +880,11 @@ class Delegation:
                       "asked": int(context.get("asked") or 0)}
             if context.get("answer") is not None:
                 output.update(follow_up_of=context["follow_up_of"], by=context["by"], goal=context["goal"])
+            try:
+                # What it has cost so far, against its budget: on its card and the board.
+                output["budget"] = budgets.of_task(self.root, session["id"])
+            except (sessions.SessionError, OSError):
+                pass
             asked = question_of(text) if turn["state"] == sessions.COMPLETED else ""
             if context.get("role"):
                 output["role"] = context["role"]["id"]
@@ -873,6 +905,70 @@ class Delegation:
             with self._lock:
                 self._running.pop(job.execution_id, None)
             self._ends.put(("free",))       # its agent has a place again
+
+    # -- budgets (ADR-013): checked before a turn starts, never during one ------------
+    def _conversation_budget(self, session_id, connection_id):
+        connection = store.get(connection_id or "", self.agents_path)
+        try:
+            return budgets.of_conversation(self.root, session_id, connection)
+        except (sessions.SessionError, OSError):
+            # A conversation with no record yet has spent nothing.
+            return budgets.state({"usd": 0, "tokens": 0, "unknown_cost_turns": 0},
+                                 budgets.load(self.root, session_id, connection) if session_id else {})
+
+    def _within_budget(self, job, context, then):
+        """Start the turn - or, at a budget's limit, hold it and ask the person."""
+        checks = []
+        if context.get("session_id"):
+            try:
+                checks.append(("task", budgets.of_task(self.root, context["session_id"])))
+            except (sessions.SessionError, OSError):
+                pass
+        checks.append(("conversation", self._conversation_budget(context["parent"],
+                                                                 context.get("parent_connection"))))
+        for scope, found in checks:
+            if found["reached"]:
+                self._hold(job, context, scope, found, then)
+                return
+        then()
+
+    def _hold(self, job, context, scope, found, then):
+        info = {"scope": scope, "spent": found["spent"], "budget": found["budget"], "share": found["share"],
+                "session": context["session_id"] if scope == "task" else context["parent"],
+                "conversation": context["parent"], "task": context.get("root") or job.execution_id,
+                "goal": context["goal"], "target_name": context["target_name"],
+                "enforcement": budgets.ENFORCEMENT}
+        with self._lock:
+            if self._closed:
+                job.fail("source_unavailable", "Delegation is closed.")
+                return
+            self._budget_holds[job.execution_id] = (job, context, info, then)
+        if not job.progress("budget.requested", info):
+            return
+        self._notify(dict(info, type="budget_reached", execution_id=job.execution_id, actor=job.actor_id))
+
+    def budget_answer(self, execution_id, go, by=""):
+        """The person's word on a turn held at a budget: go on with the budget
+        raised by what it was first set to, or stop. False when none is held."""
+        with self._lock:
+            slot = self._budget_holds.pop(execution_id, None)
+        if slot is None:
+            return False
+        job, context, info, then = slot
+        by = str(by or "the person")[:200]
+        if not go:
+            if info["scope"] == "task":
+                self.stop(info["task"], by)
+            job.fail("stopped", "%s stopped it at its budget." % by.capitalize())
+            return True
+        raised = budgets.raised(budgets.load(self.root, info["session"]) or info["budget"])
+        try:
+            budgets.save(self.root, info["session"], raised)
+        except (sessions.SessionError, OSError):
+            pass                          # no record to keep it beside: it holds for this turn
+        if job.progress("budget.answered", {"by": by, "budget": raised, "scope": info["scope"]}):
+            then()
+        return True
 
     # -- answers to what a task asks (ADR-011) --------------------------------------
     def person_says(self, actor, task, by, forget=False):
@@ -951,7 +1047,8 @@ class Delegation:
                    "package": output.get("context_package") or "", "session_id": session["id"],
                    "grants": child_grants(rule.get("grants"), connection),
                    "answer": job.request["answer"].strip(), "by": by_person or rule["name"],
-                   "follow_up_of": task_id, "root": root_id, "asked": int(output.get("asked") or 0), "after": []}
+                   "follow_up_of": task_id, "root": root_id, "asked": int(output.get("asked") or 0), "after": [],
+                   "parent_connection": rule["connection"]}
         with self._lock:
             if self._closed:
                 job.fail("source_unavailable", "Delegation is closed.")
@@ -967,7 +1064,7 @@ class Delegation:
         if job.dispatched({"answer_by": "person" if by_person else "agent"}):
             job.progress("answered", {"task": task_id, "root": root_id, "by": context["by"],
                                       "answer": context["answer"][:QUESTION_CHARS]})
-            self._start_when_ready(job, context)
+            self._within_budget(job, context, lambda: self._start_when_ready(job, context))
 
     # -- the workbench: every task handed on, and its history (ADR-012) -------------
     def board(self, limit=BOARD_LIMIT):
@@ -1007,8 +1104,11 @@ class Delegation:
             pending = latest["execution_id"] in self._pending
             blocked = latest["execution_id"] in self._blocked
             stopped = self._stopped.get(root["execution_id"])
+            held = latest["execution_id"] in self._budget_holds
         state = latest.get("state")
-        if pending:
+        if held:
+            state = "budget"
+        elif pending:
             state = "approval"
         elif blocked:
             state = "waiting"
@@ -1024,7 +1124,8 @@ class Delegation:
         session = (root.get("output") or {}).get("session_id") or output.get("session_id") or ""
         return {"task": root["execution_id"], "latest": latest["execution_id"],
                 "kind": "question" if root["capability_id"].endswith(".message") else "task",
-                "state": state, "needs_person": state in ("approval", ASKS),
+                "state": state, "needs_person": state in ("approval", ASKS, "budget"),
+                "budget": self._spend_of(session),
                 "goal": str(given.get("goal") or given.get("body") or "")[:500], "name": given.get("name") or "",
                 "target": (connection or {}).get("id") or target_id,
                 "target_name": (connection or {}).get("name") or target_id,
@@ -1039,6 +1140,15 @@ class Delegation:
                 "criteria": len(criteria), "passed": sum(1 for one in verdicts.values() if one == "passed"),
                 "error": str(error.get("message") or "")[:500],
                 "created_at": root.get("created_at"), "updated_at": latest.get("updated_at")}
+
+    def _spend_of(self, session_id):
+        """What a task's conversation has cost, against its budget - or {} unknown."""
+        if not session_id:
+            return {}
+        try:
+            return budgets.of_task(self.root, session_id)
+        except (sessions.SessionError, OSError):
+            return {}
 
     def history(self, task_id):
         """One task as it went, oldest first: handed on, approved, waited, each turn,
@@ -1095,6 +1205,13 @@ class Delegation:
                 made.append({"at": event.get("at"), "kind": "waiting", "text": (
                     "Waits for %s to succeed." % ", ".join(payload.get("after") or ()) if payload.get("after")
                     else "Waits for a free place with its agent.")})
+            elif kind == "budget.requested":
+                made.append({"at": event.get("at"), "kind": "budget", "text": "%s reached its budget: %s of %s." % (
+                    "The conversation" if payload.get("scope") == "conversation" else "The task",
+                    budgets.text(payload.get("spent") or {}), budgets.text(payload.get("budget") or {}))})
+            elif kind == "budget.answered":
+                made.append({"at": event.get("at"), "kind": "budget_raised", "text": "Continued by %s: budget now %s." % (
+                    payload.get("by") or "the person", budgets.text(payload.get("budget") or {}))})
             elif kind == "answered":
                 made.append({"at": event.get("at"), "kind": "answer", "execution_id": row["execution_id"],
                              "text": payload.get("answer") or "", "by": payload.get("by") or ""})

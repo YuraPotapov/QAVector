@@ -345,6 +345,11 @@ class AgentRequestCard(QFrame):
         self.details.setProperty("role", "hint")
         self.details.setVisible(bool(details))
         column.addWidget(self.details)
+        # What it has cost so far, against its budget (ADR-013).
+        self.cost = QLabel("")
+        self.cost.setProperty("role", "hint")
+        self.cost.setVisible(False)
+        column.addWidget(self.cost)
         self.result = QLabel("")
         self.result.setProperty("role", "hint")
         self.result.setWordWrap(True)
@@ -391,6 +396,23 @@ class AgentRequestCard(QFrame):
         self.result.setText(detail)
         self.result.setVisible(bool(detail))
         _settled(self, ended)
+
+    def set_cost(self, found):
+        """What the task has cost so far, and how far into its budget: warned at 80%."""
+        from .agentbudget import share_text, spend_text
+        found = found or {}
+        spent = found.get("spent") or {}
+        said = ("Cost so far: " + spend_text(spent)) if (spent.get("usd") or spent.get("tokens")) else ""
+        if said and found.get("share") is not None:
+            said += " - " + share_text(found) + " budget"
+        self.cost.setText(said)
+        self.cost.setVisible(bool(said))
+        warn = "true" if found.get("warn") else "false"
+        if self.cost.property("bad") != warn:
+            self.cost.setProperty("bad", warn)
+            self.cost.style().unpolish(self.cost)
+            self.cost.style().polish(self.cost)
+
 
 def _marked_head(name, kind, meta=""):
     """A card's heading with its direction in front: what came in, or what went out."""

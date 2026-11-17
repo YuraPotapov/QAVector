@@ -372,6 +372,25 @@ def _usage(call):
         return _refusal(exc.kind, str(exc))
 
 
+def _budget(call):
+    """A conversation's budget and how far it is spent (QCR ADR-013): read it, or
+    with ``{"budget": {"usd", "tokens"}}`` set its own (``{}``: none)."""
+    from integrations.agents import budgets, sessions, store
+    session_id = _one(call, "session")
+    document = _document(call.source)
+    try:
+        session = sessions.load(call.sessions, session_id)
+        connection = store.get(session.get("connection") or "", call.path)
+        if "budget" in document:
+            budgets.save(call.sessions, session_id, document.get("budget") or {})
+        task = (session.get("source") or {}).get("label") == "Delegated"
+        found = budgets.of_task(call.sessions, session_id, connection) if task \
+            else budgets.of_conversation(call.sessions, session_id, connection)
+        return dict(found, ok=True, session=session_id, scope="task" if task else "conversation")
+    except sessions.SessionError as exc:
+        return _refusal(exc.kind, str(exc))
+
+
 def _session(call):
     from integrations.agents import sessions
     session_id = _one(call, "session")
@@ -637,7 +656,7 @@ def _import(call):
 COMMANDS = {"kinds": _kinds, "models": _models, "list": _list, "save": _save, "delete": _delete,
             "roles": _roles, "role-save": _role_save, "role-delete": _role_delete,
             "test": _test, "sign-in": _sign_in,
-            "sessions": _sessions, "session": _session, "usage": _usage, "session-new": _session_new,
+            "sessions": _sessions, "session": _session, "usage": _usage, "budget": _budget, "session-new": _session_new,
             "session-set": _session_set, "session-delete": _session_delete,
             "send": _send, "activity": _activity, "changes": _changes,
             "skills": _skills, "skill-look": _skill_look, "skill-add": _skill_add,
