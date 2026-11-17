@@ -41,6 +41,7 @@ ACCESS_GRANTS = {
     "jira_write": ("integrations.jira.write", "integrations.jira.comment", "integrations.jira.transition",
                    "integrations.jira.assign", "integrations.jira.edit", "integrations.jira.comment_edit",
                    "integrations.jira.create", "integrations.jira.attach"),
+    "usage": ("analytics.read",),
 }
 
 

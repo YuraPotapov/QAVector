@@ -38,6 +38,17 @@ app-agnostic, since that will break things on purpose.
   same Jira code as the page and is logged in Activity as `Agent <name>`.
   The agent never sees the token or Jira's error text. Nothing is retried; a
   lost answer is reported as `unknown_outcome`.
+- **Agents -> Usage** adds up what agents used in the project (QCR ADR-008):
+  conversations, turns, tokens and the estimated cost for 7 days, 30 days or
+  all time, by model, connection, source or cycle, with CSV/JSON export. Every
+  view now sums one way (`agents usage`). A Jira issue's Summary says what its
+  conversations handed on to other agents. Agents may read the same figures
+  through QAVector when their connection allows it.
+- Agents -> Usage sums by **role** too, and says how many turns QAVector
+  continued by itself with what other agents came back with.
+- Costs are called **est.** everywhere: they are the agent program's own
+  estimate, priced as its API would be, and on a subscription not what is
+  charged. A turn without a reported cost is counted as such, never as 0.
 - Agent chats offer **Interrupt & send** for a new or queued message. The
   current turn is stopped before the same conversation resumes with the
   selected message; other queued messages keep their order. Failed stops

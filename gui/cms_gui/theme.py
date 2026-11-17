@@ -1090,6 +1090,11 @@ QTextBrowser[role="answer"] {{
     background: transparent; border: none; padding: 0; font-size: 13px; color: {text};
 }}
 /* A conversation's head: what it is called, then whom it is with and where. */
+/* A figure of a period (Agents -> Usage): a small caption over a large value. */
+QFrame[role="stattile"] {{ background: {surface}; border: 1px solid {divider}; }}
+QLabel[role="statlabel"] {{ font-size: 10px; font-weight: 600; letter-spacing: 0.8px; color: {n600}; }}
+QLabel[role="statvalue"] {{ font-family: {heading}; font-size: 20px; font-weight: 600; color: {text}; }}
+QLabel[role="statvalue"][state="warn"] {{ color: {warn_ink}; }}
 QLabel[role="chattitle"] {{
     font-family: {heading}; font-size: 15px; font-weight: 600; color: {text};
 }}

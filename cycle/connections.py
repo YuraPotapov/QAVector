@@ -346,8 +346,12 @@ def _record_agent_call(context, step, call):
             root, owner, call.get("cwd") or context.workspace, mode,
             model=call.get("model") or "", effort=call.get("effort") or "",
             title="%s · %s" % (cycle_name, label),
+            # The ref is for summing by cycle, run and step (ADR-008 D5); the
+            # label and detail are for a person.
             source={"label": "Cycle %s · step %s" % (cycle_name, label),
-                    "detail": "Run %s" % getattr(run, "id", ""), "record": True})
+                    "detail": "Run %s" % getattr(run, "id", ""), "record": True,
+                    "ref": "cycle:%s:%s:%s" % (getattr(cycle, "id", "") or cycle_name,
+                                               getattr(run, "id", ""), step.id)})
         session_id = made["id"]
         with open(where, "w", encoding="utf-8") as handle:
             json.dump({"session": session_id}, handle)
@@ -373,6 +377,8 @@ def _record_agent_call(context, step, call):
         "started": call.get("started"), "ended": call.get("ended"), "state": state,
         "mode": mode, "model": call.get("model") or "", "effort": call.get("effort") or "",
         "skills": [], "cost_usd": call.get("cost_usd"), "steps": call.get("steps"),
+        # Claude's own figure for the call, priced as the API would be (ADR-008 D3).
+        "cost_kind": "estimate" if isinstance(call.get("cost_usd"), (int, float)) else "unknown",
         "error": call.get("error") or "", "provider_session": call.get("provider_session") or "",
         "files": {"prompt": call.get("prompt_file") or "", "stdout": call.get("stdout") or ""},
     }

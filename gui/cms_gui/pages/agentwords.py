@@ -155,7 +155,7 @@ def end_text(event, started=None):
         parts.append("%d step%s" % (steps, "" if steps == 1 else "s"))
     cost = cost_text(event.get("cost_usd"))
     if cost:
-        parts.append(cost)
+        parts.append("est. " + cost)
     took = took_text(started, event.get("at")) if started is not None else ""
     if took:
         parts.append(took)

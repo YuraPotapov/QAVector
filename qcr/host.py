@@ -105,6 +105,8 @@ class Host:
         self.messages = None
         #: Integration reads and writes, once the GUI names the project's connections file.
         self.integrations = None
+        #: Agent usage reads, once the GUI says where the conversations are.
+        self.analytics = None
         self._secrets_path = None
         extra = {} if schedule is None else {"schedule": schedule}
         self.engine = Engine(self.registry, self.store, on_change=self._changed, **extra)
@@ -385,6 +387,11 @@ class Host:
         elif (root, path) != (self.delegation.root, self.delegation.agents_path):
             raise QCRError("conflict", "Agent storage cannot change during this host's lifetime.")
         self.delegation.configure()
+        if self.analytics is None:
+            # What agent work used and cost, read from the same record (ADR-008 U.2).
+            from .adapters.analytics import AnalyticsAdapter
+            self.analytics = AnalyticsAdapter(self.registry, self.project_id, root)
+            self.analytics.refresh()
         return {}
 
     def _on_messages(self, message):

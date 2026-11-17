@@ -29,6 +29,7 @@ from .. import background, core as core_mod, search, theme, widgets
 from ..agentmodel import ModelPicker
 from .agentchat import ChatTab
 from .agentskills import SkillsTab
+from .agentusage import UsageTab
 from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F401
                          folder_text, kind_name, model_text, program_text, result_text,
                          status_text, tokens_text, tokens_total, took_text, when_text)
@@ -604,7 +605,7 @@ class ActivityTab(QWidget):
     """Every turn taken with an agent in this project, the newest first."""
 
     HEADERS = ("When", "Connection", "From", "Folder", "Mode", "Model", "Skills", "Took",
-               "Context", "Cost", "Result")
+               "Context", "Est. cost", "Result")
     SKILLS = 6
     CONTEXT = 8
     RESULT = 10
@@ -748,10 +749,12 @@ class AgentsView(QWidget):
         self.connections_tab = ConnectionsTab()
         self.skills_tab = SkillsTab()
         self.activity = ActivityTab()
+        self.usage = UsageTab()
         self.tabs.addTab(self.chat, "Chat")
         self.tabs.addTab(self.connections_tab, "Connections")
         self.tabs.addTab(self.skills_tab, "Skills")
         self.tabs.addTab(self.activity, "Activity")
+        self.tabs.addTab(self.usage, "Usage")
         self.tabs.currentChanged.connect(self._tab_changed)
         outer.addWidget(self.tabs, 1)
 
@@ -772,6 +775,8 @@ class AgentsView(QWidget):
         self.connections_tab.models_requested.connect(self.load_models)
         self.connections_tab.check_requested.connect(self.check_connection)
         self.activity.wanted.connect(self.load_activity)
+        self.usage.wanted.connect(self.load_usage)
+        self.usage.turns_wanted.connect(self._turns_of)
 
     # -- the outside ------------------------------------------------------------
     def set_core(self, core):
@@ -789,6 +794,9 @@ class AgentsView(QWidget):
         self.connections_tab.say("")
         self.activity.say("")
         self.activity.set_rows([])
+        self.usage.skeleton.stop()
+        self.usage.say("")
+        self.usage.set_usage(None)
         self.chat.reset()
         if self.quick_composer is not None:
             self.quick_composer.reset()
@@ -870,6 +878,8 @@ class AgentsView(QWidget):
             return
         if self.tabs.currentWidget() is self.activity:
             self.load_activity()
+        elif self.tabs.currentWidget() is self.usage:
+            self.usage.shown()
         elif self.tabs.currentWidget() is self.chat:
             self.chat.shown()
         elif self.tabs.currentWidget() is self.skills_tab:
@@ -1072,6 +1082,34 @@ class AgentsView(QWidget):
 
         self._call("activity", lambda core, cancel: core.agents("activity", cancel=cancel),
                    done)
+
+    def load_usage(self, wanted):
+        """What agent work used, summed by the core from the project's record
+        (ADR-008) - files read; no agent is asked."""
+        if self.core is None:
+            return
+        self.usage.skeleton.start()
+        document = {"by": ["model", "connection", "kind", "role", "cycle"]}
+        if wanted.get("since"):
+            document["since"] = wanted["since"]
+
+        def done(payload):
+            self.usage.skeleton.stop()
+            if payload.get("ok"):
+                self.usage.say("")
+                self.usage.set_usage(payload)
+            else:
+                self.usage.say(payload.get("error") or "The usage could not be read.")
+
+        self._call("usage", lambda core, cancel: core.agents("usage", document=document, cancel=cancel), done)
+
+    def _turns_of(self, field, value):
+        """The turns behind a row of Usage: Activity, searched by that model or connection."""
+        column = {"connection": 1, "model": 5}[field]
+        self.tabs.setCurrentWidget(self.activity)
+        box = self.activity.search.box(column)
+        if box is not None:
+            box.setText(value)
 
     # -- skills -----------------------------------------------------------------
     def load_skills(self, then=None):

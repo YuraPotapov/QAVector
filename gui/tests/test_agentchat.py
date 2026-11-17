@@ -138,7 +138,7 @@ def test_a_turn_reads_as_what_was_asked_what_was_done_and_what_was_said(qapp):
     assert feed.kinds() == ["you", "thinking", "tool", "answer", "end"]
     assert feed.said() == [QUESTION, "Thinking", "Read test_login.py", ANSWER, "Finished"]
     end = feed._rows[-1][1]
-    assert end.stage["detail"] == "3 steps · $0.04 · 42 s"
+    assert end.stage["detail"] == "3 steps · est. $0.04 · 42 s"
 
 
 def test_the_last_line_is_not_said_twice_but_one_that_differs_is_said(qapp):
@@ -1376,7 +1376,7 @@ def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):
                     changes=lambda args, document: found)
     chat = make(core).agents.chat
     chat.table.selectRow(0)
-    assert chat.usage.text() == "context 25k of 1M · $0.25"
+    assert chat.usage.text() == "context 25k of 1M · est. $0.25"
     assert chat.usage.toolTip() == "Tokens so far: 105k in (101k cached) · 2k out"
     line = chat.feed._rows[-1][1].body
     assert line.said == "Changed 2 files · +3 -1"

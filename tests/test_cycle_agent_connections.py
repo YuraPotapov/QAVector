@@ -231,7 +231,7 @@ def test_a_step_runs_the_connection_s_program_and_its_call_is_on_the_record(worl
     assert (_flag(argv, "--model"), _flag(argv, "--effort")) == ("opus", "high")
     (session,) = sessions.listing(world.sessions)["sessions"]
     assert session["source"] == {"label": "Cycle Nightly · step Fix it",
-                                 "detail": "Run %s" % run.id, "ref": "", "record": True}
+                                 "detail": "Run %s" % run.id, "ref": "cycle:c:%s:fix" % run.id, "record": True}
     assert session["record"] is True                # read in the chat, not carried on
     assert (session["connection"], session["connection_name"]) == ("claude-code", "Claude Code")
     assert session["title"] == "Nightly · Fix it" and session["mode"] == "edit"

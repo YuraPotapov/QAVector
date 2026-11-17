@@ -190,6 +190,13 @@ class Delegation:
         self.agents.ask("delegation-sessions", lambda core, cancel: core.agents(
             "sessions", document={"ref": ref}, cancel=cancel), done)
 
+        def counted(payload):
+            if ref == self.ref and getattr(self, "summary", None) is not None:
+                self.summary.set_usage(payload)
+        # What the issue's conversations handed on is summed by the core (ADR-008).
+        self.agents.ask("delegation-usage", lambda core, cancel: core.agents(
+            "usage", document={"ref": ref}, cancel=cancel), counted)
+
     def _show(self):
         if self.detail is None:
             return

@@ -279,7 +279,7 @@ def test_the_summary_adds_up_the_conversations_and_what_they_changed(make):
     detail = page.jira.issues.detail
     detail.show_tab(page.delegation.summary)
     summary = page.delegation.summary
-    assert summary.figures.text() == "2 conversations · 3 turns · 1 min 50 s · $0.30"
+    assert summary.figures.text() == "2 conversations · 3 turns · 1 min 50 s · est. $0.30"
     assert "Tokens: 106k in all - 104k in (100k cached) · 2k out." in summary.detail.text()
     assert "Files changed: 1 (+3 -1)" in summary.detail.text()
     assert [summary.table.item(0, column).text() for column in range(6)] == [
@@ -289,6 +289,28 @@ def test_the_summary_adds_up_the_conversations_and_what_they_changed(make):
     assert section.title() == "Fix the expiry · 1 file +3 -1"
     section.set_expanded(True)
     assert [file.entry["path"] for file in section.view.sections] == ["calc.py"]
+
+
+def test_the_summary_says_what_was_handed_on_apart_from_the_issue_s_own(make):
+    """A task handed to another agent is a conversation of its own, with its own
+    ref: counted by the core (ADR-008), said apart, never added into the figures."""
+    one = _talk("20261111-172345-3fa91c", "Fix the expiry", cost_usd=0.25,
+                turns=[{"n": 1, "state": "completed", "cost_usd": 0.25, "started": 0.0, "ended": 60.0}])
+    child = agents_fakes._session("20261111-180000-bbbbbb", "Run the tests", record=True,
+                                  source={"label": "Delegated", "ref": "qcr-task:e-1", "record": True,
+                                          "parent": one["id"]},
+                                  turns=[{"n": 1, "state": "completed", "cost_usd": 0.1, "started": 70.0,
+                                          "ended": 80.0},
+                                         {"n": 2, "state": "completed", "cost_usd": None, "started": 90.0,
+                                          "ended": 95.0}])
+    page, core = make(agents_fakes.FakeCore(sessions=[one, child]))
+    detail = page.jira.issues.detail
+    detail.show_tab(page.delegation.summary)
+    summary = page.delegation.summary
+    assert summary.figures.text() == "1 conversation · 1 turn · 1 min · est. $0.25"
+    assert ("Handed on to other agents: 1 conversation, 2 turns, est. $0.10 (1 turn reported no cost)."
+            in summary.detail.text())
+    assert "not what is charged" in summary.detail.text()
 
 
 def test_nothing_to_show_says_so_and_another_issue_starts_afresh(make):

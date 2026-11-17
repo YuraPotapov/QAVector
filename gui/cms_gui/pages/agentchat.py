@@ -1880,7 +1880,9 @@ class ChatTab(QWidget):
             session.get("connection_name") or session.get("connection"),
             folder_text(session.get("folder")), "" if source == CHAT else source) if part))
         context = context_text(session.get("context"))
+        # The program's own estimate, priced as its API would be (ADR-008 D3).
         cost = cost_text(session.get("cost_usd")) if session.get("turns") else ""
+        cost = "est. " + cost if cost else ""
         self.usage.setText(" · ".join(part for part in (
             ran_with_text(session), "context " + context if context else "", cost) if part))
         tokens = tokens_text(session.get("tokens"))

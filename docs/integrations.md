@@ -422,11 +422,40 @@ Full access. The skills a program has by itself are listed for information.
 first: from the chat, and from every agent step of a cycle - with a
 connection or without one (see *Every call on the record* in
 [cycle-agents.md](cycle-agents.md)). Each row says when, which connection, who
-asked, where, with what access, model and skills, how long it took, what it
-cost and how it ended. Double-click opens the conversation.
+asked, where, with what access, model and skills, how long it took, its
+estimated cost and how it ended. Double-click opens the conversation.
 
 The record is the conversations themselves, in `<project>/agent-sessions/`,
 owner-readable only; nothing is kept beside it to disagree with it.
+
+## Agents usage
+
+**Usage** adds up what agents used in the project, for the last 7 or 30 days or
+for all time ([ADR-008](qcr/adr-008-usage-and-cost.md)):
+
+- **What is counted.** Conversations, turns, tokens (in, of which cached, and
+  out), the estimated cost, the turns that reported no cost, and how long they
+  took.
+- **Breakdowns.** By model, connection, source (chats, tasks for other agents,
+  questions to other agents, Jira issues, cycle steps), role or cycle.
+- **Woken turns.** The totals say how many turns QAVector started by itself
+  with what other agents came back with.
+- **Drill-down.** Double-click a model or a connection to see its turns in
+  Activity.
+- **Export.** **Export…** saves the breakdown as CSV, or everything as JSON.
+
+Every figure is summed one way, by the core (`agents usage`), from the same
+record. A few rules hold throughout:
+
+- Thinking is part of the output and is not added again.
+- A cost is the agent program's own **estimate**, priced as its API would be.
+  On a subscription it is not what is charged. Codex reports none, so its turns
+  are counted as having no cost, never as free.
+- A Jira issue's **Summary** says what its conversations handed on to other
+  agents apart from the issue's own figures.
+- An agent connection with **Read agent usage and est. cost** turned on may
+  read the same figures through QAVector (`analytics.usage.summary`,
+  `.conversation`, `.ref`).
 
 ## Handing an issue to an agent
 

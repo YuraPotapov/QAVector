@@ -81,4 +81,4 @@ def test_tokens_and_context_read_at_a_glance():
     assert agentwords.tokens_text({}) == ""
     assert agentwords.end_text({"steps": 2, "cost_usd": 0.04,
                                 "context": {"used": 24813, "window": 200000}}) == (
-        "2 steps · $0.04 · context 25k of 200k")
+        "2 steps · est. $0.04 · context 25k of 200k")

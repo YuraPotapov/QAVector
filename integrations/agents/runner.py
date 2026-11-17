@@ -384,6 +384,9 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
 
     turn.update(ended=time.time(), state=outcome["state"], error=outcome["error"],
                 cost_usd=outcome["cost_usd"], cost_total_usd=outcome["cost_total_usd"],
+                # What the figure is (ADR-008 D3): the program's own estimate, or none.
+                cost_kind="estimate" if isinstance(outcome["cost_usd"], (int, float))
+                and not isinstance(outcome["cost_usd"], bool) else "unknown",
                 steps=outcome["steps"])
     for key in ("tokens", "context"):
         if outcome.get(key):

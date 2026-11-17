@@ -136,6 +136,21 @@ class FakeCore:
                     "detail": "Claude Code opens your browser and keeps the credentials itself."}
         if command == "activity":
             return {"ok": True, "activity": [dict(one) for one in self.turns]}
+        if command == "usage":
+            # As the core sums an issue's ref: its own conversations, and with
+            # those they handed on (source.parent) - figures kept apart.
+            ref = (document or {}).get("ref")
+            own = [one for one in self.sessions if (one.get("source") or {}).get("ref") == ref]
+            ids = {one["id"] for one in own}
+            children = [one for one in self.sessions if (one.get("source") or {}).get("parent") in ids]
+
+            def summed(found):
+                turns = [turn for one in found for turn in one.get("turns") or []]
+                return {"turns": len(turns),
+                        "estimate_usd": round(sum(t.get("cost_usd") or 0 for t in turns), 6),
+                        "unknown_cost_turns": sum(1 for t in turns if t.get("cost_usd") is None)}
+            return {"ok": True, "ref": ref, "own": summed(own), "inclusive": summed(own + children),
+                    "children": [one["id"] for one in children]}
         if command == "sessions":
             # As the core matches a source's ref: exactly, or every one when none.
             ref = (document or {}).get("ref")
@@ -871,3 +886,76 @@ def test_qavector_access_is_off_until_a_switch_is_turned_on(qapp):
             ("services", "scenarios", "cycles", "approvals", "jira", "jira_write", "usage"), False)
     finally:
         dialog.close()
+
+
+# -- Usage (QCR ADR-008 D8) -----------------------------------------------------------
+def _part(turns, tokens_total, estimate, unknown=0, conversations=1):
+    return {"conversations": conversations, "turns": turns, "failed_turns": 0, "seconds": 125.0,
+            "tokens": {"input": 10, "cache_read": 1000, "cache_write": 0, "output": 50, "thinking": 5},
+            "tokens_total": tokens_total, "estimate_usd": estimate, "priced_usd": 0.0,
+            "unknown_cost_turns": unknown}
+
+
+USAGE = dict(_part(5, 1060, 0.42, unknown=2, conversations=3), ok=True, by={
+    "model": {"sonnet": _part(3, 900, 0.42), "gpt-5": _part(2, 160, 0.0, unknown=2)},
+    "connection": {"Claude": _part(3, 900, 0.42), "Codex": _part(2, 160, 0.0, unknown=2)},
+    "kind": {"chat": _part(3, 900, 0.42), "delegated": _part(2, 160, 0.0, unknown=2)},
+    "cycle": {}})
+
+
+def test_usage_is_added_up_by_the_core_when_its_tab_is_opened(make):
+    core = FakeCore(usage=USAGE)
+    page = make(core)
+    assert "usage" not in core.asked()
+    page.agents.tabs.setCurrentWidget(page.agents.usage)
+    tab = page.agents.usage
+    (args, document), = [one for one in core.calls if one[0][0] == "usage"]
+    assert document["by"] == ["model", "connection", "kind", "role", "cycle"] and document["since"] > 0
+    shown = {key: tile.value.text() for key, tile in tab.tiles.items()}
+    assert shown == {"conversations": "3", "turns": "5", "tokens": "1.1k", "estimate": "$0.42", "woken": "0",
+                     "unknown": "2"}
+    assert tab.tiles["unknown"].value.property("state") == "warn"
+    assert tab.tiles["woken"].value.property("state") == ""
+    assert tab.table.horizontalHeaderItem(0).text() == "Model"
+    rows = [[tab.table.item(row, column).text() for column in range(9)] for row in range(2)]
+    assert rows[0][:3] == ["sonnet", "1", "3"] and rows[0][6] == "$0.42" and rows[0][7] == "—"
+    assert rows[1][0] == "gpt-5" and rows[1][6] == "—" and rows[1][7] == "2"
+    tab.breakdown.set_current("Source")
+    assert tab.table.horizontalHeaderItem(0).text() == "Source"
+    assert {tab.table.item(row, 0).text() for row in range(2)} == {"Chats", "Tasks for other agents"}
+    tab.breakdown.set_current("Cycle")
+    assert tab.table.rowCount() == 0 and tab.note.text() == "No cycle step ran an agent in this period."
+    tab.period.set_current("All")
+    assert "since" not in core.calls[-1][1]
+
+
+def test_a_row_of_usage_opens_its_turns_in_activity_and_exports_as_csv(make):
+    core = FakeCore(usage=USAGE)
+    page = make(core)
+    page.agents.tabs.setCurrentWidget(page.agents.usage)
+    tab = page.agents.usage
+    tab._drill(tab.table.item(1, 2))
+    assert page.agents.tabs.currentWidget() is page.agents.activity
+    assert page.agents.activity.search.box(5).text() == "gpt-5"
+    lines = tab.csv().splitlines()
+    assert lines[0].startswith("model,conversations,turns,tokens_total") and lines[1].startswith("sonnet,1,3,900")
+
+
+def test_usage_says_the_turns_qavector_went_on_with_and_sums_by_role(make):
+    payload = dict(USAGE, woken_turns=2, by=dict(USAGE["by"], role={"reviewer": _part(1, 400, 0.3)}))
+    page = make(FakeCore(usage=payload))
+    page.agents.tabs.setCurrentWidget(page.agents.usage)
+    tab = page.agents.usage
+    assert tab.tiles["woken"].value.text() == "2"
+    assert tab.tiles["woken"].label.text() == "QAVECTOR TURNS"
+    tab.breakdown.set_current("Role")
+    assert tab.table.horizontalHeaderItem(0).text() == "Role" and tab.table.item(0, 0).text() == "reviewer"
+
+
+def test_no_turns_in_the_period_says_so(make):
+    page = make(FakeCore(usage=dict(_part(0, 0, 0.0, conversations=0), ok=True, by={"model": {}})))
+    page.agents.tabs.setCurrentWidget(page.agents.usage)
+    tab = page.agents.usage
+    assert tab.table.rowCount() == 0 and tab.note.text() == "No agent turn in this period. Choose a longer one, or All."
+
+

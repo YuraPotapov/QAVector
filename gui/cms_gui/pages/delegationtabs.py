@@ -224,13 +224,17 @@ class AgentWorkTab(_Shown):
 
 # -- Summary -----------------------------------------------------------------------
 class SummaryTab(_Shown):
-    """What the agents' work on the issue came to."""
+    """What the agents' work on the issue came to - its own conversations, and
+    what they handed on to other agents, which have conversations of their own."""
 
-    HEADERS = ("Conversation", "Turns", "Tokens", "Context", "Cost", "State")
+    HEADERS = ("Conversation", "Turns", "Tokens", "Context", "Est. cost", "State")
 
     def __init__(self):
         super().__init__()
         self.sessions, self.changes = [], {}
+        #: The core's figures for the issue's ref, inclusive of what its
+        #: conversations handed on to other agents (ADR-008 D6), and its key.
+        self.usage, self._key = None, ""
         column = QVBoxLayout(self)
         column.setContentsMargins(18, 12, 18, 12)
         column.setSpacing(8)
@@ -251,11 +255,36 @@ class SummaryTab(_Shown):
         panel.layout().addWidget(self.table)
         column.addWidget(panel, 1)
 
+    def set_usage(self, usage):
+        """The core's figures for the issue (``agents usage`` by ref)."""
+        self.usage = dict(usage) if isinstance(usage, dict) and usage.get("ok") else None
+        self.set_sessions(self.sessions, self.changes, self._key)
+
+    def _handed_on(self):
+        """What the conversations handed on came to - said apart, never added
+        into the figures above, which are the issue's own conversations'."""
+        usage = self.usage or {}
+        children = usage.get("children") or []
+        own, inclusive = usage.get("own") or {}, usage.get("inclusive") or {}
+        if not children:
+            return ""
+        turns = (inclusive.get("turns") or 0) - (own.get("turns") or 0)
+        said = "Handed on to other agents: %d conversation%s, %d turn%s" % (
+            len(children), "" if len(children) == 1 else "s", turns, "" if turns == 1 else "s")
+        cost = round((inclusive.get("estimate_usd") or 0) - (own.get("estimate_usd") or 0), 6)
+        if cost:
+            said += ", est. " + cost_text(cost)
+        unknown = (inclusive.get("unknown_cost_turns") or 0) - (own.get("unknown_cost_turns") or 0)
+        if unknown:
+            said += " (%d turn%s reported no cost)" % (unknown, "" if unknown == 1 else "s")
+        return said + "."
+
     def set_sessions(self, sessions, changes=None, key=""):
         """``changes`` is each conversation's changes as the core said them,
         by id - read when this tab is first in front."""
         self.sessions = list(sessions or [])
         self.changes = dict(changes or {})
+        self._key = key
         turns = sum(len(one.get("turns") or []) for one in self.sessions)
         tokens = {}
         for one in self.sessions:
@@ -278,17 +307,20 @@ class SummaryTab(_Shown):
                      "%d turn%s" % (turns, "" if turns == 1 else "s"),
                      duration_text(sum(took_seconds(one) for one in self.sessions))]
             if priced:
-                parts.append(cost_text(cost) or "$0.00")
+                parts.append("est. " + (cost_text(cost) or "$0.00"))
             self.figures.setText(" · ".join(parts))
             lines = []
             if tokens:
                 lines.append("Tokens: %s in all - %s." % (count_text(tokens_total(tokens)),
                                                           tokens_text(tokens)))
+            handed = self._handed_on()
+            if handed:
+                lines.append(handed)
+            lines.append("The cost is the agents' programs' own estimate, priced as their API would be; "
+                         "on a subscription it is not what is charged.")
             if len(priced) < len(self.sessions):
-                lines.append("The cost is only what the agents' programs reported; %d "
-                             "conversation%s said none." % (
-                                 len(self.sessions) - len(priced),
-                                 "" if len(self.sessions) - len(priced) == 1 else "s"))
+                lines.append("%d conversation%s reported no cost." % (
+                    len(self.sessions) - len(priced), "" if len(self.sessions) - len(priced) == 1 else "s"))
             if self.changes:
                 lines.append("Files changed: %d (%s) across the conversations' folders." % (
                     len(files), counts_text(sum(one.get("added") or 0 for one in files.values()),

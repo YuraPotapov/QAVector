@@ -306,6 +306,27 @@ def _sessions(call):
     return dict(answer, ok=True, path=sessions.resolve_root(call.sessions))
 
 
+def _usage(call):
+    """What agent work used and cost (QCR ADR-008): ``{"ref": ...}`` for an
+    issue's conversations with what they handed on, ``{"session": ...}`` for one
+    conversation, else totals with filters ``since``, ``until``, ``connection``,
+    ``model``, ``kind``, ``cycle``, ``run`` and breakdowns ``by``."""
+    from integrations.agents import sessions, usage
+    document = _document(call.source)
+    try:
+        if document.get("ref"):
+            return dict(usage.for_ref(call.sessions, str(document["ref"])), ok=True)
+        if document.get("session"):
+            return dict(usage.conversation(call.sessions, str(document["session"])), ok=True)
+        filters = {key: document[key] for key in ("since", "until", "connection", "model", "kind", "cycle", "run",
+                                                  "role") if document.get(key) not in (None, "")}
+        by = tuple(one for one in document.get("by") or ("model", "connection", "kind", "cycle")
+                   if one in ("model", "connection", "kind", "cycle", "role"))
+        return dict(usage.summary(call.sessions, by=by, **filters), ok=True)
+    except sessions.SessionError as exc:
+        return _refusal(exc.kind, str(exc))
+
+
 def _session(call):
     from integrations.agents import sessions
     session_id = _one(call, "session")
@@ -569,7 +590,7 @@ def _import(call):
 
 COMMANDS = {"kinds": _kinds, "models": _models, "list": _list, "save": _save, "delete": _delete,
             "test": _test, "sign-in": _sign_in,
-            "sessions": _sessions, "session": _session, "session-new": _session_new,
+            "sessions": _sessions, "session": _session, "usage": _usage, "session-new": _session_new,
             "session-set": _session_set, "session-delete": _session_delete,
             "send": _send, "activity": _activity, "changes": _changes,
             "skills": _skills, "skill-look": _skill_look, "skill-add": _skill_add,
