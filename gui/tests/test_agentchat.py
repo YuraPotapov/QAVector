@@ -1304,7 +1304,7 @@ def test_changes_are_visible_and_refresh_before_the_first_turn_finishes(make):
     (turn,) = FakeTurn.made
     assert not chat.current["turns"] and chat.running()
     assert not chat.changes_button.isHidden()
-    assert chat.changes_button.text() == "Changes +0 -0"
+    assert chat.changes_button.text() == "Changes" and not chat.changes_button.parts
     found.update(files=[{"path": "app.py", "status": "modified", "added": 100, "removed": 20}],
                  added=100, removed=20,
                  patch="diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n")

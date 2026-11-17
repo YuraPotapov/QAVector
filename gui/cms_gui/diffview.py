@@ -12,10 +12,10 @@ the turn, which is the agent's work plus anything somebody else did there
 meanwhile, and it says so.
 """
 
-from PySide6.QtCore import QEvent, QTimer
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QSyntaxHighlighter, QTextCharFormat
-from PySide6.QtWidgets import (QDialog, QComboBox, QFrame, QLabel, QPlainTextEdit,
-                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QDialog, QComboBox, QFrame, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
+                               QStyle, QStyleOptionButton, QStylePainter, QVBoxLayout, QWidget)
 
 from . import theme, widgets
 
@@ -64,8 +64,52 @@ def _path_of(lines):
     return header[:(len(header) - 3) // 2]
 
 
+def counts(added, removed):
+    """``[("+12", "add"), ("-4", "del")]``: a count that is 0 is not shown."""
+    return [(sign + str(value), kind) for sign, value, kind in (("+", added, "add"), ("-", removed, "del"))
+            if value]
+
+
 def counts_text(added, removed):
-    return "+%d -%d" % (added or 0, removed or 0)
+    """``+12 -4``, ``+12`` - or "" when nothing was added or removed."""
+    return " ".join(text for text, _kind in counts(added, removed))
+
+
+class ChangesButton(QPushButton):
+    """``Changes +12 -4``: the counts in the diff's own green and red, a 0 not shown."""
+
+    def __init__(self, word="Changes", parent=None):
+        super().__init__(word, parent)
+        self.word, self.parts = word, []
+
+    def set_counts(self, added=0, removed=0):
+        """Unknown or nothing changed: the word alone."""
+        self.parts = counts(added, removed)
+        # The whole caption is the button's text: its size, and what is read out.
+        self.setText(" ".join([self.word] + [text for text, _kind in self.parts]))
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.parts:
+            return super().paintEvent(event)
+        painter = QStylePainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        painter.drawControl(QStyle.CE_PushButtonBevel, option)
+        metrics = self.fontMetrics()
+        rest = "".join(" " + text for text, _kind in self.parts)
+        # The word where it would stand in the whole caption, in the style's own ink.
+        option.text = self.word
+        option.rect = option.rect.adjusted(0, 0, -metrics.horizontalAdvance(rest), 0)
+        painter.drawControl(QStyle.CE_PushButtonLabel, option)
+        x = (self.width() - metrics.horizontalAdvance(self.text())) // 2 + metrics.horizontalAdvance(self.word)
+        painter.setFont(self.font())
+        for text, kind in self.parts:
+            x += metrics.horizontalAdvance(" ")
+            painter.setPen(QColor(theme.DIFF_ADD_INK if kind == "add" else theme.DIFF_DEL_INK))
+            width = metrics.horizontalAdvance(text)
+            painter.drawText(QRect(x, 0, width + 1, self.height()), Qt.AlignLeft | Qt.AlignVCenter, text)
+            x += width
 
 
 def summary_text(found):
@@ -73,8 +117,8 @@ def summary_text(found):
     files = found.get("files") or []
     if not files:
         return "No files changed."
-    return "%d file%s changed · %s" % (len(files), "" if len(files) == 1 else "s",
-                                       counts_text(found.get("added"), found.get("removed")))
+    return " · ".join(part for part in ("%d file%s changed" % (len(files), "" if len(files) == 1 else "s"),
+                                        counts_text(found.get("added"), found.get("removed"))) if part)
 
 
 class DiffHighlighter(QSyntaxHighlighter):
@@ -151,12 +195,10 @@ class FileSection(widgets.Disclosure):
             status.setProperty("role", "muted")
             self.add_to_header(status)
         if not entry.get("binary") and entry.get("status") != "written":
-            added = QLabel("+%d" % (entry.get("added") or 0))
-            added.setProperty("role", "diffadded")
-            removed = QLabel("-%d" % (entry.get("removed") or 0))
-            removed.setProperty("role", "diffremoved")
-            self.add_to_header(added)
-            self.add_to_header(removed)
+            for text, kind in counts(entry.get("added"), entry.get("removed")):
+                count = QLabel(text)
+                count.setProperty("role", "diffadded" if kind == "add" else "diffremoved")
+                self.add_to_header(count)
         self.toggled.connect(self._opened)
 
     def _opened(self, opened):

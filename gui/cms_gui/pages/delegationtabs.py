@@ -322,10 +322,10 @@ class SummaryTab(_Shown):
                 lines.append("%d conversation%s reported no cost." % (
                     len(self.sessions) - len(priced), "" if len(self.sessions) - len(priced) == 1 else "s"))
             if self.changes:
-                lines.append("Files changed: %d (%s) across the conversations' folders." % (
-                    len(files), counts_text(sum(one.get("added") or 0 for one in files.values()),
-                                            sum(one.get("removed") or 0
-                                                for one in files.values()))))
+                said = counts_text(sum(one.get("added") or 0 for one in files.values()),
+                                   sum(one.get("removed") or 0 for one in files.values()))
+                lines.append("Files changed: %d%s across the conversations' folders." % (
+                    len(files), " (%s)" % said if said else ""))
             self.detail.setText("\n".join(lines))
         self.table.setRowCount(0)
         for one in self.sessions:
@@ -396,9 +396,9 @@ class ChangesTab(_Shown):
             title = title_text(one, key)
             if found is not None:
                 files = found.get("files") or []
-                title += " · %s" % ("no files changed" if not files else "%d file%s %s" % (
+                title += " · %s" % ("no files changed" if not files else ("%d file%s %s" % (
                     len(files), "" if len(files) == 1 else "s",
-                    counts_text(found.get("added"), found.get("removed"))))
+                    counts_text(found.get("added"), found.get("removed")))).rstrip())
             section = widgets.Disclosure(title, expanded=False)
             view = DiffView(scrolling=False)
             view.summary.setText("Reading..." if found is None else "")

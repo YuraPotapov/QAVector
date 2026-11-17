@@ -262,9 +262,9 @@ class ChangesLine(QWidget):
         super().__init__()
         from ..diffview import counts_text
         files = event.get("files") or 0
-        self.said = "Changed %d file%s · %s" % (files, "" if files == 1 else "s",
-                                                 counts_text(event.get("added"),
-                                                             event.get("removed")))
+        self.said = " · ".join(part for part in (
+            "Changed %d file%s" % (files, "" if files == 1 else "s"),
+            counts_text(event.get("added"), event.get("removed"))) if part)
         if event.get("kept") in ("partial", "none"):
             self.said += " · part of the folder is too large to compare"
         across = QHBoxLayout(self)

@@ -30,9 +30,21 @@ def test_a_patch_is_split_into_the_files_it_is_about():
 def test_the_totals_say_how_many_files_and_lines():
     assert diffview.summary_text({}) == "No files changed."
     assert diffview.summary_text({"files": [{}], "added": 1, "removed": 0}) == (
-        "1 file changed · +1 -0")
+        "1 file changed · +1")
     assert diffview.summary_text({"files": [{}, {}], "added": 12, "removed": 4}) == (
         "2 files changed · +12 -4")
+    # A binary file changed: no line counts, and no dangling separator.
+    assert diffview.summary_text({"files": [{}], "added": 0, "removed": 0}) == "1 file changed"
+
+
+def test_the_changes_button_shows_only_what_is_not_zero(qapp):
+    button = diffview.ChangesButton()
+    button.set_counts(0, 7)
+    assert button.text() == "Changes -7" and button.parts == [("-7", "del")]
+    button.set_counts(3, 0)
+    assert button.text() == "Changes +3" and button.parts == [("+3", "add")]
+    button.set_counts()
+    assert button.text() == "Changes" and button.parts == []
 
 
 def test_each_file_is_a_section_folded_shut_and_laid_out_when_opened(qapp):

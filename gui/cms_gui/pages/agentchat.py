@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QVBoxLayout, QWidget)
 
 from .. import icons, restrictions as restrictions_mod, stages, theme, widgets
-from ..diffview import ChangesDialog
+from ..diffview import ChangesButton, ChangesDialog
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
 from . import agentcards
@@ -1482,7 +1482,7 @@ class ChatTab(QWidget):
         # two things worth knowing before saying more to it.
         self.usage = QLabel("")
         self.usage.setProperty("role", "muted")
-        self.changes_button = QPushButton("Changes")
+        self.changes_button = ChangesButton()
         self.changes_button.setProperty("variant", "ghost")
         self.changes_button.setToolTip("What changed in the folder during this conversation, "
                                        "file by file")
@@ -1995,8 +1995,7 @@ class ChatTab(QWidget):
         visible = bool(session.get("turns") or session.get("running") or self._key() in self.turns)
         self.changes_button.setVisible(visible)
         available = found.get("ok") and not found.get("pending")
-        self.changes_button.setText("Changes +%d -%d" % (
-            found.get("added") or 0, found.get("removed") or 0) if available else "Changes")
+        self.changes_button.set_counts(*((found.get("added"), found.get("removed")) if available else ()))
         self.changes_button.setToolTip(found.get("error") or (
             "Current changes in the conversation's folder. Includes edits made by others."
             + (" Some files could not be compared." if found.get("unkept") else "")))
