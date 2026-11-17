@@ -585,7 +585,7 @@ class ChatFeed(QScrollArea):
         self._times.pop(index)
         self._tools = {key: ((place - 1 if place > index else place), stage, name)
                        for key, (place, stage, name) in self._tools.items()}
-        for name in ("approve", "deny", "open", "dismiss", "edited", "go"):
+        for name in ("approve", "deny", "open", "dismiss", "edited", "go", "reply", "stop"):
             signal = getattr(card, name, None)
             if signal is not None:
                 try:
@@ -1417,6 +1417,8 @@ class ChatTab(QWidget):
         #: person last spoke, and what waits for the person's word to go on.
         self._woke = {}                 # session id -> {"failed": n, "all": n}
         self._wakes = {}                # session id -> {key: (found, document, reason)}
+        #: A task's execution that asked -> the task it belongs to (ADR-011).
+        self._root_of = {}
         self._listed_states = {}        # execution id -> the state the list was read for
 
         outer = QVBoxLayout(self)
@@ -2404,6 +2406,9 @@ class ChatTab(QWidget):
         conversation here becomes its card, and follows how it goes."""
         capability = str(execution.get("capability_id") or "")
         actor = str(execution.get("actor_id") or "")
+        if capability == "agents.tasks.reply":
+            self._task_answered(execution)
+            return
         if capability.endswith(".message") and execution.get("state") == "succeeded":
             self._refresh_inbox()
         if capability.startswith("agents.") and capability.endswith((".delegate", ".message")):
@@ -2430,6 +2435,7 @@ class ChatTab(QWidget):
             request["state"] = "denied" if error.get("code") == "denied" else state
         elif state == "running" or (state == "dispatched" and request.get("state") != "waiting"):
             request["state"] = "running" if request.get("state") != "approved" else "approved"
+        self._took_question(request, execution, output)
         if output.get("session_id"):
             request["session_id"] = output["session_id"]
         request["detail"] = self._request_detail(request, output, error)
@@ -2453,10 +2459,92 @@ class ChatTab(QWidget):
                 "files": len(request.get("files") or []), "artifacts": len(request.get("artifacts") or []),
                 "state": "running", "at": execution.get("created_at") or time.time(), "role": role}
 
+    # -- what a delegated task asks, and what it is told (ADR-011) ----------------------
+    def _took_question(self, request, execution, output):
+        """A task's turn that ended asking: the task asks, and its question is a card."""
+        if execution.get("state") != "succeeded" or not output.get("needs_input"):
+            return
+        if not request.get("stopped"):
+            request["state"] = "asks"
+        asked = execution["execution_id"]
+        self._root_of[asked] = request["execution_id"]
+        questions = request.setdefault("questions", [])
+        if not any(one["execution_id"] == asked for one in questions):
+            questions.append({"execution_id": asked, "question": output.get("question") or "",
+                              "number": int(output.get("asked") or len(questions) + 1),
+                              "at": execution.get("updated_at") or time.time(), "answered": False})
+
+    def _answer_of(self, request, asked, answer, by, at, mine=False):
+        """The answer to one question: a card of its own, once, after the question's.
+        The one the core took wins: the person's typed one, sent too late, is
+        said so on the card of the one that went."""
+        for one in request.get("questions") or []:
+            if one["execution_id"] == asked:
+                one["answered"] = True
+        answers = request.setdefault("answers", {})
+        known = answers.get(asked)
+        if known is None:
+            answers[asked] = {"answer": answer, "by": by, "at": at, "mine": mine}
+        elif known.get("mine") and not mine and known["answer"] != answer:
+            # Another's went first: it is the answer; the person's was refused.
+            answers[asked] = dict(known, answer=answer, by=by, mine=False, late=known["answer"])
+
+    def _task_answered(self, execution):
+        """An answer to a task's question goes on in its conversation: the task's card
+        follows it, and the answer is a card of its own."""
+        given = execution.get("input") or {}
+        asked = given.get("task")
+        output = execution.get("output") or {}
+        request = self._requests.get(self._root_of.get(asked) or output.get("root"))
+        if request is None:
+            return
+        state, error = execution.get("state"), execution.get("error") or {}
+        if state == "failed" and error.get("code") in ("not_waiting", "stopped"):
+            # Refused: answered first by somebody else, or stopped - the task is as it was.
+            self._sync_others()
+            return
+        actor = str(execution.get("actor_id") or "")
+        connection = actor[len("agent:"):].split("/", 1)[0] if actor.startswith("agent:") else ""
+        agent = next((one.get("name") for one in self.connections if one.get("id") == connection), connection)
+        known = (request.get("answers") or {}).get(asked) or {}
+        by = output.get("by") or ("You" if known.get("mine") and known.get("answer") == given.get("answer")
+                                  else agent or "Agent")
+        self._answer_of(request, asked, given.get("answer") or "", by, execution.get("created_at") or time.time())
+        if not request.get("stopped"):
+            request["state"] = state if state in ("succeeded", "failed", "canceled", "timed_out", "unknown") \
+                else "running"
+        self._took_question(request, execution, output)
+        request["detail"] = self._request_detail(request, output, error)
+        self._sync_others()
+
+    def _reply_task(self, asked, text):
+        """The person's answer, from the question's card (ADR-011 D3)."""
+        request = self._requests.get(self._root_of.get(asked))
+        if request is None or ChatTab.qcr_access is None:
+            return
+        ChatTab.qcr_access.reply_task(asked, text, "You")
+        self._answer_of(request, asked, text, "You", time.time(), mine=True)
+        request["state"] = "running"
+        self._sync_others()
+
+    def _stop_task(self, execution_id):
+        """The person ends a task that goes on through answers: it takes none any more."""
+        request = self._requests.get(execution_id)
+        if request is None or ChatTab.qcr_access is None:
+            return
+        ChatTab.qcr_access.stop_task(execution_id)
+        request["stopped"] = True
+        request["state"] = "canceled"
+        for one in request.get("questions") or []:
+            one["stopped"] = not one["answered"]
+        self._sync_others()
+
     @staticmethod
     def _request_detail(request, output, error):
         if error.get("code") == "denied":
             return ""
+        if output.get("needs_input"):
+            return ""                           # its question is a card of its own
         if error:
             return error.get("message") or error.get("code") or ""
         if request.get("kind") == "message":
@@ -2520,15 +2608,53 @@ class ChatTab(QWidget):
                 card.approve.connect(lambda execution_id: self._answer_request(execution_id, True))
                 card.deny.connect(lambda execution_id: self._answer_request(execution_id, False))
                 card.open.connect(lambda found: found and self.open_session(found))
+                card.stop.connect(self._stop_task)
                 return card
             return make
 
         def told(request):
             return lambda card: card.set_state(request.get("state") or "waiting", request.get("session_id") or "",
-                                               request.get("detail") or "")
+                                               request.get("detail") or "", len(request.get("questions") or []))
         self.feed.sync_cards("request", [
             (key, request.get("at") or 0, made(request), told(request))
             for key, request in self._requests.items() if session_id and request.get("session") == session_id])
+
+        # What its tasks asked, and what they were told: a card each (ADR-011).
+        def question_card(question):
+            def make():
+                card = agentcards.TaskQuestionCard(question)
+                card.reply.connect(self._reply_task)
+                return card
+            return make
+
+        def question_told(question):
+            def update(card):
+                now = (question["answered"], bool(question.get("stopped")))
+                if (bool(card.question.get("answered")), bool(card.question.get("stopped"))) != now:
+                    card.question.update(answered=now[0], stopped=now[1])
+                    card.set_open(not any(now), stopped=now[1])
+            return update
+
+        def answer_told(answer):
+            def update(card):
+                if card.answer.get("answer") != answer.get("answer") or card.answer.get("late") != answer.get("late"):
+                    card.set_answer(dict(card.answer, **answer))
+            return update
+        questions, answers = [], []
+        for request in self._requests.values():
+            if not session_id or request.get("session") != session_id:
+                continue
+            program = request.get("target_name") or request.get("target") or ""
+            who = "%s (%s)" % (request["role"], program) if request.get("role") and program \
+                else (request.get("role") or program or "Another agent")
+            for one in request.get("questions") or []:
+                shown = dict(one, who=who, goal=request.get("goal") or "")
+                questions.append((one["execution_id"], one["at"], question_card(shown), question_told(one)))
+            for asked, one in (request.get("answers") or {}).items():
+                answers.append((asked, one["at"], lambda one=one, who=who: agentcards.TaskAnswerCard(
+                    dict(one, who=who)), answer_told(one)))
+        self.feed.sync_cards("question", questions)
+        self.feed.sync_cards("answer", answers)
 
         def inbox_card(message):
             def make():
@@ -2553,10 +2679,14 @@ class ChatTab(QWidget):
             return                      # the results are on their cards
         document = {"message": agentcards.wake_message(found), "trigger": "tasks_finished"}
         counted = self._woke.setdefault(session_id, {"failed": 0, "all": 0})
-        within = counted["failed"] < WAKE_FAILED_ROUNDS and counted["all"] < WAKE_ROUNDS
+        # A task asking is a dialogue, not a loop: it goes on as long as it needs, and
+        # the person sees how many questions and stops it when they decide (ADR-011).
+        questions = bool(found.get("items")) and all(one.get("state") == "asks" for one in found["items"])
+        within = questions or (counted["failed"] < WAKE_FAILED_ROUNDS and counted["all"] < WAKE_ROUNDS)
         if mode == "continue" and within:
-            counted["all"] += 1
-            counted["failed"] += 1 if found.get("failed") else 0
+            if not questions:
+                counted["all"] += 1
+                counted["failed"] += 1 if found.get("failed") else 0
             self._go_on(session, document)
             return
         key = "%s/%d" % ((found.get("condition") or {}).get("id") or "", len(self._wakes.get(session_id, {})))

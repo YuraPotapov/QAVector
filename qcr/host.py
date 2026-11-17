@@ -69,7 +69,7 @@ from .adapters.services import ServiceAdapter, ServiceInvoker
 from .contracts import document, text
 from .engine import Engine
 from .errors import QCRError
-from .executions import ExecutionStore
+from .executions import TERMINAL, ExecutionStore
 from .policy import Authority, Grant
 from .registry import Registry
 
@@ -493,6 +493,58 @@ class Host:
             raise QCRError("not_found", "No delegation waits for that answer.")
         return {}
 
+    def _on_task_reply(self, message):
+        """The person answers what a delegated task asks (ADR-011 D3). It runs as
+        the conversation that delegated the task - its turn may have ended - so
+        that conversation follows it as its own, and is woken by it."""
+        from .adapters.delegation import PERMISSION, TASKS
+        task, answer = message.get("task"), message.get("answer")
+        if not isinstance(task, str) or not task or not isinstance(answer, str) or not answer.strip():
+            raise QCRError("invalid_message", "A reply names its task and says something.")
+        if self.delegation is None:
+            raise QCRError("not_found", "No task waits for an answer.")
+        found = self.delegation.store.get(task)
+        actor = str(found.get("actor_id") or "")
+        if found.get("project_id") != self.project_id or not actor.startswith("agent:"):
+            raise QCRError("not_found", "No task waits for an answer.")
+        caller, temporary = self._callers.get(actor), None
+        if caller is None:
+            temporary = caller = self.authority.issue(actor, self._grants(
+                [{"permission": PERMISSION, "resource_id": TASKS}]))
+        self.delegation.person_says(actor, task, message.get("by"))
+        try:
+            execution = self.engine.invoke(caller, self.project_id, "agents.tasks.reply",
+                                           {"task": task, "answer": answer}, parent_id=task)
+        except Exception:
+            self.delegation.person_says(actor, task, None, forget=True)
+            raise
+        finally:
+            if temporary is not None:
+                self.authority.revoke(temporary)
+        return {"execution": execution}
+
+    def _on_task_stop(self, message):
+        """The person stops a delegated task that goes on through answers (ADR-011):
+        it takes no more answers, and what of it still runs is canceled."""
+        task = message.get("task")
+        if not isinstance(task, str) or not task or self.delegation is None:
+            raise QCRError("invalid_message", "A stop names its task.")
+        latest = self.delegation.stop(task, str(message.get("by") or ""))
+        execution = self.delegation.store.get(latest)
+        if execution.get("project_id") != self.project_id:
+            raise QCRError("not_found", "No such task.")
+        if execution["state"] not in TERMINAL:
+            actor = execution["actor_id"]
+            caller, temporary = self._callers.get(actor), None
+            if caller is None:
+                temporary = caller = self.authority.issue(actor, ())
+            try:
+                execution = self.engine.cancel(caller, latest, "Stopped by the person.")
+            finally:
+                if temporary is not None:
+                    self.authority.revoke(temporary)
+        return {"execution": execution}
+
     def _on_integration_answer(self, message):
         """The person approved - perhaps with the comment changed - or denied an
         integration write that waits (ADR-007 D3)."""
@@ -675,7 +727,8 @@ class Host:
             parent_id=message.get("parent_id"))
         answer = {"execution": execution}
         capability = str(message.get("capability") or "")
-        handed = capability.startswith("agents.") and (capability.endswith(".delegate") or (
+        handed = capability == "agents.tasks.reply" or capability.startswith("agents.") and (
+            capability.endswith(".delegate") or (
             capability.endswith(".message") and (message.get("input") or {}).get("expects_reply")))
         if handed:
             # What comes next, said outright (ADR-009 D7): an agent that knows it

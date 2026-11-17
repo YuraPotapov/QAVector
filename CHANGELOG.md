@@ -27,6 +27,13 @@ app-agnostic, since that will break things on purpose.
   time, with a Continue action and a bounded scrolling list.
 
 ### Added
+- **A delegated task can ask, and is answered in the same conversation** (QCR
+  ADR-011): a child that cannot go on ends with a question; the task waits and
+  wakes the agent that delegated it. `agents.tasks.reply` - or **Answer** on the
+  question's card in the chat - runs one more turn of the same child
+  conversation, so nothing it read is lost. Question and answer are cards of
+  their own, marked with their direction. There is no limit on questions: the
+  task's card counts them, and **Stop** ends the task when the person decides.
 - **Agents can propose Jira changes** (QCR ADR-007): with the new **Change
   Jira** access switch (off by default), an agent may propose a comment, a
   move to another status, an assignment, an edit of summary, description,

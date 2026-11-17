@@ -16,6 +16,8 @@ message says decides the turn:
     MCP_LIST  calls the QAVector MCP server from its -c argument and says what it listed
     MCP_DELEGATE  through that server, delegates "Say hello" to the Claude connection,
               waits for it and says the delegated agent's answer
+    WONDER  ends with a question line for whoever gave the task (QCR ADR-011) - unless
+            the message is the answer to it; WONDER-ALWAYS asks after answers too
 
 ``FAKE_CODEX_LOG`` gets one line per start (argv) and per request received.
 ``FAKE_CODEX_MCP`` (JSON) is the mcp_servers table config/read reports.
@@ -29,6 +31,7 @@ def fake_codex(tmp_path):
     path.write_text("#!%s\n" % sys.executable + r'''
 import json, os, sys, time
 args = sys.argv[1:]
+WONDERED = 'I cannot tell which database the tests use.\n{"needs": "answer", "question": "Which database should the tests use?"}'
 def say(value):
     print(json.dumps(value), flush=True)
 def log(value):
@@ -211,6 +214,8 @@ if args[0] == "app-server":
                     finish(turn, "failed", {"message": "MCP access refused"})
                     continue
                 text = listed
+            if "WONDER-ALWAYS" in text or ("WONDER" in text and "answers your question" not in text):
+                text = WONDERED
             say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn,
                  "item": {"type": "agentMessage", "id": "m-%d" % turns, "text": "Answer: " + text}}})
             finish(turn, "completed")
@@ -228,6 +233,8 @@ if "CRASH" in message:
 if "REFUSE" in message:
     say({"type": "turn.failed", "error": {"message": "Unavailable feature"}})
     sys.exit(1)
+if "WONDER-ALWAYS" in message or ("WONDER" in message and "answers your question" not in message):
+    message = WONDERED
 say({"type": "item.completed", "item": {"id": "i1", "type": "agent_message", "text": "Answer: " + message}})
 say({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 7}})
 ''')

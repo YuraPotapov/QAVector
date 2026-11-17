@@ -29,6 +29,8 @@ import threading
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 #: An ended item that did not succeed makes its wake a failed one (ADR-009 D6).
 GOOD = "succeeded"
+#: Ended and not failed: done, or asking (ADR-011 D5: asking is not failing).
+NOT_FAILED = (GOOD, "asks")
 ENDED = ("succeeded", "failed", "canceled", "timed_out", "unknown")
 
 
@@ -146,7 +148,7 @@ class Rounds:
                     continue
                 ends = [items[one]["ended"] for one in condition["ids"]]
                 failed = condition["on_failure"] and any(
-                    items[one]["ended"] and items[one]["state"] != GOOD for one in condition["ids"])
+                    items[one]["ended"] and items[one]["state"] not in NOT_FAILED for one in condition["ids"])
                 if (condition["kind"] == "all" and all(ends)) or (condition["kind"] == "any" and any(ends)) or failed:
                     condition["fired"] = True
                     fired.append((dict(condition, why="failure" if failed and not all(ends) else condition["kind"]),
@@ -175,4 +177,4 @@ class Rounds:
             self._notify({"type": "round_finished", "session": session, "actor": actor,
                           "condition": {key: condition[key] for key in ("id", "kind", "why", "names")},
                           "items": described, "running": running,
-                          "failed": any(one.get("state") != GOOD for one in described)})
+                          "failed": any(one.get("state") not in NOT_FAILED for one in described)})

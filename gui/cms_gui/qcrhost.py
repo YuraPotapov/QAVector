@@ -476,6 +476,16 @@ class QcrHost(QObject):
 
     refresh_agents = _push_agent_storage
 
+    def reply_task(self, task, answer, by="You"):
+        """The person answers what a delegated task asks (ADR-011 D3): it goes on
+        in its own conversation, as the conversation that delegated it."""
+        self._send_when_ready({"type": "task_reply", "id": next(self._ids), "task": task,
+                               "answer": answer, "by": by})
+
+    def stop_task(self, task, by="you"):
+        """The person stops a task that goes on through answers (ADR-011)."""
+        self._send_when_ready({"type": "task_stop", "id": next(self._ids), "task": task, "by": by})
+
     def answer_agent(self, execution_id, approve, by="you"):
         """The person's word on a delegation or a message that waits for it."""
         self._send_when_ready({"type": "agent_answer", "id": next(self._ids),

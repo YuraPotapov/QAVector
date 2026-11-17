@@ -1074,6 +1074,8 @@ QFrame[role="agentcard"] {{
     border-left: 3px solid {warn};
 }}
 QFrame[role="agentcard"][settled="true"] {{ border-left-color: {n400}; }}
+/* An answer sent to a delegated task's question: it went out from here (ADR-011). */
+QFrame[role="agentcard"][variant="answer"] {{ border-left-color: {accent}; }}
 QFrame[role="agentcard"] QLabel[role="cardquestion"] {{
     font-size: 13px; font-weight: 600; color: {text};
 }}

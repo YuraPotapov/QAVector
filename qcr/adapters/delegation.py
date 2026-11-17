@@ -19,6 +19,13 @@ the artifacts, and each acceptance criterion ``unverified``.
 ``agents.tasks.verify`` lets the delegator record a verdict per criterion, with
 the execution that proves it.
 
+A child that cannot go on without an answer ends its turn with a question
+line (ADR-011). The task ends asking; ``agents.tasks.reply`` - from the agent
+that delegated it, or from the person - runs one more turn of the same child
+conversation, so the child keeps everything it has read. A task may ask as
+often as it needs (user, 2026-11-17): the questions are counted and shown, and
+the person stops it when they decide to.
+
 The delegating agent may choose the child's ``model`` and ``effort`` for the
 task: it knows how hard the task is. ``agents.<id>.describe`` says what the
 target offers - its role, models, efforts and defaults - read from its program
@@ -60,6 +67,9 @@ ANSWER_CHARS = 20000
 MAX_MESSAGES_PER_HOUR = 20
 #: How long a target's model list, read from its program, is believed.
 CATALOG_SECONDS = 600
+QUESTION_CHARS = 2000
+#: What a task that asks is, for rounds and dependencies: not failed, not done.
+ASKS = "asks"
 
 _EXECUTION = {"type": "string", "minLength": 1, "maxLength": 200}
 _MODEL = {"type": "string", "minLength": 1, "maxLength": 200}
@@ -105,6 +115,9 @@ DESCRIBE_OUTPUT = {
             "properties": {"value": _TEXT, "label": _TEXT, "description": _TEXT,
                            "efforts": {"type": "array", "items": _TEXT, "maxItems": 20}}}},
         "models_known": {"type": "boolean"}}}
+REPLY_INPUT = {
+    "type": "object", "additionalProperties": False, "required": ["task", "answer"],
+    "properties": {"task": _EXECUTION, "answer": {"type": "string", "minLength": 1, "maxLength": ANSWER_CHARS}}}
 VERIFY_INPUT = {
     "type": "object", "additionalProperties": False, "required": ["task", "criterion", "verdict"],
     "properties": {"task": _EXECUTION, "criterion": {"type": "integer", "minimum": 0},
@@ -112,9 +125,14 @@ VERIFY_INPUT = {
                    "note": {"type": "string", "maxLength": 2000}}}
 
 #: What the child is told after the task: the turn is all it has.
-CLOSING = ("Work only in this folder. Nobody can answer a question during this task: if "
-           "something blocks you, say what and stop. End with what you changed and how you "
-           "checked it.")
+CLOSING = ("Work only in this folder. If you cannot go on without an answer, stop and end with one "
+           "last line of JSON: " + '{"needs": "answer", "question": "..."}' + " - the one who gave you "
+           "this task answers, and you go on here with all you have read. Otherwise end with what you "
+           "changed and how you checked it.")
+#: What the child is told with an answer to its question (ADR-011).
+ANSWERED = "[QAVector: %s answers your question]"
+GO_ON = ("Go on with the task. If you cannot go on without another answer, end with the same line of "
+         "JSON as before; otherwise end with what you changed and how you checked it.")
 
 
 def child_grants(parent, connection):
@@ -163,6 +181,21 @@ def verdict_of(answer):
             issues = [str(one)[:1000] for one in found.get("issues") or [] if str(one).strip()][:30]
             return found["verdict"], issues
     return "no_verdict", []
+
+
+def question_of(answer):
+    """The question a child ended its turn with (ADR-011 D1), or "" for none."""
+    for line in reversed(str(answer or "").strip().splitlines()):
+        line = line.strip().strip("`").strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            found = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(found, dict) and found.get("needs") == "answer" and str(found.get("question") or "").strip():
+            return str(found["question"]).strip()[:QUESTION_CHARS]
+    return ""
 
 
 def _count_files(files):
@@ -230,6 +263,9 @@ class Delegation:
         self._catalogs = {}                # connection id -> (when read, [model rows]) from its program
         self._catalog_lock = threading.Lock()
         self._blocked = {}                 # execution id -> (job, context): approved, waiting to start
+        self._follow = {}                  # a task that asked -> the execution its answer runs as (ADR-011)
+        self._by_person = {}               # (actor, task) -> who: the next reply is the person's
+        self._stopped = {}                 # a task the person stopped -> by whom: no more answers
         #: What the delegating conversations handed on, and when to wake them (ADR-009).
         self.rounds = Rounds(notify, self._summary)
         # Ends are taken off the Engine's own notification, one at a time, in order.
@@ -307,8 +343,14 @@ class Delegation:
             "Say when this conversation is to be woken with results: all or any of the named tasks and "
             "questions ended; on_failure also at once when one fails. Without it: when all of a turn's end.",
             WAKE_INPUT, {"type": "object"}, PERMISSION, risk_level="low", timeout_seconds=30, exclusive=False)
+        reply = CapabilityDescriptor(
+            "agents.tasks.reply", ref, 1,
+            "Answer the question a task you delegated asked: it goes on in its own conversation, keeping what "
+            "it has read. Do not delegate it again.",
+            REPLY_INPUT, DELEGATE_OUTPUT, PERMISSION, risk_level="medium", mode="long_running",
+            supports_cancel=True, supports_idempotency=True, timeout_seconds=MAX_SECONDS, exclusive=False)
         registrations.append(Registration(ResourceDescriptor(ref, "agents", "Delegated tasks", PERMISSION),
-                                          (verify, wake), lambda ref, names: {}, invoker=self))
+                                          (verify, wake, reply), lambda ref, names: {}, invoker=self))
         self.registry.replace(self._owner, registrations)
 
     # -- the Engine's invoker interface ----------------------------------------
@@ -327,6 +369,10 @@ class Delegation:
                                      ("acceptance criteria", request.get("acceptance_criteria") or []),
                                      ("summary", request.get("summary") or ""),
                                      ("file list", request.get("files") or [])], self._secrets())
+        if capability.capability_id == "agents.tasks.reply":
+            if not request["answer"].strip():
+                raise QCRError("invalid_input", "An answer says something.")
+            packages.refuse_secrets([("answer", request["answer"])], self._secrets())
         if capability.capability_id.endswith(".message"):
             if not request["body"].strip():
                 raise QCRError("invalid_input", "A message needs a body.")
@@ -430,6 +476,12 @@ class Delegation:
     def timeout(self, capability, request):
         if capability.capability_id == "agents.tasks.verify":
             return None
+        if capability.capability_id == "agents.tasks.reply":
+            # The task's own time, again for each turn it is answered.
+            try:
+                return (self.store.get(request["task"]).get("input") or {}).get("timeout_seconds", DEFAULT_SECONDS)
+            except Exception:
+                return DEFAULT_SECONDS
         return request.get("timeout_seconds", DEFAULT_SECONDS)
 
     def start(self, job):
@@ -438,6 +490,9 @@ class Delegation:
             return
         if job.capability.capability_id == "agents.tasks.wake_when":
             self._wake_when(job)
+            return
+        if job.capability.capability_id == "agents.tasks.reply":
+            self._reply(job)
             return
         if job.capability.capability_id.endswith(".message"):
             self._message(job)
@@ -539,13 +594,14 @@ class Delegation:
     def _start_when_ready(self, job, context):
         """Start it now, or keep it until the tasks it is ``after`` succeed and its
         agent has a free place; one of those failing skips it."""
-        failed = [name for name, execution_id in context.get("after") or ()
-                  if self.rounds.state_of(execution_id) not in ("", "succeeded")]
+        states = {name: self.rounds.state_of(self.latest(execution_id))
+                  for name, execution_id in context.get("after") or ()}
+        failed = [name for name, state in states.items() if state not in ("", "succeeded", ASKS)]
         if failed:
             job.fail("skipped", "Not run: %s did not succeed." % ", ".join(failed))
             return
-        waiting = [name for name, execution_id in context.get("after") or ()
-                   if self.rounds.state_of(execution_id) != "succeeded"]
+        # One that asks is not done: what is after it waits for its answer and the rest.
+        waiting = [name for name, state in states.items() if state != "succeeded"]
         with self._lock:
             if self._closed:
                 job.fail("source_unavailable", "Delegation is closed.")
@@ -577,7 +633,10 @@ class Delegation:
         taken in order, off the Engine's own notification."""
         if execution.get("state") in TERMINAL and str(execution.get("capability_id") or "").startswith("agents."):
             state = execution["state"]
-            if state == "succeeded" and (execution.get("output") or {}).get("verdict") in ("rework", "no_verdict"):
+            output = execution.get("output") or {}
+            if state == "succeeded" and output.get("needs_input"):
+                state = ASKS                # waits for an answer (ADR-011)
+            elif state == "succeeded" and output.get("verdict") in ("rework", "no_verdict"):
                 # It ran fine, and said no: what is after it does not start (ADR-010 D4).
                 state = "rework"
             self._ends.put(("ended", execution["execution_id"], state))
@@ -625,15 +684,26 @@ class Delegation:
         role = roles.get(target_id, self.agents_path) if is_role else None
         target = [role["connection"]] if role else ([target_id] if not is_role else [])
         connection = store.get(target[0], self.agents_path) if target else None
+        if execution.get("capability_id") == "agents.tasks.reply":
+            # An answered task going on: told as the task it is (ADR-011).
+            root = self._root_input(output.get("root") or "")
+            request = dict(root, name=root.get("name") or "")
+            target = [output["target"]] if output.get("target") else []
+            connection = store.get(target[0], self.agents_path) if target else None
+            role = roles.get(output["role"], self.agents_path) if output.get("role") else None
         question = str(execution.get("capability_id") or "").endswith(".message")
         answer = ((output.get("reply") or {}).get("body") if question else output.get("answer")) or ""
         state = error.get("code") if error.get("code") in ("skipped", "denied") else execution["state"]
-        if state == "succeeded" and output.get("verdict") in ("rework", "no_verdict"):
+        if state == "succeeded" and output.get("needs_input"):
+            state = ASKS
+        elif state == "succeeded" and output.get("verdict") in ("rework", "no_verdict"):
             state = "rework"
         return {"execution_id": execution_id, "name": request.get("name") or "",
                 "kind": "question" if question else "task",
                 "target": target[0] if target else "", "target_name": (connection or {}).get("name") or "",
                 "goal": str(request.get("goal") or request.get("body") or "")[:500],
+                "question": output.get("question") or "", "asked": int(output.get("asked") or 0),
+                "root": output.get("root") or "",
                 "model": request.get("model") or "", "effort": request.get("effort") or "",
                 "state": state, "answer": str(answer)[:2000], "error": str(error.get("message") or "")[:500],
                 "acceptance": output.get("acceptance") or [],
@@ -719,25 +789,35 @@ class Delegation:
             if connection is None or connection["kind"] != context["provider"]:
                 raise QCRError("source_unavailable", "That agent connection has changed.")
             self._checked_late(context)
-            session = sessions.create(
-                self.root, connection, context["folder"], context["mode"],
-                title=context["goal"], restrictions=context["restrictions"], others="deny",
-                source=dict({"label": "Delegated", "ref": "qcr-task:" + job.execution_id, "record": True,
-                             "detail": "%s: %s" % (context["parent_name"], context["goal"])[:300],
-                             "parent": context["parent"], "by": context["parent_name"]},
-                            **({"role": context["role"]["id"]} if context.get("role") else {})))
+            if context.get("session_id"):
+                # An answer: the same conversation goes on (ADR-011 D2).
+                session = sessions.load(self.root, context["session_id"])
+            else:
+                session = sessions.create(
+                    self.root, connection, context["folder"], context["mode"],
+                    title=context["goal"], restrictions=context["restrictions"], others="deny",
+                    source=dict({"label": "Delegated", "ref": "qcr-task:" + job.execution_id, "record": True,
+                                 "detail": "%s: %s" % (context["parent_name"], context["goal"])[:300],
+                                 "parent": context["parent"], "by": context["parent_name"]},
+                                **({"role": context["role"]["id"]} if context.get("role") else {})))
             task_id = job.execution_id
             metadata = {"task_id": task_id, "session_id": session["id"], "provider": context["provider"],
                         "target": context["target"], "parent_session": context["parent"]}
             if not job.running(metadata) or stop.is_set():
                 return
-            # Read again from where it was kept: the bytes the person approved.
-            document = packages.load(context["package"], self.context_dir)
-            stale = packages.freshness(document, context["folder"])
-            message = packages.render(document, sender=context["parent_name"], mode=context["mode"],
-                                      changed=stale, closing=CLOSING)
             role = context.get("role")
-            if role:
+            if context.get("answer") is not None:
+                stale = []
+                message = "%s\n\n%s\n\n%s" % (ANSWERED % context["by"], context["answer"], GO_ON)
+                if role and role["verdict"]:
+                    message += "\n\n" + roles.VERDICT_ASK
+            else:
+                # Read again from where it was kept: the bytes the person approved.
+                document = packages.load(context["package"], self.context_dir)
+                stale = packages.freshness(document, context["folder"])
+                message = packages.render(document, sender=context["parent_name"], mode=context["mode"],
+                                          changed=stale, closing=CLOSING)
+            if role and context.get("answer") is None:
                 # How this role works, before the task; a verdict asked for at its end (ADR-010).
                 lines = ["Your role: %s - %s" % (role["name"], role["does"])]
                 if role["instructions"]:
@@ -765,11 +845,18 @@ class Delegation:
                       "answer": text[:ANSWER_CHARS], "changes": turn.get("changes") or {},
                       "artifacts": turn_artifacts(self.root, session["id"], turn),
                       "acceptance": [{"criterion": one, "status": "unverified"} for one in context["criteria"]],
-                      "verified": False}
+                      "verified": False, "root": context.get("root") or job.execution_id,
+                      "asked": int(context.get("asked") or 0)}
+            if context.get("answer") is not None:
+                output.update(follow_up_of=context["follow_up_of"], by=context["by"], goal=context["goal"])
+            asked = question_of(text) if turn["state"] == sessions.COMPLETED else ""
             if context.get("role"):
                 output["role"] = context["role"]["id"]
-                if context["role"]["verdict"]:
+                if context["role"]["verdict"] and not asked:
                     output["verdict"], output["issues"] = verdict_of(text)
+            if asked:
+                # Counted, never cut off: the person sees how many and stops it (ADR-011 D5).
+                output.update(needs_input=True, question=asked, asked=output["asked"] + 1)
             if turn["state"] == sessions.COMPLETED:
                 job.succeed(output)
             else:
@@ -782,6 +869,101 @@ class Delegation:
             with self._lock:
                 self._running.pop(job.execution_id, None)
             self._ends.put(("free",))       # its agent has a place again
+
+    # -- answers to what a task asks (ADR-011) --------------------------------------
+    def person_says(self, actor, task, by, forget=False):
+        """The next reply to ``task`` from ``actor`` is the person's (the owner pipe only)."""
+        with self._lock:
+            if forget:
+                self._by_person.pop((actor, task), None)
+            else:
+                self._by_person[(actor, task)] = str(by or "You")[:200]
+
+    def stop(self, task_id, by=""):
+        """The person stops a task that goes on through answers: no answer is
+        taken any more. Returns the execution it is at now, for the host to
+        cancel if it still runs."""
+        try:
+            output = self.store.get(task_id).get("output") or {}
+        except QCRError:
+            raise QCRError("not_found", "No such task.") from None
+        root = output.get("root") or task_id
+        with self._lock:
+            self._stopped[root] = str(by or "the person")[:200]
+        return self.latest(root)
+
+    def latest(self, execution_id):
+        """A task as it goes on: the last answer's execution, or itself."""
+        seen = set()
+        with self._lock:
+            while execution_id in self._follow and execution_id not in seen:
+                seen.add(execution_id)
+                execution_id = self._follow[execution_id]
+        return execution_id
+
+    def _root_input(self, root):
+        try:
+            return dict(self.store.get(root).get("input") or {}) if root else {}
+        except Exception:
+            return {}
+
+    def _reply(self, job):
+        task_id = job.request["task"]
+        with self._lock:
+            by_person = self._by_person.pop((job.actor_id, task_id), None)
+        try:
+            rule = self._policies.get(job.actor_id)
+            if rule is None:
+                raise QCRError("authorization_denied", "This conversation does not work with other agents.")
+            asked = self._own(job, task_id)
+            output = asked.get("output") or {}
+            if asked["capability_id"] != "agents.tasks.reply" and not asked["capability_id"].endswith(".delegate"):
+                raise QCRError("invalid_input", "That execution is not a delegated task.")
+            root_id = output.get("root") or task_id
+            with self._lock:
+                answered, stopped = task_id in self._follow, self._stopped.get(root_id)
+            if stopped:
+                raise QCRError("stopped", "%s stopped this task: it takes no more answers." % stopped.capitalize())
+            if answered:
+                raise QCRError("not_waiting", "That question was answered already.")
+            if asked["state"] != "succeeded" or not output.get("needs_input"):
+                raise QCRError("not_waiting", "That task does not wait for an answer.")
+            root = self._root_input(root_id)
+            connection = store.get(output.get("target") or "", self.agents_path)
+            if connection is None or connection["kind"] != output.get("provider"):
+                raise QCRError("source_unavailable", "That agent connection has changed.")
+            session = sessions.load(self.root, output["session_id"])
+            role = roles.get(output["role"], self.agents_path) if output.get("role") else None
+        except (QCRError, sessions.SessionError) as exc:
+            job.fail(getattr(exc, "code", "not_found"), str(exc))
+            return
+        context = {"target": output["target"], "target_name": connection["name"], "provider": connection["kind"],
+                   "model": root.get("model") or (role or {}).get("model") or "",
+                   "effort": root.get("effort") or (role or {}).get("effort") or "", "role": role,
+                   "parent": rule["session"], "parent_name": rule["name"], "folder": session["folder"],
+                   "restrictions": session.get("restrictions") or {}, "mode": output.get("mode") or session["mode"],
+                   "others": rule["others"], "goal": str(root.get("goal") or "")[:GOAL_CHARS],
+                   "criteria": list(root.get("acceptance_criteria") or []),
+                   "package": output.get("context_package") or "", "session_id": session["id"],
+                   "grants": child_grants(rule.get("grants"), connection),
+                   "answer": job.request["answer"].strip(), "by": by_person or rule["name"],
+                   "follow_up_of": task_id, "root": root_id, "asked": int(output.get("asked") or 0), "after": []}
+        with self._lock:
+            if self._closed:
+                job.fail("source_unavailable", "Delegation is closed.")
+                return
+            self._follow[task_id] = job.execution_id
+            try:
+                # It goes on under the task's name: what waits for the task waits for this.
+                self.rounds.add(rule["session"], job.execution_id, root.get("name") or "", "task")
+            except RoundError as exc:
+                self._follow.pop(task_id, None)
+                job.fail(exc.code, str(exc))
+                return
+        if job.dispatched({"answer_by": "person" if by_person else "agent"}):
+            job.progress("answered", {"task": task_id, "root": root_id, "by": context["by"],
+                                      "answer": context["answer"][:QUESTION_CHARS]})
+            self._start_when_ready(job, context)
 
     # -- verification ------------------------------------------------------------
     def _verify(self, job):

@@ -813,7 +813,36 @@ def _clear_format(painter, ink):
     painter.drawLine(QPointF(4.5, 18.5), QPointF(19.5, 7.5))
 
 
+def _arrow_at_bar(painter, ink, coming):
+    """An arrow and a bar on the left: the arrow comes in to it (``coming``),
+    or sets out from it - what a task asked, and what it was told (ADR-011)."""
+    _stroke(painter, ink)
+    painter.drawLine(QPointF(4.0, 6.0), QPointF(4.0, 18.0))
+    painter.drawLine(QPointF(8.5, 12.0), QPointF(20.0, 12.0))
+    head = QPainterPath()
+    if coming:
+        head.moveTo(13.0, 7.5)
+        head.lineTo(8.5, 12.0)
+        head.lineTo(13.0, 16.5)
+    else:
+        head.moveTo(15.5, 7.5)
+        head.lineTo(20.0, 12.0)
+        head.lineTo(15.5, 16.5)
+    painter.drawPath(head)
+
+
+def _asked(painter, ink):
+    _arrow_at_bar(painter, ink, coming=True)
+
+
+def _answered(painter, ink):
+    _arrow_at_bar(painter, ink, coming=False)
+
+
 DRAWINGS = {
+    # A delegated task's question to this conversation, and the answer it was sent.
+    "asked": _asked,
+    "answered": _answered,
     "network": _network,
     "network-isolated": _network_isolated,
     "network-off": _network_off,

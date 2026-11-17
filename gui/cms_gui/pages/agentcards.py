@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLa
                                QLineEdit, QPlainTextEdit, QPushButton, QRadioButton,
                                QVBoxLayout, QWidget)
 
-from .. import widgets
+from .. import icons, theme, widgets
 
 #: What the next turn is told, around what the person chose or wrote.
 ANSWERS = "Answers to your questions:"
@@ -285,7 +285,8 @@ class ChangesLine(QWidget):
 #: What a waiting request says in its head, by how it stands.
 REQUEST_STATES = {"waiting": "waits for you", "approved": "approved - working", "running": "working",
                   "succeeded": "done", "failed": "did not finish", "denied": "denied",
-                  "canceled": "canceled", "timed_out": "ran out of time", "unknown": "outcome unknown"}
+                  "canceled": "canceled", "timed_out": "ran out of time", "unknown": "outcome unknown",
+                  "asks": "asks - its question is below"}
 
 #: What the next message is prefixed with when other agents wrote to this conversation.
 INBOX = "Messages from other agents, sent to you since your last turn:"
@@ -300,6 +301,8 @@ class AgentRequestCard(QFrame):
     deny = Signal(str)
     open = Signal(str)
     dismiss = Signal(str)
+    #: The person stops a task that goes on through answers (ADR-011).
+    stop = Signal(str)
 
     def __init__(self, request, dismissible=True):
         super().__init__()
@@ -360,19 +363,27 @@ class AgentRequestCard(QFrame):
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.setProperty("variant", "ghost")
         self.dismiss_button.clicked.connect(lambda: self.dismiss.emit(self.execution_id))
-        self.actions = widgets.row(self.open_button, None, self.dismiss_button, self.deny_button,
-                                   self.approve_button)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setProperty("variant", "ghost")
+        self.stop_button.setToolTip("End this task here: it takes no more answers, and what of it runs is "
+                                    "canceled. Its conversation keeps what it found.")
+        self.stop_button.clicked.connect(lambda: self.stop.emit(self.execution_id))
+        self.actions = widgets.row(self.open_button, None, self.dismiss_button, self.stop_button,
+                                   self.deny_button, self.approve_button)
         column.addWidget(self.actions)
         widgets.see_through(self)
         self.set_state(self.request.get("state") or "waiting")
 
-    def set_state(self, state, session_id="", detail=""):
+    def set_state(self, state, session_id="", detail="", questions=0):
         self.request["state"] = state
         if session_id:
             self.request["session_id"] = session_id
-        self.meta.setText(REQUEST_STATES.get(state, state))
+        # How long it has gone on through answers: counted, for the person to judge.
+        self.meta.setText(REQUEST_STATES.get(state, state) + (
+            " - %d question%s so far" % (questions, "" if questions == 1 else "s") if questions else ""))
+        self.stop_button.setVisible(state in ("running", "asks") and self.request.get("kind") != "message")
         waiting = state == "waiting"
-        ended = state not in ("waiting", "approved", "running")
+        ended = state not in ("waiting", "approved", "running", "asks")
         self.deny_button.setVisible(waiting)
         self.approve_button.setVisible(waiting)
         self.open_button.setVisible(bool(self.request.get("session_id")))
@@ -380,6 +391,122 @@ class AgentRequestCard(QFrame):
         self.result.setText(detail)
         self.result.setVisible(bool(detail))
         _settled(self, ended)
+
+def _marked_head(name, kind, meta=""):
+    """A card's heading with its direction in front: what came in, or what went out."""
+    head, label, said = _head(kind, meta)
+    mark = QLabel()
+    mark.setObjectName("mark_" + name)
+    mark.setPixmap(icons.pixmap(name, 16, theme.WARN_INK if name == "asked" else theme.ACCENT))
+    mark.setFixedSize(16, 16)
+    head.insertWidget(0, mark)
+    return head, label, said
+
+
+class TaskQuestionCard(QFrame):
+    """What a delegated task asks this conversation (ADR-011): answered here by
+    the person, or by the agent that handed the task on. One card a question."""
+
+    #: (task execution id, answer)
+    reply = Signal(str, str)
+
+    def __init__(self, question):
+        super().__init__()
+        self.setProperty("role", "agentcard")
+        self.question = dict(question)
+        self.execution_id = self.question.get("execution_id") or ""
+        who = self.question.get("who") or "The other agent"
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 6, 10, 8)
+        column.setSpacing(6)
+        head, self.kind, self.meta = _marked_head("asked", "QUESTION FROM %s" % who.upper())
+        column.addLayout(head)
+        self.text = QLabel(self.question.get("question") or "")
+        self.text.setProperty("role", "cardquestion")
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(self.text)
+        self.goal = QLabel("Task: " + (self.question.get("goal") or ""))
+        self.goal.setProperty("role", "hint")
+        self.goal.setWordWrap(True)
+        self.goal.setVisible(bool(self.question.get("goal")))
+        column.addWidget(self.goal)
+        self.answer_box = QPlainTextEdit()
+        self.answer_box.setObjectName("taskAnswer")
+        self.answer_box.setPlaceholderText("Your answer to %s - or let the agent that handed it on answer." % who)
+        self.answer_box.setFixedHeight(64)
+        self.answer_box.textChanged.connect(self._ready)
+        column.addWidget(self.answer_box)
+        self.answer_button = QPushButton("Answer")
+        self.answer_button.setProperty("variant", "primary")
+        self.answer_button.setToolTip("Goes on in the same conversation: %s keeps what it has already read." % who)
+        self.answer_button.clicked.connect(self._send)
+        self.actions = widgets.row(None, self.answer_button)
+        column.addWidget(self.actions)
+        widgets.see_through(self)
+        stopped = bool(self.question.get("stopped"))
+        self.set_open(not self.question.get("answered") and not stopped, stopped=stopped)
+
+    def set_open(self, waiting, stopped=False):
+        """Waiting for an answer, or answered - its answer is the next card -
+        or not answered: the task was stopped."""
+        number = self.question.get("number") or 1
+        said = "waits for an answer" if waiting else ("not answered - the task was stopped" if stopped
+                                                       else "answered")
+        self.meta.setText("%s - question %d" % (said, number))
+        self.answer_box.setVisible(waiting)
+        self.actions.setVisible(waiting)
+        self._ready()
+        _settled(self, not waiting)
+
+    def _ready(self):
+        self.answer_button.setEnabled(bool(self.answer_box.toPlainText().strip()))
+
+    def _send(self):
+        text = self.answer_box.toPlainText().strip()
+        if text:
+            self.answer_button.setEnabled(False)
+            self.reply.emit(self.execution_id, text)
+
+
+class TaskAnswerCard(QFrame):
+    """What a delegated task was told in answer: by the person, or by the agent
+    that handed it on (ADR-011). Its stripe is the accent: it went out from here."""
+
+    def __init__(self, answer):
+        super().__init__()
+        self.setProperty("role", "agentcard")
+        self.setProperty("variant", "answer")
+        self.answer = dict(answer)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 6, 10, 8)
+        column.setSpacing(6)
+        by = self.answer.get("by") or "You"
+        who = self.answer.get("who") or "the other agent"
+        head, self.kind, self.meta = _marked_head("answered", "ANSWER TO %s" % who.upper(),
+                                                  "from " + ("you" if by == "You" else by))
+        column.addLayout(head)
+        self.text = QLabel("")
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(self.text)
+        self.note = QLabel("")
+        self.note.setProperty("role", "hint")
+        self.note.setWordWrap(True)
+        column.addWidget(self.note)
+        widgets.see_through(self)
+        _settled(self, True)
+        self.set_answer(self.answer)
+
+    def set_answer(self, answer):
+        """The answer that went - another's, when the person's came too late."""
+        self.answer = dict(answer)
+        by = self.answer.get("by") or "You"
+        self.meta.setText("from " + ("you" if by == "You" else by))
+        self.text.setText(self.answer.get("answer") or "")
+        late = self.answer.get("late") or ""
+        self.note.setText(("Your answer was not sent - it was answered first: %s" % late) if late else "")
+        self.note.setVisible(bool(late))
 
 
 class InboxCard(QFrame):
@@ -565,7 +692,12 @@ WAKE_WHY = {"all": "everything you asked to be woken for has ended",
 WAKE_STATES = {"succeeded": "done", "failed": "failed", "skipped": "skipped - what it waited for failed",
                "rework": "sent back for rework",
                "denied": "denied by the person", "canceled": "canceled", "timed_out": "ran out of time",
-               "unknown": "outcome unknown"}
+               "unknown": "outcome unknown", "asks": "asks you a question",
+               "stopped": "stopped by the person"}
+#: What the woken agent is told to do with a question (ADR-011 D4).
+WAKE_REPLY = ('  Answer it with agents.tasks.reply {"task": "%s", "answer": "..."}: it goes on in its own '
+              'conversation with what it has read. Do not delegate it again; ask the person only what you '
+              'cannot decide.')
 WAKE_TODO = ("Check each acceptance criterion against evidence and record it with agents.tasks.verify. "
              "Then carry on with what the person asked - hand on more work if it is needed - and tell "
              "the person what came of it.")
@@ -584,6 +716,11 @@ def wake_message(found):
             "question" if one.get("kind") == "question" else "task", who, ", " + with_ if with_ else "",
             WAKE_STATES.get(one.get("state"), one.get("state") or ""))
         lines.append(head)
+        if one.get("state") == "asks":
+            lines.append("  It asks: " + (one.get("question") or ""))
+            lines.append(WAKE_REPLY % one.get("execution_id"))
+            lines.append("  Execution: %s." % one.get("execution_id"))
+            continue
         if one.get("answer"):
             lines.append("  Answer: " + one["answer"])
         if one.get("error") and one.get("state") != "succeeded":
