@@ -152,6 +152,20 @@ def test_the_last_line_is_not_said_twice_but_one_that_differs_is_said(qapp):
     assert feed.said()[-3:] == [ANSWER, "A summary nobody has read yet.", "Finished"]
 
 
+def test_codex_s_closing_text_of_everything_it_said_is_not_said_again(qapp):
+    feed = ChatFeed()
+    first, second = "Checking the issues now.", "Two are yours:\n\n- QA-1\n- QA-2"
+    feed.load([{"type": "user", "text": "Mine?"}, {"type": "text", "text": first},
+               {"type": "text", "text": second},
+               # What the runner records for a program with no final text of its own.
+               {"type": "completed", "text": first + "\n\n" + second}])
+    assert feed.kinds().count("answer") == 2
+    # Something it had not said is still shown.
+    feed.load([{"type": "user", "text": "Mine?"}, {"type": "text", "text": first},
+               {"type": "completed", "text": first + "\n\nAnd one more thing."}])
+    assert feed.kinds().count("answer") == 2
+
+
 def test_a_tool_s_call_and_its_outcome_are_one_row(qapp):
     feed = ChatFeed()
     events = _events()

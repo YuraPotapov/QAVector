@@ -363,6 +363,13 @@ class CommandRow(QWidget):
         return value
 
 
+def _repeats(text, last, said):
+    """Whether a turn's closing text only says again what the turn said."""
+    def flat(value):
+        return " ".join(str(value or "").split())
+    return flat(text) in (flat(last), flat("\n\n".join(said)))
+
+
 class ChatFeed(QScrollArea):
     """A conversation, top to bottom, following the newest as it arrives.
 
@@ -403,6 +410,7 @@ class ChatFeed(QScrollArea):
         self._mode = "read"             # the access mode of the turn being shown
         self._began = None              # when the turn being shown began
         self._last_text = ""            # the last thing the agent said in it
+        self._said = []                 # everything it said in that turn, in order
         self._cards = []                # planning cards, in order: the newest waits
         self._actionable = False
         self._follow = True
@@ -441,7 +449,7 @@ class ChatFeed(QScrollArea):
         for _kind, widget in self._rows:
             self._drop(widget)
         self._rows, self._tools, self._cards, self._times, self._placed = [], {}, [], [], {}
-        self._began, self._last_text = None, ""
+        self._began, self._last_text, self._said = None, "", []
         self.set_waiting("", [])
         self._follow = True
         self._sync()
@@ -582,7 +590,7 @@ class ChatFeed(QScrollArea):
         at = event.get("at")
         self._now = at if type(at) in (int, float) else time.time()
         if kind == "user":
-            self._began, self._last_text = event.get("at"), ""
+            self._began, self._last_text, self._said = event.get("at"), "", []
             self._mode = event.get("mode") or self._mode
             for card in self._cards:
                 if card.property("settled") != "true":
@@ -648,6 +656,7 @@ class ChatFeed(QScrollArea):
         if not text:
             return
         self._last_text = text
+        self._said.append(text)
         self._add("answer", _Row({"kind": "text"}, AnswerText(text)))
 
     def _returned(self, event):
@@ -690,10 +699,11 @@ class ChatFeed(QScrollArea):
         self._tools = {}
         kind = event.get("type")
         if kind == "completed":
-            # The CLI's last line repeats what the agent said last. Shown only
-            # when it says something the feed does not already end with.
+            # The turn's answer as its record keeps it: Claude's repeats what it
+            # said last, Codex's is everything it said in the turn, joined.
+            # Shown only when it says something the feed does not already hold.
             text = str(event.get("text") or "").strip()
-            if text and text != self._last_text:
+            if text and not _repeats(text, self._last_text, self._said):
                 self._answer(text)
             stage = {"kind": "result", "title": "Finished",
                      "detail": end_text(event, self._began)}
