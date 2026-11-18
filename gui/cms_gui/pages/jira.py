@@ -2616,7 +2616,8 @@ class JiraView(QWidget):
         self._call("list", lambda core, cancel: core.integrations("list", cancel=cancel), done)
 
     def _set_connections(self, connections, pick=""):
-        self.connections = list(connections)
+        # The project's connections of every provider come; this page is Jira's.
+        self.connections = [one for one in connections if (one.get("provider") or "jira") == "jira"]
         wanted = pick or self.picker.currentData() or \
             self.settings.integrations_state().get("connection", "")
         self.picker.blockSignals(True)
@@ -3326,7 +3327,9 @@ class JiraView(QWidget):
 
         def done(payload):
             if payload.get("ok"):
-                self.activity.set_rows(payload.get("activity") or [], names)
+                # The log is the project's, every provider's: this tab is Jira's.
+                self.activity.set_rows([one for one in payload.get("activity") or []
+                                        if (one.get("provider") or "jira") == "jira"], names)
 
         self._call("activity", lambda core, cancel: core.integrations(
             "activity", cancel=cancel), done, quiet=True)

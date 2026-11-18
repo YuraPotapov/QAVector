@@ -225,6 +225,15 @@ def _call_command(rest, source, path, secrets_path, environments=None):
     return _call(rest[0], rest[1], _document(source), path, secrets_path, environments)
 
 
+def _page_of(provider):
+    """``integrations.<provider>.page`` when the provider has one, else None."""
+    import importlib
+    try:
+        return importlib.import_module("integrations.%s.page" % provider)
+    except ImportError:
+        return None
+
+
 def _call(connection_id, operation, request, path, secrets_path, environments=None):
     """One operation, its failure turned into something a page can show."""
     from integrations import store, PROVIDERS
@@ -242,6 +251,10 @@ def _call(connection_id, operation, request, path, secrets_path, environments=No
     if connection["provider"] not in PROVIDERS:
         return {"ok": False, "kind": "error",
                 "error": "Unknown provider %r." % connection["provider"]}
+    page = _page_of(connection["provider"])
+    if page is not None:
+        # A provider with operations of its own for the page answers them itself.
+        return page.call(connection, operation, request or {})
     token = connection["token"]
     from integrations import activity
     from integrations.jira import writes

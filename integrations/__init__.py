@@ -35,4 +35,4 @@ Four rules this package holds to:
 
 #: The providers this build knows, by the id a connection records. A provider
 #: is a module with ``operations.call(name, connection, token, request)``.
-PROVIDERS = ("jira",)
+PROVIDERS = ("jira", "teams")

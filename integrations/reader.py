@@ -18,8 +18,10 @@ from .contracts import WRITE_ERRORS, WRITE_SAYS, ReadError, WriteError
 
 
 def builtin_providers():
-    from .jira.capabilities import provider
-    return {"jira": provider()}
+    """Every provider this build knows: ``integrations.<name>.capabilities.provider()``."""
+    import importlib
+    from . import PROVIDERS
+    return {name: importlib.import_module("integrations.%s.capabilities" % name).provider() for name in PROVIDERS}
 
 
 def _redact(value, secrets):
@@ -61,6 +63,33 @@ class ProjectReader:
         from . import store
         return [{key: entry[key] for key in ("id", "provider", "name")}
                 for entry in store.load(self._path)]
+
+    def access(self, connection_id, provider_name, kind):
+        """What ``kind`` of caller ("agents", "cycles") may do through a connection,
+        as the connection says (ADR-015 D5) - read fresh each time - or None
+        where its provider sets no such limit (Jira, for now). A connection
+        that is gone allows nothing."""
+        from . import store
+        module = store._provider(provider_name)
+        rule = getattr(module, "access_of", None) if module is not None else None
+        if rule is None:
+            return None
+        entry = next((one for one in store.load(self._path)
+                      if one["id"] == connection_id and store.provider_of(one) == provider_name), None)
+        return rule(entry, kind) if entry is not None else "off"
+
+    def ceilings(self, kind):
+        """``{(provider, connection id): level}`` for every connection whose
+        provider sets a limit for ``kind`` of caller."""
+        from . import store
+        found = {}
+        for entry in store.load(self._path):
+            provider = store.provider_of(entry)
+            module = store._provider(provider)
+            rule = getattr(module, "access_of", None) if module is not None else None
+            if rule is not None:
+                found[(provider, entry["id"])] = rule(entry, kind)
+        return found
 
     def read(self, connection_id, provider_name, operation, request):
         """One provider read. Raises :class:`ReadError` with a code and nothing else.
@@ -154,31 +183,35 @@ class ProjectReader:
         from . import activity
         provider, check_output = self._writable(provider_name, operation, request)
         target = str(request.get("key") or request.get("project") or "")
+        caller, source = source, {key: value for key, value in (source or {}).items()
+                                  if key not in ("actor", "approved_by")} or None
         try:
             connection = self._connection(connection_id, provider_name)
             token = connection["token"]
         except Exception as exc:
             raise _write_error(exc) from None
         try:
-            result = provider.write(operation, connection, token, copy.deepcopy(request))
+            # Who asked, and who approved, go with it: a provider that keeps a
+            # record of what it sent (Teams, ADR-015) writes them down.
+            result = provider.write(operation, dict(connection, caller=caller), token, copy.deepcopy(request))
         except Exception as exc:
             error = _write_error(exc)
             # Refused before anything was changed (fields asked for, changed
             # meanwhile): nothing to log, as for the page's own writes.
             if error.code not in WRITE_SAYS:
                 activity.record(self._path, connection_id, operation, target, False, WRITE_ERRORS[error.code],
-                                source)
+                                source, provider_name)
             raise error from None
         try:
             result = _redact(result, _secrets_of(connection, token))
             check_output(result)
         except Exception:
             # Made, but its answer is unusable: say what is known.
-            activity.record(self._path, connection_id, operation, target, True, operation, source)
+            activity.record(self._path, connection_id, operation, target, True, operation, source, provider_name)
             raise WriteError("invalid_response") from None
         made = (result.get("issue") or {}).get("key") or target      # a new issue's own key
         activity.record(self._path, connection_id, operation, made, True,
-                        str(result.get("summary") or operation)[:200], source)
+                        str(result.get("summary") or operation)[:200], source, provider_name)
         return result
 
 

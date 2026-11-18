@@ -31,6 +31,16 @@ WRITES = "%s~writes"
 WRITE_SECONDS = 3600
 
 
+#: The kinds of caller a connection may limit (ADR-015 D5), by the start of the
+#: actor's id. The person (the GUI's own actor) is no kind: nothing limits them.
+KINDS = (("agent:", "agents"), ("cycle:", "cycles"), ("run:", "cycles"))
+
+
+def kind_of(actor_id):
+    """``"agents"``, ``"cycles"``, or None for the person."""
+    return next((kind for start, kind in KINDS if str(actor_id or "").startswith(start)), None)
+
+
 def _thread(work):
     threading.Thread(target=work, name="qcr-integration-write", daemon=True).start()
 
@@ -109,6 +119,39 @@ class IntegrationAdapter:
         for hook in self.refreshed:
             hook(rows)
 
+    def narrow(self, actor_id, grants):
+        """``grants`` held to what each connection allows ``actor_id``'s kind of
+        caller (ADR-015 D5): for a provider whose connections set such a limit,
+        a grant over all its connections becomes one per connection that is not
+        Off - so the caller does not even see the others - and a grant on one
+        connection that is Off is dropped. Other grants are as given."""
+        kind = kind_of(actor_id)
+        ceilings = getattr(self._source, "ceilings", None)
+        if kind is None or ceilings is None:
+            return list(grants)
+        try:
+            levels = ceilings(kind)
+        except Exception:
+            levels = None
+        limited = {provider for provider, _connection in (levels or {})}
+        made = []
+        for grant in grants:
+            parts = grant.permission.split(".")
+            provider = parts[1] if len(parts) > 2 and parts[0] == "integrations" else None
+            if levels is None and provider in self._providers:
+                continue                          # cannot tell what is allowed: nothing is
+            if provider not in limited:
+                made.append(grant)
+                continue
+            open_ = ["integrations.%s.%s" % (provider, connection) for (name, connection), level
+                     in sorted(levels.items()) if name == provider and level != "off"]
+            if grant.resource_id is None:
+                made.extend(type(grant)(grant.project_id, grant.permission, resource)
+                            for prefix in open_ for resource in (prefix, WRITES % prefix))
+            elif grant.resource_id.split("~", 1)[0] in open_:
+                made.append(grant)
+        return made
+
     def _properties(self, connection_id, provider_name):
         def read(ref, names):
             row = next((row for row in self._connections()
@@ -172,6 +215,10 @@ class WriteInvoker:
         if target is None:
             job.fail("not_found", "Capability is not available.")
             return
+        level = self._level(job, target)
+        if level == "off":
+            job.fail("authorization_denied", "This connection does not let %s do this." % kind_of(job.actor_id))
+            return
         request = dict(job.request)
         for field in target[4]:
             found = self._local(job.actor_id, request.get(field))
@@ -181,6 +228,18 @@ class WriteInvoker:
             request[field] = found
         # A read of the service: never on the host's lock.
         self._spawn(lambda: self._prepare(job, target, request))
+
+    def _level(self, job, target):
+        """What the connection allows this caller's kind now (ADR-015 D5), read
+        fresh: a level changed during a turn holds for its next write. None:
+        no limit set, so the person approves, as for every write before."""
+        kind, access = kind_of(job.actor_id), getattr(self._source, "access", None)
+        if kind is None or access is None:
+            return None
+        try:
+            return access(target[0], target[1], kind)
+        except Exception:
+            return "off"
 
     def _local(self, actor, given):
         """``given`` as a real path inside the actor's folder, or None."""
@@ -208,6 +267,11 @@ class WriteInvoker:
             return
         if prepared["noop"] is not None:
             job.succeed(prepared["noop"])
+            return
+        if self._level(job, target) == "post":
+            # The connection lets this kind of caller write without asking (D5).
+            if job.dispatched({"approval": "not_needed"}) and job.running():
+                self._write(job, target, prepared["request"])
             return
         card = dict(prepared["card"], connection=connection_id, connection_name=name)
         with self._lock:
@@ -252,12 +316,15 @@ class WriteInvoker:
         if not job.progress("approval.answered", {"approved": True, "by": by, "edited": edited}):
             return True
         job.running()
-        self._spawn(lambda: self._write(job, target, request))
+        self._spawn(lambda: self._write(job, target, request, by))
         return True
 
-    def _write(self, job, target, request):
+    def _write(self, job, target, request, by=""):
         connection_id, provider, operation, _name, _paths = target
-        source = {"label": str(self._label(job.actor_id))[:200], "detail": job.execution_id}
+        source = {"label": str(self._label(job.actor_id))[:200], "detail": job.execution_id,
+                  "actor": job.actor_id}
+        if by:
+            source["approved_by"] = str(by)[:200]
         try:
             result = self._source.write(connection_id, provider, operation, request, source)
         except WriteError as exc:

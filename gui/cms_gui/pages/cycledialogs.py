@@ -335,7 +335,8 @@ class NodeDialog(_Editor):
             return
         if kind == "connection":
             self._connection_field(key, label, _text(value), hint,
-                                   agents="agents" in (spec.get("options") or ()))
+                                   agents="agents" in (spec.get("options") or ()),
+                                   providers=[one for one in spec.get("options") or () if one != "agents"])
         elif kind == "check":
             self._check(key, label, bool(value), hint)
         elif kind == "choice":
@@ -557,7 +558,7 @@ class NodeDialog(_Editor):
             + "Kept exactly as written; change it in the YAML tab."))
 
     # -- a project connection -------------------------------------------------
-    def _connection_field(self, key, label, value, hint="", agents=False):
+    def _connection_field(self, key, label, value, hint="", agents=False, providers=()):
         """The connection a step names: one of the project's, by id, or a
         ``${vars.x}`` typed in. The list is the project's connections file,
         read by the core - Jira is not asked anything.
@@ -588,7 +589,9 @@ class NodeDialog(_Editor):
 
         def done(result, error):
             if error is None and isinstance(result, dict) and result.get("ok"):
-                self._connections = list(result.get("connections") or [])
+                # A project's connections of every provider come: the step takes those it names.
+                self._connections = [one for one in result.get("connections") or []
+                                     if not providers or (one.get("provider") or "jira") in providers]
                 current = widget.currentText()
                 for one in self._connections:
                     widget.addItem(one.get("id", ""))

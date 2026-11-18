@@ -25,7 +25,7 @@ VERSION = 1
 
 #: What a connection's turns may do in QAVector itself, through QCR (ADR-003 D6):
 #: each off until somebody turns it on - approvals above all.
-QAVECTOR_ACCESS = ("services", "scenarios", "cycles", "approvals", "jira", "jira_write", "usage")
+QAVECTOR_ACCESS = ("services", "scenarios", "cycles", "approvals", "jira", "jira_write", "teams", "usage")
 
 #: The QCR permissions each "QAVector access" switch gives a turn. The GUI
 #: keeps the same table (gui/cms_gui/qcrhost.py AGENT_GRANTS) for the turns it
@@ -41,6 +41,10 @@ ACCESS_GRANTS = {
     "jira_write": ("integrations.jira.write", "integrations.jira.comment", "integrations.jira.transition",
                    "integrations.jira.assign", "integrations.jira.edit", "integrations.jira.comment_edit",
                    "integrations.jira.create", "integrations.jira.attach"),
+    # Each channel says how far (ADR-015 D5): Off hides it, Ask waits for Approve.
+    "teams": ("integrations.teams.read", "integrations.teams.describe", "integrations.teams.preview",
+              "integrations.teams.history", "integrations.teams.post_of", "integrations.teams.write",
+              "integrations.teams.post"),
     "usage": ("analytics.read",),
 }
 

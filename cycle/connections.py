@@ -228,7 +228,7 @@ def expand(plugin, settings, connections):
         raise BindingError(str(exc))
     if not token:
         raise BindingError("Connection %r has no token. Set it in Integrations "
-                           "-> Jira -> Connections." % (connection.get("name") or name))
+                           "-> %s -> Connections." % (connection.get("name") or name, provider.capitalize()))
     values = dict(connection, token=token, api=connection.get("api") or "")
     if connection.get("auth") == "oauth":
         # Signed in through Atlassian: a bearer token, for the API gateway.
@@ -238,6 +238,10 @@ def expand(plugin, settings, connections):
     for key in FIELDS:
         if key in accepted:
             expanded[key] = values.get(key)
+    # The whole connection, for a step that says it posts through its integration
+    # and so keeps its record, limits and access (Teams, ADR-015).
+    if getattr(plugin, "TAKES_CONNECTION", False):
+        expanded["_connection"] = values
     return expanded
 
 

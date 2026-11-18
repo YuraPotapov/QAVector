@@ -567,6 +567,18 @@ CHANGE_STATES = {"waiting": "waits for you", "approved": "approved - sending", "
                  "unknown": "outcome unknown"}
 
 
+#: How a provider is named on a change's card; another is named by its id.
+PROVIDER_NAMES = {"jira": "Jira", "teams": "Teams"}
+
+
+def provider_of(change):
+    """The provider a change goes to - ``integrations.<provider>.<connection>.<op>`` -
+    as its card names it."""
+    parts = str((change or {}).get("capability") or "").split(".")
+    found = parts[1] if len(parts) > 2 and parts[0] == "integrations" else ""
+    return PROVIDER_NAMES.get(found, found.capitalize() or "the integration")
+
+
 def change_title(card):
     """What a change does, as its provider says it: ``Comment on QA-142``."""
     return str(card.get("title") or "%s %s" % (str(card.get("operation") or "change").capitalize(),
@@ -575,7 +587,7 @@ def change_title(card):
 
 class IntegrationChangeCard(QFrame):
     """A change an agent proposes to an integration - a Jira comment, a move to
-    another status, an edit - waiting for the person. What it would change is
+    another status, an edit, a post to Teams - waiting for the person. What it would change is
     as the provider says it (``changes``: from - to); its text fields
     (``edit``) can be changed before Approve, and what is approved is what is
     written (ADR-007 D7)."""
@@ -600,7 +612,9 @@ class IntegrationChangeCard(QFrame):
         column.setSpacing(6)
         head, self.kind, self.meta = _head(change_title(card).upper())
         column.addLayout(head)
-        where = [card.get("summary") or "", "Jira: %s" % (card.get("connection_name") or card.get("connection") or "")]
+        provider = provider_of(self.change)
+        where = [card.get("summary") or "", "%s: %s" % (provider, card.get("connection_name")
+                                                         or card.get("connection") or "")]
         if show_agent and self.change.get("agent"):
             where.append("asked by %s" % self.change["agent"])
         self.where = QLabel(" · ".join(one for one in where if one))
@@ -661,11 +675,12 @@ class IntegrationChangeCard(QFrame):
         self.result.setVisible(False)
         column.addWidget(self.result)
         self.deny_button = QPushButton("Deny")
-        self.deny_button.setToolTip("Nothing is changed in Jira; the agent hears it was denied.")
+        self.deny_button.setToolTip("Nothing is changed in %s; the agent hears it was denied." % provider)
         self.deny_button.clicked.connect(lambda: self.deny.emit(self.execution_id))
         self.approve_button = QPushButton("Approve")
         self.approve_button.setProperty("variant", "primary")
-        self.approve_button.setToolTip("Make this change in Jira, as it reads now. It cannot be taken back here.")
+        self.approve_button.setToolTip("Make this change in %s, as it reads now. It cannot be taken back here."
+                                       % provider)
         self.approve_button.clicked.connect(self._approve)
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.setProperty("variant", "ghost")

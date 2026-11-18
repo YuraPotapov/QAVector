@@ -79,6 +79,10 @@ AGENT_GRANTS = {
     "jira_write": ("integrations.jira.write", "integrations.jira.comment", "integrations.jira.transition",
                    "integrations.jira.assign", "integrations.jira.edit", "integrations.jira.comment_edit",
                    "integrations.jira.create", "integrations.jira.attach"),
+    # Each channel says how far (ADR-015 D5): Off hides it, Ask waits for Approve.
+    "teams": ("integrations.teams.read", "integrations.teams.describe", "integrations.teams.preview",
+              "integrations.teams.history", "integrations.teams.post_of", "integrations.teams.write",
+              "integrations.teams.post"),
     "usage": ("analytics.read",),
 }
 #: How long one turn's token is good for at most; it is revoked when the turn ends.

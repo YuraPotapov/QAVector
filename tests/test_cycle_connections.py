@@ -303,7 +303,7 @@ def test_a_run_naming_a_missing_or_tokenless_connection_is_refused(paths):
     assert found == {}
     assert problems == [
         "Connection 'Product team' has no token. Set it in Integrations -> Jira -> Connections.",
-        "No connection 'nowhere' in this project. Add it in Integrations -> Jira -> Connections."]
+        "No connection 'nowhere' in this project. Add it in Integrations."]
 
 
 def test_a_cycle_naming_no_connection_reads_nothing(paths, monkeypatch):

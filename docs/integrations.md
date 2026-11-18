@@ -2,8 +2,8 @@
 
 Integrations connects a project to the services it works with. Each connection
 is defined once in the project. The Integrations page uses it to read and change
-things, and anything else in QAVector can use it by its id. Jira is the first
-provider.
+things, and anything else in QAVector can use it by its id. The providers are
+Jira and Teams.
 
 Integrations knows nothing about what uses it. It offers a connection with its
 credentials (`integrations.store.credentials`) and a log of changes
@@ -222,6 +222,95 @@ token.
 The log is `integrations-activity.jsonl`, beside `integrations.json`. It is
 readable by its owner only and keeps about the newest 2000 entries.
 
+## Teams
+
+A Teams connection is one channel, group chat or person that QAVector posts to
+([ADR-015](qcr/adr-015-teams.md)). It posts through a Teams *Workflows* webhook:
+the workflow "Post to a channel when a webhook request is received" gives a URL,
+and a card sent to that URL is posted by the workflow. There is no sign-in and
+no app to register. QAVector cannot read the channel, edit a post or take one
+back, and the card on Integrations says so with **Limited**.
+
+| Field | Meaning |
+|---|---|
+| Name | What the page shows. The id is made once from it, as for Jira. |
+| Posts to | Channel, group chat or person. Only a label: the webhook decides where the post goes. |
+| About | A line about the channel, for people and for agents. |
+| Webhook | The workflow's URL. It is the whole permission, so it is kept like a Jira token, in the project's secrets store, and shown only as its host. It never appears in an answer, an error, the history, an event or a run's files. |
+| Default title | The title of a post that gives none. |
+| Footer | A line under every post, such as "- via QAVector". |
+| Mention by | `name = sign-in address`, one a line. Teams mentions people by their sign-in address (UPN), which is not always the address people know. A post may name someone by the name on the left. |
+| Agents | **Off**, **Ask** or **Auto**. See below. A new channel starts at Ask. |
+| Cycles | **Off** or **Auto**. A new channel starts at Auto. |
+
+**What a channel lets agents and cycles do** is the most any of them may do
+there. An agent connection's own switch, **Post to Teams**, can only narrow it:
+
+| Agents | What an agent with Post to Teams can do |
+|---|---|
+| Off | Nothing. The channel is not shown to agents at all, delegated tasks included. |
+| Ask | Read the channel's settings and history, and propose a post. The post waits for you, as a Jira change does: a card in the agent's conversation and on the Teams page's **Waiting** tab. The title and text can be changed before **Approve**. **Deny** sends nothing. |
+| Auto | Post without asking. The post is in History with the agent and its conversation as its source. |
+
+The level is read again before each post, so a change made while an agent is
+working holds for its next post. The person working on the page is held to
+none of these.
+
+**One post a minute per channel**, whoever sends it: the page, an agent or a
+cycle. A post that may have reached the channel counts; a failed one does not.
+A refusal says how many seconds are left and is not a post.
+
+**What a post's outcome means.** `accepted` is HTTP 2xx: the workflow took the
+card, which is not the same as delivered. `failed` names the host and the HTTP
+status. A 404 is usually a workflow that was deleted or turned off. `unknown`
+means no answer came in time, so the post may or may not be there. A post is
+never sent again by itself. **Send again** on the History tab makes a new post
+with the same words, and asks first.
+
+**The page** has four tabs:
+
+- **New post**: the channel, title, text, the people to mention, and the card
+  as it will look. **Send** asks first. Text left there stays as a draft.
+- **Waiting**: the posts agents want to send to channels that ask first.
+- **History**: every post QAVector sent through the channel, with its outcome,
+  who sent it and who approved it.
+- **Connections**: add a channel, change its settings, and **Test post**, which
+  posts a message that says it is a test.
+
+**Where it is stored.** The channel is in `integrations.json` and its webhook
+in `cyclesecrets.json`, as for Jira. Posts are in
+`integrations-teams-posts.jsonl` beside them, readable by their owner only.
+The newest 2,000 are kept. The file holds each post's text, because a webhook
+cannot read the channel back, and never the webhook. Each post, from the page,
+an agent or a cycle, is also a line in the project's activity log, with its
+outcome and source and without its words. Jira's Activity tab shows Jira's
+lines only.
+
+**What agents get** through QCR, for each channel they may see:
+
+| Operation | What it gives |
+|---|---|
+| `describe` | Everything set on the channel but its webhook: what it posts to, about, default title, footer, names it mentions people by, the longest text, its access, and when the next post may go. |
+| `preview` | The card a post would be, built locally. Nothing is sent. |
+| `history`, `post_of` | The posts sent through the channel, all outcomes, newest first; one post by its id. |
+| `post` | A post: title, Markdown text, people to mention. |
+
+**Cycles** post with the `teams.message` step. Naming a channel makes the post
+go through it, with its footer, names, history, access and one-a-minute rule:
+
+```yaml
+- id: tell
+  plugin: teams.message
+  with:
+    connection: release
+    title: Release ${vars.version}
+    text: ${steps.notes.outputs.text}
+    mentions: Dana
+```
+
+A step that still gives `webhook:` instead posts as before. Its posts are not in
+any history.
+
 ## Command line
 
 The page reaches integrations only through the core:
@@ -277,6 +366,11 @@ filter at all the list is limited to `updated >= -90d`, because Cloud refuses a
 search with no condition. A `jql` value is used as written, and an ordering is
 added only when it has none.
 
+Teams operations, by `call ID OPERATION`: `describe`, `preview`, `history`
+(`size`, `outcome`), `post_of` (`id`) and `post` (`title`, `text`, `mentions`)
+as above, and the page's own `again` (`id`: a new post with an old one's
+words) and `test` (a test post). The person's post through `call` asks nobody.
+
 Every command prints one JSON object. The exit code is 0 when `ok` is true, 1
 for a refusal or a failure, and 2 for a wrong command line. Failures carry a
 `kind` the page can act on: `signin`, `forbidden`, `not_found`, `invalid`,
@@ -285,7 +379,9 @@ for a refusal or a failure, and 2 for a wrong command line. Failures carry a
 ## Not in this version
 
 - OAuth for Jira Server or Data Center. Use a personal access token there.
-- Other providers. Codex comes to Agents in a later version.
+- Other providers.
+- Reading a Teams channel, or posting through Microsoft Graph: Teams posts only
+  through a workflow's webhook.
 
 ## Agents chat
 

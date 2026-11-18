@@ -31,13 +31,17 @@ def path_for(integrations_path):
                         FILE_NAME)
 
 
-def record(integrations_path, connection, operation, target, ok, summary, source=None):
+def record(integrations_path, connection, operation, target, ok, summary, source=None, provider=""):
     """Append one entry. Never raises: a change that was made must not be
-    reported as failed because its log line could not be written."""
+    reported as failed because its log line could not be written.
+    ``provider`` says whose change it was; an entry without one is Jira's,
+    the only provider when the log began."""
     entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "connection": str(connection or ""),
              "op": str(operation or ""), "target": str(target or ""), "ok": bool(ok),
              "summary": str(summary or "")[:500],
              "source": dict(source or {"label": "This page"})}
+    if provider:
+        entry["provider"] = str(provider)
     path = path_for(integrations_path)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)

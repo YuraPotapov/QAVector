@@ -38,40 +38,32 @@ again posts again. Resuming a run does not re-run a step that finished.
 
 import json
 import os
-import re
-import ssl
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from cycle import registry
 from cycle.registry import CyclePlugin, PluginMetadata, field, output
-
-#: Where a plain http:// address is allowed: a stand-in on this machine, for
-#: trying a cycle out. Anything else must be https - the URL is a password.
-LOOPBACK = ("127.0.0.1", "localhost", "::1")
-TIMEOUT = 30
-CARD = "application/vnd.microsoft.card.adaptive"
-#: The most a message from a file carries. A Teams card stops at about 28 KB;
-#: this leaves room for the card around the text.
-MAX_TEXT = 20000
-#: One person to mention: ``name <email>``, or the email alone.
-PERSON = re.compile(r"^\s*(?:(?P<name>[^<>]+?)\s*<\s*(?P<email>[^<>\s@]+@[^<>\s@]+)\s*>"
-                    r"|(?P<bare>[^<>\s@,]+@[^<>\s@,]+))\s*$")
+# The card, the mentions and the request are the Teams integration's (ADR-015):
+# one way to post, whoever posts.
+from integrations.teams.webhook import (CARD, LOOPBACK, MAX_TEXT, PERSON, TIMEOUT,  # noqa: F401
+                                        SendError, address_problem as _address_problem, card, people, send)
 
 
 class TeamsMessage(CyclePlugin):
+    #: Given its channel whole (``_connection``): it posts through the integration.
+    TAKES_CONNECTION = True
     metadata = PluginMetadata(
         id="teams.message", name="Teams Message", category=registry.ACTION,
         summary="Post a message to a Teams chat, channel or person through a "
                 "Workflows webhook.",
         permissions=("network",),
         inputs=(
-            field("webhook", "Workflow URL", required=True,
-                  hint="The URL a Teams workflow \"Post to a chat when a webhook "
-                       "request is received\" gives. A secret: reference a "
-                       "secret variable - ${vars.teams_webhook} - so the value "
-                       "stays out of this file."),
+            field("connection", "Channel", "connection", options=("teams",),
+                  hint="A Teams channel of this project (Integrations -> Teams), by its id. "
+                       "Its webhook, footer and names to mention people by come with it, every "
+                       "post is in its history, and it posts at most once a minute."),
+            field("webhook", "Workflow URL",
+                  hint="Only for a cycle not moved to a channel yet: the URL a Teams workflow "
+                       "gives, as a secret variable - ${vars.teams_webhook}. Name a channel "
+                       "instead."),
             field("text", "Message", "multiline",
                   hint="Markdown as a note is written: lines, \"- \" bullets, "
                        "**bold**. Usually an earlier step's output, such as "
@@ -99,13 +91,18 @@ class TeamsMessage(CyclePlugin):
 
     def problems(self, settings):
         settings = settings or {}
-        found = super().problems(settings)
+        # ``_connection`` is the channel the run put in place of ``connection``
+        # (cycle/connections.expand), not something a cycle file can say.
+        found = super().problems({key: value for key, value in settings.items() if key != "_connection"})
         for key in ("webhook", "text", "text_file", "title"):
             if key in settings and not isinstance(settings[key], str):
                 found.append("%s must be text." % key)
         if not str(settings.get("text") or "").strip() and \
                 not str(settings.get("text_file") or "").strip():
             found.append("A message needs text, or text_file to read it from.")
+        if not str(settings.get("connection") or "").strip() and not settings.get("_connection") and \
+                not str(settings.get("webhook") or "").strip():
+            found.append("Name the Teams channel to post to (Integrations -> Teams).")
         webhook = str(settings.get("webhook") or "").strip()
         if webhook and "${" not in webhook:
             problem = _address_problem(webhook)
@@ -138,6 +135,9 @@ class TeamsMessage(CyclePlugin):
                 text = text[:MAX_TEXT].rstrip() + "\n\n(cut at %d characters)" % MAX_TEXT
         if not text:
             return registry.failed("There is no message to send: the text is empty.")
+        channel = step.settings.get("_connection")
+        if channel:
+            return self._through(context, step, channel, text)
         webhook = str(self.setting(step.settings, "webhook")).strip()
         problem = _address_problem(webhook)
         if problem:
@@ -147,104 +147,44 @@ class TeamsMessage(CyclePlugin):
 
         body = json.dumps(card(text, str(self.setting(step.settings, "title", "") or ""),
                                mentions), ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            webhook, data=body, method="POST",
-            headers={"Content-Type": "application/json; charset=utf-8"})
-        host = urllib.parse.urlsplit(webhook).hostname or "the workflow"
         verify = bool(self.setting(step.settings, "verify_tls", True))
-        tls = None if verify else ssl._create_unverified_context()
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT, context=tls) as answer:
-                status = answer.status
-        except urllib.error.HTTPError as exc:
-            return registry.failed(
-                "Teams did not take the message: %s answered HTTP %d. A 404 is "
-                "usually a workflow that was deleted or turned off." % (host, exc.code),
-                sent=False, status=exc.code, mentioned=0)
-        except (urllib.error.URLError, OSError) as exc:
-            reason = getattr(exc, "reason", exc)
-            return registry.failed("Could not reach %s: %s" % (host, reason),
-                                   sent=False, status=0, mentioned=0)
-        if not 200 <= status < 300:
-            return registry.failed("Teams did not take the message: %s answered "
-                                   "HTTP %d." % (host, status), sent=False, status=status,
-                                   mentioned=0)
+            status = send(webhook, body, verify_tls=verify)
+        except SendError as exc:
+            return registry.failed(str(exc), sent=False, status=exc.status, mentioned=0)
+        from integrations.teams.webhook import host_of
+        host = host_of(webhook)
         said = " mentioning %d" % len(mentions) if mentions else ""
         if skipped:
             said += "; not mentioned: " + " ".join(skipped)
         return registry.succeeded("teams: sent to %s (HTTP %d)%s" % (host, status, said),
                                   sent=True, status=status, mentioned=len(mentions))
 
-
-def _address_problem(webhook):
-    """Why ``webhook`` cannot be posted to, or "". Never quotes the address."""
-    parts = urllib.parse.urlsplit(webhook)
-    if parts.scheme == "https" and parts.hostname:
-        return ""
-    if parts.scheme == "http" and parts.hostname in LOOPBACK:
-        return ""
-    return ("The workflow URL must start with https:// (http:// only for a "
-            "stand-in on this machine).")
-
-
-def people(value):
-    """``([(name, email), ...], problems)`` from a list, or from lines or commas.
-
-    One person once, however often named: the first spelling of their name
-    wins. Somebody given by email alone is tagged by that email.
-    """
-    entries = value if isinstance(value, list) else re.split(r"[\n,]", str(value or ""))
-    found, problems, seen = [], [], set()
-    for entry in entries:
-        entry = str(entry or "").strip()
-        if not entry:
-            continue
-        hit = PERSON.match(entry)
-        if not hit:
-            problems.append("mentions: %r is not an email or \"name <email>\"." % entry)
-            continue
-        email = hit.group("email") or hit.group("bare")
-        if email.lower() in seen:
-            continue
-        seen.add(email.lower())
-        found.append(((hit.group("name") or email).strip(), email))
-    return found, problems
-
-
-def card(text, title="", mentions=()):
-    """The Adaptive Card a Teams workflow posts: one block per line of ``text``.
-
-    ``mentions`` - ``(name, email)`` pairs - are listed for Teams to notify;
-    whoever the text does not already tag as ``<at>name</at>`` is tagged on a
-    last line of its own.
-    """
-    tags = [("<at>%s</at>" % name, name, email) for name, email in mentions]
-    rest = [tag for tag, _name, _email in tags if tag not in text]
-    if rest:
-        text = text.rstrip() + "\n\n" + ", ".join(rest)
-    body = []
-    if title.strip():
-        body.append({"type": "TextBlock", "text": title.strip(), "weight": "Bolder",
-                     "size": "Medium", "wrap": True})
-    gap = False
-    for line in text.splitlines():
-        if not line.strip():
-            gap = True
-            continue
-        stripped = line.strip()
-        if stripped.startswith(("- ", "* ")):
-            block = {"type": "TextBlock", "text": "• " + stripped[2:].strip(),
-                     "wrap": True, "spacing": "Small"}
-        else:
-            block = {"type": "TextBlock", "text": stripped, "wrap": True}
-        if gap and body:
-            block["spacing"] = "Medium"
-        gap = False
-        body.append(block)
-    content = {"type": "AdaptiveCard", "version": "1.4", "body": body}
-    if tags:
-        content["msteams"] = {"entities": [
-            {"type": "mention", "text": tag, "mentioned": {"id": email, "name": name}}
-            for tag, name, email in tags]}
-    return {"type": "message", "attachments": [{
-        "contentType": CARD, "contentUrl": None, "content": content}]}
+    def _through(self, context, step, channel, text):
+        """Post through the project's channel: its record, its one-a-minute and
+        its access for cycles hold, as for anybody else who posts (ADR-015)."""
+        from integrations.contracts import WriteError
+        from integrations.teams import capabilities
+        if ((channel.get("settings") or {}).get("access") or {}).get("cycles") == "off":
+            return registry.failed("%s does not let cycles post. Change it in Integrations -> Teams -> "
+                                   "Connections." % channel.get("name"), sent=False, status=0, mentioned=0)
+        mentions = self.setting(step.settings, "mentions")
+        names = mentions if isinstance(mentions, list) else [one for one in str(mentions or "").replace(
+            "\n", ",").split(",") if one.strip()]
+        run = getattr(context, "run", None)
+        cycle = getattr(context, "cycle", None)
+        source = {"label": "Cycle %s" % (getattr(cycle, "name", "") or getattr(run, "cycle_id", "") or ""),
+                  "detail": "Run %s, step %s" % (getattr(run, "id", ""), step.id)}
+        context.cancel.raise_if_set()
+        try:
+            made = capabilities.post(channel, {"title": str(self.setting(step.settings, "title", "") or ""),
+                                               "text": text, "mentions": [str(one) for one in names]}, source)
+        except WriteError as exc:
+            return registry.failed("Teams: %s" % exc, sent=False, status=0, mentioned=0)
+        except SendError as exc:
+            return registry.failed(str(exc), sent=False, status=exc.status, mentioned=0)
+        post = made["post"]
+        return registry.succeeded("teams: posted to %s (HTTP %d)%s" % (
+            channel.get("name"), post.get("status") or 0,
+            " mentioning %d" % len(post.get("mentions") or []) if post.get("mentions") else ""),
+            sent=True, status=post.get("status") or 0, mentioned=len(post.get("mentions") or []))

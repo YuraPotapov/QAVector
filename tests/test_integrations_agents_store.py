@@ -51,7 +51,7 @@ def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
                      "binary": "", "model": "sonnet", "effort": "high", "role": "",
                      # QAVector through QCR: nothing until somebody turns it on (ADR-003 D6).
                      "qavector_access": {"services": False, "scenarios": False, "cycles": False,
-                                         "approvals": False, "jira": False, "jira_write": False, "usage": False},
+                                         "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
                      # Other agents: a new connection asks the person each time (ADR-006 D3).
                      "others_default": "approve", "allowed_agents": [],
                      # When its tasks end, a conversation asks the person (ADR-009 D3).
@@ -155,7 +155,7 @@ def test_qavector_access_keeps_only_its_switches_and_only_true_turns_one_on():
     normalized = store.normalize({"name": "C", "qavector_access": {
         "services": True, "approvals": "yes", "cycles": 1, "everything": True}})
     assert normalized["qavector_access"] == {"services": True, "scenarios": False, "cycles": False,
-                                             "approvals": False, "jira": False, "jira_write": False, "usage": False}
+                                             "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False}
     assert store.normalize({"name": "C", "qavector_access": "all"})["qavector_access"]["services"] is False
 
 

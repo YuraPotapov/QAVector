@@ -295,7 +295,11 @@ class Host:
         previous = self._callers.pop(actor, None)
         if previous is not None:
             self.authority.revoke(previous)
-        self._callers[actor] = self.authority.issue(actor, self._grants(grants))
+        made = self._grants(grants)
+        if self.integrations is not None:
+            # What each connection allows this kind of caller (ADR-015 D5).
+            made = self.integrations.narrow(actor, made)
+        self._callers[actor] = self.authority.issue(actor, made)
 
     # -- handlers -----------------------------------------------------------------
     def _on_agent_profiles(self, message):

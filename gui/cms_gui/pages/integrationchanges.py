@@ -19,21 +19,33 @@ from .jiraconnections import _cell, _table
 
 TITLE = "Agent changes"
 
+#: What the tab says for each provider: (its title, the lede, the empty list,
+#: what the "what" column names). Teams' tab is its Waiting list (ADR-015 D6).
+WORDS = {
+    "jira": (TITLE, "Changes agents asked to make in Jira. Nothing is sent until you approve it; "
+                    "a comment can be changed first. Each also waits in its agent's conversation.",
+             "No agent has asked to change Jira. When one does - a comment, a move to "
+             "another status - it waits here for you.", "Issue"),
+    "teams": ("Waiting", "Posts agents want to send. Nothing is posted until you approve it, and the text "
+                         "can be changed first. Each also waits in its agent's conversation; a channel set "
+                         "to Post sends without asking, and its posts are in History.",
+              "No agent post waits for you. When an agent wants to post to a channel that asks "
+              "first, it waits here.", "Post"),
+}
+
 
 class IntegrationChangesTab(QWidget):
-    HEADERS = ("Asked", "Agent", "Change", "Issue", "Connection", "State")
-
     def __init__(self, provider="jira", parent=None):
         super().__init__(parent)
         self.provider = provider
+        self.name, lede, empty, what = WORDS.get(provider, WORDS["jira"])
+        self.HEADERS = ("Asked", "Agent", "Change", what, "Connection", "State")
         self.source = None
         self._ids = []
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 14, 0, 0)
         column.setSpacing(8)
-        column.addWidget(widgets.lede(
-            "Changes agents asked to make in Jira. Nothing is sent until you approve it; "
-            "a comment can be changed first. Each also waits in its agent's conversation."))
+        column.addWidget(widgets.lede(lede))
         panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.table = _table(self.HEADERS)
         self.table.setObjectName("integrationChanges")
@@ -43,9 +55,7 @@ class IntegrationChangesTab(QWidget):
         self.table.itemSelectionChanged.connect(self._show_selected)
         self.search = widgets.SearchRow(self.table)
         self.search.changed.connect(self._say_empty)
-        self.note = widgets.empty_note(
-            self.table, "No agent has asked to change Jira. When one does - a comment, a move to "
-                        "another status - it waits here for you.")
+        self.note = widgets.empty_note(self.table, empty)
         panel.layout().addWidget(self.table)
         column.addWidget(panel, 1)
         self.holder = QVBoxLayout()
@@ -128,4 +138,4 @@ class IntegrationChangesTab(QWidget):
 
     def title(self):
         count = self.waiting()
-        return "%s (%d)" % (TITLE, count) if count else TITLE
+        return "%s (%d)" % (self.name, count) if count else self.name

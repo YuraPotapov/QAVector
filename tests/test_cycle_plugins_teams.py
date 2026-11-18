@@ -1,6 +1,7 @@
 """Posting to Teams through a workflow's webhook - and never repeating its URL."""
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -221,3 +222,104 @@ def test_a_bad_address_from_a_step_costs_only_its_own_mention(workflow, tmp_path
     assert result.ok, result.message
     assert result.outputs["mentioned"] == 1 and "not an address" in result.message
     assert len(entities(workflow.received[0][2])) == 1
+
+
+# -- through the project's channel (ADR-015 D7) -------------------------------------------
+@pytest.fixture
+def channel(tmp_path, workflow):
+    """A Teams channel of the project, its webhook the stand-in; ``post(level=...)``
+    runs the step the way a run does: the connections read, the step's settings
+    expanded, the step executed."""
+    from cycle import connections as binding
+    from domain.cycle import Cycle
+    from integrations import store
+    paths = (str(tmp_path / "integrations.json"), str(tmp_path / "secrets.json"))
+
+    made_entry, problems = store.upsert({"provider": "teams", "name": "Release", "settings": {
+        "footer": "via QAVector", "aliases": {"Dana": "dana.k@team.example"}}},
+        paths[0], paths[1], new_token=workflow.url)
+    assert not problems
+
+    def post(cycles="post", **settings):
+        entry = next(one for one in store.load(paths[0]) if one["id"] == made_entry["id"])
+        entry["settings"]["access"]["cycles"] = cycles
+        _entry, problems = store.upsert(entry, paths[0], paths[1])
+        assert not problems
+        step = CycleStep(id="tell", plugin="teams.message",
+                         settings=dict(settings, connection=made_entry["id"]))
+        found, problems = binding.load(Cycle(id="c", name="Release notes", steps=[step]), path=paths[0],
+                                       secrets_path=paths[1], environments_path=str(tmp_path / "env.json"),
+                                       include_agents=False)
+        assert problems == []
+        plugin = registry.get("teams.message")
+        made = CycleStep(id="tell", plugin="teams.message",
+                         settings=binding.expand(plugin, step.settings, found))
+        context = RunContext(CycleRun(id="r7", cycle_id="c"), None, str(tmp_path))
+        return plugin.execute(context, made)
+
+    post.paths, post.id = paths, made_entry["id"]
+    return post
+
+
+def test_a_step_naming_a_channel_posts_through_it_with_its_footer_and_names(channel, workflow):
+    from integrations.teams import history
+    result = channel(text="Release 1.4 is out", mentions="Dana")
+    assert result.ok, result.message
+    assert result.outputs == {"sent": True, "status": 202, "mentioned": 1}
+    sent = json.dumps(workflow.received[0][2])
+    assert "via QAVector" in sent and "dana.k@team.example" in sent
+    [post] = history.read(channel.paths[0], channel.id)
+    assert post["outcome"] == "accepted" and post["text"].startswith("Release 1.4 is out")
+    assert post["source"]["detail"] == "Run r7, step tell"
+    assert "SECRET" not in json.dumps(post) and "SECRET" not in result.message
+
+
+def test_a_channel_closed_to_cycles_fails_the_step_and_sends_nothing(channel, workflow):
+    result = channel(cycles="off", text="Hello")
+    assert not result.ok and "does not let cycles post" in result.message
+    assert workflow.received == []
+
+
+def test_a_second_post_within_the_minute_fails_the_step_and_says_when(channel, workflow):
+    assert channel(text="First").ok
+    result = channel(text="Second")
+    assert not result.ok and "One post a minute" in result.message
+    assert len(workflow.received) == 1
+
+
+def test_a_step_needs_a_channel_or_an_old_webhook():
+    plugin = registry.get("teams.message")
+    assert "Name the Teams channel" in " ".join(plugin.problems({"text": "Hi"}))
+    assert plugin.problems({"text": "Hi", "connection": "release"}) == []
+
+
+def test_a_whole_run_posts_through_the_channel(channel, workflow, tmp_path):
+    """The executor's own checks too, not the step alone (the step once refused
+    the channel the run handed it as an unknown setting)."""
+    from cycle import model
+    from cycle import connections as binding
+    from cycle.executor import run_cycle
+    from domain.cycle import SUCCESS
+    cycle = model.parse_cycle({"id": "c", "steps": [
+        {"id": "tell", "plugin": "teams.message", "with": {"connection": channel.id, "text": "Run says hi"}}]}, "c")
+    found, problems = binding.load(cycle, path=channel.paths[0], secrets_path=channel.paths[1],
+                                   environments_path=str(tmp_path / "env.json"), include_agents=False)
+    assert problems == []
+    run = run_cycle(cycle, str(tmp_path / "run"), connections=found)
+    assert run.steps["tell"].status == SUCCESS, run.steps["tell"].message
+    assert len(workflow.received) == 1
+    assert "SECRET" not in json.dumps(run.steps["tell"].outputs) + run.steps["tell"].message
+    # The channel the run handed the step carries its webhook: none of the run's files may.
+    assert any(files for _folder, _dirs, files in os.walk(str(tmp_path / "run")))
+    for folder, _dirs, files in os.walk(str(tmp_path / "run")):
+        for name in files:
+            with open(os.path.join(folder, name), "rb") as handle:
+                assert b"SECRET" not in handle.read(), name
+
+
+def test_a_cycle_s_post_is_a_line_in_activity_without_its_words(channel):
+    from integrations import activity
+    assert channel(text="Words nobody should log").ok
+    [line] = activity.read(channel.paths[0])
+    assert line["op"] == "post" and line["source"]["detail"] == "Run r7, step tell"
+    assert "Words nobody" not in json.dumps(line) and "SECRET" not in json.dumps(line)

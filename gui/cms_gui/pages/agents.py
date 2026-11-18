@@ -302,6 +302,7 @@ QAVECTOR_ACCESS = (("services", "Start, stop and restart services"),
                    ("approvals", "Answer a cycle's approvals and questions"),
                    ("jira", "Read Jira"),
                    ("jira_write", "Change Jira: comment, move issues - you approve each"),
+                   ("teams", "Post to Teams - as far as each channel allows"),
                    ("usage", "Read agent usage and est. cost"))
 
 
@@ -1052,6 +1053,23 @@ class AgentsView(QWidget):
                 then()
 
         self._call("list", lambda core, cancel: core.agents("list", cancel=cancel), done)
+
+    def last_kind(self, done):
+        """``done(kind)``: the program the most recent conversation was with
+        (``claude``, ``codex``), or "" when there is none. The chat's own list
+        when it has read one; else the project's conversations, read by the
+        core - no agent is asked anything."""
+        if self.chat._loaded:
+            newest = self.chat.sessions[0] if self.chat.sessions else {}
+            done(str(newest.get("kind") or ""))
+            return
+
+        def answered(payload):
+            rows = (payload.get("sessions") or []) if payload.get("ok") else []
+            done(str(rows[0].get("kind") or "") if rows else "")
+
+        self._call("last-kind", lambda core, cancel: core.agents(
+            "sessions", document={"limit": 1}, cancel=cancel), answered)
 
     def _set_connections(self, connections):
         self.connections = list(connections)

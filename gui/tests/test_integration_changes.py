@@ -247,3 +247,46 @@ def test_only_the_provider_s_own_changes_are_listed(qapp, tmp_path):
     tab = IntegrationChangesTab("jira")
     tab.set_source(host)
     assert tab.table.rowCount() == 0 and tab.title() == "Agent changes"
+
+
+POST = {"type": "integration_approval", "execution_id": "e-9", "actor": "agent:claude/s-1",
+        "capability": "integrations.teams.release.post", "editable": ["text", "title"],
+        "card": {"operation": "post", "key": "Release 1.4", "summary": "",
+                 "title": "Post to Release", "changes": [],
+                 "notes": ["A post cannot be taken back. It goes to Release (channel)."],
+                 "edit": {"title": {"label": "Title", "value": "Release 1.4", "was": "", "multiline": False},
+                          "text": {"label": "Text", "value": "Out today", "was": "", "multiline": True,
+                                   "required": True}},
+                 "connection": "release", "connection_name": "Release"}}
+
+
+def test_a_post_an_agent_wants_to_send_waits_on_teams_own_page_not_jira_s(qapp, tmp_path):
+    """ADR-015 D6: Teams' Waiting tab, after New post; the catalog counts it too."""
+    from cms_gui.pages.integrations import IntegrationsPage
+    from cms_gui.settings import Settings
+    host = ready_host(tmp_path)
+    page = IntegrationsPage(Settings())
+    try:
+        page.set_change_source(host)
+        waiting = page.teams_changes
+        tabs = page.teams.tabs
+        assert tabs.indexOf(waiting) == 1 and tabs.tabText(1) == "Waiting"
+        assert waiting.table.horizontalHeaderItem(3).text() == "Post"
+        host._take(dict(POST))
+        assert tabs.tabText(1) == "Waiting (1)"
+        assert page.changes.table.rowCount() == 0          # nothing of it on Jira's page
+        assert waiting.table.rowCount() == 1
+        assert page.tiles["waiting"].value.text() == "1"
+        assert waiting.table.item(0, 3).text() == "Release 1.4"
+        assert waiting.table.item(0, 4).text() == "Release"
+        waiting.table.selectRow(0)
+        assert "Teams: Release" in waiting.card.where.text() and "Jira" not in waiting.card.where.text()
+        waiting.card.fields["text"].setPlainText("Out today, see the notes")
+        waiting.card.approve_button.click()
+        [answer] = [one for one in host.sent if one["type"] == "integration_answer"]
+        assert answer["execution_id"] == "e-9" and answer["approve"] is True
+        assert answer["changes"]["text"] == "Out today, see the notes"
+        assert tabs.tabText(1) == "Waiting"
+    finally:
+        page.shutdown()
+        page.close()

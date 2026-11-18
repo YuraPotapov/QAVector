@@ -387,12 +387,11 @@ def test_the_catalog_lists_agents_after_jira_with_its_connections_counted(make, 
     page.agents.crumb.click()
     qapp.processEvents()
     assert page.stack.currentWidget() is page.catalog
-    assert [page.table.item(row, 0).text() for row in range(page.table.rowCount())] == [
-        "Jira", "Agents"]
-    assert page.table.item(1, 1).text() == "2"
+    assert list(page.cards.cards) == ["jira", "teams", "agents"]
+    assert page.cards.cards["agents"].count.text() == "2"
     # Jira was never opened: its connections are counted now, not left as a dash.
-    assert page.table.item(0, 1).text() == "0"
-    page.table.selectRow(1)
+    assert page.cards.cards["jira"].count.text() == "0"
+    page.cards.pick("agents")
     page.open_selected()
     assert page.stack.currentWidget() is page.agents
 
@@ -585,7 +584,7 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         dialog.save.click()
         assert core.calls[-1] == (("save",), {"connection": {
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "", "role": "",
-            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
             "others_default": "approve", "allowed_agents": [], "wake_default": "ask",
             "budget_task": {}, "budget_conversation": {}}})
@@ -686,7 +685,7 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
         assert core.calls[-1] == (("save",), {"connection": {
             "id": "claude", "name": "Claude", "kind": "claude",
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high", "role": "",
-            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "usage": False},
+            "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
             "others_default": "deny", "allowed_agents": [], "wake_default": "ask",
             "budget_task": {}, "budget_conversation": {}}})
@@ -930,11 +929,11 @@ def test_qavector_access_is_off_until_a_switch_is_turned_on(qapp):
                                      "qavector_access": {"services": True}})
     try:
         assert dialog.entry()["qavector_access"] == {"services": True, "scenarios": False, "cycles": False,
-                                                      "approvals": False, "jira": False, "jira_write": False, "usage": False}
+                                                      "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False}
         dialog.access["approvals"].setChecked(True)
         assert dialog.entry()["qavector_access"]["approvals"] is True
         assert ConnectionDialog(None).entry()["qavector_access"] == dict.fromkeys(
-            ("services", "scenarios", "cycles", "approvals", "jira", "jira_write", "usage"), False)
+            ("services", "scenarios", "cycles", "approvals", "jira", "jira_write", "teams", "usage"), False)
     finally:
         dialog.close()
 
