@@ -1128,6 +1128,42 @@ QFrame[role="stattile"] {{ background: {surface}; border: 1px solid {divider}; }
 QLabel[role="statlabel"] {{ font-size: 10px; font-weight: 600; letter-spacing: 0.8px; color: {n600}; }}
 QLabel[role="statvalue"] {{ font-family: {heading}; font-size: 20px; font-weight: 600; color: {text}; }}
 QLabel[role="statvalue"][state="warn"] {{ color: {warn_ink}; }}
+/* --- the providers on Integrations (pages/providercards.py) ---------------- */
+/* A card each: a hairline box on the panel's ground, its top edge the accent
+   once picked - the one place the slate is spent. */
+QFrame[role="providercard"] {{
+    background: {surface}; border: 1px solid {divider}; border-top: 3px solid {divider};
+}}
+QFrame[role="providercard"]:hover {{ border-color: {divider_strong}; border-top-color: {divider_strong}; }}
+QFrame[role="providercard"][selected="true"] {{ border-color: {accent}; border-top-color: {accent}; }}
+QFrame[role="providercard"] QWidget[seethrough="true"] {{ background: transparent; }}
+QLabel[role="providername"] {{
+    font-family: {heading}; font-size: 18px; font-weight: 600; color: {text}; background: transparent;
+}}
+QLabel[role="providerwhat"] {{ font-size: 12px; color: {n700}; background: transparent; }}
+QLabel[role="providerdetail"] {{ font-size: 12px; color: {n600}; background: transparent; }}
+QLabel[role="providerdetail"][state="warn"] {{ color: {warn_ink}; }}
+QLabel[role="providercount"] {{
+    font-family: {heading}; font-size: 30px; font-weight: 600; color: {text}; background: transparent;
+}}
+QLabel[role="providercount"][state="idle"] {{ color: {n500}; }}
+/* What the provider is in one word, and where it stands, as tags. */
+QLabel[role="providerstate"] {{
+    font-family: {mono}; font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
+    padding: 2px 7px; color: {mark_ink}; background: {mark_tint}; border-radius: 0px;
+}}
+QLabel[role="providerstate"][state="warn"] {{ color: {warn_ink}; background: {warn_tint}; }}
+QLabel[role="providerstate"][state="idle"] {{ color: {n600}; background: {n200}; }}
+/* A limit worth knowing before opening it (Teams: posts only), beside the name. */
+QLabel[role="providerflag"] {{
+    font-family: {mono}; font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
+    color: {warn_ink}; background: transparent; border: 1px solid {warn_ink};
+    padding: 1px 6px; border-radius: 0px;
+}}
+QLabel[role="capchip"] {{
+    font-family: {mono}; font-size: 10px; letter-spacing: 0.6px; color: {n700};
+    background: {bg}; border: 1px solid {divider}; padding: 2px 6px; border-radius: 0px;
+}}
 QLabel[role="chattitle"] {{
     font-family: {heading}; font-size: 15px; font-weight: 600; color: {text};
 }}

@@ -7,25 +7,40 @@ and coordinates their window lifecycle.
 """
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHeaderView, QPushButton,
-                               QStackedWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QScrollArea, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from .. import search, widgets
 from ..integrationhost import IntegrationHost
 from .agents import AgentsView
+from .agentusage import StatTile
 from .jira import JiraView
+from .providercards import Provider, ProviderGrid, standing_of
+from .teams import TeamsView
 
-#: Provider id -> what the list calls it and says about it.
-PROVIDERS = (("jira", "Jira", "Issues: read, search, and change them; cycles name a "
-                              "connection instead of carrying a site and a token."),
-             ("agents", "Agents", "Agent programs such as Claude Code, set once for every "
-                                  "project, and every turn taken with one."))
+#: Each provider as its card tells it: id, name, what kind of service it is,
+#: what it does, its maker's mark (brandmarks.py), what can be done through it, and
+#: optionally a (flag, why) the card wears beside its name.
+PROVIDERS = (("jira", "Jira", "Issue tracker",
+              "Issues: read, search, and change them; cycles name a connection instead of "
+              "carrying a site and a token.", "jira",
+              ("Read", "Search", "Change", "Agents", "Cycles")),
+             ("teams", "Teams", "Team chat",
+              "Posts to a channel or chat through its workflow; cycles and agents post through "
+              "a channel set up here, one post a minute.", "teams",
+              ("Post", "History", "Agents", "Cycles"),
+              # Webhook posts only (ADR-015): said on the card, not found out later.
+              ("Limited", "Posts only, through the channel's workflow webhook: it cannot read the "
+                          "channel, edit or take back a post, and sends one post a minute.")),
+             ("agents", "Agents", "Coding agents",
+              "Agent programs such as Claude Code, set once for every project, and every turn "
+              "taken with one.", "agents",
+              ("Chat", "Delegate", "Budgets", "Usage")))
 
 
 class IntegrationsPage(QWidget):
     """The rail's Integrations entry: the providers, and the one opened."""
 
-    HEADERS = ("Provider", "Connections", "What it does")
     return_to_main_requested = Signal()
     #: What Search may ask this page to search changed: a connection was
     #: added, lost its token, or was read for the first time.
@@ -37,8 +52,6 @@ class IntegrationsPage(QWidget):
         self.core = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        self.window_button = QPushButton("Open in separate window")
-        self.window_button.clicked.connect(self.detach_selected)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack)
 
@@ -46,37 +59,43 @@ class IntegrationsPage(QWidget):
         column = QVBoxLayout(catalog)
         column.setContentsMargins(24, 22, 24, 18)
         column.setSpacing(8)
-        column.addWidget(widgets.heading("Integrations"))
-        column.addWidget(widgets.lede(
-            "Services this project is connected to. A connection is set once here, "
-            "and cycles name it instead of carrying a site, an account and a token."))
-        column.addSpacing(8)
-        panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
-        self.table = widgets.Table(0, len(self.HEADERS), reclick_clears=False)
-        self.table.setHorizontalHeaderLabels(self.HEADERS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setShowGrid(False)
-        header = self.table.horizontalHeader()
-        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        header.setSectionResizeMode(0, QHeaderView.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 180)
-        self.table.setColumnWidth(1, 140)
-        self.table.itemDoubleClicked.connect(lambda _item: self.open_selected())
-        self.search = widgets.SearchRow(self.table)
-        self.search.changed.connect(lambda: self.note.say_filtered(
-            "No provider matches the search." if self.search.searching() else ""))
-        self.note = widgets.empty_note(self.table, "No providers in this build.")
-        panel.layout().addWidget(self.table)
-        column.addWidget(panel, 1)
-        self.open_button = QPushButton("Open")
-        self.open_button.setProperty("variant", "primary")
-        self.open_button.clicked.connect(self.open_selected)
-        column.addWidget(widgets.row(self.open_button, self.window_button, None))
+        head = QHBoxLayout()
+        head.setSpacing(24)
+        head.addWidget(widgets.heading("Integrations"), 1, Qt.AlignVCenter)
+        # The whole of it at a glance: what is there, and what waits for the person.
+        self.tiles = {key: StatTile(label, hint) for key, label, hint in (
+            ("providers", "Providers", "Services this build can connect to."),
+            ("connections", "Connections", "Connections set up, across every provider."),
+            ("waiting", "Waiting for you", "Changes agents asked for that wait for your Approve."))}
+        tiles = QHBoxLayout()
+        tiles.setSpacing(8)
+        for tile in self.tiles.values():
+            tile.setFixedWidth(152)
+            tiles.addWidget(tile)
+        head.addLayout(tiles)
+        head.setAlignment(tiles, Qt.AlignTop)
+        column.addLayout(head)
+        column.addSpacing(12)
+        self.cards = ProviderGrid([Provider(*one) for one in PROVIDERS])
+        self.cards.open_requested.connect(self.open_provider)
+        self.cards.detach_requested.connect(self.detach_provider)
+        # The cards scroll: stacked one to a row on a narrow window they are
+        # taller than a laptop's screen, and must not hold the window tall.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setProperty("seethrough", True)
+        cards = QVBoxLayout(body)
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.addWidget(self.cards)
+        if not PROVIDERS:
+            cards.addWidget(widgets.empty_zone(
+                "No providers in this build", "This build of QAVector connects to no service."))
+        cards.addStretch(1)
+        scroll.setWidget(body)
+        column.addWidget(scroll, 1)
         self.stack.addWidget(catalog)
         self.catalog = catalog
 
@@ -89,12 +108,15 @@ class IntegrationsPage(QWidget):
         self.agents.chat.issue_wanted.connect(self._issue_from_chat)
         self.agents.back_requested.connect(self._back_to_catalog)
         self.agents.connections_changed.connect(self._fill)
+        self.teams = TeamsView(settings)
+        self.teams.back_requested.connect(self._back_to_catalog)
+        self.teams.connections_changed.connect(self._fill)
         # All providers are registered through a host: separate-window support
         # is part of the integration contract, not a Jira-only feature.
-        self.views = {"jira": self.jira, "agents": self.agents}
+        self.views = {"jira": self.jira, "teams": self.teams, "agents": self.agents}
         self.hosts = {provider: IntegrationHost(provider, name, self.views[provider],
                                               self.stack, settings, self)
-                      for provider, name, _description in PROVIDERS}
+                      for provider, name, *_rest in PROVIDERS}
         for provider, host in self.hosts.items():
             host.docked.connect(lambda provider=provider: self._returned(provider))
         # A Jira issue handed to an agent: the one thing that knows both, added
@@ -108,6 +130,9 @@ class IntegrationsPage(QWidget):
         from .integrationchanges import IntegrationChangesTab
         self.changes = IntegrationChangesTab("jira")
         self.jira.add_tab(self.changes, self.changes.title())
+        # The posts agents want to send, on Teams' own page (ADR-015 D6).
+        self.teams_changes = IntegrationChangesTab("teams")
+        self.teams.add_tab(self.teams_changes, self.teams_changes.title())
         QApplication.instance().aboutToQuit.connect(self.shutdown)
         self._fill()
         self._restore()
@@ -120,16 +145,27 @@ class IntegrationsPage(QWidget):
             view.set_core(core)
         if changed:
             self._restore()
+            # Another project: what the cards said was the last one's. Its own
+            # are read now if the cards are on screen - a view reads again only
+            # when it is itself shown, and on the catalog none of them is.
+            for card in self.cards.cards.values():
+                card.set_mark("")
             self._fill()
+            if self.isVisible() and self.stack.currentWidget() is self.catalog:
+                self._count_connections()
 
     def set_change_source(self, source):
         """QAVector's core, whose agents' changes to integrations the page lists."""
         self.changes.set_source(source)
+        self.teams_changes.set_source(source)
         source.integration_changes_changed.connect(self._changes_changed)
 
     def _changes_changed(self):
         self.changes.refresh()
         self.jira.set_tab_title(self.changes, self.changes.title())
+        self.teams_changes.refresh()
+        self.teams.set_tab_title(self.teams_changes, self.teams_changes.title())
+        self._fill()
 
     def set_project_name(self, name):
         for host in self.hosts.values():
@@ -173,6 +209,11 @@ class IntegrationsPage(QWidget):
         for view in self.views.values():
             if not view._listed:
                 view.list_connections(then=self._fill)
+        # Agents wears the mark of the program used last (Claude, Codex); both
+        # before any conversation.
+        card = self.cards.cards.get("agents")
+        if card is not None:
+            self.agents.last_kind(card.set_mark)
 
     # -- Ctrl+K ---------------------------------------------------------------
     # -- search (Ctrl+K) --------------------------------------------------------
@@ -310,9 +351,7 @@ class IntegrationsPage(QWidget):
             self.open_provider(provider)
 
     def selected_provider(self):
-        rows = self.table.selectionModel().selectedRows()
-        item = self.table.item(rows[0].row() if rows else 0, 0)
-        return item.data(Qt.UserRole) if item is not None else ""
+        return self.cards.selected()
 
     def _restore(self):
         view = self.settings.integrations_state().get("view", "jira")
@@ -328,15 +367,20 @@ class IntegrationsPage(QWidget):
         self.settings.save_integrations_state(state)
 
     def _fill(self):
-        self.table.setRowCount(0)
-        for provider, name, what in PROVIDERS:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+        """Each card's standing, and the totals over them, from what the views read."""
+        tabs = {"jira": getattr(self, "changes", None), "teams": getattr(self, "teams_changes", None)}
+        waits = {provider: tab.waiting() if tab is not None else 0 for provider, tab in tabs.items()}
+        waiting = sum(waits.values())
+        total, known = 0, True
+        for provider, *_rest in PROVIDERS:
             view = self.views[provider]
-            values = (name, ("%d" % len(view.connections)) if view._listed else "—", what)
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setData(Qt.UserRole, provider)
-                self.table.setItem(row, column, item)
-        self.search.apply()
+            standing = standing_of(view.connections, view._listed, waiting=waits.get(provider, 0),
+                                   kinds=provider == "agents")
+            self.cards.cards[provider].set_standing(standing)
+            if standing.count is None:
+                known = False
+            else:
+                total += standing.count
+        self.tiles["providers"].set_value("%d" % len(PROVIDERS))
+        self.tiles["connections"].set_value("%d" % total if known else "—")
+        self.tiles["waiting"].set_value("%d" % waiting, warn=bool(waiting))

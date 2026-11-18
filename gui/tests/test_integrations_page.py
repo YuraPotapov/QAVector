@@ -222,6 +222,16 @@ def test_the_first_look_reads_the_connections_and_one_page_of_the_list(make):
     assert page.jira.issues.list.count() == 2
 
 
+def test_the_jira_page_shows_jira_s_connections_only(make):
+    """A project's Teams channel (ADR-015) is a connection too, of another provider."""
+    teams = {"id": "release", "provider": "teams", "name": "Release", "target": "channel",
+             "settings": {}, "token_set": True}
+    core = FakeCore(connections=[_connection(), teams])
+    page = make(core)
+    assert [one["id"] for one in page.jira.connections] == ["product-team"]
+    assert [page.jira.picker.itemData(i) for i in range(page.jira.picker.count())] == ["product-team"]
+
+
 def test_coming_back_and_changing_tabs_asks_jira_nothing(make, qapp):
     core = FakeCore()
     page = make(core)
@@ -666,16 +676,12 @@ def test_refreshing_on_a_timer_is_off_unless_a_connection_says_so(make, qapp):
 
 
 # -- shape --------------------------------------------------------------------
-@pytest.mark.parametrize("which", ["connections", "activity", "catalog"])
+@pytest.mark.parametrize("which", ["connections", "activity"])
 def test_every_table_has_a_search_box_over_every_column(make, qapp, which):
     page = make(FakeCore())
-    if which == "catalog":
-        page.show_catalog()
-        table, search = page.table, page.search
-    else:
-        tab = page.jira.connections_tab if which == "connections" else page.jira.activity
-        page.jira.tabs.setCurrentWidget(tab)
-        table, search = tab.table, tab.search
+    tab = page.jira.connections_tab if which == "connections" else page.jira.activity
+    page.jira.tabs.setCurrentWidget(tab)
+    table, search = tab.table, tab.search
     qapp.processEvents()
     header = table.horizontalHeader()
     for column in range(table.columnCount()):
@@ -690,7 +696,7 @@ def test_the_breadcrumb_leads_to_the_providers_and_back(make, settings):
     assert page.stack.currentWidget() is page.jira
     page.jira.crumb.click()
     assert page.stack.currentWidget() is page.catalog
-    assert page.table.item(0, 0).text() == "Jira" and page.table.item(0, 1).text() == "1"
+    assert list(page.cards.cards)[0] == "jira" and page.cards.cards["jira"].count.text() == "1"
     assert settings.integrations_state()["view"] == ""
     page.open_selected()
     assert page.stack.currentWidget() is page.jira
@@ -1676,6 +1682,22 @@ def test_the_activity_tab_shows_what_was_changed_and_who_said_they_did_it(make, 
     assert table.item(1, 4).text() == "Failed - 403" and table.item(1, 5).text() == "This page"
     assert table.item(0, 5).toolTip() == "Run r-1"
 
+
+def test_the_activity_tab_shows_jira_s_lines_only(make, qapp):
+    """The log is the project's: a Teams post (ADR-015) is a line in it too."""
+    rows = [{"at": "2026-11-07T10:05:00+0000", "connection": "release", "provider": "teams", "op": "post",
+             "target": "Release", "ok": True, "summary": "Post to Release: accepted (HTTP 202)",
+             "source": {"label": "This page"}},
+            {"at": "2026-11-07T10:00:00+0000", "connection": "product-team", "provider": "jira",
+             "op": "comment", "target": "QA-2", "ok": True, "summary": "QA-2: comment",
+             "source": {"label": "This page"}},
+            {"at": "2026-11-06T10:00:00+0000", "connection": "product-team", "op": "comment",
+             "target": "QA-1", "ok": True, "summary": "QA-1: comment", "source": {"label": "This page"}}]
+    page = make(FakeCore(activity_rows=rows))
+    page.jira.tabs.setCurrentWidget(page.jira.activity)
+    qapp.processEvents()
+    table = page.jira.activity.table
+    assert [table.item(row, 3).text() for row in range(table.rowCount())] == ["QA-2", "QA-1"]
 
 
 # -- Ctrl+K -------------------------------------------------------------------
