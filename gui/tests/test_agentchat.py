@@ -1470,3 +1470,16 @@ def test_a_conversation_shows_the_issues_it_is_about_and_a_link_can_be_undone(ma
     undo.click()
     assert (("session-link", session["id"]), {"unlink": "jira:team:QA-7"}) in core.calls
     assert chips() == ["QA-1"]
+
+
+def test_interrupt_and_send_shows_its_ampersand(qapp):
+    """A single & in a button's text is a shortcut mark: "Interrupt & send" drew
+    "Interrupt _send". The label says it with a real ampersand."""
+    from PySide6.QtWidgets import QPushButton
+    from cms_gui.pages import agentchat
+    composer = agentchat.Composer()
+    try:
+        assert composer.interrupt.text() == "Interrupt && send"
+        assert QPushButton("Interrupt && send").text().replace("&&", "&") == "Interrupt & send"
+    finally:
+        composer.deleteLater()

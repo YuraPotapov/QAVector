@@ -1170,6 +1170,8 @@ QLabel[role="chattitle"] {{
 /* The rows of choices over the box you write in, on the composer's own
    ground rather than on patches of the page's. */
 QFrame[role="composer"] QWidget[seethrough="true"] {{ background: transparent; }}
+/* The composer's settings, scrolling when the window is short: no box of their own. */
+QFrame[role="composer"] QScrollArea[role="composeroptions"] {{ background: transparent; border: none; }}
 /* Delegation's settings in the composer (ADR-013): one group, framed apart. */
 QFrame[role="composer"] QFrame[role="delegationbox"] {{
     background: transparent; border: 1px solid {divider};

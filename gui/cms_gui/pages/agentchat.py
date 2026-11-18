@@ -137,7 +137,7 @@ class MessageCard(QFrame):
         head.addStretch(1)
         self.remove = None
         if removable:
-            self.interrupt = QPushButton("Interrupt & send")
+            self.interrupt = QPushButton("Interrupt && send")
             self.interrupt.setProperty("variant", "ghost")
             self.interrupt.setToolTip("Stop the current turn, then send this message in the same chat. Existing changes remain.")
             self.interrupt.clicked.connect(self.interrupt_requested)
@@ -725,6 +725,20 @@ class MessageEdit(QPlainTextEdit):
     files_dropped = Signal(list)
 
     composing = False
+    #: The height its text asks for (Composer._fit), and one line's: it is
+    #: given the first when there is room and may be squeezed to the second,
+    #: scrolling, when there is not - never a fixed height that would hold the
+    #: window taller than the screen.
+    wanted = 0
+    shortest = 0
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QSize(hint.width(), self.wanted or hint.height())
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(hint.width(), self.shortest or hint.height())
 
     def inputMethodEvent(self, event):
         self.composing = bool(event.preeditString())
@@ -740,6 +754,47 @@ class MessageEdit(QPlainTextEdit):
             self.files_dropped.emit([url.toLocalFile() for url in source.urls()])
             return
         super().insertFromMimeData(source)
+
+
+
+#: The least of the conversation that stays in view with the composer's settings open.
+FEED_SHORTEST = 100
+
+
+class _FittingScroll(QScrollArea):
+    """A scroll area as tall as what it holds when there is room, and as short
+    as a few lines when there is not: its content scrolls instead of making
+    everything around it - up to the window - taller."""
+
+    SHORTEST = 90
+
+    def __init__(self, content, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setWidget(content)
+        # On the composer's own ground, with no box of its own (theme: composeroptions).
+        self.setProperty("role", "composeroptions")
+        self.viewport().setAutoFillBackground(False)
+        self.viewport().setProperty("seethrough", True)
+        # Kept off the scroll bar when there is one; nothing moves when there is not.
+        self.verticalScrollBar().rangeChanged.connect(self._gap)
+
+    def _gap(self, low, high):
+        layout = self.widget().layout() if self.widget() is not None else None
+        if layout is not None:
+            margins = layout.contentsMargins()
+            layout.setContentsMargins(margins.left(), margins.top(), 10 if high > low else 0, margins.bottom())
+
+    def sizeHint(self):
+        inner = self.widget().sizeHint() if self.widget() is not None else QSize(0, 0)
+        return QSize(inner.width(), inner.height() + 2 * self.frameWidth())
+
+    def minimumSizeHint(self):
+        inner = self.widget().minimumSizeHint() if self.widget() is not None else QSize(0, 0)
+        return QSize(inner.width(), min(self.SHORTEST, self.sizeHint().height()))
 
 
 class Composer(QFrame):
@@ -799,10 +854,15 @@ class Composer(QFrame):
             widget.setVisible(False)
         outer.addWidget(self.context_row)
         self.options = QWidget()
+        self.options.setProperty("seethrough", True)
         options_layout = QVBoxLayout(self.options)
         options_layout.setContentsMargins(0, 2, 0, 4)
         options_layout.setSpacing(6)
-        outer.addWidget(self.options)
+        # Open, the settings are taller than a laptop leaves under the feed: they
+        # scroll rather than push the composer - and the window - off the screen.
+        self.options_scroll = _FittingScroll(self.options)
+        self.options_scroll.setVisible(False)
+        outer.addWidget(self.options_scroll)
         self.settings_button.toggled.connect(self.set_options_open)
 
         # Both pickers hold names from a person's own data - a connection, a
@@ -963,7 +1023,7 @@ class Composer(QFrame):
         self.send_button = QPushButton("Send")
         self.send_button.setProperty("variant", "primary")
         self.send_button.clicked.connect(self.send)
-        self.interrupt = QPushButton("Interrupt & send")
+        self.interrupt = QPushButton("Interrupt && send")
         self.interrupt.setToolTip("Stop the current turn, then send this message in the same chat. Existing changes remain.")
         self.interrupt.clicked.connect(self.interrupt_requested)
         self.interrupt.hide()
@@ -1075,6 +1135,7 @@ class Composer(QFrame):
 
     def set_options_open(self, opened):
         self.settings_button.setChecked(bool(opened))
+        self.options_scroll.setVisible(bool(opened))
         self.options.setVisible(bool(opened))
         icons.button(self.settings_button,
                      "disclosure_open" if opened else "disclosure_closed")
@@ -1426,8 +1487,13 @@ class Composer(QFrame):
         spacing = self.text.fontMetrics().lineSpacing()
         margin = self.text.document().documentMargin()
         edges = self.text.contentsMargins()
-        self.text.setFixedHeight(int(lines * spacing + 2 * margin + edges.top()
-                                     + edges.bottom() + 2))
+        frame = 2 * margin + edges.top() + edges.bottom() + 2
+        self.text.wanted = int(lines * spacing + frame)
+        # Three lines at least once it has them: the settings above scroll first.
+        self.text.shortest = int(min(lines, 3) * spacing + frame)
+        self.text.setMinimumHeight(self.text.shortest)
+        self.text.setMaximumHeight(self.text.wanted)
+        self.text.updateGeometry()
 
     def eventFilter(self, watched, event):      # noqa: N802 - Qt's own spelling
         """Enter sends; Shift+Enter is left to the box, which starts a line."""
@@ -1625,6 +1691,9 @@ class ChatTab(QWidget):
         self.feed.change_edited.connect(lambda found, field, value:
                                         ChatTab.qcr_access.set_integration_draft(found, field, value))
         self.feed_skeleton = widgets.Skeleton(self.feed, "lines")
+        # The conversation keeps a few lines whatever is open under it: the
+        # composer's settings scroll first (_FittingScroll).
+        self.feed.setMinimumHeight(FEED_SHORTEST)
         frame.layout().addWidget(self.feed, 1)
         self.composer = Composer()
         self.composer.submitted.connect(self.submit)

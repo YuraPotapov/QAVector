@@ -70,9 +70,12 @@ def test_every_picker_is_capped(build):
     """A combo is as wide as its longest item unless something says otherwise,
     and most of them list names that come from the person's data."""
     win = build()
+    # One that sizes to a set number of characters, not to its items, may
+    # stretch across its row (the chat's folder): its names cannot widen it.
+    fixed = (QComboBox.AdjustToMinimumContentsLengthWithIcon,)
     uncapped = sorted("%s: %r" % (_page_of(combo), combo.itemText(0))
                       for combo in win.findChildren(QComboBox)
-                      if combo.maximumWidth() > SCREEN_WIDTH // 2)
+                      if combo.maximumWidth() > SCREEN_WIDTH // 2 and combo.sizeAdjustPolicy() not in fixed)
     assert uncapped == [], "use widgets.capped() for these"
 
 
@@ -86,3 +89,27 @@ def test_long_names_everywhere_do_not_widen_the_window(build):
         win.cycles.state.setText(LONG)
 
     assert build(long_names).minimumSizeHint().width() <= SCREEN_WIDTH
+
+
+def test_the_agent_chat_s_settings_open_do_not_make_the_window_taller(build):
+    """2026-11-18: open, the composer's settings held the window past a laptop's
+    screen and their lower half out of sight. They scroll now, and the
+    conversation keeps a few lines above them."""
+    def open_settings(win):
+        win.show_page("integrations")
+        win.integrations.open_provider("agents")
+        chat = win.integrations.agents.chat
+        chat.set_connections([{"id": "claude", "name": "Claude", "kind": "claude"}])
+        chat.composer.set_options_open(True)
+        # 2026-11-18 again: a long message with the settings open did it too.
+        chat.composer.text.setPlainText("\n".join("line %d" % n for n in range(20)))
+
+    win = build(open_settings)
+    chat = win.integrations.agents.chat
+    assert chat.composer.options.isVisible()          # what is measured is really open
+    assert win.minimumSizeHint().height() <= SCREEN_HEIGHT
+    # The message box asks for its lines, and may still be squeezed to one.
+    text = chat.composer.text
+    assert text.sizeHint().height() > text.minimumSizeHint().height()
+    from cms_gui.pages.agentchat import FEED_SHORTEST
+    assert chat.feed.minimumHeight() == FEED_SHORTEST
