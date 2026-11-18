@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.74] - 2026-11-18
+
 ### Changed
 - **Cycle steps reach Jira and Teams through Integrations.** The editor of a
   `jira.issues`, `jira.transition` or `teams.message` step offers a
