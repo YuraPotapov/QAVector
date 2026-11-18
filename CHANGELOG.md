@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.73] - 2026-11-18
+
 ### Changed
 - The chat's delegation settings moved from beside the message into a framed
   **Delegation** group in Settings: **Mode** (Off / Ask / Auto, formerly
@@ -31,8 +33,42 @@ app-agnostic, since that will break things on purpose.
 - Jira's Delegate panel stays open when choosing an agent or using an owned
   dialog. Previous conversations have separate titles, context, status and
   time, with a Continue action and a bounded scrolling list.
+- Switching projects while the Integrations list is open reads the new
+  project's connections at once. Before, every provider said *Not read yet*
+  until the page was left and opened again.
+- The agent chat's **Interrupt & send** showed as "Interrupt _send".
+- Opening the chat's Settings, with a long message or on a laptop screen, no
+  longer makes the window taller than the screen, which stopped Maximize from
+  working. The settings scroll, the message box keeps at least three lines,
+  and the conversation keeps a few lines above them.
+- A cycle step that posts to Teams through a channel (`connection:`) is no
+  longer refused as having an "unknown setting".
 
 ### Added
+- **Teams as an integration** (QCR ADR-015). Integrations -> **Teams**: a
+  connection is one channel or chat that QAVector posts to through a Teams
+  Workflows webhook, which is kept as a secret and shown only as its host.
+  The page has **New post**, **Waiting**, **History** and **Connections**
+  tabs; a post cannot be taken back, so Send and Send again ask first, and
+  **Test post** says it is a test. Each channel has a default title, a footer,
+  names to mention people by, and what agents (**Off / Ask / Auto**) and
+  cycles (**Off / Auto**) may do through it. One post a minute per channel,
+  whoever sends it. Every post is in the channel's History with who sent and
+  who approved it, and is a line in Activity without its words. Posting only:
+  the card says **Limited**.
+- **Agents post to Teams** with the new **Post to Teams** access switch (off
+  by default), as far as each channel allows: **Off** hides the channel from
+  agents and their delegated tasks; **Ask** waits for Approve on a card, with
+  the text editable; **Auto** posts. The level is read again before each
+  post. `describe` gives an agent everything set on a channel but its webhook.
+- **Cycles post through a Teams channel**: the `teams.message` step takes
+  `connection:`, and then follows the channel's footer, names, Cycles access,
+  history and one-a-minute rule. `webhook:` still works for old cycles.
+- **The Integrations list as cards.** Each provider has its maker's mark, what
+  kind of service it is, its connection count and whether one needs attention
+  (no token, changes waiting), what it can do, and its own Open and separate
+  window buttons. The header counts providers, connections and what waits for
+  you. The Agents card shows the mark of the program used last.
 - **A Jira issue as the context of a conversation** (QCR ADR-014): when an
   agent reads an issue's details (not a search), its conversation is linked
   to the issue. The issue then lists it, and counts it in its usage. The
