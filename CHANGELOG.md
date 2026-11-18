@@ -16,6 +16,15 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Changed
+- **Cycle steps reach Jira and Teams through Integrations.** The editor of a
+  `jira.issues`, `jira.transition` or `teams.message` step offers a
+  connection (a channel, for Teams) and no longer offers Site, Product,
+  Authentication, Account email, API token, Verify or Workflow URL. A step
+  that already has them - an older cycle file - shows them, with a note to
+  move to a connection, and still runs as before. A step with neither is told
+  to name a connection instead of being asked for a site and a token.
+
 ## [0.16.73] - 2026-11-18
 
 ### Changed

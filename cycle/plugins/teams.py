@@ -63,7 +63,7 @@ class TeamsMessage(CyclePlugin):
             field("webhook", "Workflow URL",
                   hint="Only for a cycle not moved to a channel yet: the URL a Teams workflow "
                        "gives, as a secret variable - ${vars.teams_webhook}. Name a channel "
-                       "instead."),
+                       "instead.", legacy=True),
             field("text", "Message", "multiline",
                   hint="Markdown as a note is written: lines, \"- \" bullets, "
                        "**bold**. Usually an earlier step's output, such as "
@@ -80,7 +80,7 @@ class TeamsMessage(CyclePlugin):
                        "Tagged where the text says <at>name</at>, otherwise on "
                        "a line at the end. Blank for nobody."),
             field("verify_tls", "Verify TLS", "check", default=True,
-                  hint="Off only for a stand-in with a certificate of its own."),
+                  hint="Off only for a stand-in with a certificate of its own.", legacy=True),
         ),
         outputs=(
             output("sent", "boolean", "True when Teams accepted the message."),

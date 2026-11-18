@@ -445,17 +445,14 @@ picked something up, that is a different step:
   - id: start
     plugin: jira.transition
     with:
-      site: "${vars.jira_site}"
-      email: "${vars.jira_email}"
-      token: "${vars.jira_token}"
+      connection: product-team    # a Jira connection of the project, by its id
       issue: "${steps.todo.outputs.key}"
       to: Start Progress          # the transition, as YOUR workflow names it
       lands_in: In Progress       # where it should end up
       comment: Picked up by QAVector.
 ```
 
-With a project connection, `connection: product-team` replaces the site, email
-and token lines, as for `jira.issues`.
+The connection says where and as whom, as for `jira.issues` below.
 
 **Name the transition, not the status.** A workflow is the project's own, and
 the move out of To Do is "Start Progress" in one instance and something else in
@@ -1321,22 +1318,25 @@ same as `blocking_count`.
 ### Telling Teams
 
 `teams.message` posts a message to a Teams group chat, channel or person
-through a **Workflows webhook**. In Teams, the Workflows app's *Post to a chat
-when a webhook request is received* (or *... to a channel*), pointed at the
-chat it should post in, gives a URL. That URL is the whole of the permission,
-so it goes in a secret variable:
+through one of the project's Teams channels, set up once in **Integrations →
+Teams** with its Workflows webhook ([Integrations](integrations.md#teams)).
+The step names the channel by its id:
 
 ```yaml
-variables:
-  teams_release_webhook: {secret: true}
 steps:
   - id: notify_team
     plugin: teams.message
     needs: [release_note]
     with:
-      webhook: ${vars.teams_release_webhook}
+      connection: release
       text: ${steps.release_note.outputs.summary}
 ```
+
+Through a channel the post gets its footer and the names it mentions people by,
+is in the channel's history, follows its **Cycles** access, and waits out its
+one post a minute. A step that gives `webhook:` - the URL in a secret variable -
+instead is how older cycle files posted; it still works, but its posts are in no
+history, and the editor offers that field only where a step already has it.
 
 The text is laid out as a card: each line a block, `- ` bullets drawn as
 bullets, `**bold**` left to Teams. `title` adds a heading. A message longer than
@@ -1350,7 +1350,7 @@ does not re-run a step that finished.
 
 Leave `if:` off a message that sends another step's work. A step with an `if:`
 runs even when a step it needs was skipped - that is what lets a condition
-react to a skip - so `if: ${vars.teams_release_webhook}` sends after a
+react to a skip - so `if: ${vars.notify}` sends after a
 release note that was never written, and fails reading it. Without one, the
 message is skipped with the step it needs.
 
@@ -1384,17 +1384,11 @@ transition and no edit, so a step can be pointed at a production instance
 without thinking about it.
 
 ```yaml
-variables:
-  jira_token: {secret: true}
-
 steps:
   - id: mine
     plugin: jira.issues
     with:
-      site: https://yourcompany.atlassian.net
-      flavour: cloud                 # or server, for Jira Server / Data Center
-      email: you@yourcompany.example
-      token: "${vars.jira_token}"    # never the value itself - see below
+      connection: product-team       # a Jira connection of the project, by its id
       user: currentUser()            # or an account id on Cloud, a username on Server
       project: QA, WEB               # blank reads every project the account sees
       role: any                      # assignee, reporter or creator
@@ -1403,9 +1397,13 @@ steps:
       limit: 25
 ```
 
-**A project connection instead.** The site, account and token can be set once
-for the project in **Integrations → Jira → Connections**, and a step names that
-connection by its id instead of carrying them:
+**A step reaches Jira through a project connection.** The site, account and
+token are set once for the project in **Integrations → Jira → Connections**,
+and a step names that connection by its id. Older cycle files that give `site`,
+`flavour`, `auth`, `email` and `token` in the step itself still run; the editor
+shows those fields only where a step already has them, with a note to move it,
+and offers the project's connection to the same site and account in one click.
+The connection may come from a variable:
 
 ```yaml
 variables:

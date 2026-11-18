@@ -66,7 +66,9 @@ MIN_WAIT = 0.25
 #:   ``choice``    a drop-down; ``options`` says of what
 #:   ``scenario``  a scenario id, offered from the inventory
 #:   ``service``   a "Project/Service" reference, offered from services.json
-Field = namedtuple("Field", "key label kind hint required default options")
+#: ``legacy``: a field kept so older cycle files still run, which a new step does
+#: not offer - an editor shows it only where a step already has it.
+Field = namedtuple("Field", "key label kind hint required default options legacy", defaults=(False,))
 
 #: One thing a plugin produces, for ``${steps.<id>.outputs.<key>}``. Declared
 #: rather than merely returned so the Inspector can show what a step offers
@@ -127,9 +129,9 @@ PERMISSIONS = ("filesystem.read", "filesystem.write", "process.spawn",
 
 
 def field(key, label, kind="text", hint="", required=False, default=None,
-          options=()):
+          options=(), legacy=False):
     """One input field. Everything but ``key`` and ``label`` has a sane default."""
-    return Field(key, label, kind, hint, required, default, tuple(options))
+    return Field(key, label, kind, hint, required, default, tuple(options), bool(legacy))
 
 
 def output(key, kind="string", hint=""):
@@ -225,7 +227,8 @@ class PluginMetadata:
             "permissions": list(self.permissions),
             "inputs": [{"key": one.key, "label": one.label, "kind": one.kind,
                         "hint": one.hint, "required": one.required,
-                        "default": one.default, "options": list(one.options)}
+                        "default": one.default, "options": list(one.options),
+                        "legacy": one.legacy}
                        for one in self.inputs],
             "outputs": [{"key": one.key, "type": one.type, "hint": one.hint}
                         for one in self.outputs],

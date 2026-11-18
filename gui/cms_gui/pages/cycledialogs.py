@@ -291,7 +291,20 @@ class NodeDialog(_Editor):
         if not fields and not undeclared:
             return
         self.body_layout.addWidget(widgets.kicker("Settings"))
+        # Fields kept only so older cycle files still run - a site and a token,
+        # a webhook - are shown where the step has them, and not offered anew:
+        # a step reaches a service through an integration's connection.
+        legacy = [spec for spec in fields if spec.get("legacy") and spec.get("key") in settings]
+        if legacy:
+            note = widgets.lede("This step carries its own %s. Name a connection instead "
+                                "(Integrations), then clear these fields."
+                                % ", ".join((spec.get("label") or spec.get("key")) for spec in legacy))
+            note.setObjectName("legacyNote")
+            note.setWordWrap(True)
+            self.body_layout.addWidget(note)
         for spec in fields:
+            if spec.get("legacy") and spec.get("key") not in settings:
+                continue
             if self._plugin.get("id") == "agent" and spec.get("key") == "agent_profile":
                 spec = dict(spec, options=[""] + self._agent_profiles)
             key = "with." + spec.get("key", "")
@@ -786,6 +799,8 @@ class NodeDialog(_Editor):
                 continue
             if key in CONNECTION_FIELDS and self._connected():
                 continue            # what the connection says, not the step
+            if "with." + key not in self._widgets:
+                continue            # a legacy field this step does not have: not offered
             raw = self._value("with." + key)
             kind = spec.get("kind", "text")
             if "with." + key in self._as_text:

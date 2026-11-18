@@ -55,26 +55,26 @@ class JiraTransition(CyclePlugin):
             field("connection", "Connection", "connection", options=("jira",),
                   hint="A Jira connection of this project, by its id - set "
                        "once in Integrations -> Jira -> Connections, with its "
-                       "token. When set, leave Site, Product, Authentication, "
-                       "Account email and API token empty."),
+                       "site and token. A step names one; a site and a token "
+                       "in the step itself are only for older cycle files."),
             field("site", "Site",
                   hint="https://yourcompany.atlassian.net, or your Jira "
-                       "Server's base URL. Not used with a connection."),
+                       "Server's base URL. Not used with a connection.", legacy=True),
             field("flavour", "Product", "choice", default=CLOUD,
                   options=(CLOUD, SERVER),
                   hint="Cloud and Server differ in their API path and in how a "
                        "comment's body is written. Nothing about the URL says "
-                       "which you have."),
+                       "which you have.", legacy=True),
             field("auth", "Authentication", "choice", default="basic",
                   options=("basic", "bearer"),
                   hint="basic is Cloud: your email plus an API token. bearer "
-                       "is a Server or Data Center personal access token."),
+                       "is a Server or Data Center personal access token.", legacy=True),
             field("email", "Account email",
-                  hint="Only for basic. The account the API token belongs to."),
+                  hint="Only for basic. The account the API token belongs to.", legacy=True),
             field("token", "API token",
                   hint="Reference a secret variable - ${vars.jira_token} - so "
                        "the value stays out of this file. Not used with a "
-                       "connection."),
+                       "connection.", legacy=True),
             field("issue", "Issue",
                   hint="The key, such as QA-7, or the numeric id. Or Issues, "
                        "not both."),
@@ -108,7 +108,7 @@ class JiraTransition(CyclePlugin):
                        "that says it edits."),
             field("verify_tls", "Verify the certificate", "check", default=True,
                   hint="Off only for a Server with a self-signed certificate "
-                       "on a network you trust."),
+                       "on a network you trust.", legacy=True),
             field("api", "API address",
                   hint="Filled in by a connection signed in with Atlassian, whose "
                        "requests go through Atlassian's API gateway. Leave empty."),

@@ -71,11 +71,28 @@ def test_a_step_with_a_connection_needs_no_site_email_or_token():
                           "to": "Start Progress"}) == []
 
 
-def test_a_step_without_one_still_needs_them_and_says_so_as_before():
-    found = registry.get("jira.issues").problems({"user": "currentUser()"})
-    assert "Site is required." in found
+def test_a_step_with_nothing_of_its_own_is_told_to_name_a_connection():
+    """A step reaches Jira through an integration now (2026-11-18): a new one
+    is not walked through a site, an email and a token."""
+    for plugin, settings in (("jira.issues", {"user": "currentUser()"}),
+                             ("jira.transition", {"issue": "QA-1", "to": "Done"})):
+        found = registry.get(plugin).problems(settings)
+        assert found == ["Name the Jira connection to use (Integrations -> Jira -> Connections)."]
+
+
+def test_an_older_step_with_some_of_its_own_still_says_what_is_missing():
+    found = registry.get("jira.issues").problems({"user": "currentUser()", "site": "https://x.example.invalid"})
     assert "API token is required." in found
     assert "Basic authentication needs the account email." in found
+
+
+def test_the_fields_a_connection_stands_for_are_legacy_and_say_so_on_the_wire():
+    for plugin, keys in (("jira.issues", {"site", "flavour", "auth", "email", "token", "verify_tls"}),
+                         ("jira.transition", {"site", "flavour", "auth", "email", "token", "verify_tls"}),
+                         ("teams.message", {"webhook", "verify_tls"})):
+        described = registry.get(plugin).metadata.to_dict()
+        assert {one["key"] for one in described["inputs"] if one["legacy"]} == keys
+        assert not next(one for one in described["inputs"] if one["key"] == "connection")["legacy"]
 
 
 def test_a_connection_and_a_site_together_are_refused():

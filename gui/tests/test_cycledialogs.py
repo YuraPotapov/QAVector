@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QLabel, QLineEdit
 
 from cms_gui.pages.cycledialogs import (PATH, SECRET, TEXT, CycleDialog,
                                          NodeDialog, _VariablesTable)
@@ -1012,19 +1012,21 @@ def test_a_variable_nobody_changed_keeps_its_type(properties):
 
 
 # ---------------------------------------------------- a project connection
-def _field(key, label, kind="text", default=None, options=()):
+def _field(key, label, kind="text", default=None, options=(), legacy=False):
     return {"key": key, "label": label, "kind": kind, "hint": "", "required": False,
-            "default": default, "options": list(options)}
+            "default": default, "options": list(options), "legacy": legacy}
 
 
+# As the core describes jira.issues: what a connection stands for is legacy -
+# kept for older files, not offered to a new step (2026-11-18).
 JIRA = {"id": "jira.issues", "name": "Jira Issues", "summary": "Read issues.",
         "inputs": [_field("connection", "Connection", "connection", options=["jira"]),
-                   _field("site", "Site"),
-                   _field("flavour", "Product", "choice", "cloud", ["cloud", "server"]),
-                   _field("auth", "Authentication", "choice", "basic", ["basic", "bearer"]),
-                   _field("email", "Account email"), _field("token", "API token"),
+                   _field("site", "Site", legacy=True),
+                   _field("flavour", "Product", "choice", "cloud", ["cloud", "server"], legacy=True),
+                   _field("auth", "Authentication", "choice", "basic", ["basic", "bearer"], legacy=True),
+                   _field("email", "Account email", legacy=True), _field("token", "API token", legacy=True),
                    _field("user", "Whose issues"),
-                   _field("verify_tls", "Verify the certificate", "check", True),
+                   _field("verify_tls", "Verify the certificate", "check", True, legacy=True),
                    _field("api", "API address")],
         "outputs": [], "actions": []}
 
@@ -1050,8 +1052,8 @@ def _jira_step(**settings):
 
 
 def _visible(dialog, key):
-    widget = dialog._widgets[key]
-    return widget.parentWidget().isVisibleTo(dialog)
+    widget = dialog._widgets.get(key)
+    return widget is not None and widget.parentWidget().isVisibleTo(dialog)
 
 
 @pytest.fixture
@@ -1120,6 +1122,28 @@ def test_a_step_without_a_connection_saves_as_it_always_did(jira_node):
     assert _visible(dialog, "with.site") and not _visible(dialog, "with.api")
     dialog.save_button.click()
     assert dialog.saved["with"] == original["with"]
+
+
+def test_a_new_step_is_offered_a_connection_not_a_site_and_a_token(jira_node):
+    """2026-11-18: a step reaches a service through an integration."""
+    dialog = jira_node(_jira_step(user="currentUser()"))
+    for key in ("site", "flavour", "auth", "email", "token", "verify_tls"):
+        assert "with." + key not in dialog._widgets, key
+    assert _visible(dialog, "with.connection") and _visible(dialog, "with.user")
+    assert dialog.findChild(QLabel, "legacyNote") is None
+    dialog._widgets["with.connection"].setEditText("product-team")
+    dialog.save_button.click()
+    # Nothing it was not shown - no unchecked "verify" - is written.
+    assert dialog.saved["with"] == {"connection": "product-team", "user": "currentUser()"}
+
+
+def test_an_older_step_shows_its_own_fields_and_says_to_move_them(jira_node):
+    dialog = jira_node(_jira_step(site="https://x.example.invalid", email="a@b.example",
+                                  token="${vars.t}", user="me"))
+    note = dialog.findChild(QLabel, "legacyNote")
+    assert note is not None and "Site, Account email, API token" in note.text()
+    assert _visible(dialog, "with.site") and _visible(dialog, "with.token")
+    assert "with.flavour" not in dialog._widgets          # it does not have that one
 
 
 def test_the_connection_field_is_as_wide_as_the_others(jira_node, qapp):
