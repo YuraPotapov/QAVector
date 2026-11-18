@@ -84,12 +84,47 @@ def test_the_person_answers_as_the_conversation_after_its_turn_ended(world):
     assert ACTOR not in w.host._callers           # the caller lent for it is gone again
 
 
-def test_only_a_task_of_one_s_own_that_asks_is_answered(world):
+def test_a_finished_review_continues_in_its_existing_session(world, tmp_path):
+    w = world(wake="continue")
+    task = hand(w, name="review", goal="Review the commit")["execution"]["execution_id"]
+    first = ended(w, task)["output"]
+    end_turn(w)
+    turn(w, wake="continue")
+    continued = reply(w, task, "Review the fixes against your earlier findings.")
+    second = ended(w, continued["execution"]["execution_id"])
+    assert second["state"] == "succeeded"
+    assert second["output"]["session_id"] == first["session_id"]
+    assert second["output"]["root"] == task
+    assert "continues this task" in second["output"]["answer"]
+    assert any(row.get("method") == "thread/resume" for row in _codex_turns(tmp_path))
+    third = reply(w, second["execution_id"], "Check the final adjustment.")
+    assert ended(w, third["execution"]["execution_id"])["output"]["session_id"] == first["session_id"]
+    duplicate = reply(w, task, "Old execution")
+    assert ended(w, duplicate["execution"]["execution_id"])["error"]["code"] == "not_waiting"
+
+
+def test_a_task_continued_before_a_restart_is_not_continued_again(world):
+    w = world(wake="continue")
+    task = hand(w, name="review", goal="Review the commit")["execution"]["execution_id"]
+    ended(w, task)
+    end_turn(w)
+    turn(w, wake="continue")
+    continued = reply(w, task, "Review the fixes.")["execution"]["execution_id"]
+    ended(w, continued)
+    # What a restarted QAVector has: the record, and nothing in memory.
+    w.host.delegation._follow.clear()
+    again = reply(w, task, "The old execution once more")
+    assert ended(w, again["execution"]["execution_id"])["error"]["code"] == "not_waiting"
+    assert w.host.delegation.latest(task) == continued
+    # A refused reply is not a continuation: the latest execution still goes on.
+    latest = reply(w, continued, "Check the final adjustment.")
+    assert ended(w, latest["execution"]["execution_id"])["state"] == "succeeded"
+
+
+def test_only_a_task_of_one_s_own_is_answered(world):
     w = world(wake="continue")
     plain = hand(w, goal="Run the tests")["execution"]["execution_id"]
     ended(w, plain)
-    refused = reply(w, plain, "Nothing was asked")
-    assert ended(w, refused["execution"]["execution_id"])["error"]["code"] == "not_waiting"
     asking = hand(w, goal="WONDER about it")["execution"]["execution_id"]
     ended(w, asking)
     other = "agent:claude/s-other"

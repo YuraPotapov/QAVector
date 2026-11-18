@@ -22,15 +22,16 @@ is said next to an agent that just did something unexpected.
 
 import os
 import time
+from collections import deque
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QHeaderView, QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
-                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
+                               QTableWidgetItem, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
-from .. import icons, restrictions as restrictions_mod, stages, theme, widgets
+from .. import codeblocks, icons, restrictions as restrictions_mod, stages, theme, widgets
 from ..diffview import ChangesButton, ChangesDialog
 from .agentbudget import BUDGET_NOTE, BudgetCard, BudgetFields, share_text, spend_text
 from ..agentturn import AgentTurn
@@ -77,7 +78,7 @@ PLAN_MEANS = ("The agent first looks through the folder, changing nothing, and a
 
 #: How many of a conversation's newest events are read when it is opened, and
 #: how many conversations the list reads.
-EVENTS_SHOWN = 400
+EVENTS_SHOWN = 120
 SESSIONS_SHOWN = 200
 
 #: How many folders the composer remembers.
@@ -201,8 +202,20 @@ class AnswerText(QTextBrowser):
         self.document().setMarkdown(
             self.said, QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
         self._tame_headings()
+        # Code read as code: its own ground, the mono font, lines and indents
+        # kept, a command coloured as a command line.
+        codeblocks.style(self.document())
+        self.highlighter = codeblocks.CodeHighlighter(self.document())
         self.anchorClicked.connect(self._open)
         self._fit()
+
+    def changeEvent(self, event):               # noqa: N802 - Qt's own spelling
+        super().changeEvent(event)
+        if event.type() == QEvent.StyleChange and getattr(self, "highlighter", None) is not None:
+            # Light to dark or back: the code's ground and inks are read again.
+            codeblocks.restyle(self.document())
+            self.highlighter.restyle()
+            self._fit()
 
     def _tame_headings(self):
         """Headings an agent writes - a plan's sections - a step above the
@@ -265,6 +278,91 @@ class _Row(QWidget):
         self.body = body
 
 
+#: Tools that run a command line: their row shows what went in and what came
+#: out, on a block of its own, rather than the arguments as a list.
+COMMAND_TOOLS = ("Bash", "shell", "PowerShell")
+
+
+def command_parts(stage, name):
+    """``(command, description)`` of a command tool's row.
+
+    Claude's title is ``Bash <first line>`` and its detail the arguments the
+    title left out, ``key: value`` a line - the command among them when the
+    title could not hold all of it. Codex's detail is the command itself.
+    """
+    title, detail = str(stage.get("title") or ""), str(stage.get("detail") or "")
+    if name != "Bash":
+        return (detail or title).strip(), ""
+    fields = {}
+    for line in detail.splitlines():
+        key, sep, value = line.partition(": ")
+        if sep and key.isidentifier():
+            fields[key] = value
+    command = fields.get("command") or (title[len(name):] if title.startswith(name) else title)
+    return command.strip(), fields.get("description", "").strip()
+
+
+class CommandRow(QWidget):
+    """A command the agent ran: its marker, its name, and a block of its own
+    with what went in and what came out."""
+
+    def __init__(self, stage, name, output=None):
+        super().__init__()
+        self.stage = dict(stage)
+        command, description = command_parts(self.stage, name)
+        across = QHBoxLayout(self)
+        across.setContentsMargins(0, 0, 0, 0)
+        across.setSpacing(0)
+        self.marker = stages._Marker(self.stage, False, False)
+        across.addWidget(self.marker, 0)
+        body = QWidget()
+        column = QVBoxLayout(body)
+        column.setContentsMargins(stages.SPEC["row"]["pad_x"], stages.SPEC["row"]["pad_y"],
+                                  stages.SPEC["row"]["pad_x"], stages.SPEC["row"]["pad_y"])
+        column.setSpacing(4)
+        self.title = QLabel(name if not description else "%s  %s" % (name, description))
+        self.title.setWordWrap(True)
+        self.title.setStyleSheet("font-size: %dpx; font-weight: 600; color: %s;"
+                                 % (stages.SPEC["title"]["size"], stages.colour_of(self.stage)))
+        column.addWidget(self.title)
+
+        self.block = QFrame()
+        self.block.setProperty("role", "commandblock")
+        grid = QGridLayout(self.block)
+        grid.setContentsMargins(10, 6, 10, 6)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        self.command = self._line(grid, 0, "In:", command, "commandtext")
+        status = self.stage.get("status")
+        if output is None:
+            said = "Running..." if status == "running" else "No output was received."
+        else:
+            said = stages._trimmed(str(output).rstrip()) or "(no output)"
+        rule = QFrame()
+        rule.setProperty("role", "commandrule")
+        rule.setFixedHeight(1)
+        grid.addWidget(rule, 1, 0, 1, 2)
+        self.output = self._line(grid, 2, "Out:", said, "commandout")
+        self.output.setProperty("bad", "true" if status == "failed" else "false")
+        self.output.setProperty("pending", "true" if output is None else "false")
+        column.addWidget(self.block)
+        across.addWidget(body, 1)
+
+    @staticmethod
+    def _line(grid, at, caption, text, role):
+        label = QLabel(caption)
+        label.setProperty("role", "commandlabel")
+        grid.addWidget(label, at, 0, Qt.AlignTop)
+        value = QLabel(text)
+        value.setProperty("role", role)
+        value.setWordWrap(True)
+        value.setTextFormat(Qt.PlainText)
+        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        grid.addWidget(value, at, 1)
+        return value
+
+
 class ChatFeed(QScrollArea):
     """A conversation, top to bottom, following the newest as it arrives.
 
@@ -289,6 +387,7 @@ class ChatFeed(QScrollArea):
     change_approved = Signal(str)
     change_denied = Signal(str)
     change_edited = Signal(str, str, str)
+    loaded = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -307,6 +406,11 @@ class ChatFeed(QScrollArea):
         self._cards = []                # planning cards, in order: the newest waits
         self._actionable = False
         self._follow = True
+        self._pending_events = deque()
+        self._deferred_cards = {}
+        self._load_timer = QTimer(self)
+        self._load_timer.setSingleShot(True)
+        self._load_timer.timeout.connect(self._load_batch)
         bar = self.verticalScrollBar()
         bar.valueChanged.connect(self._moved)
         bar.rangeChanged.connect(self._grew)
@@ -323,8 +427,17 @@ class ChatFeed(QScrollArea):
         self._column.addStretch(1)
         self.setWidget(self._body)
 
+    def viewportEvent(self, event):
+        # A single long label must never widen the scroll body and move every
+        # card's approval buttons outside the viewport (horizontal scroll is off).
+        # The viewport, not the area: it narrows when the scroll bar appears.
+        if event.type() == QEvent.Resize:
+            self._body.setFixedWidth(self.viewport().width())
+        return super().viewportEvent(event)
+
     # -- what it holds ----------------------------------------------------------
     def clear(self):
+        self.cancel_load()
         for _kind, widget in self._rows:
             self._drop(widget)
         self._rows, self._tools, self._cards, self._times, self._placed = [], {}, [], [], {}
@@ -333,15 +446,72 @@ class ChatFeed(QScrollArea):
         self._follow = True
         self._sync()
 
-    def load(self, events):
-        """A conversation read from its record, all at once."""
+    def cancel_load(self):
+        self._load_timer.stop()
+        self._pending_events.clear()
+        self._deferred_cards.clear()
+        self._body.show()
+        self._column.setEnabled(True)
+
+    def pause_load(self):
+        """Keep the pending history until navigation succeeds or fails."""
+        self._load_timer.stop()
+
+    def resume_load(self):
+        if self._pending_events:
+            self._load_timer.start(0)
+
+    def load(self, events, progressive=False):
+        """Lay out long records in bounded batches, yielding to navigation."""
         self.clear()
-        for event in events or []:
-            self._take(event)
+        if progressive and len(events or []) > 24:
+            self._body.hide()
+            self._column.setEnabled(False)
+            self._pending_events.extend(events)
+            self._load_timer.start(0)
+            return
+        self._column.setEnabled(False)
+        try:
+            for event in events or []:
+                self._take(event)
+            self._show_rows()
+        finally:
+            self._column.setEnabled(True)
         self._sync()
+        self.loaded.emit()
+
+    def _load_batch(self):
+        deadline = time.monotonic() + .008
+        count = 0
+        while self._pending_events and count < 24:
+            self._take(self._pending_events.popleft())
+            count += 1
+            if time.monotonic() >= deadline:
+                break
+        if self._pending_events:
+            self._load_timer.start(1)
+        else:
+            self._show_rows()
+            self._body.show()
+            self._column.setEnabled(True)
+            self._sync()
+            deferred, self._deferred_cards = self._deferred_cards, {}
+            for group, entries in deferred.items():
+                self.sync_cards(group, entries)
+            self.loaded.emit()
+
+    def _show_rows(self):
+        # Otherwise Qt shows each inserted row later and recomputes the entire
+        # scroll layout for each one. Show them with the layout suspended once.
+        for _kind, row in self._rows:
+            if row.isHidden():
+                row.show()
 
     def append(self, event):
         """One more event of the turn going on now."""
+        if self._pending_events:
+            self._pending_events.append(event)
+            return
         self._take(event)
         self._sync()
 
@@ -429,8 +599,9 @@ class ChatFeed(QScrollArea):
         elif kind == "tool.started":
             stage = {"kind": "tool", "title": event.get("title") or event.get("name") or "Tool",
                      "detail": event.get("detail") or "", "status": "running"}
-            self._tools[event.get("id")] = (len(self._rows), stage, event.get("name") or "")
-            self._add("tool", stages.StageRow(stage))
+            name = event.get("name") or ""
+            self._tools[event.get("id")] = (len(self._rows), stage, name)
+            self._add("tool", self._tool_row(stage, name))
         elif kind == "tool.completed":
             self._returned(event)
         elif kind in ("completed", "failed", "stopped", "interrupted"):
@@ -450,6 +621,10 @@ class ChatFeed(QScrollArea):
             self._card("plan", card)
         elif kind == "changes":
             self._changed(event)
+
+    @staticmethod
+    def _tool_row(stage, name):
+        return CommandRow(stage, name) if name in COMMAND_TOOLS else stages.StageRow(stage)
 
     def _card(self, kind, card):
         self._cards.append(card)
@@ -485,11 +660,17 @@ class ChatFeed(QScrollArea):
             # Said in the access mode's terms rather than the program's, whose
             # "requires approval" asks for something nobody here can give.
             why = refused_text(self._mode, name, event.get("reason"))
+            if name in COMMAND_TOOLS:
+                self._replace(index, CommandRow(dict(stage, status="done", kind="caution"), name, why))
+                return
             self._replace(index, stages.StageRow(dict(
                 stage, status="done", kind="caution",
                 detail="\n".join(part for part in (stage["detail"], why) if part))))
             return
         stage = dict(stage, status="done" if event.get("ok", True) else "failed")
+        if name in COMMAND_TOOLS:
+            self._replace(index, CommandRow(stage, name, str(event.get("detail") or "")))
+            return
         if not event.get("ok", True) and event.get("detail"):
             # What came back is worth a line only when it is why it failed.
             stage["detail"] = "\n".join(part for part in (stage["detail"], event["detail"])
@@ -498,7 +679,10 @@ class ChatFeed(QScrollArea):
 
     def _ended(self, event):
         # A call the agent never heard back from is not still running.
-        for index, stage, _name in list(self._tools.values()):
+        for index, stage, name in list(self._tools.values()):
+            if name in COMMAND_TOOLS:
+                self._replace(index, CommandRow(dict(stage, status="unknown", kind="caution"), name))
+                continue
             detail = "\n".join(part for part in (stage.get("detail"),
                                                  "No result was received for this tool.") if part)
             self._replace(index, stages.StageRow(dict(stage, status="unknown", kind="caution",
@@ -531,6 +715,9 @@ class ChatFeed(QScrollArea):
         it happened: after the last row from before it. ``entries`` are
         ``(key, at, make, update)``: a card shown already is updated, never
         rebuilt (what is typed into it stays); one no longer given goes."""
+        if self._pending_events:
+            self._deferred_cards[group] = list(entries or [])
+            return
         placed = self._placed.setdefault(group, {})
         given = set()
         for key, at, make, update in sorted(entries or [], key=lambda one: one[1] or 0):
@@ -647,7 +834,7 @@ CHILD_WORDS = {"Delegated": "Task for %s", "Message": "Question for %s"}
 
 
 def is_child(session):
-    source = session.get("source") or {}
+    source = (session or {}).get("source") or {}
     return bool(source.get("parent")) and source.get("label") in CHILD_WORDS
 
 
@@ -1031,7 +1218,7 @@ class Composer(QFrame):
             button.setStyleSheet("min-height: 30px; max-height: 30px; padding-top: 0px; padding-bottom: 0px;")
         for button in (self.stop, self.send_button):
             button.setFixedWidth(80)
-        self.footer = widgets.row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
+        self.footer = widgets.flow_row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
                                   None, self.interrupt, self.stop, self.send_button)
         outer.addWidget(self.footer)
         self.text.textChanged.connect(self._sync_send)
@@ -1122,8 +1309,10 @@ class Composer(QFrame):
         self.folder.setEnabled(not begun)
         self.browse.setEnabled(not begun)
         readonly = begun and not _is_chat(session)
-        for widget in (self.context_row, self.text, self.footer):
+        # A record takes no next turn, but what it ran with is still said.
+        for widget in (self.text, self.footer):
             widget.setVisible(not readonly)
+        self.settings_button.setVisible(not readonly)
         self.set_options_open(not readonly and not bool(chosen.get("folder")))
         self.closed.setVisible(readonly)
         if readonly:
@@ -1139,6 +1328,12 @@ class Composer(QFrame):
         self.options.setVisible(bool(opened))
         icons.button(self.settings_button,
                      "disclosure_open" if opened else "disclosure_closed")
+
+    def update_session(self, session):
+        """The shown conversation read again - a delegated task's record moved
+        on: what it ran with is said anew, nothing the person chose is reset."""
+        self._session = session
+        self._summarize()
 
     def _summarize(self):
         if not hasattr(self, "_skills"):
@@ -1157,8 +1352,13 @@ class Composer(QFrame):
             parts.append("%d skill%s" % (len(self._skills), "s" if len(self._skills) != 1 else ""))
         if self._restrictions:
             parts.append("Restricted")
+        if self._session is not None and not _is_chat(self._session):
+            # A record has no next-turn choices: show what actually ran here.
+            parts = parts[:2] + [ran_with_text(self._session)]
+            parts = [part for part in parts if part]
         self.context_summary.setText(" · ".join(parts))
-        self.context_summary.setToolTip("\n".join(parts))
+        previous = ran_with_text(self._session or {})
+        self.context_summary.setToolTip("\n".join(parts) + ("\nLast turn: " + previous if previous else ""))
 
     def set_restrictions(self, raw):
         self._restrictions = dict(raw or {})
@@ -1560,6 +1760,8 @@ class ChatTab(QWidget):
         self._changes_timer = QTimer(self)
         self._changes_timer.setInterval(2000)
         self._changes_timer.timeout.connect(self._poll_changes)
+        self._changes_timer.timeout.connect(self._poll_child)
+        self._child_pending = None
         self._changes_timer.start()
         self._stopping = set()
         self._redirecting = set()
@@ -1582,6 +1784,7 @@ class ChatTab(QWidget):
         #: person last spoke, and what waits for the person's word to go on.
         self._woke = {}                 # session id -> {"failed": n, "all": n}
         self._wakes = {}                # session id -> {key: (found, document, reason)}
+        self._wake_docs = []            # (session id, found, document) of wakes queued behind a turn
         #: A task's execution that asked -> the task it belongs to (ADR-011).
         self._root_of = {}
         #: session id -> its budget as the core last said it (ADR-013).
@@ -1591,7 +1794,7 @@ class ChatTab(QWidget):
         self._listed_states = {}        # execution id -> the state the list was read for
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 14, 0, 0)
+        outer.setContentsMargins(0, 6, 0, 0)
         self.splitter = widgets.FoldingSplitter(Qt.Horizontal)
         outer.addWidget(self.splitter)
 
@@ -1644,14 +1847,26 @@ class ChatTab(QWidget):
         self.delete_button = QPushButton("Delete…")
         self.delete_button.setProperty("variant", "ghost")
         self.delete_button.clicked.connect(self.delete)
-        head = widgets.row(self.title, self.rename_button, self.delete_button)
+        self.more_button = QToolButton()
+        icons.button(self.more_button, "more", "")
+        self.more_button.setAccessibleName("Conversation actions")
+        self.more_button.setToolTip("Conversation links and history")
+        self.more_button.setPopupMode(QToolButton.InstantPopup)
+        self.more_button.setProperty("menuglyph", "true")
+        self.more_button.setProperty("variant", "icon")
+        self.more_button.setFixedSize(28, 24)
+        self.more_button.setIconSize(QSize(16, 16))
+        self.more_button.setStyleSheet("padding: 0px;")
+        self.more_menu = QMenu(self.more_button)
+        self.more_button.setMenu(self.more_menu)
+        head = widgets.row(self.title, self.rename_button, self.delete_button, self.more_button)
         head.layout().setStretchFactor(self.title, 1)
         column.addWidget(head)
         self.sub = widgets.ElidedLabel(mode=Qt.ElideMiddle)
         self.sub.setProperty("role", "muted")
         # How full the agent's context is and what the conversation cost - the
         # two things worth knowing before saying more to it.
-        self.usage = QLabel("")
+        self.usage = widgets.ElidedLabel(mode=Qt.ElideMiddle)
         self.usage.setProperty("role", "muted")
         self.changes_button = ChangesButton()
         self.changes_button.setProperty("variant", "ghost")
@@ -1660,25 +1875,19 @@ class ChatTab(QWidget):
         self.changes_button.clicked.connect(lambda: self.show_changes())
         self.changes_dialog = None
         sub_row = widgets.row(self.sub, self.usage, self.changes_button)
-        sub_row.layout().setStretchFactor(self.sub, 1)
+        sub_row.layout().setStretchFactor(self.sub, 2)
+        sub_row.layout().setStretchFactor(self.usage, 3)
         column.addWidget(sub_row)
         # The issues it is about: started for one, or linked because its agent read
         # one's details (ADR-014). A link can be undone; what it began with stays.
-        self.links = QWidget()
-        self.links.setObjectName("conversationLinks")
-        self._links_row = QHBoxLayout(self.links)
-        self._links_row.setContentsMargins(0, 0, 0, 0)
-        self._links_row.setSpacing(4)
-        self.links.setVisible(False)
-        column.addWidget(self.links)
-        self.earlier = QPushButton("Show the whole conversation")
-        self.earlier.setProperty("variant", "ghost")
+        self.links = self.more_menu.addMenu("About")
+        self.links.menuAction().setVisible(False)
+        self.earlier = self.more_menu.addAction("Show the whole conversation", self._read_whole)
         self.earlier.setToolTip("Only its newest part is shown. Read the rest too.")
-        self.earlier.clicked.connect(self._read_whole)
         self.earlier.setVisible(False)
-        column.addWidget(self.earlier, 0, Qt.AlignLeft)
         frame = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.feed = ChatFeed()
+        self.feed.loaded.connect(self._feed_loaded)
         self.feed.unqueued.connect(self._unqueue)
         self.feed.interrupt_requested.connect(self.interrupt_queued)
         self.feed.answered.connect(lambda said: self._card_turn(said, plan=True))
@@ -1733,6 +1942,17 @@ class ChatTab(QWidget):
         self.splitter.remember_in(settings, "integrations/agents")
         self._show_new()
         self._sync()
+
+    def _feed_loaded(self):
+        self.feed_skeleton.stop()
+        self.earlier.setEnabled(True)
+        self.earlier.setText("Show the whole conversation")
+        self.earlier.setVisible(not self._whole)
+        self.more_button.setEnabled(not self._whole or self.links.menuAction().isVisible())
+        # The other cards (changes, wakes, budgets, other agents) were placed by
+        # _show, or kept by the feed while it loaded and placed when it finished:
+        # placing them again here would do the work of every switch twice.
+        self._sync_cards()
 
     def dragEnterEvent(self, event):
         urls = event.mimeData().urls()
@@ -1820,6 +2040,7 @@ class ChatTab(QWidget):
         self._changes_pending = {}
         self._changes_final = set()
         self._stopping = set()
+        self._child_pending = None
         self._creating = False
         self._fresh = set()
         self._new_restrictions = {}
@@ -1853,6 +2074,9 @@ class ChatTab(QWidget):
                 or any(self._draft_files.values()) or any(self._queued.values()))
 
     def shutdown(self):
+        self.feed.cancel_load()
+        self._child_pending = None
+        self._view_serial += 1
         self._changes_pending = {}
         if self.changes_dialog is not None:
             self.changes_dialog.close()
@@ -1885,6 +2109,12 @@ class ChatTab(QWidget):
                                   "be read.", bad=True)
                 return
             self.sessions = list(payload.get("sessions") or [])
+            if is_child(self.current):
+                listed = next((one for one in self.sessions if one.get("id") == self._key()), None)
+                if listed and listed.get("state") == "running":
+                    self.current = listed
+                # Read its final events as well as its state when the task ends.
+                self._poll_child()
             self._fill()
             if first and self.current is None and serial == self._view_serial:
                 wanted = self._memory().get("session") or ""
@@ -1914,7 +2144,8 @@ class ChatTab(QWidget):
                 " - ".join(part for part in (source.get("label"), source.get("detail"))
                            if part)) if part))
             answering = one.get("id") in self.turns
-            last = QTableWidgetItem("Answering" if answering else ago_text(one.get("updated")))
+            last = QTableWidgetItem("Answering" if answering else
+                                    "Working" if one.get("state") == "running" else ago_text(one.get("updated")))
             for item in (title, last):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, 0, title)
@@ -1932,6 +2163,8 @@ class ChatTab(QWidget):
                                      if one.get("id") != session.get("id")]
         if self._showing(session.get("id")):
             self.current = session
+            if is_child(session):
+                self.composer.update_session(session)
             self._head()                # a first turn gives it its name
             self._sync_cards()
         self._fill()
@@ -1941,7 +2174,7 @@ class ChatTab(QWidget):
         if not rows:
             return
         wanted = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
-        if not self._showing(wanted):
+        if not self._showing(wanted) or (self._reading is not None and self._reading[0] != wanted):
             self.open_session(wanted)
 
     def _say_empty(self):
@@ -1952,13 +2185,19 @@ class ChatTab(QWidget):
         chosen = self.current is not None
         self.rename_button.setEnabled(chosen)
         self.delete_button.setEnabled(chosen and self._key() not in self.turns)
-        for button in (self.rename_button, self.delete_button):
+        for button in (self.rename_button, self.delete_button, self.more_button):
             button.setVisible(chosen)       # nothing to rename before it exists
         nobody = not self.connections and (self.current is None)
         self.setup.setVisible(nobody)
         self.composer.setVisible(not nobody)
-        self.composer.set_running(self._key() in self.turns,
-                                  self._turn_began.get(self._key()))
+        external = is_child(self.current) and self.current.get("state") == "running"
+        since = self._turn_began.get(self._key())
+        if external:
+            turns = self.current.get("turns") or []
+            started = (turns[-1].get("started") if turns else None) or self.current.get("updated")
+            if isinstance(started, (int, float)):
+                since = time.monotonic() - max(0, time.time() - started)
+        self.composer.set_running(self._key() in self.turns or external, since)
         self.composer.stop.setEnabled(self._key() not in self._stopping or
                                       self._key() in self._redirecting)
         self.composer.interrupt.setEnabled(self._key() not in self._stopping)
@@ -1983,8 +2222,10 @@ class ChatTab(QWidget):
         self.table.blockSignals(True)
         self.table.clearSelection()
         self.table.blockSignals(False)
+        self._show_links({})
         self.title.setText("New conversation")
         self.sub.setText("Nothing has been said yet")
+        self.sub.setVisible(True)
         # Nothing used, nothing changed: not the last conversation's figures.
         self.usage.setText("")
         self.usage.setToolTip("")
@@ -2013,10 +2254,13 @@ class ChatTab(QWidget):
         if not session_id or self.core() is None or self._creating:
             return
         self._view_serial += 1
+        self.feed.pause_load()
         serial = self._view_serial
         arriving = []
         self._reading = (session_id, arriving)
         self.feed_skeleton.start()
+        self.earlier.setEnabled(False)
+        self.earlier.setText("Loading conversation…")
 
         def done(payload):
             if serial != self._view_serial:
@@ -2024,6 +2268,9 @@ class ChatTab(QWidget):
             self.feed_skeleton.stop()
             self._reading = None
             if not payload.get("ok"):
+                self.feed.resume_load()
+                self.earlier.setEnabled(True)
+                self.earlier.setText("Show the whole conversation")
                 self.composer.say(payload.get("error") or "The conversation could not "
                                   "be read.", bad=True)
                 if payload.get("kind") == "not_found":
@@ -2044,6 +2291,28 @@ class ChatTab(QWidget):
         if self.current is not None:
             self.open_session(self.current["id"], limit=0)
 
+    def _poll_child(self):
+        """Follow a delegated turn from its record, including the terminal event."""
+        if (not self.isVisible() or not is_child(self.current) or self.core() is None
+                or self._reading is not None or self._child_pending is not None
+                or self.current.get("state") != "running"):
+            return
+        key = (self._key(), self._view_serial)
+        after = self._shown_seq
+        self._child_pending = key
+
+        def done(payload):
+            if self._child_pending == key:
+                self._child_pending = None
+            if key != (self._key(), self._view_serial) or not payload.get("ok"):
+                return
+            for event in payload.get("events") or []:
+                self._heard(key[0], event)
+            self._put(payload.get("session") or self.current)
+
+        self.ask("child-events", lambda core, cancel: core.agents(
+            "session", key[0], document={"after": after}, cancel=cancel), done)
+
     def _show(self, session, events, whole=False):
         self._view_serial += 1
         self._reading = None
@@ -2054,7 +2323,12 @@ class ChatTab(QWidget):
         self._head()
         self.earlier.setVisible(not self._whole)
         self.feed.set_empty_text("Nothing has been said in this conversation yet.")
-        self.feed.load(events)
+        self.feed.load(events, progressive=True)
+        if self.feed._pending_events:
+            self.earlier.setVisible(True)
+            self.earlier.setEnabled(False)
+            self.earlier.setText("Loading conversation…")
+            self.feed_skeleton.start()
         self.integration_changes_changed()
         self._sync_wakes()
         self._sync_budget_cards()
@@ -2195,9 +2469,8 @@ class ChatTab(QWidget):
         session = self.current or {}
         self.title.setText(session.get("title") or "Untitled")
         source = (session.get("source") or {}).get("label") or CHAT
-        self.sub.setText(" · ".join(part for part in (
-            session.get("connection_name") or session.get("connection"),
-            folder_text(session.get("folder")), "" if source == CHAT else source) if part))
+        self.sub.setText("" if source == CHAT else source)
+        self.sub.setVisible(bool(self.sub.text()))
         context = context_text(session.get("context"))
         # The program's own estimate, priced as its API would be (ADR-008 D3).
         cost = cost_text(session.get("cost_usd")) if session.get("turns") else ""
@@ -2205,54 +2478,38 @@ class ChatTab(QWidget):
         # How far into its budget, with what it handed on (ADR-013).
         budget = share_text(self._budgets.get(session.get("id")))
         self.usage.setText(" · ".join(part for part in (
-            ran_with_text(session), "context " + context if context else "", cost,
+            "context " + context if context else "", cost,
             budget + " budget" if budget else "") if part))
         tokens = tokens_text(session.get("tokens"))
-        self.usage.setToolTip("Tokens so far: %s" % tokens if tokens else "")
+        self.usage.setToolTip(self.usage.text() + ("\nTokens so far: %s" % tokens if tokens else ""))
         self._show_links(session)
         self._changes_label()
 
     def _show_links(self, session):
-        while self._links_row.count():
-            item = self._links_row.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                # Off the header at once, its slots cut first: a slot still holding
-                # this tab must not outlive it in the deferred delete.
-                if isinstance(widget, QPushButton):
-                    try:
-                        widget.clicked.disconnect()
-                    except (RuntimeError, TypeError):
-                        pass
-                widget.hide()
-                widget.setParent(None)
-                widget.deleteLater()
+        self.links.clear()
         source = (session or {}).get("source") or {}
-        refs = [one for one in [source.get("ref")] + list(source.get("links") or []) if one and one.startswith("jira:")]
+        refs = [one for one in [source.get("ref")] + list(source.get("links") or [])
+                if one and one.startswith("jira:")]
         refs = list(dict.fromkeys(refs))
-        if refs:
-            said = QLabel("ABOUT")
-            said.setProperty("role", "composerlabel")
-            self._links_row.addWidget(said)
+        removable = []
         for ref in refs:
             _kind, connection_id, key = (ref.split(":", 2) + ["", ""])[:3]
-            chip = QPushButton(key)
-            chip.setProperty("variant", "ghost")
-            chip.setObjectName("issueLink")
-            chip.setToolTip("Open %s in Jira." % key)
-            chip.clicked.connect(lambda _checked=False, c=connection_id, k=key: self.issue_wanted.emit(c, k))
-            self._links_row.addWidget(chip)
+            action = self.links.addAction(key)
+            action.setObjectName("issueLink")
+            action.setToolTip("Open %s in Jira." % key)
+            action.triggered.connect(lambda _checked=False, c=connection_id, k=key:
+                                     self.issue_wanted.emit(c, k))
             if ref != source.get("ref"):
-                undo = QPushButton()
-                undo.setIcon(icons.icon("close", theme.NEUTRAL[600]))
-                undo.setProperty("variant", "ghost")
-                undo.setObjectName("issueUnlink")
-                undo.setFixedWidth(22)
-                undo.setToolTip("This conversation is not about %s: undo the link. What it said stays." % key)
-                undo.clicked.connect(lambda _checked=False, r=ref: self._unlink(r))
-                self._links_row.addWidget(undo)
-        self._links_row.addStretch(1)
-        self.links.setVisible(bool(refs))
+                removable.append((ref, key))
+        if removable:
+            self.links.addSeparator()
+        for ref, key in removable:
+            undo = self.links.addAction("Unlink %s" % key)
+            undo.setObjectName("issueUnlink")
+            undo.setToolTip("This conversation is not about %s: undo the link. What it said stays." % key)
+            undo.triggered.connect(lambda _checked=False, r=ref: self._unlink(r))
+        self.links.menuAction().setVisible(bool(refs))
+        self.more_button.setEnabled(bool(refs) or not self._whole)
 
     def conversation_linked(self, found):
         """An agent read an issue's details: the conversation is about it now."""
@@ -2678,6 +2935,11 @@ class ChatTab(QWidget):
         capability = str(execution.get("capability_id") or "")
         actor = str(execution.get("actor_id") or "")
         if capability == "agents.tasks.reply":
+            state = execution.get("state")
+            if self._listed_states.get(execution.get("execution_id")) != state:
+                self._listed_states[execution.get("execution_id")] = state
+                if state in ("running", "succeeded", "failed", "canceled", "timed_out"):
+                    self.load_sessions()
             self._task_answered(execution)
             return
         if capability.endswith(".message") and execution.get("state") == "succeeded":
@@ -3054,11 +3316,52 @@ class ChatTab(QWidget):
             if not questions:
                 counted["all"] += 1
                 counted["failed"] += 1 if found.get("failed") else 0
+            if session_id in self.turns:
+                self._wake_docs.append((session_id, found, document))
             self._go_on(session, document)
             return
         key = "%s/%d" % ((found.get("condition") or {}).get("id") or "", len(self._wakes.get(session_id, {})))
         self._wakes.setdefault(session_id, {})[key] = (found, document, "ask" if mode == "ask" else "limit")
         self._sync_wakes()
+
+    def round_seen(self, seen):
+        """The agent read a result itself - in a turn of the person's - before
+        the wake telling it was delivered: that wake no longer tells it. One left
+        with nothing to tell goes; the rest is said without it."""
+        session_id, execution_id = seen.get("session"), seen.get("execution_id")
+
+        def without(found):
+            items = [one for one in found.get("items") or [] if one.get("execution_id") != execution_id]
+            return None if not items else dict(found, items=items, failed=any(
+                one.get("state") not in ("succeeded", "asks") for one in items))
+
+        wakes = self._wakes.get(session_id) or {}
+        for key, (found, document, reason) in list(wakes.items()):
+            left = without(found)
+            if left is None:
+                wakes.pop(key)
+            elif left["items"] != found["items"]:
+                # A new key: a card shown is rebuilt with what is left, not kept.
+                wakes.pop(key)
+                wakes[key + "'"] = (left, dict(document, message=agentcards.wake_message(left)), reason)
+        kept = []
+        for owner, found, document in self._wake_docs:
+            queue = self._queued.get(owner) or []
+            if not any(one is document for one in queue):
+                continue                # delivered already, or no longer waiting
+            if owner != session_id:
+                kept.append((owner, found, document))
+                continue
+            left = without(found)
+            if left is None:
+                self._queued[owner] = [one for one in queue if one is not document]
+                continue
+            document["message"] = agentcards.wake_message(left)
+            kept.append((owner, left, document))
+        self._wake_docs = kept
+        if self._showing(session_id):
+            self._sync_wakes()
+            self._waiting()
 
     def _go_on(self, session, document):
         """The woken turn: now, or first in line behind the turn running."""

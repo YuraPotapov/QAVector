@@ -146,6 +146,22 @@ def test_a_result_the_agent_saw_itself_wakes_nothing(world):
     assert woken(w) == []
 
 
+def test_a_result_read_after_its_wake_was_told_says_so_to_the_owner(world):
+    w = world(wake="continue")
+    task = hand(w, goal="Run the tests")["execution"]["execution_id"]
+    end_turn(w)
+    ended(w, task)
+    assert until(lambda: woken(w))
+    # The person speaks before the wake is delivered; in that turn the agent reads it.
+    turn(w, wake="continue")
+    assert w.ask("get", execution_id=task)["ok"]
+    seen = [one for one in w.sent if one.get("type") == "round_seen"]
+    assert seen == [{"type": "round_seen", "session": "s-parent", "execution_id": task}]
+    # Read once more: nothing new to say.
+    w.ask("get", execution_id=task)
+    assert len([one for one in w.sent if one.get("type") == "round_seen"]) == 1
+
+
 def test_wake_when_on_failure_wakes_at_once_and_says_what_still_runs(world):
     w = world(wake="continue")
     bad = hand(w, name="lint", goal="REFUSE it")["execution"]["execution_id"]
@@ -168,3 +184,34 @@ def test_the_answer_to_handing_work_on_says_what_comes_next(world):
     assert "end your turn" in hand(w)["next"]
     turn(w, wake="off")
     assert "not continued by itself" in hand(w, "claude")["next"]
+
+
+@pytest.mark.parametrize("length", [10000, delegation.ANSWER_CHARS + 500])
+def test_wake_preserves_review_findings_and_marks_storage_truncation(world, monkeypatch, length):
+    review = "Review finding. " * (length // 16) + "FINAL FINDING"
+    monkeypatch.setattr(delegation, "run_turn", lambda *args, **kwargs: (
+        {"turn": {"n": 1, "state": "completed"}, "session": {"provider_session": "review-thread"}}, review))
+    w = world(wake="continue")
+    task = hand(w, name="review", goal="Review the changes")["execution"]["execution_id"]
+    output = ended(w, task)["output"]
+    end_turn(w)
+    assert until(lambda: woken(w))
+    [item] = woken(w)[0]["items"]
+    assert item["answer"] == review[:delegation.ANSWER_CHARS]
+    assert item["answer_chars"] == len(review)
+    assert item["answer_truncated"] == (len(review) > delegation.ANSWER_CHARS)
+    assert output["answer_truncated"] == item["answer_truncated"]
+    if length < delegation.ANSWER_CHARS:
+        assert item["answer"].endswith("FINAL FINDING")
+
+
+def test_large_round_bounds_answers_and_identifies_the_omitted_results(world):
+    w = world(wake="continue")
+    items = [{"execution_id": "review-%d" % n, "answer": "x" * delegation.ANSWER_CHARS}
+             for n in range(5)]
+    w.host.delegation._round_finished({"type": "round_finished", "session": "s-parent", "items": items})
+    [message] = woken(w)
+    assert sum(len(item["answer"]) for item in message["items"]) == delegation.WAKE_ANSWER_CHARS
+    assert [item["execution_id"] for item in message["items"] if item["wake_shortened"]] == [
+        "review-3", "review-4"]
+    assert all(len(item["answer"]) == delegation.ANSWER_CHARS for item in items)

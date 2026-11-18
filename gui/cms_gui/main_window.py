@@ -321,6 +321,7 @@ class MainWindow(QMainWindow):
         self.integrations.set_change_source(self.qcr_host)
         # What a conversation handed on has ended: it goes on, or asks (ADR-009).
         self.qcr_host.round_finished.connect(self.integrations.agents.chat.round_finished)
+        self.qcr_host.round_seen.connect(self.integrations.agents.chat.round_seen)
         self._qcr_answers = {}          # node approval request id -> (execution id, item id)
         self._qcr_run = None
         self._aim_qcr()

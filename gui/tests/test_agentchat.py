@@ -16,7 +16,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtCore import QObject, QRect, QSettings, Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QPushButton, QWidget
 
@@ -191,10 +192,52 @@ def test_a_refused_call_says_what_the_mode_allows_not_that_it_awaits_approval(
                      reason="This command requires approval",
                      detail="This command requires approval")
     feed.load(events[:6])
-    stage = feed._rows[2][1].stage
+    row = feed._rows[2][1]
+    stage = row.stage
     # A caution, not a failure: nothing broke, the conversation did not allow it.
     assert (stage["status"], stage["kind"]) == ("done", "caution")
-    assert stage["detail"] == "command: git status\n" + said
+    if name == "Bash":
+        # A command says why it did not run where its output would be.
+        assert (row.command.text(), row.output.text()) == ("git status", said)
+    else:
+        assert stage["detail"] == "command: git status\n" + said
+
+
+@pytest.mark.parametrize("started, command, title", [
+    # Claude: a short command is in the title alone; the rest of the arguments below.
+    ({"name": "Bash", "title": "Bash git status", "detail": "description: Show the working tree"},
+     "git status", "Bash  Show the working tree"),
+    # Claude: a long one is in the detail, whole.
+    ({"name": "Bash", "title": "Bash pytest -q tests/...",
+      "detail": "command: pytest -q tests/test_a.py tests/test_b.py\ntimeout: 600000"},
+     "pytest -q tests/test_a.py tests/test_b.py", "Bash"),
+    # Codex: the detail is the command.
+    ({"name": "shell", "title": "ls -la", "detail": "ls -la"}, "ls -la", "shell"),
+])
+def test_a_command_shows_what_went_in_and_what_came_out_on_its_own_block(
+        qapp, started, command, title):
+    feed = ChatFeed()
+    feed.append(dict(started, type="tool.started", id="c1"))
+    row = feed._rows[0][1]
+    assert isinstance(row, agentchat.CommandRow)
+    assert row.block.property("role") == "commandblock"
+    assert (row.title.text(), row.command.text()) == (title, command)
+    assert (row.output.text(), row.output.property("pending")) == ("Running...", "true")
+    feed.append({"type": "tool.completed", "id": "c1", "ok": False, "detail": "exit 1\n"})
+    row = feed._rows[0][1]
+    assert (row.stage["status"], row.output.text()) == ("failed", "exit 1")
+    assert (row.output.property("bad"), row.output.property("pending")) == ("true", "false")
+    captions = [label.text() for label in row.block.findChildren(agentchat.QLabel)
+                if label.property("role") == "commandlabel"]
+    assert captions == ["In:", "Out:"]
+
+
+def test_a_command_never_heard_back_from_says_so_in_its_output(qapp):
+    feed = ChatFeed()
+    feed.load([{"type": "tool.started", "id": "c1", "name": "Bash", "title": "Bash make"},
+               {"type": "stopped"}])
+    row = feed._rows[0][1]
+    assert (row.stage["status"], row.output.text()) == ("unknown", "No output was received.")
 
 
 @pytest.mark.parametrize("end, title, status", [
@@ -343,7 +386,8 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     chat.table.selectRow(0)
     assert (("session", session["id"]), {"limit": agentchat.EVENTS_SHOWN}) in core.calls
     assert chat.title.text() == "Flaky login test"
-    assert chat.sub.text() == "Claude · /home/someone/src/shop"
+    assert chat.sub.text() == "" and chat.sub.isHidden()
+    assert "/home/someone/src/shop" in chat.composer.context_summary.text()
     assert chat.feed.kinds() == ["you", "thinking", "tool", "answer", "end"]
     composer = chat.composer
     assert composer.settings() == {"connection": "claude", "folder": "/home/someone/src/shop",
@@ -375,7 +419,7 @@ def test_only_the_newest_part_of_a_long_conversation_is_read_until_asked(make):
     chat = make(core).agents.chat
     chat.table.selectRow(0)
     assert chat.earlier.isVisible()
-    chat.earlier.click()
+    chat.earlier.trigger()
     assert (("session", session["id"]), {"limit": 0}) in core.calls
     assert not chat.earlier.isVisible()
 
@@ -720,7 +764,7 @@ def test_a_conversation_with_a_connection_since_removed_still_says_whom_it_was_w
     chat = make(FakeCore(sessions=[session], events={session["id"]: _events()})).agents.chat
     chat.table.selectRow(0)
     assert chat.composer.connection.currentText() == "Old laptop (removed)"
-    assert chat.sub.text().startswith("Old laptop")
+    assert chat.composer.context_summary.text().startswith("Old laptop")
 
 
 def test_a_turn_seen_in_the_log_opens_its_conversation(make):
@@ -1382,7 +1426,8 @@ def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):
     chat = make(core).agents.chat
     chat.table.selectRow(0)
     assert chat.usage.text() == "context 25k of 1M · est. $0.25"
-    assert chat.usage.toolTip() == "Tokens so far: 105k in (101k cached) · 2k out"
+    assert chat.usage.text() in chat.usage.toolTip()
+    assert chat.usage.toolTip().endswith("Tokens so far: 105k in (101k cached) · 2k out")
     line = chat.feed._rows[-1][1].body
     assert line.said == "Changed 2 files · +3 -1"
     line.view.click()
@@ -1457,17 +1502,17 @@ def test_a_conversation_shows_the_issues_it_is_about_and_a_link_can_be_undone(ma
     core = FakeCore(sessions=[session], events={session["id"]: _events()})
     chat = make(core).agents.chat
     chat.table.selectRow(0)
-    chips = lambda: [one.text() for one in chat.links.findChildren(QPushButton, "issueLink")]
-    assert chips() == ["QA-1"] and chat.links.findChildren(QPushButton, "issueUnlink") == []
+    chips = lambda: [one.text() for one in chat.links.findChildren(QAction, "issueLink")]
+    assert chips() == ["QA-1"] and chat.links.findChildren(QAction, "issueUnlink") == []
     # Its agent read another issue's details: linked, and said so at once.
     chat.conversation_linked({"session": session["id"], "ref": "jira:team:QA-7"})
     assert chips() == ["QA-1", "QA-7"]
     opened = []
     chat.issue_wanted.connect(lambda connection_id, key: opened.append((connection_id, key)))
-    [chip for chip in chat.links.findChildren(QPushButton, "issueLink") if chip.text() == "QA-7"][0].click()
+    [chip for chip in chat.links.findChildren(QAction, "issueLink") if chip.text() == "QA-7"][0].trigger()
     assert opened == [("team", "QA-7")]
-    [undo] = chat.links.findChildren(QPushButton, "issueUnlink")       # only the link: QA-1 it began with
-    undo.click()
+    [undo] = chat.links.findChildren(QAction, "issueUnlink")       # only the link: QA-1 it began with
+    undo.trigger()
     assert (("session-link", session["id"]), {"unlink": "jira:team:QA-7"}) in core.calls
     assert chips() == ["QA-1"]
 
@@ -1483,3 +1528,220 @@ def test_interrupt_and_send_shows_its_ampersand(qapp):
         assert QPushButton("Interrupt && send").text().replace("&&", "&") == "Interrupt & send"
     finally:
         composer.deleteLater()
+
+
+def test_long_history_yields_and_navigation_cancels_pending_rows(qapp, dispose):
+    from PySide6.QtCore import QTimer
+    feed = ChatFeed()
+    feed.resize(640, 360)
+    feed.show()
+    events = [{"type": "text", "text": "Answer %d" % n, "seq": n + 1} for n in range(160)]
+    feed.load(events, progressive=True)
+    assert feed._pending_events
+    ticks = []
+    QTimer.singleShot(0, lambda: ticks.append(True))
+    qapp.processEvents()
+    assert ticks and feed._pending_events
+    feed.load(_events(question="Another chat"), progressive=True)
+    QTest.qWait(20)
+    assert feed.said()[0] == "Another chat"
+    assert "Answer 159" not in feed.said()
+    assert not feed._pending_events
+    dispose(feed)
+
+
+def test_live_events_during_history_loading_keep_their_order(qapp, dispose):
+    feed = ChatFeed()
+    events = [{"type": "user", "text": "Message %d" % n, "seq": n + 1} for n in range(60)]
+    completed = []
+    feed.loaded.connect(lambda: completed.append(True))
+    feed.load(events, progressive=True)
+    feed.append({"type": "text", "text": "Newest answer", "seq": 61})
+    for _ in range(300):
+        if completed:
+            break
+        QTest.qWait(10)
+    assert completed == [True]
+    assert feed.said() == ["Message %d" % n for n in range(60)] + ["Newest answer"]
+    dispose(feed)
+
+
+def test_approval_buttons_remain_inside_a_narrow_feed(qapp, dispose):
+    from PySide6.QtCore import QPoint
+    from cms_gui.pages.agentcards import AgentRequestCard, WakeCard
+    feed = ChatFeed()
+    feed.load([{"type": "changes", "files": 35, "added": 647, "removed": 2626, "kept": "partial"}])
+    request = AgentRequestCard({"execution_id": "review", "target_name": "A reviewer with a long name",
+                                "goal": "Check the changes", "mode": "read", "model": "long-model-name"})
+    wake = WakeCard("round", {"items": [{"name": "Review", "state": "succeeded"}]})
+    feed.sync_cards("requests", [("review", 1, lambda: request, lambda card: None)])
+    feed.sync_cards("wakes", [("round", 2, lambda: wake, lambda card: None)])
+    feed.resize(360, 600)
+    feed.show()
+    for width in (360, 520, 320):
+        feed.resize(width, 600)
+        QTest.qWait(20)
+        assert feed.widget().width() <= feed.viewport().width()
+        for button in (request.approve_button, request.deny_button, wake.go_button, wake.dismiss_button):
+            left = button.mapTo(feed.widget(), QPoint()).x()
+            assert left >= 0
+            assert left + button.width() <= feed.viewport().width()
+    dispose(feed)
+
+
+def test_delegated_conversation_shows_working_time_and_finishes(make, monkeypatch):
+    child = _session("20261118-133500-aaaaaa", "Review", state="running", record=True,
+                     source={"label": "Delegated", "parent": "parent", "record": True},
+                     turns=[{"n": 1, "state": "running", "started": 1000}])
+    monkeypatch.setattr(agentchat.time, "time", lambda: 1075)
+    core = FakeCore(sessions=[child], events={child["id"]: _events()[:2]})
+    chat = make(core).agents.chat
+    chat.open_session(child["id"])
+    assert chat.composer.working.isVisible()
+    assert "1 min 15 s" in chat.composer.working_text()
+    assert chat.composer.text.isHidden() and chat.composer.footer.isHidden()
+    core.sessions[0]["state"] = "completed"
+    core.events[child["id"]] = _events()
+    chat._poll_child()
+    assert chat.composer.working.isHidden()
+    assert chat.feed.said()[-1] == "Finished"
+    assert chat.feed.said().count(QUESTION) == 1
+
+
+def test_action_cards_wait_for_history_before_being_placed(qapp, dispose):
+    from cms_gui.pages.agentcards import WakeCard
+    feed = ChatFeed()
+    events = [{"type": "user", "text": "Message %d" % n, "seq": n + 1, "at": n} for n in range(60)]
+    feed.load(events, progressive=True)
+    feed.sync_cards("wake", [("round", 30.5, lambda: WakeCard("round", {}), lambda card: None)])
+    for _ in range(300):
+        if not feed._pending_events:
+            break
+        QTest.qWait(10)
+    assert not feed._pending_events
+    assert feed._times == sorted(feed._times)
+    assert len(feed.placed("wake")) == 1
+    dispose(feed)
+
+
+def test_provider_settings_appear_once_and_history_is_in_the_menu(make, qapp):
+    session = _session(model="opus", effort="high", source={"label": "Jira", "ref": "jira:team:QA-1"},
+                       turns=[{"n": 1, "model_used": "claude-opus", "effort_used": "high"}],
+                       context={"used": 24000, "window": 1000000}, cost_usd=.25)
+    chat = make(FakeCore(sessions=[session], events={session["id"]: _events(first=40)})).agents.chat
+    chat.open_session(session["id"])
+    qapp.processEvents()
+    assert chat.sub.text() == "Jira"
+    assert chat.usage.text() == "context 24k of 1M · est. $0.25"
+    assert "Claude" in chat.composer.context_summary.text()
+    assert "opus" in chat.composer.context_summary.text()
+    assert "effort high" in chat.composer.context_summary.text()
+    assert chat.links.menuAction() in chat.more_menu.actions()
+    assert chat.earlier in chat.more_menu.actions()
+    assert chat.more_button.isVisible()
+    assert chat.more_button.height() <= chat.rename_button.height()
+
+
+def test_failed_navigation_resumes_the_history_it_paused(make, monkeypatch):
+    first = _session()
+    events = [{"type": "user", "text": "Message %d" % n, "seq": n + 1} for n in range(80)]
+    chat = make(FakeCore(sessions=[first], events={first["id"]: events})).agents.chat
+    chat.open_session(first["id"])
+    assert chat.feed._pending_events
+    pending = []
+    monkeypatch.setattr(chat, "ask", lambda kind, work, done: pending.append(done))
+    chat.open_session("20261110-090000-bbbbbb")
+    assert chat.feed._pending_events and not chat.feed._load_timer.isActive()
+    pending[-1]({"ok": False, "error": "Cannot read the other conversation"})
+    for _ in range(300):
+        if not chat.feed._pending_events:
+            break
+        QTest.qWait(10)
+    assert chat.current["id"] == first["id"]
+    assert chat.feed.said() == ["Message %d" % n for n in range(80)]
+
+
+def test_selecting_the_current_chat_cancels_a_pending_switch(make, monkeypatch):
+    first = _session()
+    second = _session("20261110-090000-bbbbbb", "Second chat")
+    chat = make(FakeCore(sessions=[first, second], events={first["id"]: _events()})).agents.chat
+    chat.table.selectRow(0)
+    pending = []
+    monkeypatch.setattr(chat, "ask", lambda kind, work, done: pending.append(done))
+    chat.table.selectRow(1)
+    assert len(pending) == 1
+    chat.table.selectRow(0)
+    assert len(pending) == 2
+    pending[0]({"ok": True, "session": second, "events": _events(question="Wrong chat")})
+    assert chat.current["id"] == first["id"]
+    pending[1]({"ok": True, "session": first, "events": _events()})
+    assert chat.current["id"] == first["id"] and chat.feed.said()[0] == QUESTION
+
+
+def test_a_flow_row_keeps_its_right_hand_buttons_right_and_wraps_them_when_narrow(qapp):
+    left, deny, approve = QPushButton("Open"), QPushButton("Deny"), QPushButton("Approve")
+    for button in (left, deny, approve):
+        button.setFixedSize(80, 24)
+    box = widgets.flow_row(left, 6, None, deny, approve)
+    box.layout().setGeometry(QRect(0, 0, 400, 24))
+    assert left.geometry().x() == 0
+    assert approve.geometry().right() == 399 and deny.geometry().right() == 399 - 80 - 8
+    # Narrow: what does not fit drops to the next line, still at the right edge.
+    # The theme sets its own button heights: two lines, whatever they are.
+    line = max(button.sizeHint().height() for button in (left, deny))
+    assert box.layout().heightForWidth(180) == line + 8 + approve.sizeHint().height()
+    box.layout().setGeometry(QRect(0, 0, 180, 100))
+    assert approve.geometry().top() > deny.geometry().bottom()
+    assert approve.geometry().right() == 179
+    # An int is fixed space before the next control, as in widgets.row.
+    first, second = QPushButton("a"), QPushButton("b")
+    for button in (first, second):
+        button.setFixedSize(40, 24)
+    spaced = widgets.flow_row(first, 6, second)
+    spaced.layout().setGeometry(QRect(0, 0, 400, 24))
+    assert second.geometry().x() == 40 + 6 + 8
+
+
+def test_code_an_agent_writes_reads_as_code_in_a_frame_of_its_own(qapp):
+    from PySide6.QtGui import QTextFormat
+    from cms_gui import codeblocks
+    answer = AnswerText("Run:\n\n```bash\ncd /repo && git status\npytest -q\n```\n\n"
+                        "Then `inline()`:\n\n```\ngit log -3\n```\n\n"
+                        "```python\ndef f(x):\n    return x\n```\n")
+    document = answer.document()
+    frames = document.rootFrame().childFrames()
+    assert len(frames) == 3
+
+    def lines(frame):
+        block, found = document.findBlock(frame.firstPosition()), []
+        while block.isValid() and block.position() <= frame.lastPosition():
+            found.append((block.text(), codeblocks.language_of(block),
+                          block.charFormat().fontFixedPitch() or block.begin().fragment().charFormat().fontFixedPitch()))
+            block = block.next()
+        return found
+    # Every line kept, indents too, each in the mono font and with its language -
+    # the first line as well, which a frame does not take the format of by itself.
+    assert lines(frames[0]) == [("cd /repo && git status", "bash", True), ("pytest -q", "bash", True)]
+    # Nobody labelled it, but it is a command line.
+    assert lines(frames[1]) == [("git log -3", "bash", True)]
+    assert lines(frames[2]) == [("def f(x):", "python", True), ("    return x", "python", True)]
+    assert frames[0].frameFormat().padding() > 0
+    # Inline code: the mono font on a ground of its own.
+    block = document.begin()
+    while "inline()" not in block.text():
+        block = block.next()
+    grounds = [one.format.background().style() for one in block.textFormats()
+               if one.format.fontFixedPitch()]
+    assert grounds and grounds[0] != Qt.NoBrush
+    # A command line is coloured as one: the program, and after && the next.
+    first = document.findBlock(frames[0].firstPosition())
+    starts = {one.start for one in first.layout().formats()}
+    assert {0, len("cd /repo && ")} <= starts
+
+
+@pytest.mark.parametrize("first, language", [
+    ("$ npm test", "bash"), ("git push", "bash"), ("./run.sh", "bash"),
+    ("import os", "python"), ("SELECT 1", ""), ("hello world", "")])
+def test_an_unlabelled_block_is_guessed_from_its_first_line(first, language):
+    from cms_gui import codeblocks
+    assert codeblocks.guess(["", first]) == language

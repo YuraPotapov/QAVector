@@ -148,3 +148,74 @@ def test_qavector_s_message_reads_as_qavector_s(chat):
     row = tab.feed._rows[0][1]
     labels = [label.text() for label in row.body.findChildren(type(row.body.meta))]
     assert "QAVECTOR · TASKS FINISHED" in labels and "YOU" not in labels
+
+
+def test_long_review_reaches_the_parent_without_losing_its_last_finding():
+    message = found()
+    review = "A review finding. " * 500 + "The final blocking issue."
+    message["items"][0]["answer"] = review
+    said = agentcards.wake_message(message)
+    assert review in said
+    assert "agents.tasks.reply" in said
+
+
+def test_shortened_wake_requires_reading_the_correct_execution():
+    message = found()
+    message["items"][0].update(answer="", wake_shortened=True)
+    said = agentcards.wake_message(message)
+    assert 'qavector_get_execution {"execution_id": "e-1"}' in said
+    assert "before judging its result" in said
+
+
+def test_storage_truncation_is_not_presented_as_a_complete_result():
+    message = found()
+    message["items"][0].update(answer_truncated=True, answer_chars=25000)
+    said = agentcards.wake_message(message)
+    assert "25000 characters originally" in said
+    assert "Do not treat this excerpt as the full result" in said
+    assert "omitted findings" in said
+
+
+def test_a_finished_task_is_offered_its_own_conversation_for_more_of_the_same_work():
+    said = agentcards.wake_message({"items": [
+        {"execution_id": "x-done", "state": "succeeded", "goal": "Review", "answer": "Two findings."},
+        {"execution_id": "x-failed", "state": "failed", "goal": "Build", "error": "boom"},
+        {"execution_id": "x-asked", "state": "succeeded", "kind": "question", "goal": "Which DB?"}]})
+    assert agentcards.WAKE_CONTINUE % "x-done" in said
+    assert agentcards.WAKE_CONTINUE % "x-failed" not in said
+    assert agentcards.WAKE_CONTINUE % "x-asked" not in said
+
+
+def _two():
+    both = found()
+    both["items"].append(dict(both["items"][0], execution_id="e-2", name="lint", goal="Lint it",
+                              answer="clean"))
+    return both
+
+
+def test_a_result_the_agent_read_in_the_person_s_turn_leaves_the_queued_wake(chat):
+    tab = chat
+    session = tab.show_session("continue")
+    tab._start(session, "Is the review in?", document={"message": "Is the review in?"})
+    tab.round_finished(_two())
+    [document] = tab._queued["s-1"]
+    tab.round_seen({"session": "s-1", "execution_id": "e-1"})
+    # What it read is no longer told; what it did not read still is.
+    assert "Run the tests" not in document["message"] and "Lint it" in document["message"]
+    tab.round_seen({"session": "s-1", "execution_id": "e-2"})
+    assert tab._queued["s-1"] == []
+    end(tab, tab.made[0])
+    assert len(tab.made) == 1, "nothing left to wake it for"
+
+
+def test_a_wake_card_loses_what_the_agent_read_and_goes_when_nothing_is_left(chat):
+    tab = chat
+    tab.show_session("ask")
+    tab.round_finished(_two())
+    tab.round_seen({"session": "s-1", "execution_id": "e-1"})
+    (card,) = tab.feed.placed("wake")
+    assert [line.text() for line in card.lines] == ["lint - Codex: done"]
+    tab.round_seen({"session": "s-other", "execution_id": "e-2"})     # another conversation's
+    assert len(tab.feed.placed("wake")) == 1
+    tab.round_seen({"session": "s-1", "execution_id": "e-2"})
+    assert tab.feed.placed("wake") == []

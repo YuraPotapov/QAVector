@@ -154,7 +154,7 @@ class BudgetCard(QFrame):
         self.go_button = QPushButton("Continue")
         self.go_button.setProperty("variant", "primary")
         self.go_button.clicked.connect(lambda: self._answer(True))
-        self.actions = widgets.row(None, self.stop_button, self.go_button)
+        self.actions = widgets.flow_row(self.stop_button, self.go_button)
         column.addWidget(self.actions)
         widgets.see_through(self)
 

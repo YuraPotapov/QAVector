@@ -92,10 +92,17 @@ It says which condition fired and what is still running. For each item that
 ended it gives:
 
 * the target, the model and effort, how it ended;
-* the answer, bounded (2,000 characters each);
+* the saved answer, up to 20,000 characters each (updated 2026-11-18; the old
+  2,000-character excerpt silently omitted most findings in longer reviews);
 * the acceptance criteria, each `unverified`;
 * how many files changed;
 * the execution id, so the agent can read more.
+
+All answers in one wake share a 60,000-character budget. When an answer is
+shortened to fit, the message explicitly instructs the agent to read that
+execution before judging its result. An answer already clipped by the task's
+20,000-character storage limit is marked incomplete separately, with its
+original length, so fetching the same excerpt is not mistaken for recovery.
 
 Then it says what to do: check each criterion against evidence and record it
 (`agents.tasks.verify`), carry on with what the person asked, and tell the
@@ -194,3 +201,11 @@ Pending wakes are not kept across restarts.
 1. ~~The default~~ - decided: a setting of its own per connection (D3).
 2. ~~The limit~~ - decided: 3 failed rounds, 10 wakes in all (D6).
 3. ~~When to wake~~ - decided: the delegator declares it (D1).
+
+**Update 2026-11-18 - a result read after its wake was told.** A wake told
+while no turn runs may wait in the owner's hands: on a card (``ask``), or queued
+behind a turn the person started. If the agent reads one of its results in that
+turn (``get``/``wait``), the core sends ``round_seen`` with the session and the
+execution id, and the owner takes that result out of the waiting wake; a wake
+left with nothing goes. Seen in practice: a review read at the person's request
+was told again five minutes later as news.

@@ -37,9 +37,11 @@ def _head(kind, meta=""):
     row.setSpacing(8)
     label = QLabel(kind)
     label.setProperty("role", "msgkind")
+    label.setWordWrap(True)
     row.addWidget(label)
     said = QLabel(meta)
     said.setProperty("role", "msgmeta")
+    said.setWordWrap(True)
     row.addWidget(said)
     row.addStretch(1)
     return row, label, said
@@ -102,7 +104,7 @@ class QuestionsCard(QFrame):
         self.send = QPushButton("Send answers")
         self.send.setProperty("variant", "primary")
         self.send.clicked.connect(self._send)
-        column.addWidget(widgets.row(None, self.send))
+        column.addWidget(widgets.flow_row(None, self.send))
         self.set_actionable(False)
 
     def answers(self):
@@ -197,7 +199,7 @@ class PlanCard(QFrame):
         self.start_full.setToolTip("Approve the plan: the agent works on it and may also "
                                    "run commands. The comments go along as notes.")
         self.start_full.clicked.connect(lambda: self._start("full"))
-        self.actions = widgets.row(self.quote, None, self.revise_button, self.start_edit,
+        self.actions = widgets.flow_row(self.quote, None, self.revise_button, self.start_edit,
                                    self.start_full)
         inner.addWidget(self.actions)
         column.addWidget(self.body)
@@ -272,6 +274,7 @@ class ChangesLine(QWidget):
         across.setSpacing(8)
         label = QLabel(self.said)
         label.setProperty("role", "muted")
+        label.setWordWrap(True)
         across.addWidget(label)
         self.view = QPushButton("View")
         self.view.setProperty("variant", "ghost")
@@ -343,11 +346,13 @@ class AgentRequestCard(QFrame):
                     details.append("%d %s%s" % (count, word, "s" if count != 1 else ""))
         self.details = QLabel(" · ".join(details))
         self.details.setProperty("role", "hint")
+        self.details.setWordWrap(True)
         self.details.setVisible(bool(details))
         column.addWidget(self.details)
         # What it has cost so far, against its budget (ADR-013).
         self.cost = QLabel("")
         self.cost.setProperty("role", "hint")
+        self.cost.setWordWrap(True)
         self.cost.setVisible(False)
         column.addWidget(self.cost)
         self.result = QLabel("")
@@ -373,7 +378,7 @@ class AgentRequestCard(QFrame):
         self.stop_button.setToolTip("End this task here: it takes no more answers, and what of it runs is "
                                     "canceled. Its conversation keeps what it found.")
         self.stop_button.clicked.connect(lambda: self.stop.emit(self.execution_id))
-        self.actions = widgets.row(self.open_button, None, self.dismiss_button, self.stop_button,
+        self.actions = widgets.flow_row(self.open_button, None, self.dismiss_button, self.stop_button,
                                    self.deny_button, self.approve_button)
         column.addWidget(self.actions)
         widgets.see_through(self)
@@ -463,7 +468,7 @@ class TaskQuestionCard(QFrame):
         self.answer_button.setProperty("variant", "primary")
         self.answer_button.setToolTip("Goes on in the same conversation: %s keeps what it has already read." % who)
         self.answer_button.clicked.connect(self._send)
-        self.actions = widgets.row(None, self.answer_button)
+        self.actions = widgets.flow_row(None, self.answer_button)
         column.addWidget(self.actions)
         widgets.see_through(self)
         stopped = bool(self.question.get("stopped"))
@@ -685,7 +690,7 @@ class IntegrationChangeCard(QFrame):
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.setProperty("variant", "ghost")
         self.dismiss_button.clicked.connect(lambda: self.dismiss.emit(self.execution_id))
-        column.addWidget(widgets.row(None, self.dismiss_button, self.deny_button, self.approve_button))
+        column.addWidget(widgets.flow_row(None, self.dismiss_button, self.deny_button, self.approve_button))
         widgets.see_through(self)
         self.set_state(self.change.get("state") or "waiting", self.change.get("detail") or "")
 
@@ -735,9 +740,18 @@ WAKE_STATES = {"succeeded": "done", "failed": "failed", "skipped": "skipped - wh
 WAKE_REPLY = ('  Answer it with agents.tasks.reply {"task": "%s", "answer": "..."}: it goes on in its own '
               'conversation with what it has read. Do not delegate it again; ask the person only what you '
               'cannot decide.')
-WAKE_TODO = ("Check each acceptance criterion against evidence and record it with agents.tasks.verify. "
-             "Then carry on with what the person asked - hand on more work if it is needed - and tell "
-             "the person what came of it.")
+#: What the woken agent is told about a task that finished: another round of
+#: the same work goes on in its conversation rather than in a new one.
+WAKE_CONTINUE = ('  More of the same work (another review round, a fix to check): agents.tasks.reply '
+                 '{"task": "%s", "answer": "..."} - it continues in this task\'s conversation, with what '
+                 'it has read. Do not delegate it again.')
+WAKE_TODO = ("Confirm each finding in the code before acting on it. A defect your own change caused, "
+             "within what the person asked, is yours to fix now: fix it, check it, and send the fix to the "
+             "same task for another round with agents.tasks.reply. Ask the person only what changes the "
+             "scope or what the code cannot decide. "
+             "Record acceptance criteria with agents.tasks.verify only from evidence: while a reviewer still "
+             "asks for fixes, what they concern has not passed. "
+             "Then carry on with what the person asked and tell the person what came of it.")
 
 
 def wake_message(found):
@@ -760,6 +774,15 @@ def wake_message(found):
             continue
         if one.get("answer"):
             lines.append("  Answer: " + one["answer"])
+        if one.get("wake_shortened"):
+            lines.append('  This answer was shortened to fit this message. Read this task with '
+                         'qavector_get_execution {"execution_id": "%s"} before judging its result.'
+                         % one.get("execution_id"))
+        if one.get("answer_truncated"):
+            lines.append("  The saved answer is also incomplete (%s characters originally). "
+                         "Do not treat this excerpt as the full result. Read the final response in "
+                         "the task's artifacts, or ask this same task for the omitted findings."
+                         % (one.get("answer_chars") or "more"))
         if one.get("error") and one.get("state") != "succeeded":
             lines.append("  Why: " + one["error"])
         if one.get("verdict") == "no_verdict":
@@ -771,6 +794,8 @@ def wake_message(found):
             lines.append("  Acceptance criteria, not verified yet: " + "; ".join(criteria))
         if one.get("files_changed"):
             lines.append("  Files changed: %d." % one["files_changed"])
+        if one.get("state") == "succeeded" and one.get("kind") != "question":
+            lines.append(WAKE_CONTINUE % one.get("execution_id"))
         lines.append("  Execution: %s." % one.get("execution_id"))
     if found.get("running"):
         lines.append("Still running: %s." % ", ".join(found["running"]))
@@ -821,7 +846,7 @@ class WakeCard(QFrame):
         self.go_button.setProperty("variant", "primary")
         self.go_button.setToolTip("The agent goes on with these results.")
         self.go_button.clicked.connect(lambda: self.go.emit(self.key))
-        column.addWidget(widgets.row(None, self.dismiss_button, self.go_button))
+        column.addWidget(widgets.flow_row(None, self.dismiss_button, self.go_button))
         widgets.see_through(self)
 
 

@@ -20,7 +20,7 @@ from PySide6.QtGui import (QBrush, QColor, QFontMetricsF, QIcon, QKeySequence,
                            QPainter, QPen, QShortcut, QValidator)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QAbstractSpinBox, QApplication, QComboBox, QDialog,
-                               QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QFileDialog, QFrame, QHBoxLayout, QLabel, QLayout,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QSizePolicy,
                                QSpinBox, QSplitter, QStackedLayout, QStyle,
@@ -1966,6 +1966,123 @@ def see_through(section):
         if type(child) is QWidget or isinstance(child, (CheckList, Segmented,
                                                          QListWidget)):
             child.setProperty("seethrough", "true")
+
+
+class FlowLayout(QLayout):
+    """Controls keep their natural size and wrap instead of being clipped.
+
+    Like :func:`row`: :meth:`add_gap` puts fixed space before the next
+    control, and :meth:`add_stretch` sends every control after it to the
+    right edge of whichever line it lands on - so a card's buttons stay where
+    they were in a wide chat and only drop to a second line in a narrow one.
+    """
+
+    def __init__(self, parent=None, spacing=8):
+        super().__init__(parent)
+        self._items = []
+        self._gaps = []                 # extra space before each item, beside _items
+        self._gap = 0                   # what the next item gets
+        self._right = None              # the first item that goes to the right
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def add_gap(self, width):
+        self._gap += int(width)
+
+    def add_stretch(self):
+        if self._right is None:
+            self._right = len(self._items)
+
+    def addItem(self, item):
+        self._items.append(item)
+        self._gaps.append(self._gap)
+        self._gap = 0
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        if not 0 <= index < len(self._items):
+            return None
+        self._gaps.pop(index)
+        if self._right is not None and index < self._right:
+            self._right -= 1
+        return self._items.pop(index)
+
+    def expandingDirections(self):
+        return Qt.Orientations()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QRect(0, 0, width, 0), measure=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect)
+
+    def _shown(self):
+        return [(index, item, item.sizeHint()) for index, item in enumerate(self._items)
+                if not item.isEmpty()]
+
+    def sizeHint(self):
+        shown = self._shown()
+        width = sum(size.width() for _index, _item, size in shown)
+        width += sum(self._gaps[index] for index, _item, _size in shown[1:])
+        if self._right is not None and 0 < sum(1 for index, _i, _s in shown if index >= self._right) < len(shown):
+            width += self.spacing()     # the stretch keeps the two groups apart
+        return QSize(width + max(0, len(shown) - 1) * self.spacing(),
+                     max((size.height() for _index, _item, size in shown), default=0))
+
+    def minimumSize(self):
+        size = QSize(0, 0)
+        for _index, item, _size in self._shown():
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _arrange(self, rect, measure=False):
+        lines, line, x = [], [], rect.x()
+        for index, item, size in self._shown():
+            gap = self._gaps[index] if line else 0
+            if line and x + gap + size.width() > rect.right() + 1:
+                lines.append(line)
+                line, x, gap = [], rect.x(), 0
+            line.append((index, item, size, x + gap))
+            x += gap + size.width() + self.spacing()
+        if line:
+            lines.append(line)
+        y = rect.y()
+        for line in lines:
+            height = max(size.height() for _index, _item, size, _x in line)
+            if not measure:
+                end = line[-1][3] + line[-1][2].width()
+                shift = max(0, rect.right() + 1 - end)
+                for index, item, size, left in line:
+                    if self._right is not None and index >= self._right:
+                        left += shift
+                    top = y + (height - size.height()) // 2
+                    item.setGeometry(QRect(QPoint(left, top), size))
+            y += height + self.spacing()
+        return max(0, y - rect.y() - self.spacing()) if lines else 0
+
+
+def flow_row(*controls, spacing=8):
+    """:func:`row` that wraps: ints are fixed space, ``None`` sends what follows
+    to the right edge."""
+    box = QWidget()
+    layout = FlowLayout(box, spacing)
+    for control in controls:
+        if control is None:
+            layout.add_stretch()
+        elif isinstance(control, int):
+            layout.add_gap(control)
+        else:
+            layout.addWidget(control)
+    return box
 
 
 def row(*widgets, spacing=8, stretch_last=False):

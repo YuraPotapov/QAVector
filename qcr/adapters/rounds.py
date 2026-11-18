@@ -16,7 +16,9 @@ A condition fires only once the turn that set it has ended: an agent still in
 its turn sees for itself. It wakes the conversation only for results the
 agent has not seen; one that waited for everything is not woken again for it.
 Waking is telling: ``notify({"type": "round_finished", ...})`` - the owner of
-the conversation (the GUI) decides whether a turn starts (ADR-009 D3, D5).
+the conversation (the GUI) decides whether a turn starts (ADR-009 D3, D5). A
+result the agent reads itself after its wake was told is said too
+(``round_seen``), so a wake still waiting is not delivered with it.
 
 Thread-safe; nothing here asks any agent or service.
 """
@@ -116,10 +118,20 @@ class Rounds:
         self.evaluate(session)
 
     def seen(self, execution_id):
+        """The agent got this result itself. A wake already told for it may still
+        wait in the owner's hands - on a card, or queued behind the person's
+        turn: ``round_seen`` lets the owner take it out of that wake."""
+        told = None
         with self._lock:
             session = self._owner.get(execution_id)
-            if session is not None:
-                self._sessions[session]["items"][execution_id]["seen"] = True
+            if session is None:
+                return
+            item = self._sessions[session]["items"][execution_id]
+            if item["reported"] and not item["seen"]:
+                told = session
+            item["seen"] = True
+        if told is not None:
+            self._notify({"type": "round_seen", "session": told, "execution_id": execution_id})
 
     # -- when to wake -------------------------------------------------------------
     def wake_when(self, session, kind, names, on_failure=False):

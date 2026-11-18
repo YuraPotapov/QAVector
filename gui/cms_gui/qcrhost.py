@@ -124,6 +124,9 @@ class QcrHost(QObject):
     #: What a conversation handed on to other agents has ended, as it asked
     #: to be woken for (ADR-009): ``{"session", "condition", "items", "running", "failed"}``.
     round_finished = Signal(dict)
+    #: The agent read one of those results itself before its wake was delivered:
+    #: ``{"session", "execution_id"}``.
+    round_seen = Signal(dict)
     #: A turn waits at a budget for the person's word (ADR-013 D3).
     budget_reached = Signal(dict)
     #: An agent read an issue's details: its conversation is linked to it (ADR-014).
@@ -349,6 +352,8 @@ class QcrHost(QObject):
             self._integration_waits(message)
         elif kind == "round_finished":
             self.round_finished.emit(dict(message))
+        elif kind == "round_seen":
+            self.round_seen.emit(dict(message))
         elif kind == "budget_reached":
             self.budget_reached.emit(dict(message))
         elif kind == "conversation_linked":

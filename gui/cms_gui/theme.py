@@ -1081,6 +1081,19 @@ QFrame[role="agentcard"] QLabel[role="cardquestion"] {{
 }}
 QFrame[role="agentcard"] QPlainTextEdit {{ background: {bg}; }}
 QFrame[role="agentcard"] QWidget[seethrough="true"] {{ background: transparent; }}
+/* A command an agent ran: what went in and what came out, on a block of its
+   own so a run of commands reads apart from what the agent said. */
+QFrame[role="commandblock"] {{ background: {surface}; border: 1px solid {divider}; }}
+QFrame[role="commandblock"] QFrame[role="commandrule"] {{ background: {divider}; border: none; }}
+QFrame[role="commandblock"] QLabel {{ background: transparent; }}
+QLabel[role="commandlabel"] {{
+    font-family: {heading}; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.8px; color: {n600}; padding-top: 1px;
+}}
+QLabel[role="commandtext"] {{ font-family: {mono}; font-size: 12px; color: {text}; }}
+QLabel[role="commandout"] {{ font-family: {mono}; font-size: 11px; color: {n700}; }}
+QLabel[role="commandout"][pending="true"] {{ color: {n600}; font-style: italic; }}
+QLabel[role="commandout"][bad="true"] {{ color: {bad_ink}; }}
 /* A diff: per file a line with its counts, then the patch itself. */
 QLabel[role="diffadded"] {{ font-family: {mono}; font-size: 11px; color: {diff_add_ink}; }}
 QLabel[role="diffremoved"] {{ font-family: {mono}; font-size: 11px; color: {diff_del_ink}; }}

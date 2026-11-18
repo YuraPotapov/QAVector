@@ -63,6 +63,8 @@ MAX_PER_TARGET = 2
 DEFAULT_SECONDS, MAX_SECONDS = 1800, 21600
 GOAL_CHARS, SUMMARY_CHARS, CRITERION_CHARS, MAX_CRITERIA = 2000, 20000, 500, 10
 ANSWER_CHARS = 20000
+#: Keep wake messages bounded even if a round contains many finished tasks.
+WAKE_ANSWER_CHARS = 60000
 #: ADR-006 D6: messages one conversation may send in an hour.
 MAX_MESSAGES_PER_HOUR = 20
 #: How long a target's model list, read from its program, is believed.
@@ -342,8 +344,8 @@ class Delegation:
         ref = ResourceRef(self.project_id, TASKS, "agent_tasks")
         verify = CapabilityDescriptor(
             "agents.tasks.verify", ref, 1,
-            "Record whether one acceptance criterion of a task you delegated passed, with the "
-            "execution that shows it. A task is verified when every criterion passed.",
+            "Record whether a criterion of a task you delegated passed, with the execution that "
+            "shows it - evidence, not the task's word: what a reviewer still asks to fix has not passed.",
             VERIFY_INPUT, {"type": "object"}, PERMISSION, risk_level="low", timeout_seconds=30,
             exclusive=False)
         wake = CapabilityDescriptor(
@@ -353,8 +355,9 @@ class Delegation:
             WAKE_INPUT, {"type": "object"}, PERMISSION, risk_level="low", timeout_seconds=30, exclusive=False)
         reply = CapabilityDescriptor(
             "agents.tasks.reply", ref, 1,
-            "Answer the question a task you delegated asked: it goes on in its own conversation, keeping what "
-            "it has read. Do not delegate it again.",
+            "Continue your delegated task: answer its question or send follow-up work after it finishes "
+            "(such as another review round). Use the latest execution id; its conversation and context "
+            "are resumed. Do not delegate the same work again.",
             REPLY_INPUT, DELEGATE_OUTPUT, PERMISSION, risk_level="medium", mode="long_running",
             supports_cancel=True, supports_idempotency=True, timeout_seconds=MAX_SECONDS, exclusive=False)
         registrations.append(Registration(ResourceDescriptor(ref, "agents", "Delegated tasks", PERMISSION),
@@ -689,6 +692,15 @@ class Delegation:
         """A round to wake a conversation for, with how far it is into its budget:
         at its limit the person is asked first, not the agent (ADR-013 D3)."""
         if message.get("type") == "round_finished" and message.get("session"):
+            remaining, items = WAKE_ANSWER_CHARS, []
+            for item in message.get("items") or []:
+                item = dict(item)
+                answer = str(item.get("answer") or "")
+                item["answer"] = answer[:remaining]
+                item["wake_shortened"] = len(answer) > remaining
+                remaining = max(0, remaining - len(item["answer"]))
+                items.append(item)
+            message = dict(message, items=items)
             policy = next((one for one in self._policies.values() if one.get("session") == message["session"]), {})
             message = dict(message, budget=self._conversation_budget(message["session"], policy.get("connection")))
         self._notify(message)
@@ -726,7 +738,10 @@ class Delegation:
                 "question": output.get("question") or "", "asked": int(output.get("asked") or 0),
                 "root": output.get("root") or "",
                 "model": request.get("model") or "", "effort": request.get("effort") or "",
-                "state": state, "answer": str(answer)[:2000], "error": str(error.get("message") or "")[:500],
+                "state": state, "answer": str(answer)[:ANSWER_CHARS],
+                "answer_chars": output.get("answer_chars", len(str(answer))),
+                "answer_truncated": bool(output.get("answer_truncated")) or len(str(answer)) > ANSWER_CHARS,
+                "error": str(error.get("message") or "")[:500],
                 "acceptance": output.get("acceptance") or [],
                 "files_changed": _count_files((output.get("changes") or {}).get("files")),
                 "session_id": output.get("session_id") or "",
@@ -839,7 +854,9 @@ class Delegation:
             role = context.get("role")
             if context.get("answer") is not None:
                 stale = []
-                message = "%s\n\n%s\n\n%s" % (ANSWERED % context["by"], context["answer"], GO_ON)
+                heading = (ANSWERED % context["by"] if context.get("answering_question", True)
+                           else "[QAVector: %s continues this task]" % context["by"])
+                message = "%s\n\n%s\n\n%s" % (heading, context["answer"], GO_ON)
                 if role and role["verdict"]:
                     message += "\n\n" + roles.VERDICT_ASK
             else:
@@ -873,7 +890,9 @@ class Delegation:
                       "provider_session_id": answer["session"].get("provider_session", ""),
                       "mode": context["mode"], "turn_state": turn["state"],
                       "context_package": context["package"], "stale_files": stale,
-                      "answer": text[:ANSWER_CHARS], "changes": turn.get("changes") or {},
+                      "answer": text[:ANSWER_CHARS], "answer_chars": len(text),
+                      "answer_truncated": len(text) > ANSWER_CHARS,
+                      "changes": turn.get("changes") or {},
                       "artifacts": turn_artifacts(self.root, session["id"], turn),
                       "acceptance": [{"criterion": one, "status": "unverified"} for one in context["criteria"]],
                       "verified": False, "root": context.get("root") or job.execution_id,
@@ -1001,6 +1020,29 @@ class Delegation:
                 execution_id = self._follow[execution_id]
         return execution_id
 
+    def _continued(self, task_id, but):
+        """The reply that already took ``task_id`` on, by the record - so an
+        execution continued before QAVector restarted is not continued twice.
+        A reply refused on its checks never left ``queued``; one that went on
+        was dispatched."""
+        with self._lock:
+            if task_id in self._follow:
+                return self._follow[task_id]
+        try:
+            rows = self.store.list(self.project_id, capability_id="agents.tasks.reply", limit=1000)
+        except Exception:
+            return None
+        for row in rows:
+            if row["execution_id"] == but or (row.get("input") or {}).get("task") != task_id:
+                continue
+            try:
+                events = self.store.events(row["execution_id"], limit=50)
+            except Exception:
+                continue
+            if any(one.get("type") == "state" and one.get("state") == "dispatched" for one in events):
+                return row["execution_id"]
+        return None
+
     def _root_input(self, root):
         try:
             return dict(self.store.get(root).get("input") or {}) if root else {}
@@ -1020,14 +1062,17 @@ class Delegation:
             if asked["capability_id"] != "agents.tasks.reply" and not asked["capability_id"].endswith(".delegate"):
                 raise QCRError("invalid_input", "That execution is not a delegated task.")
             root_id = output.get("root") or task_id
+            continued = self._continued(task_id, job.execution_id)
             with self._lock:
+                if continued:
+                    self._follow.setdefault(task_id, continued)
                 answered, stopped = task_id in self._follow, self._stopped.get(root_id)
             if stopped:
                 raise QCRError("stopped", "%s stopped this task: it takes no more answers." % stopped.capitalize())
             if answered:
-                raise QCRError("not_waiting", "That question was answered already.")
-            if asked["state"] != "succeeded" or not output.get("needs_input"):
-                raise QCRError("not_waiting", "That task does not wait for an answer.")
+                raise QCRError("not_waiting", "That task was continued already; use its latest execution id.")
+            if asked["state"] != "succeeded" or not output.get("session_id"):
+                raise QCRError("not_waiting", "That task has not completed successfully yet.")
             root = self._root_input(root_id)
             connection = store.get(output.get("target") or "", self.agents_path)
             if connection is None or connection["kind"] != output.get("provider"):
@@ -1047,11 +1092,15 @@ class Delegation:
                    "package": output.get("context_package") or "", "session_id": session["id"],
                    "grants": child_grants(rule.get("grants"), connection),
                    "answer": job.request["answer"].strip(), "by": by_person or rule["name"],
+                   "answering_question": bool(output.get("needs_input")),
                    "follow_up_of": task_id, "root": root_id, "asked": int(output.get("asked") or 0), "after": [],
                    "parent_connection": rule["connection"]}
         with self._lock:
             if self._closed:
                 job.fail("source_unavailable", "Delegation is closed.")
+                return
+            if task_id in self._follow or root_id in self._stopped:
+                job.fail("not_waiting", "That task was continued or stopped already.")
                 return
             self._follow[task_id] = job.execution_id
             try:
@@ -1447,6 +1496,7 @@ class Delegation:
             self._message_state(reply["message_id"], "delivered")
             self._message_state(message_id, "acknowledged", {"replied_by": reply["message_id"]})
             job.succeed({"message_id": message_id, "state": "acknowledged", "session_id": session["id"],
+                         "answer_chars": len(text), "answer_truncated": len(text) > ANSWER_CHARS,
                          "reply": {"message_id": reply["message_id"], "body": reply["body"]},
                          "conversation_id": reply["conversation_id"],
                          "artifacts": turn_artifacts(self.root, session["id"], turn)})

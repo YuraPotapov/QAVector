@@ -72,8 +72,14 @@ Usage counts it in the same conversation, because it is one.
 
 **D3. Who may reply.** The agent that delegated the task (the same actor
 check as `verify`), and the person, from the task's card (**Answer**). Nobody
-else. Replying to a task that does not ask (`needs_input` false) is refused
-(`not_waiting`).
+else. Updated 2026-11-18: a successfully finished task can also receive follow-up
+work (for example, a second review round) through this same operation, even
+without `needs_input`. The caller supplies the latest execution id. An execution
+can be continued once; an older, running, failed or stopped execution is refused. Whether it was
+continued is read from the record (a reply that was dispatched), so this holds
+across a restart.
+The provider session, folder, model and prior context are retained. A new
+`delegate` is for a distinct task, not another round of an existing review.
 
 **D4. Waking.** A task that asks counts as ended for its round (ADR-009), so
 the parent is woken with the question. The wake message lists it under

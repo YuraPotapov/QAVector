@@ -769,21 +769,17 @@ class AgentsView(QWidget):
         self._pending = {}              # cancellation event -> request kind
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 18, 24, 14)
+        outer.setContentsMargins(16, 8, 16, 8)
         outer.setSpacing(4)
         crumb = QHBoxLayout()
         self.crumbs = widgets.Crumbs("Integrations")
         self.crumb = self.crumbs.root
         self.crumb.clicked.connect(self.back_requested)
         crumb.addWidget(self.crumbs)
+        crumb.addWidget(widgets.heading("Agents", "kicker"))
         crumb.addStretch(1)
         self.window_actions = crumb
         outer.addLayout(crumb)
-        header = QHBoxLayout()
-        header.setSpacing(10)
-        header.addWidget(widgets.heading("Agents"))
-        header.addStretch(1)
-        outer.addLayout(header)
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("agentsTabs")
@@ -1009,6 +1005,10 @@ class AgentsView(QWidget):
         cancel = cancel if cancel is not None else threading.Event()
         self._pending[cancel] = kind
         handed = None if kind in WRITES else cancel
+        if handed is not None:
+            for pending, pending_kind in list(self._pending.items()):
+                if pending is not cancel and pending_kind == kind:
+                    pending.set()
 
         def answer(result, error):
             self._pending.pop(cancel, None)

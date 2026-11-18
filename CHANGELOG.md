@@ -16,6 +16,45 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+### Fixed
+- Agent conversations build long histories in batches and lay out their rows
+  together, keeping navigation responsive while loading the whole conversation.
+  Superseded reads are canceled, returning to the current chat cancels a pending
+  switch, and failed navigation resumes the history that was being loaded.
+- Approval and continuation buttons wrap in narrow chats; long metadata no
+  longer widens the feed beyond its visible area. The Agents header is smaller;
+  project paths and provider settings appear only by the composer, while issue
+  links and full-history loading live in the conversation's three-dot menu.
+- Delegated conversations show **Working** and elapsed time, and refresh their
+  events and final status while open.
+- Finished delegated tasks accept follow-up work through `agents.tasks.reply`,
+  resuming the same provider session for subsequent review rounds. Agent tool
+  guidance now explains both continuation and the context a new child needs,
+  and the wake message names the exact call for each finished task. An
+  execution continued before QAVector restarted is still refused a second
+  continuation: the record, not memory, decides.
+- A wake no longer repeats a result the agent already read: when it reads one
+  in the person's turn before the wake is delivered, the core says so
+  (`round_seen`) and the queued wake or its card drops it - and goes when
+  nothing is left.
+- Agents are told to confirm a finding in the code before acting on it, to fix
+  in-scope defects their own change caused and send them for another round
+  instead of handing the decision to the person, and to record a criterion as
+  passed only from evidence.
+- Wrapped card buttons keep their places: approvals stay at the right edge and
+  only drop to a second line when the chat is too narrow.
+
+### Changed
+- Commands an agent runs show as a block of their own, with **In:** (the
+  command line) and **Out:** (what it printed, or why it did not run).
+- Code in an agent's answers is framed, monospaced and roughly highlighted:
+  lines and indents are kept, shell is coloured as a command line, and an
+  unlabelled block that starts with a command is read as shell.
+- Waking the delegator preserves saved review answers up to 20,000 characters
+  instead of silently cutting them at 2,000. A shared 60,000-character answer
+  budget bounds large rounds; omitted text is identified with instructions to
+  fetch the correct result. Task results also disclose storage truncation.
+
 ## [0.16.74] - 2026-11-18
 
 ### Changed
