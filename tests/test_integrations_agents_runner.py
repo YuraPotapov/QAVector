@@ -56,6 +56,12 @@ class World:
         return os.path.join(sessions.turn_directory(self.root, session["id"], number), name)
 
 
+@pytest.fixture(autouse=True)
+def _track_changes(monkeypatch):
+    """These tests cover what a turn changed, off by default in the app."""
+    monkeypatch.setenv("QAVECTOR_TRACK_CHANGES", "1")
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     return World(tmp_path, monkeypatch)
@@ -702,3 +708,13 @@ def test_answers_bring_a_plan_and_work_on_it_waits_for_nothing(world):
     saved = sessions.load(world.root, session["id"])
     assert (saved["phase"], saved["plan"]) == ("", False)
     assert os.listdir(world.folder) == ["notes.md"]
+
+
+def test_a_turn_keeps_no_changes_unless_tracking_is_turned_on(world, monkeypatch):
+    monkeypatch.delenv("QAVECTOR_TRACK_CHANGES")
+    session = world.session(mode="edit")
+    seen = []
+    answer = runner.send(world.root, session["id"], "Write a note", agents_path=world.agents,
+                         emit=seen.append)
+    assert "changes" not in answer["turn"]
+    assert "changes" not in [one["type"] for one in seen]

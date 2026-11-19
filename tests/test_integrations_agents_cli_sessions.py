@@ -67,6 +67,12 @@ class Agents:
         return answer["session"]
 
 
+@pytest.fixture(autouse=True)
+def _track_changes(monkeypatch):
+    """These tests cover what a turn changed, off by default in the app."""
+    monkeypatch.setenv("QAVECTOR_TRACK_CHANGES", "1")
+
+
 @pytest.fixture
 def agents(tmp_path, capsys, monkeypatch):
     return Agents(tmp_path, capsys, monkeypatch)

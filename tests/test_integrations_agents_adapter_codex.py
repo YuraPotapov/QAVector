@@ -146,6 +146,12 @@ def test_reader_takes_the_bridge_end_and_its_own_counts():
     assert failed["type"] == "failed" and failed["error"] == "no"
 
 
+@pytest.fixture(autouse=True)
+def _track_changes(monkeypatch):
+    """These tests cover what a turn changed, off by default in the app."""
+    monkeypatch.setenv("QAVECTOR_TRACK_CHANGES", "1")
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     path = str(tmp_path / "agents.json")

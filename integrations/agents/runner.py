@@ -30,6 +30,15 @@ from integrations.agents import attachments as attachment_files
 from integrations.agents import changes as changes_mod
 from integrations.agents.contracts import Unsupported
 
+#: Whether a turn snapshots its folder before and after to show what it
+#: changed. Off for now: the snapshots cost time on every turn. The logic and
+#: the Changes view stay; ``QAVECTOR_TRACK_CHANGES=1`` turns them back on.
+TRACK_CHANGES_ENV = "QAVECTOR_TRACK_CHANGES"
+
+
+def tracking_changes():
+    return os.environ.get(TRACK_CHANGES_ENV) == "1"
+
 #: How long a stopped CLI is given to end by itself before it is killed.
 STOP_GRACE = 5.0
 
@@ -391,15 +400,17 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
         if attached:
             said["attachments"] = attached
         emit(record.add(said))
-        before = _snapshot(session_dir, folder)
-        try:
-            changes_mod.begin(session_dir, where, before)
-        except (OSError, ValueError):
-            pass  # Live inspection must not prevent a turn from running.
+        before = _snapshot(session_dir, folder) if tracking_changes() else None
+        if before is not None:
+            try:
+                changes_mod.begin(session_dir, where, before)
+            except (OSError, ValueError):
+                pass  # Live inspection must not prevent a turn from running.
         outcome = _run(adapter, argv, folder, effective, seen, prompt, where, record, tell, stop,
                        cost_before=sessions.cost_so_far(session) if resume else None)
-        turn["changes"] = _changed(session_dir, where, folder, before, written)
-        emit(record.add(dict(turn["changes"], type="changes")))
+        if before is not None:
+            turn["changes"] = _changed(session_dir, where, folder, before, written)
+            emit(record.add(dict(turn["changes"], type="changes")))
         if outcome.get("end"):
             emit(record.add(outcome["end"]))
         elif outcome["state"] != sessions.COMPLETED:
