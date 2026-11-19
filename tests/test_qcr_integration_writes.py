@@ -147,6 +147,25 @@ def test_a_comment_waits_for_the_person_and_the_edited_version_is_written(world)
     assert TOKEN not in everything
 
 
+def test_a_comment_on_a_large_issue_is_a_success_with_the_issue_as_text(world):
+    # With its HTML and editor documents the issue after the change was over
+    # the journal's 64 KB: the comment was posted, yet the agent was told
+    # invalid_output - and could post it again.
+    raw = _raw_issue()
+    raw["fields"]["description"] = {"type": "doc", "version": 1, "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "Line %d of a long incident report." % n}]}
+        for n in range(1200)]}
+    w = world(_answers(**{"/rest/api/3/issue/QA-142?": raw}))
+    execution = w.invoke("comment", {"key": "QA-142", "body": "Deploy after the fix"})
+    assert w.adapter.writer.answer(execution["execution_id"], True, "you")
+    done = w.get(execution["execution_id"])
+    assert done["state"] == "succeeded", done
+    issue = done["output"]["issue"]
+    assert "Line 1199 of a long incident report." in issue["description_text"]
+    assert issue["description_html"] == "" and issue["description_doc"] is None
+    assert len(w.posted()) == 1
+
+
 def test_a_denied_comment_is_never_sent_and_not_logged(world):
     w = world()
     execution = w.invoke("comment", {"key": "QA-142", "body": "Draft"})

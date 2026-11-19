@@ -45,6 +45,25 @@ def _timer(seconds, work):
     return timer
 
 
+
+#: What a too large result keeps: its plain top-level values, each bounded.
+_KEPT_CHARS = 4000
+
+
+def _kept(output):
+    """A successful result that does not fit the journal, cut to what does:
+    plain top-level values (a write's ``changed`` and ``summary``), and under
+    ``omitted`` the names of what was left out - nested data, long text."""
+    kept, omitted = {}, []
+    for key, value in output.items():
+        if value is None or type(value) in (bool, int, float) or (
+                isinstance(value, str) and len(value) <= _KEPT_CHARS):
+            kept[key] = value
+        else:
+            omitted.append(str(key))
+    kept["omitted"] = omitted
+    return kept
+
 class Job:
     """One execution as its invoker sees it. Every report returns False once the
     execution has ended (finished, timed out or canceled) and changes nothing."""
@@ -169,7 +188,16 @@ class Engine:
                 if current == "queued" and state in ("running", "succeeded"):
                     # An owner that answers at once still went through "took it".
                     self._store.transition(job.execution_id, "dispatched")
-                self._store.transition(job.execution_id, state, payload=payload, output=output, error=error)
+                try:
+                    self._store.transition(job.execution_id, state, payload=payload, output=output, error=error)
+                except ExecutionError as exc:
+                    if exc.code != "too_large" or state != "succeeded" or not isinstance(output, dict):
+                        raise
+                    # Done is done: an owner whose result is larger than the
+                    # journal keeps still made its change (a Jira comment is
+                    # posted). Calling it failed invites the same write again.
+                    self._store.transition(job.execution_id, state, payload=payload,
+                                           output=_kept(output), error=error)
             except ExecutionError as exc:
                 if exc.code in ("too_large", "invalid_input") and state in TERMINAL:
                     self._store.transition(job.execution_id, "failed", error={

@@ -450,19 +450,16 @@ class TeamsView(QWidget):
         self._listed = self._listing = self._closing = False
         self._asked, self._pending = {}, {}
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 18, 24, 14)
+        outer.setContentsMargins(16, 8, 16, 8)
         outer.setSpacing(4)
-        crumb = QHBoxLayout()
+        # One compact row, as on Agents and Jira.
+        header = QHBoxLayout()
+        header.setSpacing(10)
         self.crumbs = widgets.Crumbs("Integrations")
         self.crumb = self.crumbs.root
         self.crumb.clicked.connect(self.back_requested)
-        crumb.addWidget(self.crumbs)
-        crumb.addStretch(1)
-        self.window_actions = crumb
-        outer.addLayout(crumb)
-        header = QHBoxLayout()
-        header.setSpacing(10)
-        header.addWidget(widgets.heading("Teams"))
+        header.addWidget(self.crumbs)
+        header.addWidget(widgets.heading("Teams", "kicker"))
         header.addStretch(1)
         caption = QLabel("Channel")
         caption.setProperty("role", "hint")
@@ -471,6 +468,7 @@ class TeamsView(QWidget):
         self.picker.setObjectName("teamsPicker")
         self.picker.currentIndexChanged.connect(self._picked)
         header.addWidget(self.picker)
+        self.window_actions = header
         outer.addLayout(header)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("teamsTabs")

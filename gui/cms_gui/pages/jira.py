@@ -1935,6 +1935,12 @@ class IssuesTab(QWidget):
         outer.setContentsMargins(0, 14, 0, 0)
         outer.setSpacing(10)
 
+        # Search and filters fold away like the list does: drag the line under
+        # them up and a bold line is left at the top - a click brings them back.
+        self.finder = QWidget()
+        finder = QVBoxLayout(self.finder)
+        finder.setContentsMargins(0, 0, 0, 10)
+        finder.setSpacing(10)
         line = QHBoxLayout()
         line.setSpacing(8)
         self.search = QLineEdit()
@@ -1956,7 +1962,7 @@ class IssuesTab(QWidget):
         self.create.setProperty("variant", "primary")
         icons.button(self.create, "plus", "Create issue", color=theme.BG)
         line.addWidget(self.create)
-        outer.addLayout(line)
+        finder.addLayout(line)
 
         filters = QHBoxLayout()
         filters.setSpacing(8)
@@ -1974,7 +1980,14 @@ class IssuesTab(QWidget):
         for widget in (self.projects, self.statuses, self.mine, self.jql):
             filters.addWidget(widget)
         filters.addStretch(1)
-        outer.addLayout(filters)
+        finder.addLayout(filters)
+        self.fold = widgets.FoldingSplitter(Qt.Vertical)
+        self.fold.setObjectName("jiraFinderFold")
+        self.fold.addWidget(self.finder)
+        body = QWidget()
+        outer_body = QVBoxLayout(body)
+        outer_body.setContentsMargins(0, 0, 0, 0)
+        outer_body.setSpacing(10)
         self.projects.activated.connect(lambda _index: self.search_requested.emit())
         self.statuses.activated.connect(lambda _index: self.search_requested.emit())
         self.mine.toggled.connect(lambda _on: self.search_requested.emit())
@@ -1990,7 +2003,7 @@ class IssuesTab(QWidget):
         self.problem_action.clicked.connect(self._problem_clicked)
         problem_row.addWidget(self.problem_action)
         self.problem.setVisible(False)
-        outer.addWidget(self.problem)
+        outer_body.addWidget(self.problem)
 
         self.splitter = widgets.FoldingSplitter(Qt.Horizontal)
         self.splitter.setObjectName("jiraSplitter")
@@ -2063,7 +2076,16 @@ class IssuesTab(QWidget):
         # issue does not: it is what the list is for.
         self.splitter.setCollapsible(0, True)
         self.splitter.setCollapsible(1, False)
-        outer.addWidget(self.splitter, 1)
+        outer_body.addWidget(self.splitter, 1)
+        self.fold.addWidget(body)
+        # Never taller than search and filters need: the line under them only
+        # folds them, it does not make room for nothing.
+        self.finder.setMaximumHeight(self.finder.sizeHint().height())
+        self.fold.setStretchFactor(0, 0)
+        self.fold.setStretchFactor(1, 1)
+        self.fold.setCollapsible(0, True)
+        self.fold.setCollapsible(1, False)
+        outer.addWidget(self.fold, 1)
 
         self.footer = _label("", "muted")
         self.footer.setAlignment(Qt.AlignRight)
@@ -2322,19 +2344,17 @@ class JiraView(QWidget):
         self._reveal = None
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 18, 24, 14)
+        outer.setContentsMargins(16, 8, 16, 8)
         outer.setSpacing(4)
-        crumb = QHBoxLayout()
+        # One compact row, as on Agents: the way back, the page's name, its
+        # state and the connection - the room below is the issues'.
+        header = QHBoxLayout()
+        header.setSpacing(10)
         self.crumbs = widgets.Crumbs("Integrations", "jiraCrumb")
         self.crumb = self.crumbs.root
         self.crumb.clicked.connect(self.back_requested)
-        crumb.addWidget(self.crumbs)
-        crumb.addStretch(1)
-        self.window_actions = crumb
-        outer.addLayout(crumb)
-        header = QHBoxLayout()
-        header.setSpacing(10)
-        header.addWidget(widgets.heading("Jira"))
+        header.addWidget(self.crumbs)
+        header.addWidget(widgets.heading("Jira", "kicker"))
         self.tag = widgets.Tag("", "neutral")
         header.addWidget(self.tag, 0, Qt.AlignVCenter)
         header.addStretch(1)
@@ -2347,6 +2367,7 @@ class JiraView(QWidget):
         self.picker.setAccessibleName("Connection")
         self.picker.activated.connect(self._connection_picked)
         header.addWidget(self.picker)
+        self.window_actions = header
         outer.addLayout(header)
 
         self.tabs = QTabWidget()
@@ -2367,6 +2388,7 @@ class JiraView(QWidget):
         self.issues.splitter.remember_in(settings, "integrations/jira")
         if settings.splitter("integrations/jira"):
             self.issues._across = self.issues.splitter.sizes()
+        self.issues.fold.remember_in(settings, "integrations/jira/finder")
 
         self.issues.search_requested.connect(self.search)
         self.issues.more_requested.connect(self.load_more)

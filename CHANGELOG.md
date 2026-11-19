@@ -17,6 +17,14 @@ app-agnostic, since that will break things on purpose.
 ## [Unreleased]
 
 ### Fixed
+- An approved Jira change on a large issue is reported as done. The issue
+  sent back after a comment, edit or transition carried its HTML and editor
+  documents and outgrew the 64 KB the execution journal keeps, so the change
+  was made in Jira while the agent was told `invalid_output` and could make it
+  again. Writes now return the issue as text, like reads (ADR-014). And any
+  success that still does not fit stays a success, keeping its plain fields
+  and naming the rest under `omitted`. `invalid_output` now means only a result
+  that breaks its schema or is not JSON.
 - Agent conversations build long histories in batches and lay out their rows
   together, keeping navigation responsive while loading the whole conversation.
   Superseded reads are canceled, returning to the current chat cancels a pending
@@ -45,6 +53,11 @@ app-agnostic, since that will break things on purpose.
   only drop to a second line when the chat is too narrow.
 
 ### Changed
+- The Jira and Teams pages have a compact header like Agents: the way back,
+  the page name and its picker (with Jira's connection state) share one row.
+- Jira's search and filters fold away like the issue list: drag the line under
+  them up, and click the bold line left at the top to bring them back. The
+  page remembers the choice.
 - Commands an agent runs show as a block of their own, with **In:** (the
   command line) and **Out:** (what it printed, or why it did not run).
 - Code in an agent's answers is framed, monospaced and roughly highlighted:

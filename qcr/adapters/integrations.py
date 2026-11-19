@@ -266,7 +266,7 @@ class WriteInvoker:
             job.fail("failed", WRITE_ERRORS["failed"])
             return
         if prepared["noop"] is not None:
-            job.succeed(prepared["noop"])
+            job.succeed(text_only(prepared["noop"]))
             return
         if self._level(job, target) == "post":
             # The connection lets this kind of caller write without asking (D5).
@@ -334,7 +334,9 @@ class WriteInvoker:
             log.exception("writing %s failed", job.capability.capability_id)
             job.fail("failed", WRITE_ERRORS["failed"])
             return
-        job.succeed(result)
+        # The issue after the change, as a read gives it (ADR-014): with its
+        # HTML and editor documents a large one was over the journal's limit.
+        job.succeed(text_only(result))
 
     def cancel(self, job):
         """Canceled or out of time: a write still waiting is dropped. One

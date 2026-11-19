@@ -239,6 +239,16 @@ def test_an_unusable_result_or_a_failed_start_is_a_failure_not_a_success(world):
     assert second["state"] == "failed" and second["error"]["code"] == "dispatch_failed"
 
 
+def test_a_success_larger_than_the_journal_keeps_is_still_a_success(world):
+    # The owner made its change (a Jira comment was posted); calling that a
+    # failure invites the agent to make it again.
+    big = "x" * (70 * 1024)
+    world.invoker.on_start = lambda job: job.succeed({"service_status": big})
+    first = invoke(world)
+    assert first["state"] == "succeeded", first
+    assert first["output"] == {"omitted": ["service_status"]}
+
+
 def test_a_journal_that_cannot_be_written_means_the_owner_is_never_asked(world, monkeypatch):
     def unavailable(*args, **kwargs):
         from qcr.executions import ExecutionError
