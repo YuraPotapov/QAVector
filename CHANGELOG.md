@@ -16,6 +16,8 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.76] - 2026-11-19
+
 ### Fixed
 - An approved Jira change on a large issue is reported as done. The issue
   sent back after a comment, edit or transition carried its HTML and editor
