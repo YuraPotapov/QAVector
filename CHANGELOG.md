@@ -16,6 +16,13 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.77] - 2026-11-19
+
+### Changed
+- Agent chats no longer track what a turn changed in the folder. The folder
+  was snapshot before and after every turn, which cost time; the Changes view
+  and its logic stay and come back with `QAVECTOR_TRACK_CHANGES=1`.
+
 ## [0.16.76] - 2026-11-19
 
 ### Fixed
