@@ -16,6 +16,12 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.79] - 2026-11-20
+
+### Fixed
+- Claude chats now receive automatic replies from background tasks in the same
+  turn. The chat shows task completion or failure, and counts usage across replies.
+
 ## [0.16.78] - 2026-11-19
 
 ### Fixed

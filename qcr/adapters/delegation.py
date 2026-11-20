@@ -830,7 +830,7 @@ class Delegation:
             raise QCRError("source_unavailable", "The secrets store could not be read to check the task.")
 
     def _launch(self, job, context, work=None):
-        stop = threading.Event()
+        stop = runner.TurnStop()
         thread = threading.Thread(target=work or self._run, args=(job, context, stop), daemon=True)
         with self._lock:
             if self._closed:

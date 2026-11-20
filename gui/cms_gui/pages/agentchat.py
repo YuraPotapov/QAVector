@@ -609,6 +609,17 @@ class ChatFeed(QScrollArea):
                 {"kind": "thinking", "title": "Thinking", "detail": event.get("text") or ""}))
         elif kind == "text":
             self._answer(event.get("text"))
+        elif kind == "background.waiting":
+            text = str(event.get("text") or "").strip()
+            if text and not _repeats(text, self._last_text, self._said):
+                self._answer(text)
+            self._add("background", stages.StageRow({"kind": "tool", "title": "Waiting for background tasks",
+                                                     "detail": "Active: %s" % event["count"]}))
+        elif kind == "background.notification":
+            status = event.get("status") or "updated"
+            self._add("background", stages.StageRow({
+                "kind": "caution" if status in ("failed", "stopped") else "result",
+                "title": "Background task %s" % status, "detail": event.get("summary") or ""}))
         elif kind == "tool.started":
             stage = {"kind": "tool", "title": event.get("title") or event.get("name") or "Tool",
                      "detail": event.get("detail") or "", "status": "running"}
@@ -1050,6 +1061,7 @@ class Composer(QFrame):
         # page read as a stopped one. A breathing dot and how long the turn
         # has taken, quiet beside what the turn runs with.
         self._working_since = None
+        self._background_wait = False
         self.working_dot = widgets.PulseDot()
         self.working_dot.setToolTip("The agent is working on this turn")
         self.working = QLabel()
@@ -1577,10 +1589,11 @@ class Composer(QFrame):
                 self.others.set_current(self.others.current(), notify=False)
 
     # -- writing ----------------------------------------------------------------
-    def set_running(self, running, since=None):
+    def set_running(self, running, since=None, background=False):
         """``since``: when the turn began, on ``time.monotonic()``'s clock -
         what "Working" counts from; now, when not said."""
         running = bool(running)
+        self._background_wait = running and background
         if running:
             self._working_since = since if since is not None else (
                 self._working_since or time.monotonic())
@@ -1605,13 +1618,16 @@ class Composer(QFrame):
         if self._working_since is None:
             self.working.setText("")
             return
+        if self._background_wait:
+            self.working.setText("Waiting for background tasks")
+            return
         took = took_text(self._working_since, time.monotonic())
         self.working.setText("Working · %s  ·" % took)
 
     def _animate(self):
         """The dot breathes and the clock runs only while they can be seen:
         an animation nobody sees is a timer waking the process for nothing."""
-        on = self._working_since is not None and self.isVisible()
+        on = self._working_since is not None and self.isVisible() and not self._background_wait
         if on:
             self.working_dot.start()
             if not self._working_clock.isActive():
@@ -1792,6 +1808,7 @@ class ChatTab(QWidget):
         self.connections = []
         self.current = None             # the conversation that is open, or None
         self.turns = {}                 # session id -> the turn being taken
+        self._background_waits = set()
         self._turn_began = {}           # session id -> when it began (monotonic)
         self._sending = {}              # session id -> what is being handed over
         self._queued = {}               # session id -> what waits for the agent
@@ -2249,7 +2266,7 @@ class ChatTab(QWidget):
             started = (turns[-1].get("started") if turns else None) or self.current.get("updated")
             if isinstance(started, (int, float)):
                 since = time.monotonic() - max(0, time.time() - started)
-        self.composer.set_running(self._key() in self.turns or external, since)
+        self.composer.set_running(self._key() in self.turns or external, since, self._key() in self._background_waits)
         self.composer.stop.setEnabled(self._key() not in self._stopping or
                                       self._key() in self._redirecting)
         self.composer.interrupt.setEnabled(self._key() not in self._stopping)
@@ -2474,6 +2491,8 @@ class ChatTab(QWidget):
             cancel=cancel), ready)
 
     def _poll_changes(self):
+        if self._key() in self._background_waits:
+            return
         session = self.current or {}
         # An open whole-session diff already polls; its answer also updates
         # the button, so do not snapshot the folder a second time.
@@ -2799,6 +2818,15 @@ class ChatTab(QWidget):
             self.changes_dialog.load(refresh=True)
 
     def _heard(self, session_id, event):
+        kind = event.get("type")
+        if kind == "background.waiting":
+            self._background_waits.add(session_id)
+            if self._showing(session_id):
+                self._sync()
+        elif session_id in self._background_waits and kind in ("thinking", "text", "completed", "failed", "stopped"):
+            self._background_waits.discard(session_id)
+            if self._showing(session_id):
+                self._sync()
         if self._reading is not None and self._reading[0] == session_id:
             self._reading[1].append(event)
         if event.get("type") in ("completed", "failed", "stopped"):
@@ -2817,6 +2845,7 @@ class ChatTab(QWidget):
     def _answered(self, session_id, answer):
         self.conversation_changed.emit(session_id)
         self.read_budget(session_id)             # what it has cost now, against its budget
+        self._background_waits.discard(session_id)
         turn = self.turns.pop(session_id, None)
         self._turn_began.pop(session_id, None)
         if turn is not None:

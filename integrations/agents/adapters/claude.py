@@ -690,7 +690,7 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
     reads. Without it, as ever, no MCP server at all.
     """
     from qavector_agent_claude.command import tool_list
-    argv = [binary, "-p", "--output-format", "stream-json", "--verbose"]
+    argv = [binary, "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json"]
     tools = TOOLS["read" if plan else mode] + (("Skill",) if skills_dir else ())
     argv += ["--tools", ",".join(tools)]
     access = qavector if isinstance(qavector, dict) and qavector.get("socket") and qavector.get("token_file") \
@@ -717,6 +717,12 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
     if session:
         argv += ["--resume", session] if resume else ["--session-id", session]
     return argv
+
+
+def stream_message(message):
+    """One complete message, readable by the CLI while its input remains open."""
+    return json.dumps({"type": "user", "message": {"role": "user", "content": message}},
+                      ensure_ascii=False) + "\n"
 
 
 def turn_env(env):
@@ -810,6 +816,11 @@ def events(line):
     if kind in SKIPPED_TYPES or event.get("subtype") in SKIPPED_SUBTYPES:
         return []
     if kind == "system":
+        if event.get("subtype") == "background_tasks_changed" and isinstance(event.get("tasks"), list):
+            return [{"type": "background.tasks", "count": len(event["tasks"])}]
+        if event.get("subtype") == "task_notification":
+            return [{"type": "background.notification", "id": event.get("task_id"),
+                     "status": event.get("status"), "summary": event.get("summary") or ""}]
         if event.get("subtype") == "permission_denied":
             # Said apart from the call's own result, whose text reads as a
             # question ("requires approval") nobody in a turn can answer.

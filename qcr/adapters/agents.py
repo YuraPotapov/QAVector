@@ -156,7 +156,7 @@ class AgentRuntime:
         return dict(asdict(task), execution=execution)
 
     def start(self, job):
-        stop = threading.Event()
+        stop = runner.TurnStop()
         with self._lock:
             if self._closed:
                 job.fail("source_unavailable", "The agent runtime is closed.")

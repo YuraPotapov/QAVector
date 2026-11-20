@@ -491,13 +491,12 @@ def _send(call):
     """One turn, printed as it happens. SIGTERM - how a page's Stop ends this
     process - stops the agent, and the turn is still recorded and answered."""
     import signal
-    import threading
     from integrations.agents import runner
     session_id = _one(call, "send")
     if not call.source:
         raise Usage("send needs --from=FILE with the message.")
     document = _document(call.source)
-    stop = threading.Event()
+    stop = runner.TurnStop()
     listening = [True]
 
     def emit(event):

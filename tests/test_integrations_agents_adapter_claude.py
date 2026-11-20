@@ -187,7 +187,7 @@ def test_without_a_caller_json_is_just_what_was_said():
 # ------------------------------------------------------------ a turn's command
 def test_a_first_turn_names_the_conversation_and_a_later_one_continues_it():
     first = claude.turn_argv("/bin/claude", "read", session="abc")
-    assert first == ["/bin/claude", "-p", "--output-format", "stream-json", "--verbose",
+    assert first == ["/bin/claude", "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
                      "--tools", "Read,Glob,Grep", "--allowedTools", "Read Glob Grep",
                      "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                      "--session-id", "abc"]

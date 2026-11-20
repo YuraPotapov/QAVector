@@ -513,6 +513,27 @@ def test_a_breathing_dot_and_the_turn_s_time_say_the_agent_is_working(make, monk
     assert composer.working_text() == "" and not composer._working_clock.isActive()
 
 
+def test_background_wait_is_idle_and_keeps_the_next_message_queued(make):
+    core = FakeCore()
+    chat = make(core).agents.chat
+    _say(chat, QUESTION)
+    turn = FakeTurn.made[0]
+    turn.say({"type": "background.waiting", "count": 1, "text": "Started"})
+    composer = chat.composer
+    assert composer.working_text() == "Waiting for background tasks"
+    assert not composer.working_dot.running() and not composer._working_clock.isActive()
+    reads = core.asked().count("changes")
+    chat._poll_changes()
+    assert core.asked().count("changes") == reads
+    _say(chat, "What next?")
+    assert len(FakeTurn.made) == 1 and composer.send_button.text() == "Queue"
+    turn.say({"type": "text", "text": "Finished in the background."})
+    assert composer.working_dot.running()
+    turn.say({"type": "completed", "text": "Finished in the background."})
+    turn.finish()
+    assert len(FakeTurn.made) == 2
+
+
 def test_enter_sends_and_shift_enter_starts_a_line(make):
     chat = make(FakeCore()).agents.chat
     box = chat.composer.text
@@ -1794,3 +1815,14 @@ def test_code_an_agent_writes_reads_as_code_in_a_frame_of_its_own(qapp):
 def test_an_unlabelled_block_is_guessed_from_its_first_line(first, language):
     from cms_gui import codeblocks
     assert codeblocks.guess(["", first]) == language
+
+def test_background_answers_stay_in_order_with_one_finished_row(qapp):
+    feed = ChatFeed()
+    feed.load([{"type": "text", "text": "Started"},
+               {"type": "background.waiting", "text": "Started", "count": 1},
+               {"type": "background.notification", "status": "failed", "summary": "exit code 3"},
+               {"type": "text", "text": "The command failed."},
+               {"type": "completed", "text": "The command failed."}])
+    assert [row.stage["title"] for kind, row in feed._rows if kind in ("background", "end")] == [
+        "Waiting for background tasks", "Background task failed", "Finished"]
+    assert len(feed._rows) == 5

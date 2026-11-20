@@ -39,7 +39,8 @@ def say(payload):
 
 
 session = value("--session-id") or value("--resume")
-message = sys.stdin.read()
+message = (json.loads(sys.stdin.readline())["message"]["content"]
+           if "--input-format" in args else sys.stdin.read())
 log = os.environ.get("FAKE_AGENT_LOG")
 COST = 0.0125                               # what one turn costs
 USAGE = {"input_tokens": 5, "cache_read_input_tokens": 1000,
@@ -54,6 +55,32 @@ if log:
     with open(log, encoding="utf-8") as handle:
         taken = sum(1 for line in handle if session and session in json.loads(line)["argv"])
 say({"type": "system", "subtype": "init", "model": "fake-model", "session_id": session})
+if message.startswith("BACKGROUND"):
+    import select
+    def background(ids):
+        say({"type": "system", "subtype": "background_tasks_changed",
+             "tasks": [{"task_id": key, "task_type": "local_bash"} for key in ids]})
+
+    def result(text, count):
+        say({"type": "result", "result": text, "session_id": session, "num_turns": 2,
+             "total_cost_usd": COST * (taken + count), "usage": USAGE})
+
+    background(["a", "b"])
+    result("Started both tasks", 0)
+    if "STOP" in message:
+        time.sleep(30)
+    if "LOST" in message:
+        sys.exit(0)
+    background(["b"])
+    # The second task still needs its process. EOF here is premature.
+    assert not select.select([sys.stdin], [], [], 0.1)[0]
+    background([])
+    assert select.select([sys.stdin], [], [], 3)[0] and sys.stdin.read() == ""
+    status = "failed" if "FAIL" in message else "completed"
+    say({"type": "system", "subtype": "task_notification", "task_id": "b",
+         "status": status, "summary": "exit code 3" if status == "failed" else "exit code 0"})
+    result("The task " + status, 1)
+    sys.exit(0)
 if "CRASH" in message:
     sys.stderr.write("boom: something broke\n")
     sys.exit(3)

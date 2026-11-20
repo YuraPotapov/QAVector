@@ -47,6 +47,17 @@ STOP_GRACE = 5.0
 ERROR_CHARS = 400
 
 
+class TurnStop(threading.Event):
+    """Wake the process watcher on cancellation or natural completion of this turn."""
+    def __init__(self):
+        super().__init__()
+        self.wake = threading.Event()
+
+    def set(self):
+        super().set()
+        self.wake.set()
+
+
 class Refused(Exception):
     """A turn that was not started; ``kind`` is what a page acts on.
 
@@ -229,7 +240,7 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     """
     message = str(message or "")
     emit = emit or (lambda event: None)
-    stop = stop or threading.Event()
+    stop = stop or TurnStop()
     chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
               "skills_root": skills_root, "attachments": attachments if attachments is not None else [],
               "qavector": qavector, "trigger": trigger if trigger in TRIGGERS else None}
@@ -491,6 +502,29 @@ def _keep(path, text):
         handle.write(text if text.endswith("\n") else text + "\n")
 
 
+def _close_input(process):
+    try:
+        process.stdin.close()
+    except BrokenPipeError:
+        pass  # The provider can exit with an error before reading the prompt.
+
+
+def _collect_result(outcome, event):
+    """Multiple Claude results share one session cost; their usage and steps add up."""
+    if "steps" in event:
+        event["steps"] += outcome["steps"] or 0
+    if "tokens" in event:
+        tokens = dict(outcome["tokens"] or {})
+        for key, count in event["tokens"].items():
+            tokens[key] = tokens.get(key, 0) + count
+        event["tokens"] = tokens
+    for key in ("steps", "tokens", "cost_usd", "cost_total_usd", "context"):
+        if key in event:
+            outcome[key] = event[key]
+        elif outcome[key] is not None:
+            event[key] = outcome[key]
+
+
 def _run(adapter, argv, folder, effective, seen, message, where, record, emit, stop,
          cost_before=None):
     """Run the CLI once and read it to the end. Never raises for the CLI's
@@ -519,29 +553,43 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
             return outcome
 
         finished = threading.Event()
+        if isinstance(stop, TurnStop):
+            stop.wake.clear()
+        stream_message = getattr(adapter, "stream_message", None)
 
         def feed():
             # On a thread of its own: a long message fills the pipe, and the
             # CLI may write before it has read all of it.
             try:
-                process.stdin.write(message.encode("utf-8"))
-                process.stdin.close()
+                payload = stream_message(message) if stream_message else message
+                process.stdin.write(payload.encode("utf-8"))
+                if stream_message:
+                    process.stdin.flush()
+                else:
+                    process.stdin.close()
             except (OSError, ValueError):
                 pass                    # it ended without reading; the stream says why
 
         def watch():
-            while not finished.wait(0.1):
-                if stop.is_set():
-                    _signal(process, hard=False)
-                    if not finished.wait(STOP_GRACE):
-                        _signal(process, hard=True)
-                    return
+            if isinstance(stop, TurnStop):
+                if not stop.is_set():
+                    stop.wake.wait()
+            else:
+                # Direct callers may still supply a standard threading.Event.
+                while not stop.is_set() and not finished.wait(0.1):
+                    pass
+            if stop.is_set() and not finished.is_set():
+                _signal(process, hard=False)
+                if not finished.wait(STOP_GRACE):
+                    _signal(process, hard=True)
 
         threads = [threading.Thread(target=feed, daemon=True),
                    threading.Thread(target=watch, daemon=True)]
         for thread in threads:
             thread.start()
         reader = Reader(adapter, cost_before=cost_before)
+        background_count = 0
+        awaiting_reply = False
         try:
             for raw in process.stdout:
                 out_file.write(raw)
@@ -549,14 +597,23 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                 for event in reader.events(raw.decode("utf-8", "replace")):
                     if event.get("provider_session"):
                         outcome["provider_session"] = event["provider_session"]
+                    if event["type"] == "background.tasks":
+                        background_count = event["count"]
+                        if awaiting_reply and not background_count:
+                            _close_input(process)
+                        continue
                     if event["type"] in (sessions.COMPLETED, sessions.FAILED):
-                        outcome.update(state=event["type"], reported=True,
-                                       error=event.get("error", ""),
-                                       cost_usd=event.get("cost_usd"),
-                                       cost_total_usd=event.get("cost_total_usd"),
-                                       steps=event.get("steps"),
-                                       tokens=event.get("tokens"),
-                                       context=event.get("context"))
+                        _collect_result(outcome, event)
+                        if awaiting_reply and stop.is_set():
+                            continue  # stop owns the outcome, even if the CLI replies during shutdown
+                        outcome.update(state=event["type"], reported=True, error=event.get("error", ""))
+                        awaiting_reply = bool(background_count and event["type"] == sessions.COMPLETED)
+                        if awaiting_reply:
+                            emit(record.add({"type": "background.waiting", "count": background_count,
+                                             "text": event.get("text") or ""}))
+                            continue
+                        if stream_message:
+                            _close_input(process)
                         # Said once what the turn changed is kept: the end
                         # is the last thing a turn says.
                         outcome["end"] = event
@@ -567,11 +624,19 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
             code = process.wait()
         finally:
             finished.set()
+            if isinstance(stop, TurnStop):
+                stop.wake.set()
             if process.poll() is None:
                 _signal(process, hard=True)
                 process.wait()
             for thread in threads:
                 thread.join(STOP_GRACE + 1)
+            _close_input(process)
+    if awaiting_reply:
+        outcome.update(state=sessions.STOPPED if stop.is_set() else sessions.FAILED,
+                       error="" if stop.is_set() else "The agent exited before its background follow-up arrived.")
+        outcome.pop("end", None)
+        return outcome
     if outcome["reported"] and outcome["state"] == sessions.COMPLETED and code != 0:
         outcome.update(state=sessions.FAILED, error="The agent process exited with code %s after its result." % code)
         outcome["end"] = dict(outcome.get("end") or {}, type=sessions.FAILED, error=outcome["error"])

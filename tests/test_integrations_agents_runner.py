@@ -115,6 +115,46 @@ def test_changes_command_sees_files_before_the_running_turn_finishes(world):
     assert not final.get("live") and final["added"] == 1
 
 
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_background_reply_keeps_one_turn_and_counts_each_result_once(world, status):
+    session = world.session()
+    world.send(session, "first turn")
+    message = "BACKGROUND FAIL" if status == "failed" else "BACKGROUND"
+    answer, events = world.send(session, message)
+    assert len(starts(world.log)) == 2
+    assert answer["turn"]["n"] == 2 and answer["turn"]["state"] == "completed"
+    assert [(e["text"], e["count"]) for e in events if e["type"] == "background.waiting"] == [
+        ("Started both tasks", 2)]
+    assert [e["status"] for e in events if e["type"] == "background.notification"] == [status]
+    assert [e["type"] for e in events].count("completed") == 1
+    end = events[-1]
+    assert end["text"] == "The task " + status and end["steps"] == 4
+    assert end["cost_usd"] == 0.025 and end["cost_total_usd"] == 0.0375
+    assert end["tokens"]["output"] == answer["turn"]["tokens"]["output"] == 60
+    assert end["provider_session"] == answer["session"]["provider_session"]
+
+
+@pytest.mark.parametrize("action, state", [("STOP", "stopped"), ("LOST", "failed")])
+def test_background_turn_cannot_succeed_on_its_intermediate_answer(world, action, state):
+    session = world.session()
+    stop = runner.TurnStop()
+    events = []
+
+    def receive(event):
+        events.append(event)
+        if event["type"] == "background.waiting":
+            assert sessions.held(world.root, session["id"])
+            if action == "STOP":
+                stop.set()
+
+    answer = runner.send(world.root, session["id"], "BACKGROUND " + action, agents_path=world.agents,
+                         emit=receive, stop=stop)
+    assert events[-1]["type"] == answer["turn"]["state"] == state
+    assert not any(e["type"] == "completed" for e in events)
+    assert answer["turn"]["cost_usd"] == 0.0125
+    assert not sessions.held(world.root, session["id"])
+
+
 def test_a_turn_is_said_answered_and_all_of_it_kept(world):
     session = world.session()
     answer, seen = world.send(session, "Why does the login test fail?")
