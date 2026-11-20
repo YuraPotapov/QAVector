@@ -52,7 +52,9 @@ INTERRUPT_GRACE = 3.0
 #: Codex features a QAVector turn never has, whatever the user's configuration
 #: says: it ran with ``exec --ignore-user-config`` before, and none of these
 #: belong in a turn whose access QAVector decides.
-FEATURES_OFF = ("plugins", "apps", "computer_use", "browser_use", "in_app_browser",
+# Provider-native children run outside the QAVector approval and budget workflow.
+NATIVE_AGENTS = ("multi_agent", "multi_agent_v2", "multi_agent_v2_dynamic_tools")
+FEATURES_OFF = NATIVE_AGENTS + ("plugins", "apps", "computer_use", "browser_use", "in_app_browser",
                 "image_generation", "hooks", "memories")
 
 #: The name the QAVector MCP server goes by in a turn.

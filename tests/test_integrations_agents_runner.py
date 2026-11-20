@@ -68,6 +68,28 @@ def world(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ a turn taken
+def test_attached_task_refs_resolve_at_first_send_and_remain_off_the_transcript(world):
+    refs = ["jira:team:QA-139", "jira:team:QA-140"]
+    session = world.session(source={"ref": refs[0], "task_refs": refs}, plan=True)
+    description = "full description " * 1000
+    def read_tasks(attached):
+        return [{"ref": ref, "description": description} for ref in attached]
+
+    answer, events = world.send(session, "", read_tasks=read_tasks)
+    assert answer["turn"]["state"] == "completed"
+    user = next(event for event in events if event["type"] == "user")
+    assert user["text"] == "" and user["task_refs"] == refs
+    assert description not in json.dumps(events)
+    with open(world.turn_file(session, 1, "prompt.md")) as handle:
+        prompt = handle.read()
+    path = os.path.join(sessions.directory(world.root, session["id"]), "attachments", "tasks.json")
+    assert path in prompt and all(ref in prompt for ref in refs) and description not in prompt
+    with open(path) as handle:
+        assert json.load(handle) == read_tasks(refs)
+    with pytest.raises(runner.Refused, match="nothing to send"):
+        world.send(session, "")
+
+
 def test_changes_command_sees_files_before_the_running_turn_finishes(world):
     from types import SimpleNamespace
     from integrations.agents import cli as agent_cli

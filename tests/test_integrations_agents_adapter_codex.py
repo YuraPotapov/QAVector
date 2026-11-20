@@ -63,7 +63,8 @@ def test_server_argv_switches_off_user_extensions_and_requires_qavector():
     argv = codex_turn.server_argv("codex", ["/core", "--qcr-mcp"], ["node_repl"])
     assert argv[:2] == ["codex", "app-server"]
     joined = " ".join(argv)
-    for feature in ("plugins", "apps", "computer_use", "browser_use", "hooks"):
+    for feature in ("plugins", "apps", "computer_use", "browser_use", "hooks",
+                    "multi_agent", "multi_agent_v2", "multi_agent_v2_dynamic_tools"):
         assert "features.%s=false" % feature in joined
     assert "mcp_servers.node_repl.enabled=false" in argv
     assert ('mcp_servers.qavector={command="/core",args=["--qcr-mcp"],required=true,'
@@ -85,6 +86,7 @@ def test_exec_fallback_keeps_the_old_command_and_its_limits(monkeypatch):
     monkeypatch.setenv(codex.TRANSPORT_ENV, "exec")
     argv = codex.turn_argv("codex", "full", "chosen-model", "high", session="thread", resume=True,
                            qavector={"socket": "/tmp/socket", "token_file": "/tmp/token"})
+    assert all("features.%s=false" % name in argv for name in codex_turn.NATIVE_AGENTS)
     assert argv[-3:] == ["resume", "thread", "-"] and "--ignore-user-config" in argv
     assert 'sandbox_mode="workspace-write"' in argv and 'approval_policy="never"' in argv
     assert any("required=true" in arg and "/tmp/token" in arg for arg in argv)

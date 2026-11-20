@@ -92,7 +92,7 @@ if args[0] == "app-server":
                               capture_output=True, text=True, timeout=10)
         result = json.loads(done.stdout.splitlines()[1])["result"]
         return None if result.get("isError") else result["content"][0]["text"]
-    def mcp_delegate():
+    def mcp_delegate(to_codex=False):
         import subprocess
         spec = next(arg for arg in args if arg.startswith("mcp_servers.qavector="))
         prefix = "mcp_servers.qavector={command="
@@ -108,7 +108,7 @@ if args[0] == "app-server":
             reply = call(ident, "tools/call", {"name": name, "arguments": arguments})
             return json.loads(reply["result"]["content"][0]["text"])
         call(1, "initialize", {})
-        started = tool(2, "qavector_invoke", capability="agents.claude.delegate",
+        started = tool(2, "qavector_invoke", capability="agents.codex.delegate" if to_codex else "agents.claude.delegate",
                        input={"goal": "Say hello", "acceptance_criteria": ["it says hello"]})
         if not started.get("ok"):
             server.stdin.close()
@@ -119,6 +119,14 @@ if args[0] == "app-server":
                 break
             execution = tool(ident, "qavector_wait", execution_id=execution["execution_id"],
                              timeout_seconds=1)["execution"]
+        if to_codex and execution["state"] == "succeeded":
+            execution = tool(40, "qavector_invoke", capability="agents.tasks.reply",
+                             input={"task": execution["execution_id"], "answer": "Review the follow-up."})["execution"]
+            for ident in range(41, 80):
+                if execution["state"] in ("succeeded", "failed", "canceled", "timed_out"):
+                    break
+                execution = tool(ident, "qavector_wait", execution_id=execution["execution_id"],
+                                 timeout_seconds=1)["execution"]
         server.stdin.close()
         server.wait(timeout=10)
         return "delegated %s: %s" % (execution["state"], (execution.get("output") or {}).get("answer", ""))
@@ -203,7 +211,7 @@ if args[0] == "app-server":
                 say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn, "item": dict(
                     item, status="completed" if applied else "declined")}})
             if "MCP_DELEGATE" in text:
-                said = mcp_delegate()
+                said = mcp_delegate(to_codex="MCP_DELEGATE_CODEX" in text)
                 if said is None:
                     finish(turn, "failed", {"message": "delegation refused"})
                     continue

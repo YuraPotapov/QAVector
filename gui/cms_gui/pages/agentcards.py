@@ -325,6 +325,8 @@ class AgentRequestCard(QFrame):
         column.setSpacing(6)
         title = ("QUESTION FOR %s" if self.request.get("expects_reply") else "MESSAGE TO %s") if message \
             else "TASK FOR %s"
+        if self.request.get("kind") == "follow_up":
+            title = "FOLLOW-UP FOR %s"
         head, self.kind, self.meta = _head(title % target.upper())
         column.addLayout(head)
         self.text = QLabel(self.request.get("body") if message else self.request.get("goal") or "")
@@ -391,7 +393,7 @@ class AgentRequestCard(QFrame):
         # How long it has gone on through answers: counted, for the person to judge.
         self.meta.setText(REQUEST_STATES.get(state, state) + (
             " - %d question%s so far" % (questions, "" if questions == 1 else "s") if questions else ""))
-        self.stop_button.setVisible(state in ("running", "asks") and self.request.get("kind") != "message")
+        self.stop_button.setVisible(state in ("running", "asks") and self.request.get("kind") not in ("message", "follow_up"))
         waiting = state == "waiting"
         ended = state not in ("waiting", "approved", "running", "asks")
         self.deny_button.setVisible(waiting)

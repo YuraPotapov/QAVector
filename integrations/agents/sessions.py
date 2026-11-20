@@ -214,6 +214,12 @@ def normal_source(source):
     for key in ("parent", "by", "role"):
         if str(source.get(key) or "").strip():
             kept[key] = str(source[key]).strip()
+    refs = source.get("task_refs")
+    if isinstance(refs, list):
+        tasks = [ref for ref in refs if isinstance(ref, str) and re.fullmatch(
+            r"jira:[^:\s]+:[A-Za-z][A-Za-z0-9_]*-[0-9]+", ref)]
+        if tasks:
+            kept["task_refs"] = list(dict.fromkeys(tasks))
     # What it was linked to since (ADR-014): an issue it read the details of.
     links = [str(one).strip() for one in source.get("links") or [] if str(one).strip()]
     if links:
@@ -273,7 +279,7 @@ def unlink(root, session_id, ref):
 def refs_of(session):
     """Every ref a conversation has: what it was started for, then its links."""
     source = (session or {}).get("source") or {}
-    found = [source.get("ref")] + list(source.get("links") or [])
+    found = [source.get("ref")] + list(source.get("task_refs") or []) + list(source.get("links") or [])
     return list(dict.fromkeys(one for one in found if one))
 
 

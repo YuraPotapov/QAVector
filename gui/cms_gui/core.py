@@ -392,13 +392,6 @@ class Core:
         return self.integrations("agents", *args, *skills, document=document,
                                  timeout=timeout, cancel=cancel)
 
-    def _agents_flags(self):
-        return ((["--agents-file=" + self.agents_path] if self.agents_path else [])
-                + (["--agent-sessions-dir=" + self.agent_sessions_path]
-                   if self.agent_sessions_path else [])
-                + (["--agent-skills-dir=" + self.agent_skills_path]
-                   if self.agent_skills_path else []))
-
     def agents_argv(self, *args, source=""):
         """The command line of one ``agents`` command, for whoever runs it
         itself: a turn prints a line per event as it happens, so its process is
@@ -407,7 +400,9 @@ class Core:
         ``source`` is the ``--from`` file, which the caller writes and removes.
         """
         return (list(self.prefix) + ["--integrations", "agents"] + list(args)
-                + self._agents_flags() + (["--from=" + source] if source else []))
+                + self.secrets_flag()
+                + (["--agent-skills-dir=" + self.agent_skills_path] if self.agent_skills_path else [])
+                + (["--from=" + source] if source else []))
 
     def qcr_host_argv(self, project_id, store_path):
         """The QCR host's command line: the subcommand first, as the launcher

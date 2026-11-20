@@ -512,7 +512,8 @@ class DelegatePanel(widgets.FloatingPanel):
         folder_row.layout().setStretchFactor(self.folder, 1)
         column.addWidget(folder_row)
         self.text = QPlainTextEdit()
-        self.text.setAccessibleName("Task")
+        self.text.setAccessibleName("Additional instructions")
+        self.text.setPlaceholderText("Additional instructions (optional)")
         self.text.setMinimumHeight(180)
         column.addWidget(self.text, 1)
         self.say_label = QLabel("")
@@ -530,10 +531,8 @@ class DelegatePanel(widgets.FloatingPanel):
         outer.addWidget(body)
         self._folder = ""
 
-    def set_offer(self, key, sessions, connections, chosen, text):
-        """What is offered for ``key``: its conversations, the agents, the
-        choices to begin with - ``connection``, ``folder``, ``mode``, ``plan`` -
-        and the task as it would be said."""
+    def set_offer(self, key, sessions, connections, chosen):
+        """Offer recent conversations and an empty note for a new delegation."""
         self.heading.setText("Delegate %s" % key)
         while self.earlier_rows.count():
             item = self.earlier_rows.takeAt(0)
@@ -563,7 +562,7 @@ class DelegatePanel(widgets.FloatingPanel):
         self.mode.set_current(labels.get(chosen.get("mode"), "Edit"), notify=False)
         self.plan.setChecked(bool(chosen.get("plan", True)))
         self.set_folder(chosen.get("folder") or "")
-        self.text.setPlainText(text)
+        self.text.clear()
         self.say("")
 
     def set_folder(self, folder):
@@ -619,8 +618,5 @@ class DelegatePanel(widgets.FloatingPanel):
             # Never a guess: an agent let loose in the wrong folder is what the
             # choice is there to prevent.
             self.say("Choose the folder the agent works in.")
-            return
-        if not self.text.toPlainText().strip():
-            self.say("Say what the task is.")
             return
         self.delegate_requested.emit(chosen, self.text.toPlainText().strip())

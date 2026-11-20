@@ -273,7 +273,7 @@ class Delegation:
         self._catalog_lock = threading.Lock()
         self._blocked = {}                 # execution id -> (job, context): approved, waiting to start
         self._follow = {}                  # a task that asked -> the execution its answer runs as (ADR-011)
-        self._by_person = {}               # (actor, task) -> who: the next reply is the person's
+        self._by_person = threading.local()  # only the synchronous owner invocation can claim a human reply
         self._stopped = {}                 # a task the person stopped -> by whom: no more answers
         self._budget_holds = {}            # execution id -> (job, context, info, go on): held at a budget
         #: What the delegating conversations handed on, and when to wake them (ADR-009).
@@ -355,9 +355,8 @@ class Delegation:
             WAKE_INPUT, {"type": "object"}, PERMISSION, risk_level="low", timeout_seconds=30, exclusive=False)
         reply = CapabilityDescriptor(
             "agents.tasks.reply", ref, 1,
-            "Continue your delegated task: answer its question or send follow-up work after it finishes "
-            "(such as another review round). Use the latest execution id; its conversation and context "
-            "are resumed. Do not delegate the same work again.",
+            "Answer a delegated task's question or send follow-up work, such as another review. "
+            "Use its latest execution id to resume the same conversation after any required approval.",
             REPLY_INPUT, DELEGATE_OUTPUT, PERMISSION, risk_level="medium", mode="long_running",
             supports_cancel=True, supports_idempotency=True, timeout_seconds=MAX_SECONDS, exclusive=False)
         registrations.append(Registration(ResourceDescriptor(ref, "agents", "Delegated tasks", PERMISSION),
@@ -539,20 +538,33 @@ class Delegation:
                 "name": job.request.get("name") or "", "after": [name for name, _ in context["after"]],
                 "role": (context.get("role") or {}).get("name") or ""}
         if context["others"] == "approve":
-            if not job.dispatched({"approval": "requested"}) or not job.progress("approval.requested", card):
-                with self._lock:
-                    self._pending.pop(job.execution_id, None)
-                return
-            self._notify(dict(card, type="agent_approval", execution_id=job.execution_id,
-                              actor=job.actor_id))
-            return
-        if job.dispatched({"approval": "not_needed"}):
+            self._request_approval(job, card)
+        elif job.dispatched({"approval": "not_needed"}):
             self._within_budget(job, context, lambda: self._start_when_ready(job, context))
+
+    def _request_approval(self, job, card):
+        # The execution input already keeps the full follow-up. Its journal
+        # event has a byte limit; the approval card can show the complete text.
+        summary = dict(card, goal=card["goal"][:GOAL_CHARS])
+        if not job.dispatched({"approval": "requested"}) or not job.progress("approval.requested", summary):
+            self._release_pending(job.execution_id)
+            job.fail("dispatch_failed", "The request for approval could not be recorded.")
+            return
+        self._notify(dict(card, type="agent_approval", execution_id=job.execution_id, actor=job.actor_id))
+
+    def _release_pending(self, execution_id, approved=False):
+        with self._lock:
+            slot = self._pending.pop(execution_id, None)
+            previous = slot[1].get("follow_up_of") if slot else None
+            # Until a reply is accepted, a denial or cancellation leaves the
+            # original turn available for a different answer.
+            if not approved and previous and self._follow.get(previous) == execution_id:
+                self._follow.pop(previous)
+            return slot
 
     def answer(self, execution_id, approved, by=""):
         """The person's word on a delegation that waits for it. False when none waits."""
-        with self._lock:
-            slot = self._pending.pop(execution_id, None)
+        slot = self._release_pending(execution_id, approved)
         if slot is None:
             return False
         job, context = slot
@@ -565,13 +577,15 @@ class Delegation:
         if job.progress("approval.answered", {"approved": True, "by": by}):
             if context.get("kind") == "message":
                 self._deliver(job, context)
+            elif context.get("follow_up_of"):
+                self._start_reply(job, context)
             else:
                 self._within_budget(job, context, lambda: self._start_when_ready(job, context))
         return True
 
     def cancel(self, job):
         with self._lock:
-            waiting = self._pending.pop(job.execution_id, None)
+            waiting = self._release_pending(job.execution_id)
             self._blocked.pop(job.execution_id, None)
             self._budget_holds.pop(job.execution_id, None)
             slot = self._running.get(job.execution_id)
@@ -992,11 +1006,7 @@ class Delegation:
     # -- answers to what a task asks (ADR-011) --------------------------------------
     def person_says(self, actor, task, by, forget=False):
         """The next reply to ``task`` from ``actor`` is the person's (the owner pipe only)."""
-        with self._lock:
-            if forget:
-                self._by_person.pop((actor, task), None)
-            else:
-                self._by_person[(actor, task)] = str(by or "You")[:200]
+        self._by_person.reply = None if forget else (actor, task, str(by or "You")[:200])
 
     def stop(self, task_id, by=""):
         """The person stops a task that goes on through answers: no answer is
@@ -1023,8 +1033,7 @@ class Delegation:
     def _continued(self, task_id, but):
         """The reply that already took ``task_id`` on, by the record - so an
         execution continued before QAVector restarted is not continued twice.
-        A reply refused on its checks never left ``queued``; one that went on
-        was dispatched."""
+        An answer was delivered only after any requested approval."""
         with self._lock:
             if task_id in self._follow:
                 return self._follow[task_id]
@@ -1039,7 +1048,7 @@ class Delegation:
                 events = self.store.events(row["execution_id"], limit=50)
             except Exception:
                 continue
-            if any(one.get("type") == "state" and one.get("state") == "dispatched" for one in events):
+            if any(one.get("type") == "answered" for one in events):
                 return row["execution_id"]
         return None
 
@@ -1051,8 +1060,9 @@ class Delegation:
 
     def _reply(self, job):
         task_id = job.request["task"]
-        with self._lock:
-            by_person = self._by_person.pop((job.actor_id, task_id), None)
+        sender = getattr(self._by_person, "reply", None)
+        by_person = sender[2] if sender and sender[:2] == (job.actor_id, task_id) else None
+        self._by_person.reply = None
         try:
             rule = self._policies.get(job.actor_id)
             if rule is None:
@@ -1110,9 +1120,20 @@ class Delegation:
                 self._follow.pop(task_id, None)
                 job.fail(exc.code, str(exc))
                 return
-        if job.dispatched({"answer_by": "person" if by_person else "agent"}):
-            job.progress("answered", {"task": task_id, "root": root_id, "by": context["by"],
-                                      "answer": context["answer"][:QUESTION_CHARS]})
+            ask = context["others"] == "approve" and not by_person
+            if ask:
+                self._pending[job.execution_id] = (job, context)
+        if ask:
+            self._request_approval(job, {
+                "kind": "follow_up", "target": context["target"], "target_name": context["target_name"],
+                "session": context["parent"], "session_id": context["session_id"], "mode": context["mode"],
+                "goal": context["answer"], "model": context["model"], "effort": context["effort"]})
+        elif job.dispatched({"answer_by": "person" if by_person else "agent"}):
+            self._start_reply(job, context)
+
+    def _start_reply(self, job, context):
+        if job.progress("answered", {"task": context["follow_up_of"], "root": context["root"],
+                                    "by": context["by"], "answer": context["answer"][:QUESTION_CHARS]}):
             self._within_budget(job, context, lambda: self._start_when_ready(job, context))
 
     # -- the workbench: every task handed on, and its history (ADR-012) -------------
@@ -1246,7 +1267,10 @@ class Delegation:
         for event in events:
             kind, payload = event.get("type"), event.get("payload") or {}
             if kind == "approval.requested":
-                made.append({"at": event.get("at"), "kind": "approval", "text": "Waits for the person's approval."})
+                text = "Waits for the person's approval."
+                if payload.get("kind") == "follow_up":
+                    text = "Follow-up awaiting approval: " + str(given.get("answer") or "")
+                made.append({"at": event.get("at"), "kind": "approval", "text": text})
             elif kind == "approval.answered":
                 made.append({"at": event.get("at"), "kind": "approved", "text": "Approved by %s." % (
                     payload.get("by") or "the person")})

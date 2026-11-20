@@ -91,15 +91,15 @@ STREAMS = ("send",)
 #: What a command is handed: its words, its ``--from`` file, the three paths -
 #: the connections, the project's conversations, the skills library - and
 #: ``--to``, the file an export is written into.
-Call = namedtuple("Call", "rest source path sessions skills target",
-                  defaults=("",))
+Call = namedtuple("Call", "rest source path sessions skills target read_tasks",
+                  defaults=("", None))
 
 
 class Usage(Exception):
     """The command line is wrong; the message says how."""
 
 
-def run(words, source="", path=None, sessions_root=None, skills_root=None, target=""):
+def run(words, source="", path=None, sessions_root=None, skills_root=None, target="", read_tasks=None):
     """Answer one command as a payload. Raises :class:`Usage`."""
     if not words:
         raise Usage("agents needs a command.")
@@ -107,7 +107,7 @@ def run(words, source="", path=None, sessions_root=None, skills_root=None, targe
         handler = COMMANDS[words[0]]
     except KeyError:
         raise Usage("Unknown agents command %r." % words[0]) from None
-    return handler(Call(words[1:], source, path, sessions_root, skills_root, target or ""))
+    return handler(Call(words[1:], source, path, sessions_root, skills_root, target or "", read_tasks))
 
 
 def _document(source):
@@ -526,7 +526,7 @@ def _send(call):
                              skills=document.get("skills"), skills_root=call.skills,
                              emit=emit, stop=stop, attachments=document.get("attachments"),
                              plan=document.get("plan"), qavector=document.get("qavector"),
-                             trigger=document.get("trigger"))
+                             trigger=document.get("trigger"), read_tasks=call.read_tasks)
     except runner.Refused as exc:
         return _refusal(exc.kind, str(exc))
     finally:

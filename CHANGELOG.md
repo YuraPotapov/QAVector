@@ -16,6 +16,19 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.78] - 2026-11-19
+
+### Fixed
+- Continue keeps the parent chat in place after viewing a delegated conversation.
+- Ask waits for approval both when an agent delegates and when it sends work
+  back to the same child. Codex routes delegation through QAVector.
+- Dragging the chat sidebar divider reflows the transcript once on release.
+
+### Changed
+- Jira Delegate opens a draft with a linked task beside Plan first and room for
+  optional instructions. On first send, the agent can read the full description
+  of each attached task.
+
 ## [0.16.77] - 2026-11-19
 
 ### Changed

@@ -20,6 +20,7 @@ was waiting goes back into the box rather than after it: a person decides what
 is said next to an agent that just did something unexpected.
 """
 
+import html
 import os
 import time
 from collections import deque
@@ -27,7 +28,7 @@ from collections import deque
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                                QTableWidgetItem, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -118,7 +119,7 @@ class MessageCard(QFrame):
     removed = Signal()
     interrupt_requested = Signal()
 
-    def __init__(self, text, when="", state="", removable=False, attachments=None, who="YOU"):
+    def __init__(self, text, when="", state="", removable=False, attachments=None, who="YOU", task_refs=()):
         super().__init__()
         self.setProperty("role", "message")
         if who != "YOU":
@@ -164,6 +165,10 @@ class MessageCard(QFrame):
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         column.addWidget(self.text)
         self.text.setVisible(bool(self.said))
+        for ref in task_refs or ():
+            tag = widgets.Tag(ref.rsplit(":", 1)[-1], "accent")
+            tag.setToolTip(ref)
+            column.addWidget(tag, 0, Qt.AlignLeft)
         self.files = []
         for one in attachments or []:
             name = one.get("name", "") if isinstance(one, dict) else os.path.basename(one)
@@ -532,7 +537,7 @@ class ChatFeed(QScrollArea):
         if sending:
             document = sending if isinstance(sending, dict) else {"message": sending}
             self._add_waiting(MessageCard(document.get("message"), state="sending",
-                                          attachments=document.get("attachments"),
+                                          attachments=document.get("attachments"), task_refs=document.get("task_refs"),
                                           who=FROM_QAVECTOR if document.get("trigger") else "YOU"))
         for index, text in enumerate(queued or []):
             document = text if isinstance(text, dict) else {"message": text}
@@ -597,7 +602,7 @@ class ChatFeed(QScrollArea):
                     card.settle()
             self._add("you", _Row({"kind": "result"},
                                   MessageCard(event.get("text"), clock_text(event.get("at")),
-                                              attachments=event.get("attachments"),
+                                              attachments=event.get("attachments"), task_refs=event.get("task_refs"),
                                               who=FROM_QAVECTOR if event.get("trigger") else "YOU")))
         elif kind == "thinking":
             self._add("thinking", stages.StageRow(
@@ -815,6 +820,10 @@ class ChatFeed(QScrollArea):
         # the event loop next gets to it, and one taken out before that - a
         # tool's row replaced by its result while a conversation is laid out -
         # would be shown without a parent, a window of its own, until deleted.
+        # Hiding a focused Continue button lets Qt focus another row and
+        # scroll it into view. Keep focus on the feed during row removal.
+        if widget.isAncestorOf(QApplication.focusWidget()):
+            self.setFocus(Qt.OtherFocusReason)
         widget.hide()
         self._column.removeWidget(widget)
         widget.setParent(None)
@@ -997,6 +1006,7 @@ class _FittingScroll(QScrollArea):
 class Composer(QFrame):
     """Whom to ask, where, how much it may do - and the box to ask in."""
 
+    issue_wanted = Signal(str, str)
     submitted = Signal(str)
     interrupt_requested = Signal()
     content_changed = Signal()
@@ -1019,6 +1029,8 @@ class Composer(QFrame):
         self._session = None
         self._restrictions = {}
         self._attachments = []
+        self._task_tags = {}
+        self._task_pending = False
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 8, 12, 8)
         outer.setSpacing(6)
@@ -1669,8 +1681,31 @@ class Composer(QFrame):
         if paths:
             self.add_attachments(paths)
 
+    def set_tasks(self, refs, pending):
+        if list(self._task_tags) != refs:
+            for tag in self._task_tags.values():
+                self.footer.layout().removeWidget(tag)
+                tag.hide()
+                tag.deleteLater()
+            self._task_tags.clear()
+            for ref in refs:
+                _, connection, key = ref.split(":", 2)
+                tag = widgets.Tag('<a href="#">%s</a>' % html.escape(key), "accent")
+                tag.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                tag.setToolTip("Open %s in QAVector" % key)
+                tag.setAccessibleName("Open " + key)
+                tag.linkActivated.connect(lambda _, c=connection, k=key: self.issue_wanted.emit(c, k))
+                self.footer.layout().add_before_stretch(tag)
+                self._task_tags[ref] = tag
+        if self._task_pending != pending:
+            self._task_pending = pending
+            self._sync_send()
+
+    def has_message(self, text):
+        return bool(text.strip() or self._attachments or self._task_pending)
+
     def _sync_send(self):
-        self.send_button.setEnabled(bool(self.draft().strip() or self._attachments))
+        self.send_button.setEnabled(self.has_message(self.draft()))
         self.content_changed.emit()
 
     def say(self, text, bad=False):
@@ -1718,7 +1753,7 @@ class Composer(QFrame):
 
     def send(self):
         text = self.text.toPlainText()
-        if not self.text.isEnabled() or (not text.strip() and not self._attachments):
+        if not self.text.isEnabled() or not self.has_message(text):
             return False
         self.submitted.emit(text)
         return True
@@ -1806,6 +1841,9 @@ class ChatTab(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 6, 0, 0)
         self.splitter = widgets.FoldingSplitter(Qt.Horizontal)
+        # Reflow the transcript once at release. The divider tracks the pointer
+        # without resizing every Markdown document on each mouse move.
+        self.splitter.setOpaqueResize(False)
         outer.addWidget(self.splitter)
 
         # -- the conversations
@@ -1915,6 +1953,7 @@ class ChatTab(QWidget):
         self.feed.setMinimumHeight(FEED_SHORTEST)
         frame.layout().addWidget(self.feed, 1)
         self.composer = Composer()
+        self.composer.issue_wanted.connect(self.issue_wanted)
         self.composer.submitted.connect(self.submit)
         self.composer.interrupt_requested.connect(self.interrupt_submit)
         self.composer.stop_requested.connect(self.stop)
@@ -2192,6 +2231,9 @@ class ChatTab(QWidget):
                                if self.search.searching() else "")
 
     def _sync(self):
+        session = self.current or {}
+        refs = (session.get("source") or {}).get("task_refs") or []
+        self.composer.set_tasks(refs, bool(refs and not session.get("turns") and self._key() not in self.turns))
         chosen = self.current is not None
         self.rename_button.setEnabled(chosen)
         self.delete_button.setEnabled(chosen and self._key() not in self.turns)
@@ -2498,7 +2540,8 @@ class ChatTab(QWidget):
     def _show_links(self, session):
         self.links.clear()
         source = (session or {}).get("source") or {}
-        refs = [one for one in [source.get("ref")] + list(source.get("links") or [])
+        attached = [source.get("ref")] + list(source.get("task_refs") or [])
+        refs = [one for one in attached + list(source.get("links") or [])
                 if one and one.startswith("jira:")]
         refs = list(dict.fromkeys(refs))
         removable = []
@@ -2509,7 +2552,7 @@ class ChatTab(QWidget):
             action.setToolTip("Open %s in Jira." % key)
             action.triggered.connect(lambda _checked=False, c=connection_id, k=key:
                                      self.issue_wanted.emit(c, k))
-            if ref != source.get("ref"):
+            if ref not in attached:
                 removable.append((ref, key))
         if removable:
             self.links.addSeparator()
@@ -2563,7 +2606,7 @@ class ChatTab(QWidget):
             return
         self.composer.say("")
         files = self.composer.attachments()
-        if not text.strip() and not files:
+        if not self.composer.has_message(text):
             return
         if self.current is None:
             self._begin(text, files)
@@ -2681,7 +2724,8 @@ class ChatTab(QWidget):
             folders = [session.get("folder")] + [one for one in self._memory().get("folders")
                                                  or [] if one != session.get("folder")]
             self._remember(folders=folders[:RECENT_FOLDERS])
-            self._fresh.add(session.get("id"))
+            if send:
+                self._fresh.add(session.get("id"))
             self.sessions.insert(0, session)
             self._leave()
             if not send:
@@ -2740,6 +2784,8 @@ class ChatTab(QWidget):
         if self._showing(session_id):
             self._sync_cards()
         self._sending[session_id] = dict(document)
+        if not session.get("turns"):
+            self._sending[session_id]["task_refs"] = (session.get("source") or {}).get("task_refs") or []
         if self._showing(session_id):
             self._waiting()
         self._fill()
@@ -2950,7 +2996,16 @@ class ChatTab(QWidget):
                 self._listed_states[execution.get("execution_id")] = state
                 if state in ("running", "succeeded", "failed", "canceled", "timed_out"):
                     self.load_sessions()
-            self._task_answered(execution)
+            request = self._requests.get(execution.get("execution_id"))
+            awaiting_approval = request and request.get("state") in ("waiting", "denied")
+            if request and state in ("running", "succeeded", "failed", "canceled", "timed_out", "unknown"):
+                error = execution.get("error") or {}
+                request["state"] = "denied" if error.get("code") == "denied" else state
+                request["detail"] = self._request_detail(request, execution.get("output") or {}, error)
+                self._sync_others()
+            if state in ("running", "succeeded") or (state in ("failed", "canceled", "timed_out", "unknown")
+                                                     and not awaiting_approval):
+                self._task_answered(execution)
             return
         if capability.endswith(".message") and execution.get("state") == "succeeded":
             self._refresh_inbox()

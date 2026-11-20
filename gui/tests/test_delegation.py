@@ -16,7 +16,6 @@ from PySide6.QtCore import QSettings, Qt                              # noqa: E4
 from PySide6.QtTest import QTest                                     # noqa: E402
 from PySide6.QtWidgets import QDialog                                # noqa: E402
 
-from cms_gui import delegation                                       # noqa: E402
 from cms_gui.pages.integrations import IntegrationsPage             # noqa: E402
 from cms_gui.settings import Settings                                # noqa: E402
 import test_agents_page as agents_fakes                              # noqa: E402
@@ -75,28 +74,6 @@ def make(qapp, settings, dispose, tmp_path):
     yield build
     for page in pages:
         dispose(page)
-
-
-# -- the words -----------------------------------------------------------------------
-def test_an_issue_is_handed_over_as_its_own_words_and_what_came_before():
-    issue = jira_fakes._issue("QA-139", description_html="<p>Steps</p><ul><li>log in</li></ul>")
-    text = delegation.task_text(issue)
-    assert text.startswith("QA-139: Session expires\nType: Bug · Priority: High · "
-                           "Status: In Progress\nLink: https://qa.example.invalid/browse/QA-139")
-    assert "Steps" in text and "log in" in text and "<p>" not in text
-    earlier = agents_fakes._session("20261110-090000-aaaaaa", "First try", phase="plan",
-                                    updated=1794300000.0)
-    events = [{"type": "user", "text": "Answers to your questions:\n1. Raise?\n   Raise"},
-              {"type": "plan", "text": "# Plan\n1. Guard it."},
-              {"type": "text", "text": "Here is the plan."}]
-    previous = delegation.previous_work("QA-139", [(earlier, events)])
-    assert previous.startswith("Previous work on QA-139, from earlier conversations about it:")
-    assert "- First try (plan ready, " in previous
-    assert "  The latest plan:\n    # Plan\n    1. Guard it." in previous
-    assert "  Answered:\n    1. Raise?\n       Raise" in previous
-    assert "  What the agent said last:\n    Here is the plan." in previous
-    assert delegation.previous_work("QA-139", []) == ""
-    assert delegation.ref_for("work", "QA-1") == "jira:work:QA-1"
 
 
 # -- what an opened issue shows ----------------------------------------------------------
@@ -169,12 +146,14 @@ def test_delegate_prepares_a_chat_draft_and_waits_for_send(make, tmp_path, setti
     panel = bridge.panel
     assert panel.heading.text() == "Delegate QA-139" and panel.earlier.isHidden()
     assert panel.plan.isChecked() and panel.chosen()["folder"] == str(tmp_path)
-    assert panel.text.toPlainText().startswith("QA-139: Session expires")
+    assert panel.text.toPlainText() == ""
+    if edit_before_send:
+        panel.text.setPlainText("Check the login flow.")
     task = panel.text.toPlainText()
     panel.go.click()
     args, document = next(call for call in core.agent_side.calls if call[0][0] == "session-new")
     assert document["source"] == {"label": "Jira QA-139", "detail": "Session expires",
-                                  "ref": REF}
+                                  "ref": REF, "task_refs": [REF]}
     assert (document["plan"], document["folder"], document["title"]) == (
         True, str(tmp_path), "QA-139 · Session expires")
     assert FakeTurn.made == [] and not chat.running()
@@ -194,6 +173,8 @@ def test_delegate_prepares_a_chat_draft_and_waits_for_send(make, tmp_path, setti
     assert chat.composer.draft() == "An unrelated unsent message"
     chat.open_session(session_id)
     assert chat.composer.draft() == task and FakeTurn.made == []
+    assert list(chat.composer._task_tags) == [REF]
+    assert chat.composer.send_button.isEnabled()
     if edit_before_send:
         task += "\n\nCheck the regression first."
         chat.composer.set_draft(task)
@@ -203,8 +184,15 @@ def test_delegate_prepares_a_chat_draft_and_waits_for_send(make, tmp_path, setti
     assert turn.document["plan"] is True and turn.document["message"] == task
     assert chat.composer.draft() == ""
 
+    turn.refuse("task_read", "Could not read the attached Jira task.")
+    assert chat.current["id"] == session_id and chat.composer.draft() == task
+    assert chat.composer.send_button.isEnabled() and list(chat.composer._task_tags) == [REF]
+    chat.composer._task_tags[REF].linkActivated.emit("#")
+    assert page.stack.currentWidget() is page.jira
+    assert page.jira.issues.detail.issue["key"] == "QA-139"
 
-def test_a_new_conversation_starts_from_what_the_earlier_ones_came_to(make):
+
+def test_delegate_offers_earlier_conversations_with_an_empty_input(make):
     earlier = _talk("20261110-090000-aaaaaa", "First try", phase="plan")
     agents = agents_fakes.FakeCore(sessions=[earlier], events={earlier["id"]: [
         {"type": "user", "text": "Plan it", "seq": 1},
@@ -214,8 +202,7 @@ def test_a_new_conversation_starts_from_what_the_earlier_ones_came_to(make):
     bridge.button.click()
     panel = bridge.panel
     assert not panel.earlier.isHidden()
-    assert "Previous work on QA-139" in panel.text.toPlainText()
-    assert "1. Guard it." in panel.text.toPlainText()
+    assert panel.text.toPlainText() == ""
     carried = []
     bridge.open_agents = carried.append
     row = panel.earlier_rows.itemAt(0).widget()

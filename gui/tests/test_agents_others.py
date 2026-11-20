@@ -254,6 +254,23 @@ def test_a_request_waits_for_a_yes_then_follows_its_task(chat):
     assert not card.dismiss_button.isVisibleTo(tab) and tab.feed.kinds() == ["request"]
 
 
+def test_codex_follow_up_has_its_own_approval_in_the_parent_chat(chat):
+    tab, agentchat = chat
+    host = FakeHost()
+    agentchat.ChatTab.qcr_access = host
+    tab._show(dict(SESSION, connection="codex", mode="full"), [], whole=True)
+    tab.agent_request({"execution_id": "reply", "kind": "follow_up", "session": "s-1",
+                       "target_name": "Codex", "session_id": "child", "goal": "Review the fixes", "mode": "read"})
+    card, = _cards(tab, agentchat.agentcards.AgentRequestCard)
+    assert card.kind.text() == "FOLLOW-UP FOR CODEX" and card.text.text() == "Review the fixes"
+    assert card.approve_button.isVisibleTo(tab) and card.deny_button.isVisibleTo(tab)
+    card.deny_button.click()
+    assert host.answers == [("reply", False)]
+    tab.agent_execution({"execution_id": "reply", "capability_id": "agents.tasks.reply", "state": "failed",
+                         "actor_id": "agent:codex/s-1", "error": {"code": "denied", "message": "Denied by you"}})
+    assert card.request["state"] == "denied" and tab.feed.placed("answer") == []
+
+
 def test_a_task_card_says_the_model_and_effort_the_agent_chose(chat):
     tab, agentchat = chat
     agentchat.ChatTab.qcr_access = FakeHost()

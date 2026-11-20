@@ -6,39 +6,18 @@ adds itself to Jira's opened issue through the form's generic slot
 (``JiraView.add_issue_extension``) and talks to agents through the Agents view
 - the chat, the core's ``sessions``, ``session`` and ``changes``.
 
-**One key ties them.** A conversation begun here names the issue in its source:
-``ref`` ``jira:<connection>:<KEY>``. The Agents integration matches it exactly and
-reads nothing into it; this is the only place that writes it or knows what it
-means. Every conversation about the issue is found by it, whoever opened it.
-
-**The conversation is in the chat.** Delegate opens it with an editable draft.
-The person sends it when ready; only then does the agent run. The issue shows
-the record: Agent work, Summary and Changes, read from the project's
-conversations, never from an agent.
-
-**What came before goes along.** A new conversation about an issue starts with
-the issue as its task and, when there were conversations about it before, what
-they decided - the latest plan, the answers given, what the agent said last -
-so a new one does not start from nothing. It is all in the box before it is
-sent, to be cut or changed.
+A delegation attaches the issue's internal Jira reference to a conversation.
+The user can add instructions before sending it. The agent receives a readable
+copy of the attached issue on the first turn. The issue's Agent work, Summary
+and Changes tabs use the same reference to find conversations about it.
 
 Nothing here is a setting of Jira's or of the agents': what it remembers - the
 folder an issue's project was worked on in - is its own.
 """
 
-from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QPushButton
 
-from .pages.agentcards import ANSWERS
-from .pages.agentwords import when_text
-from .pages.delegationtabs import (AgentWorkTab, ChangesTab, DelegatePanel, SummaryTab,
-                                   state_text)
-
-#: How much of each earlier conversation goes into a new one's task.
-PLAN_CHARS, SAID_CHARS, ANSWER_CHARS = 1500, 800, 400
-
-#: How many earlier conversations about the issue are read for it.
-EARLIER = 3
+from .pages.delegationtabs import AgentWorkTab, ChangesTab, DelegatePanel, SummaryTab
 
 #: Where the bridge keeps what it remembers, in the project's integrations state.
 STATE_KEY = "delegation"
@@ -52,70 +31,6 @@ def ref_for(connection_id, key):
 def project_of(issue):
     key = str(issue.get("key") or "")
     return (issue.get("project") or {}).get("key") or (key.split("-")[0] if "-" in key else key)
-
-
-def plain(html):
-    """An issue's description as text: what an agent reads, without markup."""
-    if not html:
-        return ""
-    document = QTextDocument()
-    document.setHtml(html)
-    return document.toPlainText().strip()
-
-
-def _cut(text, limit):
-    text = str(text or "").strip()
-    return text if len(text) <= limit else text[:limit].rstrip() + " [...]"
-
-
-def _indented(text):
-    return "\n".join("    " + line for line in str(text).splitlines())
-
-
-def task_text(issue, previous=""):
-    """The task an issue is handed over as: what it is, its description, and
-    what earlier conversations about it came to."""
-    key = issue.get("key") or ""
-    lines = ["%s: %s" % (key, issue.get("summary") or "")]
-    facts = [(name, issue.get(field)) for name, field in (
-        ("Type", "type"), ("Priority", "priority"), ("Status", "status"))]
-    said = " · ".join("%s: %s" % (name, value) for name, value in facts if value)
-    if said:
-        lines.append(said)
-    if issue.get("url"):
-        lines.append("Link: %s" % issue["url"])
-    description = plain(issue.get("description_html"))
-    if description:
-        lines += ["", description]
-    if previous:
-        lines += ["", previous]
-    return "\n".join(lines)
-
-
-def previous_work(key, conversations):
-    """What earlier conversations about ``key`` came to: ``[(session, events)]``,
-    oldest first. "" when there were none."""
-    if not conversations:
-        return ""
-    lines = ["Previous work on %s, from earlier conversations about it:" % key]
-    for session, events in conversations:
-        plan = next((one.get("text") for one in reversed(events)
-                     if one.get("type") == "plan"), "")
-        answers = next((one.get("text") for one in reversed(events)
-                        if one.get("type") == "user"
-                        and str(one.get("text") or "").startswith(ANSWERS)), "")
-        last = next((one.get("text") for one in reversed(events)
-                     if one.get("type") == "text"), "")
-        lines.append("- %s (%s, %s):" % (session.get("title") or "Untitled",
-                                         state_text(session).lower(),
-                                         when_text(session.get("updated"))))
-        if plan:
-            lines += ["  The latest plan:", _indented(_cut(plan, PLAN_CHARS))]
-        if answers:
-            lines += ["  Answered:", _indented(_cut(answers[len(ANSWERS):], ANSWER_CHARS))]
-        if last:
-            lines += ["  What the agent said last:", _indented(_cut(last, SAID_CHARS))]
-    return "\n".join(lines)
 
 
 class Delegation:
@@ -269,41 +184,16 @@ class Delegation:
             self.panel = DelegatePanel(self.detail)
             self.panel.continue_requested.connect(self._carry_on)
             self.panel.delegate_requested.connect(self.delegate)
-        earlier = [one for one in self.sessions if not one.get("record")]
         if not self.agents.connections:
-            self.agents.list_connections(then=lambda *_: self._offer(earlier))
+            self.agents.list_connections(then=lambda *_: self._offer())
         else:
-            self._offer(earlier)
+            self._offer()
 
-    def _offer(self, earlier):
-        """Read what the latest earlier conversations came to, then offer."""
+    def _offer(self):
         if self.issue is None:
             return
-        issue, wanted = dict(self.issue), list(reversed(earlier[:EARLIER]))
-        read = {}
-
-        def show():
-            previous = previous_work(issue.get("key"), [(one, read.get(one["id"], []))
-                                                        for one in wanted])
-            self.panel.set_offer(issue.get("key"), earlier, self.agents.connections,
-                                 self.defaults(), task_text(issue, previous))
-            self.panel.open_below(self.button)
-
-        if not wanted:
-            show()
-            return
-        left = [len(wanted)]
-        for one in wanted:
-            def done(payload, sid=one["id"]):
-                read[sid] = list(payload.get("events") or []) if payload.get("ok") else []
-                left[0] -= 1
-                if not left[0] and self.issue is not None and \
-                        self.issue.get("key") == issue.get("key"):
-                    show()
-
-            self.agents.ask("delegation-earlier:%s" % one["id"],
-                            lambda core, cancel, sid=one["id"]: core.agents(
-                                "session", sid, document={"limit": 400}, cancel=cancel), done)
+        self.panel.set_offer(self.key(), self.sessions, self.agents.connections, self.defaults())
+        self.panel.open_below(self.button)
 
     def _carry_on(self, session_id):
         self.open_agents(session_id)
@@ -317,7 +207,7 @@ class Delegation:
         self._remember(folders=folders, plan=bool(chosen.get("plan")), mode=chosen.get("mode"))
         title = "%s · %s" % (key, issue.get("summary") or "")
         source = {"label": "Jira %s" % key, "detail": issue.get("summary") or "",
-                  "ref": self.ref}
+                  "ref": self.ref, "task_refs": [self.ref]}
         chosen = dict(chosen, title=title if len(title) <= 60 else title[:57].rstrip() + "...")
 
         def done(payload):

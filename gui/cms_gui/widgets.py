@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea,
                                QSpinBox, QSplitter, QStackedLayout, QStyle,
                                QStyledItemDelegate, QStyleOptionToolButton, QStylePainter,
                                QTableWidget, QTableWidgetItem, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QVBoxLayout, QWidget, QWidgetItem)
 
 from . import icons, theme
 
@@ -1997,6 +1997,17 @@ class FlowLayout(QLayout):
         self._items.append(item)
         self._gaps.append(self._gap)
         self._gap = 0
+
+    def add_before_stretch(self, widget):
+        """Insert another left-aligned control before the right-aligned group."""
+        if self._right is None:
+            self.addWidget(widget)
+            return
+        self.addChildWidget(widget)
+        self._items.insert(self._right, QWidgetItem(widget))
+        self._gaps.insert(self._right, 0)
+        self._right += 1
+        self.invalidate()
 
     def count(self):
         return len(self._items)

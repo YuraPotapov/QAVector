@@ -15,8 +15,10 @@ asked anything). What is defended:
 
 import json
 import os
+import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -247,36 +249,60 @@ def test_the_policy_comes_only_from_the_owner(world):
                           "folder": "relative", "mode": "full", "others": "auto"}})
 
 
-def test_codex_delegates_to_claude_through_the_real_mcp_server_and_socket(tmp_path, monkeypatch):
-    """Codex -> Claude end to end: the chat turn's MCP server, the agent socket,
-    the host, the delegation, the child Claude turn - and the answer back."""
+@pytest.mark.parametrize("others,mode,target", [("auto", "read", "claude"), ("approve", "full", "codex")])
+def test_codex_delegates_through_the_real_mcp_server_and_socket(tmp_path, monkeypatch, others, mode, target):
+    """A Codex parent delegates over MCP. Ask gates both turns of the Codex child."""
     from qcr.agent_socket import digest
     from integrations.agents import runner
     monkeypatch.setenv("FAKE_CODEX_LOG", str(tmp_path / "codex.jsonl"))
-    w = World(tmp_path, others="auto", mode="read", targets=())
+    w = World(tmp_path, others=others, mode=mode, targets=())
     try:
         socket_path = w.host.open_agent_socket(str(tmp_path / "sock"))
         codex = store.get("codex", w.agents)
-        parent = sessions.create(w.root, codex, str(w.folder), "read", others="auto")
+        parent = sessions.create(w.root, codex, str(w.folder), mode, others=others)
         actor = "agent:codex/%s" % parent["id"]
         w.host._on_actor({"actor": actor, "grants": [
-            {"permission": "agents.delegate", "resource_id": delegation.target_resource("claude")},
+            {"permission": "agents.delegate", "resource_id": delegation.target_resource(target)},
             {"permission": "agents.delegate", "resource_id": delegation.TASKS}],
             "agents": {"session": parent["id"], "connection": "codex", "name": "Codex",
-                       "folder": str(w.folder), "mode": "read", "others": "auto", "restrictions": {}}})
+                       "folder": str(w.folder), "mode": mode, "others": others, "restrictions": {}}})
         token = "b" * 64
         w.host._on_agent_token({"actor": actor, "token_sha256": digest(token), "expires_at": time.time() + 60})
         token_file = tmp_path / "token"
         token_file.write_text(token)
         os.chmod(token_file, 0o600)
-        result = runner.send(w.root, parent["id"], "MCP_DELEGATE", agents_path=w.agents,
-                             qavector={"socket": socket_path, "token_file": str(token_file)})
+        approvals = queue.Queue()
+        notify = w.host.delegation._notify
+
+        def notified(message):
+            notify(message)
+            if message["type"] == "agent_approval":
+                approvals.put(message)
+
+        monkeypatch.setattr(w.host.delegation, "_notify", notified)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            message = "MCP_DELEGATE_CODEX" if target == "codex" else "MCP_DELEGATE"
+            turn = pool.submit(runner.send, w.root, parent["id"], message, agents_path=w.agents,
+                               qavector={"socket": socket_path, "token_file": str(token_file)})
+            if others == "approve":
+                request = approvals.get(timeout=15)
+                assert request["mode"] == mode and request["session"] == parent["id"]
+                assert [s["id"] for s in sessions.listing(w.root)["sessions"]] == [parent["id"]]
+                w.host._on_agent_answer({"execution_id": request["execution_id"], "approve": True, "by": "you"})
+                follow_up = approvals.get(timeout=12)
+                assert follow_up["kind"] == "follow_up" and follow_up["session"] == parent["id"]
+                child = sessions.load(w.root, follow_up["session_id"])
+                assert child["kind"] == "codex" and len(child["turns"]) == 1
+                assert not any(e["type"] == "agent.started" for e in w.events(follow_up["execution_id"]))
+                w.host._on_agent_answer({"execution_id": follow_up["execution_id"], "approve": True, "by": "you"})
+            result = turn.result(timeout=20)
         assert result["turn"]["state"] == "completed", result
         said = sessions.events(w.root, parent["id"])[-1]["text"]
-        assert said.startswith("Answer: delegated succeeded: ") and "Say hello" in said
+        assert said.startswith("Answer: delegated succeeded: ") and ("Review the follow-up." if target == "codex" else "Say hello") in said
         children = [one for one in sessions.listing(w.root)["sessions"]
                     if (one.get("source") or {}).get("label") == "Delegated"]
-        assert len(children) == 1 and children[0]["kind"] == "claude" and children[0]["mode"] == "read"
+        assert len(children) == 1 and children[0]["kind"] == target and children[0]["mode"] == mode
+        assert len(children[0]["turns"]) == (2 if target == "codex" else 1)
     finally:
         w.close()
 

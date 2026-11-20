@@ -17,6 +17,7 @@ have been received and acted on; it is recorded as failed and left to the
 person, who can see what it did and say what to do next.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -210,7 +211,7 @@ TRIGGERS = ("tasks_finished",)
 
 def send(root, session_id, message, agents_path=None, mode=None, model=None,
          effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None,
-         plan=None, qavector=None, trigger=None):
+         plan=None, qavector=None, trigger=None, read_tasks=None):
     """Take one turn. Returns ``{"session", "turn"}``; raises :class:`Refused`.
 
     ``mode``, ``model``, ``effort``, ``skills`` (names in the library at
@@ -227,8 +228,6 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     says how. Only a turn that could not be started at all is refused.
     """
     message = str(message or "")
-    if not message.strip() and not attachments:
-        raise Refused("invalid", "There is nothing to send.")
     emit = emit or (lambda event: None)
     stop = stop or threading.Event()
     chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
@@ -239,6 +238,11 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
         with sessions.lock(root, session_id):
             # Read under the lock: what a turn before this one left is in it.
             session = sessions.load(root, session_id)
+            task_refs = (session.get("source") or {}).get("task_refs") or []
+            chosen["task_refs"] = task_refs if not session.get("turns") else []
+            if not message.strip() and not attachments and not chosen["task_refs"]:
+                raise Refused("invalid", "There is nothing to send.")
+            chosen["read_tasks"] = read_tasks
             turn = _turn(root, session, message, agents_path, chosen, emit, stop)
         # Described once the turn is let go of, or it would say it is still running.
         return {"session": sessions.described(root, session), "turn": turn}
@@ -311,11 +315,23 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
               "reason": "the skills chosen for this conversation"}] if staged else [])
 
     session_dir = sessions.directory(root, session["id"])
+    attachments_dir = os.path.join(session_dir, "attachments")
+    task_refs = chosen["task_refs"]
+    if task_refs:
+        if chosen["read_tasks"] is None:
+            raise Refused("task_read", "The Jira connection is unavailable for this turn.")
+        try:
+            tasks = chosen["read_tasks"](task_refs)
+            os.makedirs(attachments_dir, mode=0o700, exist_ok=True)
+            task_file = os.path.join(attachments_dir, "tasks.json")
+            _keep(task_file, json.dumps(tasks, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            raise Refused("task_read", "Could not read the attached Jira tasks (%s): %s" %
+                          (", ".join(task_refs), exc)) from None
     try:
         attached = attachment_files.stage(session_dir, chosen["attachments"])
     except attachment_files.AttachmentError as exc:
         raise Refused("attachments", str(exc)) from None
-    attachments_dir = os.path.join(session_dir, "attachments")
     if os.path.isdir(attachments_dir):
         # Previous messages' files remain available on later turns too.
         seen.append({"path": attachments_dir, "access": "read_only",
@@ -323,6 +339,9 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     else:
         attachments_dir = ""
     prompt = attachment_files.prompt(message, session_dir, attached)
+    if task_refs:
+        prompt = ("Read the full descriptions of the attached Jira tasks in %s before working on %s."
+                  % (task_file, ", ".join(task_refs)) + ("\n\n" + prompt if prompt else ""))
     # Who it may hand work to - the roles and the connections (ADR-010 D3):
     # told when the conversation works with other agents and this turn has
     # QAVector, on its first such turn and whenever the list changed. In the
@@ -389,6 +408,8 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
 
     try:
         said = {"type": "user", "text": message, "mode": mode}
+        if task_refs:
+            said["task_refs"] = task_refs
         if trigger in TRIGGERS:
             # Not the person's message: QAVector's, with what other agents
             # came back with (ADR-009 D4).

@@ -1622,6 +1622,41 @@ def test_delegated_conversation_shows_working_time_and_finishes(make, monkeypatc
     assert chat.feed.said().count(QUESTION) == 1
 
 
+def test_continue_after_visiting_a_child_keeps_the_parent_at_the_newest_message(make):
+    parent = _session()
+    child = _session("20261118-133500-aaaaaa", "Review", record=True,
+                     source={"label": "Delegated", "parent": parent["id"], "record": True})
+    history = [dict(event, seq=i * 8 + j + 1) for i in range(12)
+               for j, event in enumerate(_events())]
+    chat = make(FakeCore(sessions=[parent, child], events={parent["id"]: history})).agents.chat
+    chat.open_session(parent["id"])
+    chat.agent_execution({"capability_id": "agents.claude.delegate", "execution_id": "delegated",
+                          "actor_id": "agent:claude/" + parent["id"], "state": "succeeded",
+                          "created_at": history[0]["at"], "input": {"goal": "Review"},
+                          "output": {"session_id": child["id"]}})
+    chat.round_finished({"session": parent["id"], "items": [{"state": "succeeded", "goal": "Review"}]})
+    chat.open_session(child["id"])
+    chat.open_session(parent["id"])
+    for _ in range(200):
+        if not chat.feed._pending_events:
+            break
+        QTest.qWait(10)
+    QTest.qWait(50)
+    wake, = chat.feed.placed("wake")
+    bar = chat.feed.verticalScrollBar()
+    wake.go_button.setFocus()
+    bar.setValue(bar.maximum())
+    assert bar.maximum() > chat.feed.height()
+    wake_height = wake.height()
+    positions = [bar.value()]
+    bar.valueChanged.connect(positions.append)
+    QTest.mouseClick(wake.go_button, Qt.LeftButton)
+    QTest.qWait(50)
+    assert FakeTurn.made[-1].document["trigger"] == "tasks_finished"
+    assert bar.value() == bar.maximum()
+    assert min(positions) >= positions[0] - wake_height - 20
+
+
 def test_action_cards_wait_for_history_before_being_placed(qapp, dispose):
     from cms_gui.pages.agentcards import WakeCard
     feed = ChatFeed()

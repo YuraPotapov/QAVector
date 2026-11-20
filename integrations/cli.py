@@ -110,12 +110,28 @@ def _agents(rest, options):
     """``agents ...``: the agent connections, which are QAVector's rather than
     a project's and so have a file, and commands, of their own."""
     from integrations.agents import cli as agents
+
+    def read_tasks(refs):
+        from cycle import secrets
+        from integrations import scope, store
+        from integrations.reader import ProjectReader
+        path = store.resolve_path(_path(options.get("--integrations-file")))
+        reader = ProjectReader(path, secrets.resolve_path(_path(options.get("--cycle-secrets-file"))),
+                               _path(options.get("--environments-file")) or scope.default_environments_path(path))
+        tasks = []
+        for ref in refs:
+            _, connection, key = ref.split(":", 2)
+            issue = reader.read(connection, "jira", "issue", {"key": key, "comments": 1})["issue"]
+            tasks.append({"ref": ref, "summary": issue["summary"], "description": issue["description_text"],
+                          "type": issue.get("type"), "priority": issue.get("priority"), "status": issue.get("status")})
+        return tasks
+
     try:
         payload = agents.run(rest, options.get("--from") or "",
                              _path(options.get("--agents-file")),
                              _path(options.get("--agent-sessions-dir")),
                              _path(options.get("--agent-skills-dir")),
-                             target=options.get("--to") or "")
+                             target=options.get("--to") or "", read_tasks=read_tasks)
     except agents.Usage as exc:
         return _usage(str(exc), agents.USAGE)
     except Exception as exc:  # noqa: BLE001 - the report IS the error report

@@ -172,6 +172,8 @@ def exec_argv(binary, mode="read", model="", effort="", session="", resume=False
     argv = [binary, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
             "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
             "-c", 'sandbox_mode=' + json.dumps("read-only" if mode == "read" else "workspace-write")]
+    for feature in codex_turn.NATIVE_AGENTS:
+        argv += ["-c", "features.%s=false" % feature]
     # This invocation's MCP table replaces the ignored user configuration.
     # Prompt and credentials never appear in argv, only the token file path.
     servers = "{}"

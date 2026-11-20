@@ -103,6 +103,22 @@ def test_a_finished_review_continues_in_its_existing_session(world, tmp_path):
     assert ended(w, duplicate["execution"]["execution_id"])["error"]["code"] == "not_waiting"
 
 
+def test_refusing_a_follow_up_keeps_the_child_available_for_the_person(world):
+    w = world(others="approve")
+    task = hand(w, goal="Review the change")["execution"]["execution_id"]
+    w.host._on_agent_answer({"execution_id": task, "approve": True})
+    child = ended(w, task)["output"]["session_id"]
+    follow_up = reply(w, task, "Review it again")["execution"]["execution_id"]
+    assert w.host.store.get(follow_up)["state"] == "dispatched"
+    w.host._on_agent_answer({"execution_id": follow_up, "approve": False})
+    assert ended(w, follow_up)["error"]["code"] == "denied"
+    assert not any(e["type"] == "agent.started" for e in w.events(follow_up))
+    assert w.host.delegation.latest(task) == task
+    by_person = w.host._on_task_reply({"task": task, "answer": "Review these other changes", "by": "You"})
+    result = ended(w, by_person["execution"]["execution_id"])
+    assert result["output"]["session_id"] == child and result["output"]["by"] == "You"
+
+
 def test_a_task_continued_before_a_restart_is_not_continued_again(world):
     w = world(wake="continue")
     task = hand(w, name="review", goal="Review the commit")["execution"]["execution_id"]

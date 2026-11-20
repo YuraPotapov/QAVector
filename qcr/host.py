@@ -530,10 +530,8 @@ class Host:
         try:
             execution = self.engine.invoke(caller, self.project_id, "agents.tasks.reply",
                                            {"task": task, "answer": answer}, parent_id=task)
-        except Exception:
-            self.delegation.person_says(actor, task, None, forget=True)
-            raise
         finally:
+            self.delegation.person_says(actor, task, None, forget=True)
             if temporary is not None:
                 self.authority.revoke(temporary)
         return {"execution": execution}
