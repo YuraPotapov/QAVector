@@ -307,3 +307,84 @@ def test_ending_the_process_stops_the_agent_and_the_turn_is_still_answered(agent
     assert _gone(starts(agents.log)[0]["pid"])
     code, answer = agents("session", session["id"])
     assert (answer["session"]["state"], answer["session"]["running"]) == ("stopped", False)
+
+
+def test_continue_across_providers_then_join_every_branch_once(agents, tmp_path):
+    from pathlib import Path
+    from codex_cli_fixture import fake_codex
+
+    code, _ = agents("save", document={"connection": {
+        "name": "Codex", "kind": "codex", "binary": fake_codex(tmp_path)}})
+    assert code == 0
+    original = agents.new(title="Original", model="sonnet")
+    attachment = tmp_path / "example.txt"
+    attachment.write_text("context attachment")
+    code, _ = agents.lines("send", original["id"], document={"message": "original request",
+                                                             "attachments": [str(attachment)]})
+    assert code == 0
+    follow = agents.new(previous=original["id"])
+    code, switched = agents("session-set", follow["id"], document={"connection": "codex", "model": "chosen-codex"})
+    assert code == 0 and switched["session"]["kind"] == "codex"
+    follow = switched["session"]
+    assert follow["lineage"]["previous"] == original["id"] and not follow["provider_session"]
+    code, turns = agents.lines("send", follow["id"], document={"message": "continue from there"})
+    assert code == 0 and turns[-1]["turn"]["model"] == "chosen-codex"
+    code, refusal = agents("session-set", follow["id"], document={"connection": "claude"})
+    assert code != 0 and refusal["kind"] == "invalid"
+    base = Path(agents.sessions) / follow["id"]
+    history = base / "attachments" / "chat-history"
+    assert str(history / "index.json") in (base / "turns/0001/prompt.md").read_text()
+    previous_events = [json.loads(line) for line in (history / original["id"] / "events.jsonl").read_text().splitlines()]
+    assert previous_events[0]["text"] == "original request"
+    assert (history / original["id"] / previous_events[0]["attachments"][0]["path"]).read_text() == "context attachment"
+    branch = agents.new(previous=original["id"], model="opus")
+    code, _ = agents.lines("send", branch["id"], document={"message": "alternative approach"})
+    assert code == 0
+    joined = agents.new(previous=follow["id"], join=True, model="other-model")
+    def visible():
+        return [item["id"] for item in agents("sessions", document={"sidebar": True})[1]["sessions"]]
+    assert visible() == [joined["id"]]
+    originals = {original["id"], follow["id"], branch["id"]}
+    assert {entry["id"] for entry in joined["lineage"]["sources"]} == originals
+    assert not joined["turns"] and joined["cost_usd"] == 0
+    for sid in originals:
+        assert agents("session", sid)[0] == 0
+    code, transcript = agents("session", joined["id"])
+    events = transcript["events"]
+    assert {e["id"] for e in events if e["type"] == "history.session"} == originals
+    assert [e["text"] for e in events if e["type"] == "user"] == [
+        "original request", "continue from there", "alternative approach"]
+    assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
+    assert agents("session", joined["id"], document={"limit": 3})[1]["events"] == events[-3:]
+    code, rows = agents.lines("send", joined["id"], document={"message": "joined next step"})
+    assert code == 0 and rows[0]["event"]["seq"] == len(events) + 1
+    after = agents("session", joined["id"], document={"after": events[-1]["seq"]})[1]["events"]
+    assert after[0]["text"] == "joined next step"
+    later = agents.new(previous=joined["id"], connection="codex")
+    rejoined = agents.new(previous=later["id"], join=True)
+    assert visible() == [rejoined["id"]]
+    events = agents("session", rejoined["id"])[1]["events"]
+    assert [e["text"] for e in events if e["type"] == "user"].count("original request") == 1
+    assert [e["text"] for e in events if e["type"] == "user"].count("joined next step") == 1
+    assert agents("session-delete", rejoined["id"])[0] == 0
+    assert set(visible()) == {joined["id"], later["id"]}
+
+
+def test_join_uses_every_member_beyond_the_sidebar_page_and_keeps_unrelated_chats(agents):
+    original = agents.new(title="Related")
+    other = agents.new(title="Unrelated")
+    for _ in range(201):
+        agents.new(previous=original["id"])
+    code, page = agents("sessions", document={"sidebar": True, "limit": 200})
+    assert code == 0 and page["more"] and len(page["sessions"]) == 200
+    latest = page["sessions"][0]
+    assert latest["can_join"] and latest["continuation_group"]
+    joined = agents.new(previous=latest["id"], join=True)
+    assert len(joined["lineage"]["sources"]) == 202
+    code, page = agents("sessions", document={"sidebar": True})
+    assert code == 0 and {s["id"] for s in page["sessions"]} == {joined["id"], other["id"]}
+    assert not next(s for s in page["sessions"] if s["id"] == joined["id"])["can_join"]
+    assert agents("session-delete", joined["id"])[0] == 0
+    code, restored = agents("sessions", document={"sidebar": True})
+    assert code == 0 and len(restored["sessions"]) == 203
+    assert original["id"] in {s["id"] for s in restored["sessions"]}

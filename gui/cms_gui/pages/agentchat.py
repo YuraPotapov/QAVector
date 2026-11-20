@@ -37,6 +37,7 @@ from ..diffview import ChangesButton, ChangesDialog
 from .agentbudget import BUDGET_NOTE, BudgetCard, BudgetFields, share_text, spend_text
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
+from .chatcontinuation import RelationshipDelegate
 from . import agentcards
 from .agentcards import ChangesLine, IntegrationChangeCard, PlanCard, QuestionsCard
 from .agentwords import (ago_text, clock_text, context_text, cost_text, end_text, folder_text,
@@ -77,8 +78,7 @@ PLAN_MEANS = ("The agent first looks through the folder, changing nothing, and a
               "with its questions or a plan. The work starts when you approve the plan, "
               "with the access you choose then.")
 
-#: How many of a conversation's newest events are read when it is opened, and
-#: how many conversations the list reads.
+#: How many of a conversation's newest events are read when it is opened.
 EVENTS_SHOWN = 120
 SESSIONS_SHOWN = 200
 
@@ -110,6 +110,11 @@ def _is_chat(session):
     # Saved before a source could say so: a ref is what opens a conversation
     # to talk in, and only the chat's own were carried on before that.
     return bool(source.get("ref")) or source.get("label", CHAT) == CHAT
+
+
+def _continuation_draft(session):
+    return bool(session and session.get("lineage") and not session.get("turns")
+                and not session.get("provider_started"))
 
 
 # -- the feed -------------------------------------------------------------------
@@ -394,6 +399,7 @@ class ChatFeed(QScrollArea):
     approve = Signal(str, str)
     #: What a turn changed was asked for: its number.
     changes_wanted = Signal(object)
+    history_wanted = Signal(str)
     #: The person on a change the agent proposed to an integration (ADR-007):
     #: Approve / Deny it, and what they typed into one of its fields.
     change_approved = Signal(str)
@@ -609,6 +615,13 @@ class ChatFeed(QScrollArea):
                 {"kind": "thinking", "title": "Thinking", "detail": event.get("text") or ""}))
         elif kind == "text":
             self._answer(event.get("text"))
+        elif kind == "history.session":
+            label = " · ".join(filter(None, (event.get("title"), event.get("connection"), event.get("model"))))
+            button = QPushButton(label or "Original chat")
+            button.setProperty("variant", "ghost")
+            button.setToolTip("Open the original chat")
+            button.clicked.connect(lambda _checked=False, sid=event["id"]: self.history_wanted.emit(sid))
+            self._add("history", _Row({"kind": "result"}, button))
         elif kind == "background.waiting":
             text = str(event.get("text") or "").strip()
             if text and not _repeats(text, self._last_text, self._said):
@@ -664,7 +677,10 @@ class ChatFeed(QScrollArea):
             return                      # nothing changed: nothing to say
         line = ChangesLine(event)
         turn = event.get("turn")
-        line.wanted.connect(lambda turn=turn: self.changes_wanted.emit(turn))
+        if event.get("history_session"):
+            line.wanted.connect(lambda: self.history_wanted.emit(event["history_session"]))
+        else:
+            line.wanted.connect(lambda turn=turn: self.changes_wanted.emit(turn))
         self._add("changes", _Row({"kind": "tool_result"}, line))
 
     def _answer(self, text):
@@ -892,17 +908,21 @@ def _indent_icon():
 def ordered_with_children(sessions):
     """The list as it comes, each conversation's children right below it,
     newest first; a child whose parent is not listed stays where it is."""
-    listed = {one.get("id") for one in sessions}
+    listed = {one["id"] for one in sessions}
     children = {}
+    groups = {}
     for one in sessions:
-        if is_child(one) and one["source"]["parent"] in listed:
-            children.setdefault(one["source"]["parent"], []).append(one)
+        parent = one.get("sidebar_parent") or (one.get("source") or {}).get("parent")
+        if is_child(one) and parent in listed and parent != one["id"]:
+            children.setdefault(parent, []).append(one)
+        else:
+            root = (one.get("lineage") or {}).get("root") or one["id"]
+            groups.setdefault(root, []).append(one)
     ordered = []
-    for one in sessions:
-        if is_child(one) and one["source"]["parent"] in listed:
-            continue
-        ordered.append(one)
-        ordered.extend(children.get(one.get("id"), []))
+    for group in groups.values():
+        for one in group:
+            ordered.append(one)
+            ordered.extend(children.get(one["id"], []))
     return ordered
 
 
@@ -1294,7 +1314,7 @@ class Composer(QFrame):
             self.connection.addItem("%s (removed)" % (session.get("connection_name")
                                                       or session.get("connection")),
                                     session.get("connection"))
-        index = self.connection.findData(session.get("connection") if session is not None
+        index = self.connection.findData(session.get("connection") if session and not _continuation_draft(session)
                                          else wanted)
         self.connection.setCurrentIndex(index if index >= 0
                                         else (0 if self.connection.count() else -1))
@@ -1339,7 +1359,7 @@ class Composer(QFrame):
         # A conversation is with one agent in one folder: its CLI keeps it
         # under the folder it began in.
         begun = session is not None
-        self.connection.setEnabled(not begun)
+        self.connection.setEnabled(not begun or _continuation_draft(session))
         self.folder.setEnabled(not begun)
         self.browse.setEnabled(not begun)
         readonly = begun and not _is_chat(session)
@@ -1438,7 +1458,7 @@ class Composer(QFrame):
         # A new conversation starts with what its connection says for other agents.
         self._others_wanted = None
         self._wake_wanted = None
-        if self._session is None:
+        if self._session is None or _continuation_draft(self._session):
             self.model.set_value("")
             self._effort_wanted = ""
             self.effort.clear()
@@ -1804,6 +1824,7 @@ class ChatTab(QWidget):
         self.settings = settings
         #: The view this tab is part of: it asks the core through ``host.ask``.
         self.host = None
+        self._sidebar_limit = SESSIONS_SHOWN
         self.sessions = []
         self.connections = []
         self.current = None             # the conversation that is open, or None
@@ -1872,6 +1893,9 @@ class ChatTab(QWidget):
         self.table = widgets.Table(0, len(self.HEADERS), reclick_clears=False)
         # Only a child's row has an icon: room that stands it in from its parent's.
         self.table.setIconSize(QSize(CHILD_INDENT, 1))
+        self.table.setItemDelegateForColumn(0, RelationshipDelegate(self.table))
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._session_menu)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1894,7 +1918,11 @@ class ChatTab(QWidget):
         self.new_button = QPushButton("+ New")
         self.new_button.setToolTip("Begin another conversation")
         self.new_button.clicked.connect(self.new_conversation)
-        column.addWidget(widgets.row(self.new_button, None))
+        self.more_chats = QPushButton("Show more chats")
+        self.more_chats.setProperty("variant", "ghost")
+        self.more_chats.hide()
+        self.more_chats.clicked.connect(self._load_more_chats)
+        column.addWidget(widgets.row(self.new_button, None, self.more_chats))
         self.splitter.addWidget(left)
 
         # -- the one that is open
@@ -1931,6 +1959,10 @@ class ChatTab(QWidget):
         self.sub.setProperty("role", "muted")
         # How full the agent's context is and what the conversation cost - the
         # two things worth knowing before saying more to it.
+        self.previous_chat = QPushButton("Previous chat")
+        self.previous_chat.setProperty("variant", "ghost")
+        self.previous_chat.clicked.connect(lambda: self.open_session(self.current["lineage"]["previous"]))
+        self.previous_chat.hide()
         self.usage = widgets.ElidedLabel(mode=Qt.ElideMiddle)
         self.usage.setProperty("role", "muted")
         self.changes_button = ChangesButton()
@@ -1939,12 +1971,13 @@ class ChatTab(QWidget):
                                        "file by file")
         self.changes_button.clicked.connect(lambda: self.show_changes())
         self.changes_dialog = None
-        sub_row = widgets.row(self.sub, self.usage, self.changes_button)
+        sub_row = widgets.row(self.sub, self.usage, self.previous_chat, self.changes_button)
         sub_row.layout().setStretchFactor(self.sub, 2)
         sub_row.layout().setStretchFactor(self.usage, 3)
         column.addWidget(sub_row)
         # The issues it is about: started for one, or linked because its agent read
         # one's details (ADR-014). A link can be undone; what it began with stays.
+        self.history_links = self.more_menu.addMenu("Linked chats")
         self.links = self.more_menu.addMenu("About")
         self.links.menuAction().setVisible(False)
         self.earlier = self.more_menu.addAction("Show the whole conversation", self._read_whole)
@@ -1959,6 +1992,7 @@ class ChatTab(QWidget):
         self.feed.revise.connect(lambda said: self._card_turn(said, plan=True))
         self.feed.approve.connect(lambda mode, said: self._card_turn(said, plan=False, mode=mode))
         self.feed.changes_wanted.connect(self.show_changes)
+        self.feed.history_wanted.connect(self.open_session)
         # A change the agent proposed to Jira is answered where it stands in the conversation.
         self.feed.change_approved.connect(lambda found: ChatTab.qcr_access.answer_integration(found, True))
         self.feed.change_denied.connect(lambda found: ChatTab.qcr_access.answer_integration(found, False))
@@ -2014,7 +2048,8 @@ class ChatTab(QWidget):
         self.earlier.setEnabled(True)
         self.earlier.setText("Show the whole conversation")
         self.earlier.setVisible(not self._whole)
-        self.more_button.setEnabled(not self._whole or self.links.menuAction().isVisible())
+        self.more_button.setEnabled(not self._whole or self.links.menuAction().isVisible()
+                                    or self.history_links.menuAction().isVisible())
         # The other cards (changes, wakes, budgets, other agents) were placed by
         # _show, or kept by the feed while it loaded and placed when it finished:
         # placing them again here would do the work of every switch twice.
@@ -2069,7 +2104,9 @@ class ChatTab(QWidget):
         return self.host.core if self.host is not None else None
 
     def _load_models(self, done):
-        connection_id = self.composer.connection.currentData()
+        self.request_models(self.composer.connection.currentData(), done)
+
+    def request_models(self, connection_id, done):
         if not connection_id or self.core() is None:
             done({"ok": False, "error": "Choose an agent connection first."})
             return
@@ -2160,6 +2197,10 @@ class ChatTab(QWidget):
         return self.current is not None and self.current.get("id") == session_id
 
     # -- the list ---------------------------------------------------------------
+    def _load_more_chats(self):
+        self._sidebar_limit += SESSIONS_SHOWN
+        self.load_sessions()
+
     def load_sessions(self, then=None):
         if self.core() is None:
             return
@@ -2174,6 +2215,7 @@ class ChatTab(QWidget):
                 self.composer.say(payload.get("error") or "The conversations could not "
                                   "be read.", bad=True)
                 return
+            self.more_chats.setVisible(bool(payload.get("more")))
             self.sessions = list(payload.get("sessions") or [])
             if is_child(self.current):
                 listed = next((one for one in self.sessions if one.get("id") == self._key()), None)
@@ -2190,17 +2232,28 @@ class ChatTab(QWidget):
                 then()
 
         self.ask("sessions", lambda core, cancel: core.agents(
-            "sessions", document={"limit": SESSIONS_SHOWN}, cancel=cancel), done)
+            "sessions", document={"sidebar": True, "limit": self._sidebar_limit}, cancel=cancel), done)
 
     def _fill(self):
         chosen = self._key()
         self.table.blockSignals(True)
         self.table.setRowCount(0)
-        for one in ordered_with_children(self.sessions):
+        lineages = [s["lineage"] for s in self.sessions if s.get("lineage")]
+        chain_roots = {link["root"] for link in lineages}
+        parents = {s["source"]["parent"] for s in self.sessions if is_child(s)}
+        hidden = {entry["id"] for link in lineages if link.get("joined") for entry in link["sources"]}
+        for one in ordered_with_children([s for s in self.sessions if s["id"] not in hidden]):
             row = self.table.rowCount()
             self.table.insertRow(row)
             source = one.get("source") or {}
             title = QTableWidgetItem(child_title(one))
+            groups = []
+            if one.get("lineage") or one.get("continuation_group") or one["id"] in chain_roots:
+                groups.append("continuation")
+            if is_child(one) or one.get("delegation_group") or one["id"] in parents:
+                groups.append("delegation")
+            if groups:
+                title.setData(RelationshipDelegate.ROLE, groups)
             if is_child(one):
                 title.setIcon(_indent_icon())
             title.setData(Qt.UserRole, one.get("id"))
@@ -2225,6 +2278,10 @@ class ChatTab(QWidget):
     def _put(self, session):
         """``session`` as the core now has it: first in the list, as the most
         recently used is."""
+        listed = next((s for s in self.sessions if s["id"] == session["id"]), {})
+        # The project list knows about related chats outside the visible page.
+        session = dict({key: listed[key] for key in ("continuation_group", "delegation_group", "sidebar_parent", "can_join")
+                        if key in listed}, **session)
         self.sessions = [session] + [one for one in self.sessions
                                      if one.get("id") != session.get("id")]
         if self._showing(session.get("id")):
@@ -2234,6 +2291,50 @@ class ChatTab(QWidget):
             self._head()                # a first turn gives it its name
             self._sync_cards()
         self._fill()
+
+    def _session_menu(self, point):
+        item = self.table.itemAt(point)
+        if item is None:
+            return
+        sid = self.table.item(item.row(), 0).data(Qt.UserRole)
+        session = next((one for one in self.sessions if one["id"] == sid), None)
+        if session is None:
+            return
+        menu = QMenu(self)
+        proceed = menu.addAction("Continue with…")
+        join = menu.addAction("Join…")
+        root = (session.get("lineage") or {}).get("root", sid)
+        members = [s for s in self.sessions if (s.get("lineage") or {}).get("root", s["id"]) == root]
+        join.setEnabled(session.get("can_join", len(members) > 1))
+        choice = menu.exec(self.table.viewport().mapToGlobal(point))
+        if choice in (proceed, join):
+            self.continue_with(session, joined=choice == join)
+        menu.deleteLater()
+
+    def continue_with(self, session, joined=False):
+        if self._creating or not self.connections:
+            self.composer.say("Choose an agent connection first.", bad=True)
+            return
+        previous = session.get("connection")
+        connection = next((one["id"] for one in self.connections if one["id"] == previous),
+                          self.connections[0]["id"])
+        document = {"previous": session["id"], "join": joined, "connection": connection,
+                    "model": (session.get("model") or "") if connection == previous else "",
+                    "mode": session.get("mode") or "read"}
+        self._creating = True
+        self._sync()
+
+        def done(payload):
+            self._creating = False
+            self._sync()
+            if not payload.get("ok"):
+                self.composer.say(payload.get("error") or "Could not continue the chat.", bad=True)
+                return
+            made = payload["session"]
+            self.load_sessions(then=lambda: self.open_session(made["id"], draft=True))
+
+        self.ask("session-new", lambda core, cancel: core.agents("session-new", document=document,
+                                                                cancel=cancel), done)
 
     def _picked(self):
         rows = self.table.selectionModel().selectedRows()
@@ -2267,6 +2368,8 @@ class ChatTab(QWidget):
             if isinstance(started, (int, float)):
                 since = time.monotonic() - max(0, time.time() - started)
         self.composer.set_running(self._key() in self.turns or external, since, self._key() in self._background_waits)
+        self.composer.connection.setEnabled(not self._creating and (
+            self.current is None or (_continuation_draft(self.current) and self._key() not in self.turns)))
         self.composer.stop.setEnabled(self._key() not in self._stopping or
                                       self._key() in self._redirecting)
         self.composer.interrupt.setEnabled(self._key() not in self._stopping)
@@ -2318,7 +2421,7 @@ class ChatTab(QWidget):
         self.composer.set_budget(None)          # its connection's default, until the person says
         self.composer.text.setFocus()
 
-    def open_session(self, session_id, limit=EVENTS_SHOWN):
+    def open_session(self, session_id, limit=EVENTS_SHOWN, *, draft=False):
         """Read one conversation from its record and show it."""
         if not session_id or self.core() is None or self._creating:
             return
@@ -2352,6 +2455,9 @@ class ChatTab(QWidget):
             last_seq = max((event.get("seq", 0) for event in events), default=0)
             events.extend(event for event in arriving if event.get("seq", 0) > last_seq)
             self._show(payload.get("session") or {}, events, whole=not limit)
+            if draft:
+                self.composer.set_options_open(True)
+                self.composer.text.setFocus()
 
         self.ask("session", lambda core, cancel: core.agents(
             "session", session_id, document={"limit": limit}, cancel=cancel), done)
@@ -2581,7 +2687,16 @@ class ChatTab(QWidget):
             undo.setToolTip("This conversation is not about %s: undo the link. What it said stays." % key)
             undo.triggered.connect(lambda _checked=False, r=ref: self._unlink(r))
         self.links.menuAction().setVisible(bool(refs))
-        self.more_button.setEnabled(bool(refs) or not self._whole)
+        self.history_links.clear()
+        lineage = (session or {}).get("lineage") or {}
+        self.previous_chat.setVisible(bool(lineage.get("previous")))
+        entries = lineage.get("sources") or []
+        for entry in reversed(entries):
+            action = self.history_links.addAction("%s · %s" % (entry["title"], entry["connection"]))
+            action.setToolTip(entry["id"])
+            action.triggered.connect(lambda _checked=False, sid=entry["id"]: self.open_session(sid))
+        self.history_links.menuAction().setVisible(bool(entries))
+        self.more_button.setEnabled(bool(refs or entries) or not self._whole)
 
     def conversation_linked(self, found):
         """An agent read an issue's details: the conversation is about it now."""
@@ -2636,10 +2751,37 @@ class ChatTab(QWidget):
             self.composer.set_attachments([])
             self._waiting()
         else:
-            document = self._message(text, files)
-            self.composer.set_draft("")
-            self.composer.set_attachments([])
-            self._start(self.current, text, document=document)
+            self._submit_existing(self.current, text, files)
+
+    def _submit_existing(self, session, text, files):
+        document = self._message(text, files)
+        connection = self.composer.connection.currentData()
+        if not _continuation_draft(session) or connection == session.get("connection"):
+            self._send_existing(session, text, document)
+            return
+        self._creating = True
+        self._sync()
+
+        def done(payload):
+            self._creating = False
+            self._sync()
+            if not payload.get("ok"):
+                self.composer.say(payload.get("error") or "The connection could not be changed.", bad=True)
+                return
+            saved = payload["session"]
+            self.composer.set_session(saved)
+            self._put(saved)
+            self._send_existing(saved, text, document)
+
+        settings = {key: document[key] for key in ("mode", "model", "effort", "plan")}
+        settings["connection"] = connection
+        self.ask("session-set", lambda core, cancel: core.agents("session-set", session["id"],
+                                                                document=settings, cancel=cancel), done)
+
+    def _send_existing(self, session, text, document):
+        self.composer.set_draft("")
+        self.composer.set_attachments([])
+        self._start(session, text, document=document)
 
     def _message(self, text, files):
         chosen = self.composer.settings()
@@ -2981,11 +3123,13 @@ class ChatTab(QWidget):
         session = self.current
         if session is None or session["id"] in self.turns:
             return
-        if not widgets.confirm(
-                self, "Delete conversation", "Delete %s?" % (session.get("title") or "it"),
-                "Everything kept of it goes: what was said, and what the agent did as "
-                "it is recorded here. Files the agent changed are left as they are.",
-                agree="Delete", kind="warn"):
+        joined = bool((session.get("lineage") or {}).get("joined"))
+        detail = ("The original conversations will return to the sidebar."
+                  if joined and _continuation_draft(session) else
+                  "Everything kept of it goes: what was said, and what the agent did as "
+                  "it is recorded here. Files the agent changed are left as they are.")
+        if not widgets.confirm(self, "Delete conversation", "Delete %s?" % (session.get("title") or "it"),
+                               detail, agree="Delete", kind="warn"):
             return
 
         def done(payload):
@@ -2997,6 +3141,8 @@ class ChatTab(QWidget):
                 if self._showing(session["id"]):
                     self._remember(session="")
                     self._show_new()
+                if joined:
+                    self.load_sessions()
             else:
                 self.composer.say(payload.get("error") or "Not deleted.", bad=True)
 

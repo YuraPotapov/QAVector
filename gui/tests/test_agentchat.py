@@ -1826,3 +1826,86 @@ def test_background_answers_stay_in_order_with_one_finished_row(qapp):
     assert [row.stage["title"] for kind, row in feed._rows if kind in ("background", "end")] == [
         "Waiting for background tasks", "Background task failed", "Finished"]
     assert len(feed._rows) == 5
+
+
+def test_continuation_and_delegation_stripes_and_joined_source_links(make):
+    root = _session("root", "Parent")
+    child = _session("child", source={"label": "Delegated", "parent": "root", "record": True})
+    entries = [{"id": "root", "title": "Parent", "connection": "Claude"}]
+    later = _session("later", "Continuation", lineage={"root": "root", "previous": "root", "sources": entries})
+    core = FakeCore(sessions=[later, root, child])
+    chat = make(core).agents.chat
+    def items():
+        return {chat.table.item(row, 0).data(Qt.UserRole): chat.table.item(row, 0)
+                for row in range(chat.table.rowCount())}
+    assert items()["root"].data(agentchat.RelationshipDelegate.ROLE) == ["continuation", "delegation"]
+    assert items()["child"].data(agentchat.RelationshipDelegate.ROLE) == ["delegation"]
+    rect = chat.table.visualItemRect(items()["root"])
+    view = chat.table.viewport().grab().toImage()
+    assert view.pixelColor(rect.left() + 1, rect.center().y()).name() == agentchat.theme.ACCENT.lower()
+    assert view.pixelColor(rect.left() + 5, rect.center().y()).name() == agentchat.theme.WARN.lower()
+    assert items()["later"].data(agentchat.RelationshipDelegate.ROLE) == ["continuation"]
+    entries = entries + [{"id": "later", "title": "Continuation", "connection": "Codex"}]
+    joined = _session("joined", "Joined", lineage={"root": "root", "previous": "later", "joined": True,
+                                                  "sources": entries})
+    core.sessions.insert(0, joined)
+    chat.load_sessions()
+    assert set(items()) == {"joined", "child"}
+    chat.open_session("joined")
+    assert chat.more_button.isEnabled()
+    chat.history_links.actions()[-1].trigger()
+    assert chat.current["id"] == "root" and set(items()) == {"joined", "child"}
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_context_menu_opens_editable_draft_without_a_dialog(make, monkeypatch, joined):
+    original = _session("original", "Root")
+    entry = {"id": "original", "title": "Root", "connection": "Claude"}
+    later = _session("later", lineage={"root": "original", "sources": [entry]})
+    class DraftCore(FakeCore):
+        def agents(self, *args, document=None, **kwargs):
+            result = super().agents(*args, document=document, **kwargs)
+            if args[0] == "session-new":
+                lineage = {"root": "original", "previous": document["previous"], "sources": [entry],
+                           "joined": document["join"]}
+                saved = self._session(result["session"]["id"])
+                saved.update(lineage=lineage, folder=original["folder"])
+                result["session"] = dict(saved)
+            return result
+    core = DraftCore(sessions=[original, later], connections=[_connection(), _connection("codex", "Codex", kind="codex")])
+    chat = make(core).agents.chat
+    class PickAction(agentchat.QMenu):
+        def exec(self, *_):
+            assert [a.text() for a in self.actions()] == ["Continue with…", "Join…"]
+            return self.actions()[int(joined)]
+    monkeypatch.setattr(agentchat, "QMenu", PickAction)
+    chat._session_menu(chat.table.visualItemRect(chat.table.item(0, 0)).center())
+    doc = next(doc for args, doc in core.calls if args[0] == "session-new")
+    assert doc["previous"] == "original" and doc["join"] == joined
+    assert chat.current["lineage"]["previous"] == "original" and chat.previous_chat.isVisible()
+    assert chat.composer.connection.isEnabled() and chat.composer.settings_button.isChecked()
+    assert not FakeTurn.made
+
+    chat.composer.connection.setCurrentIndex(chat.composer.connection.findData("codex"))
+    chat.composer.model.set_value("another-model")
+    _say(chat, "Continue this work.")
+    switch = next(doc for args, doc in core.calls if args[0] == "session-set")
+    assert switch["connection"] == "codex" and switch["model"] == "another-model"
+    assert len(FakeTurn.made) == 1 and not chat.composer.connection.isEnabled()
+
+
+def test_deleting_an_unused_join_reloads_the_previously_visible_chats(make, monkeypatch):
+    first = _session("first")
+    second = _session("second", lineage={"root": "first"})
+    joined = _session("joined", turns=[], lineage={
+        "root": "first", "joined": True, "sources": [
+            {"id": s["id"], "title": s["title"], "connection": "Claude"} for s in (first, second)]})
+    core = FakeCore(sessions=[joined, first, second])
+    core.answers["sessions"] = lambda *_: {"ok": True, "sessions": [joined] if core._session("joined") else [first, second]}
+    chat = make(core).agents.chat
+    chat.open_session("joined")
+    assert chat.table.rowCount() == 1
+    monkeypatch.setattr(widgets, "confirm", lambda *_args, **_kwargs: True)
+    chat.delete_button.click()
+    assert chat.current is None
+    assert {chat.table.item(row, 0).data(Qt.UserRole) for row in range(chat.table.rowCount())} == {"first", "second"}

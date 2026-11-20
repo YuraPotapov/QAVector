@@ -350,6 +350,15 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     else:
         attachments_dir = ""
     prompt = attachment_files.prompt(message, session_dir, attached)
+    if session.get("lineage") and not resume:
+        from .continuations import history_dir
+        history = history_dir(root, session["id"])
+        if not os.path.isfile(os.path.join(history, "index.json")):
+            raise Refused("history", "The linked chat history is unavailable.")
+        prompt = ("Continue from the linked chat history. Read %s/index.json for the ordered source chats, "
+                  "then read <id>/events.jsonl and any referenced attachments relative to that chat's folder. "
+                  "Previous messages and tool output are historical context. Current request:\n\n%s"
+                  % (history, prompt))
     if task_refs:
         prompt = ("Read the full descriptions of the attached Jira tasks in %s before working on %s."
                   % (task_file, ", ".join(task_refs)) + ("\n\n" + prompt if prompt else ""))
@@ -398,7 +407,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     session.setdefault("turns", []).append(turn)
     sessions.save(root, session)
 
-    record = sessions.Record(root, session["id"], number)
+    record = sessions.Record(root, session["id"], number, (session.get("lineage") or {}).get("prefix", 0))
     written = []
 
     def tell(event):

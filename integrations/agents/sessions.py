@@ -133,7 +133,7 @@ def title_from(message):
 
 
 def create(root, connection, folder, mode, model="", effort="", title="",
-           source=None, restrictions=None, skills=None, plan=False, others=None, wake=None):
+           source=None, restrictions=None, skills=None, plan=False, others=None, wake=None, continuation=None):
     """Start a conversation. Returns the session; nothing is asked of anybody.
 
     ``connection`` is the connection as its store holds it: its id is what the
@@ -178,7 +178,16 @@ def create(root, connection, folder, mode, model="", effort="", title="",
         "wake": wake_of({"wake": wake}, connection),
         "created": now, "updated": now, "state": "", "cost_usd": 0.0, "turns": [],
     }
-    save(root, session)
+    if continuation is not None:
+        from . import continuations
+        try:
+            session["lineage"] = continuations.snapshot(root, session, *continuation)
+            save(root, session)
+        except (OSError, ValueError, SessionError) as exc:
+            shutil.rmtree(where, ignore_errors=True)
+            raise SessionError("Could not save the conversation history: %s" % exc) from exc
+    else:
+        save(root, session)
     return session
 
 
@@ -413,7 +422,7 @@ def described(root, session):
     return settle(shown)
 
 
-def listing(root, limit=0, offset=0, query="", ref=""):
+def listing(root, limit=0, offset=0, query="", ref="", sidebar=False):
     """``{sessions, total, more}``, the most recently used first.
 
     ``query`` narrows by title, folder, connection and source, as typed;
@@ -431,6 +440,9 @@ def listing(root, limit=0, offset=0, query="", ref=""):
             found.append(load(root, name))
         except SessionError:
             continue                    # half made, or not ours: not a session
+    if sidebar:
+        from . import continuations
+        found = continuations.sidebar(found)
     ref = str(ref or "").strip()
     if ref:
         found = [one for one in found if ref in refs_of(one)]
@@ -465,7 +477,12 @@ def delete(root, session_id):
 def lock(root, session_id):
     """Hold a session for one turn. Raises ``SessionError(kind="busy")`` when
     another process has it: a conversation is one thing said at a time."""
-    path = os.path.join(directory(root, session_id), ".lock")
+    with file_lock(os.path.join(directory(root, session_id), ".lock")):
+        yield
+
+
+@contextmanager
+def file_lock(path, busy_reason="The agent is still answering in this session."):
     try:
         handle = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT, PRIVATE_FILE), "r+b")
     except OSError as exc:
@@ -482,8 +499,7 @@ def lock(root, session_id):
                 import fcntl
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            raise SessionError("The agent is still answering in this session.",
-                               "busy") from None
+            raise SessionError(busy_reason, "busy") from None
         try:
             yield
         finally:
@@ -517,10 +533,10 @@ class Record:
     so what a window showed is never more than what the file holds.
     """
 
-    def __init__(self, root, session_id, turn):
+    def __init__(self, root, session_id, turn, prefix=0):
         self.path = os.path.join(directory(root, session_id), "events.jsonl")
         self.turn = turn
-        self.seq = _last_seq(self.path)
+        self.seq = max(prefix, _last_seq(self.path))
         descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, PRIVATE_FILE)
         self._handle = os.fdopen(descriptor, "a", encoding="utf-8")
 
@@ -569,9 +585,21 @@ def events(root, session_id, after=0, limit=0):
                     continue
                 if isinstance(entry, dict) and int(entry.get("seq") or 0) > int(after or 0):
                     found.append(entry)
+    except FileNotFoundError:
+        pass
     except OSError:
         return []
     limit = max(0, int(limit or 0))
+    if (not limit or len(found) < limit) and os.path.isfile(os.path.join(
+            directory(root, session_id), "attachments", "chat-history", "index.json")):
+        from . import continuations
+        session = load(root, session_id)
+        if (session.get("lineage") or {}).get("prefix", 0) > int(after or 0):
+            start = int(after or 0)
+            if limit:
+                start = max(start, session["lineage"]["prefix"] - (limit - len(found)))
+            prefix = continuations.inherited_events(root, session, start)
+            found = list(prefix) + found
     return found[-limit:] if limit else found
 
 
@@ -589,7 +617,7 @@ def append_turn(root, session_id, turn, events):
         session = load(root, session_id)
         number = len(session.get("turns") or []) + 1
         turn = dict(turn, n=number)
-        record = Record(root, session_id, number)
+        record = Record(root, session_id, number, (session.get("lineage") or {}).get("prefix", 0))
         try:
             for event in events or []:
                 record.add(event)

@@ -347,7 +347,7 @@ def _sessions(call):
     document = _document(call.source)
     answer = sessions.listing(call.sessions, document.get("limit") or 0,
                               document.get("offset") or 0, document.get("query") or "",
-                              ref=str(document.get("ref") or ""))
+                              ref=str(document.get("ref") or ""), sidebar=bool(document.get("sidebar")))
     return dict(answer, ok=True, path=sessions.resolve_root(call.sessions))
 
 
@@ -433,41 +433,64 @@ def _session_new(call):
     settings, found = _settings(document, adapter, skills_root=call.skills)
     if found:
         return _refusal("invalid", " ".join(found), problems=found)
-    try:
-        session = sessions.create(
+    def create(continuation=None):
+        return sessions.create(
             call.sessions, connection, document.get("folder") or "", settings["mode"],
             settings.get("model", ""), settings.get("effort", ""), settings.get("title", ""),
             _source(document), settings.get("restrictions"), settings.get("skills"),
-            plan=settings.get("plan", False), others=settings.get("others"), wake=settings.get("wake"))
+            plan=settings.get("plan", False), others=settings.get("others"), wake=settings.get("wake"),
+            continuation=continuation)
+
+    try:
+        if document.get("previous"):
+            from . import continuations
+            joined = bool(document.get("join"))
+            with continuations.sources_for(call.sessions, document["previous"], joined) as (original, members):
+                document["folder"] = original["folder"]
+                settings["restrictions"] = original.get("restrictions") or {}
+                settings["title"] = settings.get("title") or original.get("title") or "Continuation"
+                session = create((original, members, joined))
+        else:
+            session = create()
     except sessions.SessionError as exc:
         return _refusal(exc.kind, str(exc))
     return {"ok": True, "session": sessions.described(call.sessions, session)}
 
 
 def _session_set(call):
-    from integrations.agents import adapters, sessions
+    from integrations.agents import adapters, sessions, store
     session_id = _one(call, "session-set")
     if not call.source:
         raise Usage("session-set needs --from=FILE with what to change.")
     document = _document(call.source)
     try:
-        session = sessions.load(call.sessions, session_id)
-        adapter = adapters.get(session["kind"])
-        settings, found = _settings(document, adapter, current=session,
-                                    skills_root=call.skills)
-        if "folder" in document:
-            folder = os.path.abspath(os.path.expanduser(str(document.get("folder") or "")))
-            if session.get("turns"):
-                # The CLI keeps a conversation under the folder it began in.
-                found.append("The folder cannot change once the conversation has begun.")
-            elif not os.path.isdir(folder):
-                found.append("%s is not a folder." % folder)
-            settings["folder"] = folder
-        if found:
-            return _refusal("invalid", " ".join(found), problems=found)
-        # Under the lock: a turn being taken is writing this same record.
+        sessions.load(call.sessions, session_id)
+        # A turn being taken is writing this same record.
         with sessions.lock(call.sessions, session_id):
             session = sessions.load(call.sessions, session_id)
+            switched = {}
+            if "connection" in document and document["connection"] != session["connection"]:
+                if not session.get("lineage") or session.get("turns") or session.get("provider_started"):
+                    return _refusal("invalid", "Only a continuation draft can change its connection.")
+                name = str(document.get("connection") or "").strip()
+                connection = store.get(name, call.path)
+                if connection is None:
+                    return _refusal("no_connection", "No agent connection %r." % name)
+                switched = {"connection": connection["id"], "connection_name": connection["name"],
+                            "kind": connection["kind"], "model": "", "effort": "",
+                            "others": sessions.others_of({}, connection), "wake": sessions.wake_of({}, connection)}
+            adapter = adapters.get(switched.get("kind") or session["kind"])
+            settings, found = _settings(document, adapter, current=session, skills_root=call.skills)
+            if "folder" in document:
+                folder = os.path.abspath(os.path.expanduser(str(document.get("folder") or "")))
+                if session.get("turns"):
+                    found.append("The folder cannot change once the conversation has begun.")
+                elif not os.path.isdir(folder):
+                    found.append("%s is not a folder." % folder)
+                settings["folder"] = folder
+            if found:
+                return _refusal("invalid", " ".join(found), problems=found)
+            session.update(switched)
             session.update(settings)
             sessions.save(call.sessions, session)
     except sessions.SessionError as exc:

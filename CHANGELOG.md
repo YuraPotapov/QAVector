@@ -18,6 +18,11 @@ app-agnostic, since that will break things on purpose.
 
 ## [0.16.79] - 2026-11-20
 
+### Added
+- Continue a chat with another connection or model, or join the whole chain
+  into one chat. Source chats remain available from Linked chats.
+- Sidebar stripes identify continuations and delegated chats.
+
 ### Fixed
 - Claude chats now receive automatic replies from background tasks in the same
   turn. The chat shows task completion or failure, and counts usage across replies.

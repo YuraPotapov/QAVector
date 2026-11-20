@@ -338,7 +338,7 @@ class QuickAgentPopup(widgets.FloatingPanel):
         self.recent.setEnabled(False)
         self.recent_skeleton.start()
         self.agents.ask("quick-agent-sessions", lambda core, cancel: core.agents(
-            "sessions", document={"limit": SESSIONS_SHOWN}, cancel=cancel), self._recent_read)
+            "sessions", document={"limit": SESSIONS_SHOWN, "sidebar": True}, cancel=cancel), self._recent_read)
 
     def _recent_read(self, payload):
         self._recent_loading = False
