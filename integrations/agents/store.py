@@ -71,6 +71,7 @@ OTHERS_NEW = "approve"
 
 #: The fields that say which program runs; changing one makes a past check moot.
 PROGRAM = ("kind", "binary")
+CHAT_LIMIT_VIEWS = ("short", "weekly", "combined")
 
 StoreError = shared.StoreError
 
@@ -104,6 +105,8 @@ def normalize(entry):
         # Blank leaves either choice to the CLI's own configuration.
         "model": str(entry.get("model") or "").strip(),
         "effort": str(entry.get("effort") or "").strip(),
+        "show_limits_in_chat": entry.get("show_limits_in_chat") is not False,
+        "chat_limit_view": entry.get("chat_limit_view") if entry.get("chat_limit_view") in CHAT_LIMIT_VIEWS else "combined",
         # What other agents are told it is good at, when they may hand it work.
         "role": str(entry.get("role") or "").strip()[:500],
         "qavector_access": {key: (entry.get("qavector_access") or {}).get(key) is True
@@ -225,6 +228,9 @@ def upsert(entry, path=None):
         connections.append(entry)
     else:
         previous = next(one for one in connections if one["id"] == entry["id"])
+        for key in ("show_limits_in_chat", "chat_limit_view"):
+            if key not in raw:
+                entry[key] = previous[key]
         if any(previous.get(key) != entry.get(key) for key in PROGRAM):
             # Another program now: what the old one answered says nothing of it.
             entry.pop("last_check", None)

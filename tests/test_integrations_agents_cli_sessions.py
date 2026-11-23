@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -102,6 +103,23 @@ def test_send_accepts_files_and_history_keeps_their_metadata(agents):
     code, history = agents("session", session["id"])
     assert code == 0 and history["events"][0]["attachments"] == attached
     assert os.path.isfile(os.path.join(agents.sessions, session["id"], attached[0]["path"]))
+
+
+def test_tool_patch_reads_the_requested_operation_from_the_saved_turn(agents):
+    session = agents.new()
+    session_id = session["id"]
+    code, _ = agents.lines("send", session_id, document={"message": "hello"})
+    assert code == 0
+    recorded = Path(agents.sessions) / session_id / "turns" / "0001" / "stdout.log"
+    first = {"type": "fileChange", "id": "first", "status": "completed",
+             "changes": [{"path": "a.py", "diff": "-before\n+first\n"}]}
+    second = dict(first, id="second", changes=[{"path": "a.py", "diff": "-first\n+second\n"}])
+    records = [{"method": "item/completed", "params": {"item": item}} for item in (first, second)]
+    recorded.write_text("\n".join(map(json.dumps, records)), encoding="utf-8")
+    code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "first"})
+    assert code == 0 and answer["files"] == first["changes"]
+    code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "missing"})
+    assert code == 1 and answer["kind"] == "patch_unavailable"
 
 
 @pytest.mark.parametrize("document, kind, said", [

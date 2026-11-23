@@ -1003,21 +1003,24 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         # --- status bar ------------------------------------------------------
-        # Which core and which interpreter are settings, not state: they are
-        # decided once in Settings, they are on About, and the status bar is for
-        # what is happening now. The config file stays - it is the one of the
-        # three that changes what a run reads.
-        self.status_config = QLabel("")
-        self.status_state = QLabel("idle")
-        for label in (self.status_config, self.status_state):
+        self.status_context = QLabel("")
+        self.status_state = QLabel("Running")
+        for label in (self.status_context, self.status_state):
             label.setStyleSheet("font-family: %s; font-size: 11px; color: %s;"
                                 % (theme.MONO_CSS, theme.NEUTRAL[700]))
             self.statusBar().addWidget(label)
-        self.status_right = QLabel("ready")
+            label.hide()
+        self.status_chat = widgets.ElidedLabel(mode=Qt.ElideRight)
+        self.status_chat.setStyleSheet(self.status_context.styleSheet())
+        self.statusBar().addWidget(self.status_chat, 1)
+        self.status_chat.hide()
+        chat = self.integrations.agents.chat
+        chat.context_changed.connect(self._set_status_context)
+        chat.footer_title_changed.connect(self._set_status_chat)
+        self.status_right = QLabel("")
         self.status_right.setStyleSheet("font-family: %s; font-size: 11px; color: %s;"
                                         % (theme.MONO_CSS, theme.NEUTRAL[600]))
         self.statusBar().addPermanentWidget(self.status_right)
-        self._update_status()
 
     def _connect_process(self):
         self.process.event.connect(self._on_event)
@@ -1464,7 +1467,6 @@ class MainWindow(QMainWindow):
                                 and one.startswith("Could not read config"))]
             if warnings:
                 self.status_right.setText(warnings[0][:90])
-            self._update_status()
             self._warn_about_chrome()
             
             if self.splash:
@@ -3533,7 +3535,7 @@ class MainWindow(QMainWindow):
         self.command.set_running(running)
         self.launch.set_running(running)
         self._sync_cycle_block()
-        self.status_state.setText("state: running" if running else "state: idle")
+        self.status_state.setVisible(running)
         self._update_workers()   # the count is a live fact; it goes when the run does
         self._subjects_follow()
         if not running:
@@ -3657,15 +3659,13 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     # -- chrome ---------------------------------------------------------------
-    def _update_status(self):
-        """Name the config file in play, without its full path."""
-        path = self.core.config_path
-        self.status_config.setText("config: %s"
-                                   % (os.path.basename(path or "") or "—"))
-        # The full path on the tooltip: this is an absolute one, and a status-bar
-        # QLabel is as wide as its text, so spelling it out here would set the
-        # window's minimum width to the length of it.
-        self.status_config.setToolTip(path or "")
+    def _set_status_context(self, text):
+        self.status_context.setText(text)
+        self.status_context.setVisible(bool(text))
+
+    def _set_status_chat(self, text):
+        self.status_chat.setText(text)
+        self.status_chat.setVisible(bool(text))
 
     def about(self):
         """What the application is, and which version of it this is.

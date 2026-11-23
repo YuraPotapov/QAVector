@@ -78,7 +78,7 @@ def _repo_state(repo):
 
 
 # ------------------------------------------------------------------ a repository
-def test_live_changes_include_new_files_and_reverts_without_overwriting_history(repo, session_dir):
+def test_live_changes_include_new_files_and_reverts_without_overwriting_history(repo, session_dir, monkeypatch):
     before = changes.snapshot(session_dir, str(repo))
     first = _turn(session_dir, 1)
     changes.begin(session_dir, first, before)
@@ -100,6 +100,12 @@ def test_live_changes_include_new_files_and_reverts_without_overwriting_history(
     assert [one["path"] for one in whole["files"]] == ["new.md"]
     assert (whole["added"], whole["removed"]) == (1, 0)
     assert (turn["added"], turn["removed"]) == (1, 2)
+    with monkeypatch.context() as scoped:
+        def unexpected_patch(*_args):
+            pytest.fail("the chat's counts should not generate a patch")
+        scoped.setattr(changes, "_patch", unexpected_patch)
+        summary = changes.preview(session_dir, second, str(repo), include_patch=False)
+        assert (summary["added"], summary["removed"], summary["patch"]) == (1, 0, "")
     assert changes.read(session_dir) == saved
     assert _repo_state(repo) == state
 

@@ -9,21 +9,20 @@ Three tabs: **Chat** - the project's conversations with an agent, which lives
 in ``agentchat.py`` - **Connections**, and **Activity**: every turn taken with
 an agent in this project, whoever asked.
 
-Showing the page reads files through the core and asks no model anything. An
-agent's program is started only by what a person does: a message sent in Chat,
-**Test** (and **Check** in the dialog), which ask it who is signed in, and
-**Sign in...**, which hands it the browser.
+Showing the page asks no model anything. The Usage tab reads provider limits
+through each connection's CLI alongside the project's recorded usage.
 """
 
 import os
 import subprocess
 import threading
+import time
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QPushButton, QScrollArea, QTabWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QLineEdit, QPushButton, QScrollArea,
+                               QStackedWidget, QTabBar, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import background, core as core_mod, search, theme, widgets
 from ..agentmodel import ModelPicker
@@ -36,6 +35,8 @@ from .agenttasks import TasksTab
 from .agentwords import (KINDS, context_text, cost_text, count_text,  # noqa: F401
                          folder_text, kind_name, model_text, program_text, result_text,
                          status_text, tokens_text, tokens_total, took_text, when_text)
+
+CHAT_LIMIT_REFRESH_SECONDS = 30
 
 #: Requests that change a file. One of these is never cancelled half way; its
 #: answer is dropped when the page it belonged to has moved on.
@@ -387,6 +388,22 @@ class ConnectionDialog(QDialog):
             "Default effort", self.effort,
             "How hard the model is asked to think when a conversation or a step "
             "does not say. The program's own choice leaves it to its settings."))
+        self.show_limits_in_chat = QCheckBox("Show limits in chat")
+        self.show_limits_in_chat.setChecked(self.connection.get("show_limits_in_chat") is not False)
+        self.show_limits_in_chat.setToolTip("Show the remaining provider limit in this connection's chats.")
+        column.addWidget(self.show_limits_in_chat, 0, Qt.AlignLeft)
+        self.chat_limit_view = QComboBox()
+        for label, value in (("Daily / short-term", "short"), ("Weekly", "weekly"), ("Combined average", "combined")):
+            self.chat_limit_view.addItem(label, value)
+        selected_view = self.chat_limit_view.findData(self.connection.get("chat_limit_view", "combined"))
+        self.chat_limit_view.setCurrentIndex(selected_view if selected_view >= 0
+                                             else self.chat_limit_view.findData("combined"))
+        self.chat_limit_view.setEnabled(self.show_limits_in_chat.isChecked())
+        self.show_limits_in_chat.toggled.connect(self.chat_limit_view.setEnabled)
+        column.addWidget(widgets.field(
+            "Chat progress bar", self.chat_limit_view,
+            "Daily prefers a 24-hour account limit and can use a shorter provider window. "
+            "Combined average gives the daily and weekly remaining percentages equal weight."))
         self.role = QLineEdit(self.connection.get("role", ""))
         self.role.setObjectName("agentRole")
         self.role.setMaxLength(500)
@@ -590,6 +607,8 @@ class ConnectionDialog(QDialog):
                       "binary": self.binary.text().strip(),
                       "model": self.model.value(),
                       "effort": self.effort.currentData() or "",
+                      "show_limits_in_chat": self.show_limits_in_chat.isChecked(),
+                      "chat_limit_view": self.chat_limit_view.currentData(),
                       "role": self.role.text().strip(),
                       "qavector_access": {key: box.isChecked() for key, box in self.access.items()},
                       "others_default": self.others_default.currentData(),
@@ -781,7 +800,9 @@ class AgentsView(QWidget):
         self.window_actions = crumb
         outer.addLayout(crumb)
 
-        self.tabs = QTabWidget()
+        self.tab_bar = QTabBar()
+        self.tab_bar.setExpanding(False)
+        self.tabs = QStackedWidget()
         self.tabs.setObjectName("agentsTabs")
         self.chat = ChatTab(settings)
         self.chat.host = self
@@ -795,15 +816,35 @@ class AgentsView(QWidget):
         self.tasks.open_conversation.connect(self.open_session)
         # What the person does on the board goes through the chat: its cards say the same.
         self.tasks.detail.acts = self.chat
-        self.tabs.addTab(self.chat, "Chat")
-        self.tabs.addTab(self.tasks, "Tasks")
-        self.tabs.addTab(self.connections_tab, "Connections")
-        self.tabs.addTab(self.roles_tab, "Roles")
-        self.tabs.addTab(self.skills_tab, "Skills")
-        self.tabs.addTab(self.activity, "Activity")
-        self.tabs.addTab(self.usage, "Usage")
+        for label, page in (
+            ("Chat", self.chat), ("Tasks", self.tasks), ("Connections", self.connections_tab),
+            ("Roles", self.roles_tab), ("Skills", self.skills_tab), ("Activity", self.activity),
+            ("Usage", self.usage),
+        ):
+            self.tab_bar.addTab(label)
+            self.tabs.addWidget(page)
+        self.tab_bar.currentChanged.connect(self.tabs.setCurrentIndex)
+        self.tabs.currentChanged.connect(self.tab_bar.setCurrentIndex)
         self.tabs.currentChanged.connect(self._tab_changed)
-        outer.addWidget(self.tabs, 1)
+        for key, step in (("Ctrl+Tab", 1), ("Ctrl+Shift+Tab", -1)):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda step=step: self.tabs.setCurrentIndex(
+                    (self.tabs.currentIndex() + step) % self.tabs.count()))
+        self.fold = widgets.FoldingSplitter(Qt.Vertical)
+        self.fold.setObjectName("agentsTabsFold")
+        tab_row = widgets.row(self.tab_bar, self.chat.more_button)
+        tab_row.layout().setStretchFactor(self.tab_bar, 1)
+        self.fold.addWidget(tab_row)
+        self.fold.addWidget(self.tabs)
+        tab_row.setMaximumHeight(max(self.tab_bar.sizeHint().height(), self.chat.more_button.maximumHeight()))
+        self.fold.setStretchFactor(0, 0)
+        self.fold.setStretchFactor(1, 1)
+        self.fold.setCollapsible(0, True)
+        self.fold.setCollapsible(1, False)
+        self.fold.remember_in(settings, "integrations/agents/tabs")
+        outer.addWidget(self.fold, 1)
 
         self.chat.connections_wanted.connect(self._add_first_connection)
         self.chat.skills_wanted.connect(self._add_a_skill)
@@ -823,6 +864,14 @@ class AgentsView(QWidget):
         self.connections_tab.check_requested.connect(self.check_connection)
         self.activity.wanted.connect(self.load_activity)
         self.usage.wanted.connect(self.load_usage)
+        self.usage.limits.refresh_wanted.connect(self.load_provider_limits)
+        self.usage.limits.changed.connect(self._show_chat_limit)
+        self.chat.composer.limit_connection_changed.connect(self._chat_limit_selected)
+        self.chat.composer.limits_requested.connect(self._open_provider_limits)
+        self.chat.turn_finished.connect(
+            lambda connection: self.load_provider_limits([connection], queue_if_busy=True))
+        self._limits_clock = QTimer(self, interval=CHAT_LIMIT_REFRESH_SECONDS * 1000)
+        self._limits_clock.timeout.connect(self._refresh_visible_limits)
         self.roles_tab.wanted.connect(self.load_roles)
         self.roles_tab.save_requested.connect(self.save_role)
         self.roles_tab.delete_requested.connect(self.delete_role)
@@ -847,6 +896,7 @@ class AgentsView(QWidget):
         self.usage.skeleton.stop()
         self.usage.say("")
         self.usage.set_usage(None)
+        self.usage.limits.set_connections([])
         self.chat.reset()
         if self.quick_composer is not None:
             self.quick_composer.reset()
@@ -879,6 +929,7 @@ class AgentsView(QWidget):
 
     def shutdown(self):
         self._closing = True
+        self._limits_clock.stop()
         if self.quick_composer is not None:
             self.quick_composer.hide()
         self._cancel_requests()
@@ -893,6 +944,11 @@ class AgentsView(QWidget):
         if not self._listed:
             self.list_connections()
         self._tab_changed(0)
+        self._limits_clock.start()
+
+    def hideEvent(self, event):
+        self._limits_clock.stop()
+        super().hideEvent(event)
 
     def _add_first_connection(self):
         """From the Chat tab with nobody to ask: to where one is made."""
@@ -930,12 +986,14 @@ class AgentsView(QWidget):
             self.load_activity()
         elif self.tabs.currentWidget() is self.usage:
             self.usage.shown()
+            self.load_provider_limits()
         elif self.tabs.currentWidget() is self.tasks:
             self.tasks.shown()
         elif self.tabs.currentWidget() is self.roles_tab:
             self.roles_tab.shown()
         elif self.tabs.currentWidget() is self.chat:
             self.chat.shown()
+            self._chat_limit_selected(self.chat.composer.connection.currentData() or "")
         elif self.tabs.currentWidget() is self.skills_tab:
             self.load_skills()
 
@@ -1074,7 +1132,12 @@ class AgentsView(QWidget):
     def _set_connections(self, connections):
         self.connections = list(connections)
         self.connections_tab.set_connections(self.connections)
+        self.usage.limits.set_connections(self.connections)
         self.chat.set_connections(self.connections)
+        if self.isVisible() and self.tabs.currentWidget() is self.usage:
+            self.load_provider_limits()
+        elif self.tabs.currentWidget() is self.chat:
+            self._chat_limit_selected(self.chat.composer.connection.currentData() or "")
         self.connections_changed.emit()
 
     def load_kinds(self, done):
@@ -1110,10 +1173,14 @@ class AgentsView(QWidget):
         the answer on the connection, and so does the table."""
         def answered(payload):
             if payload.get("last_check"):
-                for one in self.connections:
-                    if one.get("id") == connection_id:
-                        one["last_check"] = payload["last_check"]
+                self.connections = [
+                    dict(one, last_check=payload["last_check"]) if one["id"] == connection_id else one
+                    for one in self.connections
+                ]
                 self.connections_tab.set_connections(self.connections)
+                self.usage.limits.set_connections(self.connections)
+                if self.isVisible() and self.tabs.currentWidget() is self.usage:
+                    self.load_provider_limits([connection_id])
             if done is not None:
                 done(payload)
 
@@ -1210,6 +1277,71 @@ class AgentsView(QWidget):
                 self.usage.say(payload.get("error") or "The usage could not be read.")
 
         self._call("usage", lambda core, cancel: core.agents("usage", document=document, cancel=cancel), done)
+
+    def _show_chat_limit(self):
+        composer = self.chat.composer
+        card = self._chat_limit_card(composer.connection.currentData())
+        composer.set_provider_limit(card.summary() if card is not None else None)
+
+    def _chat_limit_card(self, connection_id):
+        card = self.usage.limits.cards.get(connection_id)
+        return card if card is not None and card.connection.get("show_limits_in_chat") is not False else None
+
+    def _chat_limit_selected(self, connection_id):
+        self._show_chat_limit()
+        card = self._chat_limit_card(connection_id)
+        if (self.isVisible() and self.tabs.currentWidget() is self.chat and card is not None
+                and time.monotonic() - card.last_attempt >= CHAT_LIMIT_REFRESH_SECONDS):
+            self.load_provider_limits([connection_id])
+
+    def _refresh_visible_limits(self):
+        self.usage.limits.update_status()
+        if self.tabs.currentWidget() is self.usage:
+            self.load_provider_limits(only_due=True)
+        elif self.tabs.currentWidget() is self.chat:
+            connection_id = self.chat.composer.connection.currentData()
+            if self._chat_limit_card(connection_id) is not None:
+                self.load_provider_limits([connection_id])
+
+    def _open_provider_limits(self, connection_id):
+        self.tabs.setCurrentWidget(self.usage)
+        limits = self.usage.limits
+        card = limits.cards.get(connection_id)
+        if card is not None:
+            limits.scroll.ensureWidgetVisible(card)
+
+    def load_provider_limits(self, connections=None, *, only_due=False, queue_if_busy=False):
+        if self.core is None or self._closing:
+            return
+        limits = self.usage.limits
+        now = time.monotonic()
+        pending = []
+        for connection_id, card in limits.cards.items():
+            if connections is not None and connection_id not in connections:
+                continue
+            if card.loading:
+                if queue_if_busy:
+                    card.refresh_after = True
+            elif not only_due or now - card.last_attempt >= card.FRESH_SECONDS:
+                pending.append((connection_id, card))
+        if not pending:
+            return
+        for _, card in pending:
+            card.loading = True
+        limits.update_status()
+
+        for connection_id, card in pending:
+            def done(payload, connection_id=connection_id, card=card):
+                if limits.cards.get(connection_id) is card:
+                    refresh_after, card.refresh_after = card.refresh_after, False
+                    card.set_result(payload)
+                    limits.update_status()
+                    if refresh_after:
+                        self.load_provider_limits([connection_id])
+
+            self._call("provider-limits:" + connection_id,
+                       lambda core, cancel, connection_id=connection_id: core.agents(
+                           "rate-limits", connection_id, timeout=30, cancel=cancel), done)
 
     def _turns_of(self, field, value):
         """The turns behind a row of Usage: Activity, searched by that model or connection."""

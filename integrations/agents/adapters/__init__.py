@@ -9,6 +9,7 @@ An adapter is a module with:
     find(binary)          (path, where) - where: given, PATH or an install place
     INSTALL_HINT          what to tell somebody who does not have the CLI
     status(binary, ...)   who the CLI is signed in as, as plain data
+    rate_limits(binary)   optional account usage windows, without a model turn
     describe(status)      one line for a status row
     login_argv(binary)    what to run to sign in
     stages(line, ...)     one line of the CLI's event stream, as rows to show

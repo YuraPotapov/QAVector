@@ -8,6 +8,18 @@ class Unsupported(ValueError):
     code = "unsupported"
 
 
+def rate_limit_window(label, used_percent, resets_at=None, *, duration_minutes=None, account_wide=False):
+    """Normalize a provider's percentage and optional Unix reset time."""
+    if type(used_percent) not in (float, int) or not 0 <= used_percent < float("inf"):
+        return None
+    if type(resets_at) not in (float, int) or not 0 < resets_at < float("inf"):
+        resets_at = None
+    window = {"label": label, "used_percent": used_percent, "resets_at": resets_at}
+    if type(duration_minutes) is int and duration_minutes > 0:
+        window.update(duration_minutes=duration_minutes, account_wide=account_wide)
+    return window
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     provider: str

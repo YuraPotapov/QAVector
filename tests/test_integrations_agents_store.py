@@ -42,13 +42,27 @@ def test_renaming_keeps_the_id_everything_else_calls_it_by(path):
     assert store.get("claude", path)["name"] == "Claude Code"
 
 
+def test_chat_limits_default_on_and_an_opt_out_survives_edits(path):
+    assert store.normalize({"id": "old"})["show_limits_in_chat"] is True
+    assert store.normalize({"id": "old"})["chat_limit_view"] == "combined"
+    connection = _add(path, show_limits_in_chat=False, chat_limit_view="weekly")
+    assert store.get(connection["id"], path)["show_limits_in_chat"] is False
+    changed, problems = store.upsert({"id": connection["id"], "name": "Renamed", "kind": "claude"}, path)
+    assert problems == []
+    assert changed["show_limits_in_chat"] is False
+    assert changed["chat_limit_view"] == "weekly"
+    enabled, problems = store.upsert(dict(changed, show_limits_in_chat=True), path)
+    assert problems == [] and store.get(enabled["id"], path)["show_limits_in_chat"] is True
+
+
 def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
     _add(path, model="sonnet", effort="high")
     if os.name != "nt":
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     entry = json.load(open(path, encoding="utf-8"))["connections"][0]
     assert entry == {"id": "claude", "name": "Claude", "kind": "claude",
-                     "binary": "", "model": "sonnet", "effort": "high", "role": "",
+                     "binary": "", "model": "sonnet", "effort": "high", "role": "", "show_limits_in_chat": True,
+                     "chat_limit_view": "combined",
                      # QAVector through QCR: nothing until somebody turns it on (ADR-003 D6).
                      "qavector_access": {"services": False, "scenarios": False, "cycles": False,
                                          "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},

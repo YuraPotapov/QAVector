@@ -1,21 +1,20 @@
 """Integrations -> Agents: what the page shows, and what it asks of the core.
 
-The rule the page is held to is the one Jira's is: nothing is asked unless a
-person did something that asks. Showing it reads the connections file; only
-Test, Check and Sign in go near an agent's program, and no model is ever asked
-anything here. So the fake core writes every call down, and most tests are
-about what was called.
+The page reads the connections and provider limits when shown. The fake core
+records each call so tests can check what the page asked for.
 """
 
 import os
 import sys
+import time
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QColor
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog
 
 from cms_gui import theme, widgets
@@ -112,6 +111,8 @@ class FakeCore:
             return {"ok": True, "files": [], "patch": "", "added": 0, "removed": 0}
         if command == "list":
             return {"ok": True, "connections": [dict(one) for one in self.connections]}
+        if command == "rate-limits":
+            return {"ok": True, "windows": [], "checked_at": time.time()}
         if command == "kinds":
             return {"ok": True, "kinds": [dict(one) for one in self.kinds]}
         if command == "models":
@@ -302,16 +303,35 @@ def _texts(table, row):
     return [table.item(row, column).text() for column in range(table.columnCount())]
 
 
+def test_agents_tab_bar_folds_without_hiding_navigation_or_content(make, qapp):
+    agents = make().agents
+    fold = agents.fold
+    QTest.mouseClick(agents.tab_bar, Qt.LeftButton, pos=agents.tab_bar.tabRect(2).center())
+    assert agents.tabs.currentWidget() is agents.connections_tab
+    assert fold.sizes()[0] > 0 and not fold.isCollapsible(1)
+    fold.setSizes([0, sum(fold.sizes())])
+    fold.splitterMoved.emit(0, 1)
+    qapp.processEvents()
+    assert fold.folded() == [0]
+    assert fold.widget(0) is agents.tab_bar.parentWidget()
+    assert agents.crumb.isVisible() and agents.connections_tab.isVisible()
+    agents.tabs.setCurrentWidget(agents.chat)
+    assert agents.chat.isVisible() and agents.tab_bar.currentIndex() == 0
+
+    restored = make().agents
+    assert restored.fold.folded() == [0]
+    restored.fold.unfold(0)
+    assert restored.fold.folded() == [] and restored.tab_bar.height() > 0
+
+
 # -- what is asked ----------------------------------------------------------------
-def test_showing_the_page_reads_two_lists_and_starts_no_program(make):
-    """The connections, and the conversations of the tab in front: both files -
-    and where the agent programs are, for their effort levels: a look along
-    PATH."""
+def test_showing_the_page_reads_limits_for_the_active_connection(make):
     core = FakeCore()
     page = make(core)
     assert page.stack.currentWidget() is page.agents
     assert page.agents.tabs.currentWidget() is page.agents.chat
-    assert core.asked() == ["list", "sessions", "kinds"]
+    assert [args for args, _ in core.calls if args[0] == "rate-limits"] == [("rate-limits", "claude")]
+    assert [command for command in core.asked() if command != "rate-limits"] == ["list", "sessions", "kinds"]
 
 
 def test_coming_back_asks_nothing_and_the_activity_is_read_when_its_tab_is_opened(make, qapp):
@@ -320,9 +340,10 @@ def test_coming_back_asks_nothing_and_the_activity_is_read_when_its_tab_is_opene
     page.hide()
     page.show()
     qapp.processEvents()
-    assert core.asked() == ["list", "sessions", "kinds"]
+    assert core.asked().count("rate-limits") == 1
+    assert [command for command in core.asked() if command != "rate-limits"] == ["list", "sessions", "kinds"]
     page.agents.tabs.setCurrentWidget(page.agents.activity)
-    assert core.asked() == ["list", "sessions", "kinds", "activity"]
+    assert core.asked()[-1] == "activity"
     assert page.agents.activity.table.rowCount() == 1
 
 
@@ -330,6 +351,140 @@ def test_a_page_never_shown_asks_nothing(make):
     core = FakeCore()
     make(core, show=False)
     assert core.calls == []
+
+
+def test_provider_limits_follow_connections_and_open_from_chat(make):
+    connections = [_connection(chat_limit_view="weekly"), _connection("personal", "Personal", chat_limit_view="weekly"),
+                   _connection("work", "Work", kind="codex", chat_limit_view="weekly")]
+    usage = {"claude": 42, "personal": 81, "work": 64}
+    failures = set()
+
+    def read(args, _document):
+        connection_id = args[1]
+        if connection_id in failures:
+            return {"ok": False, "error": "Provider unavailable"}
+        return {"ok": True, "checked_at": time.time(), "windows": [
+            {"label": "5-hour limit", "used_percent": 10.123456789, "resets_at": time.time() + 3600,
+             "duration_minutes": 300},
+            {"label": "Weekly limit", "used_percent": usage[connection_id], "duration_minutes": 10080},
+        ]}
+
+    core = FakeCore(connections=connections, **{"rate-limits": read})
+    agents = make(core).agents
+    composer = agents.chat.composer
+    assert composer.context_row.remaining_percent == 58
+    assert "Weekly limit · 58% remaining" in composer.context_row.toolTip()
+    assert "5-hour limit · 89.876543211% remaining · Resets" in composer.context_row.toolTip()
+    assert not hasattr(composer, "limits_button")
+    personal = composer.connection.findData("personal")
+    composer.connection.setCurrentIndex(personal)
+    composer.connection.activated.emit(personal)
+    assert composer.context_row.remaining_percent == 19
+    assert "Weekly limit · 19% remaining" in composer.context_row.toolTip()
+    limits = agents.usage.limits
+    usage["personal"] = 83
+    agents._limits_clock.timeout.emit()
+    assert composer.context_row.remaining_percent == 17
+    QTest.mouseClick(composer.context_row, Qt.LeftButton)
+    assert agents.tabs.currentWidget() is agents.usage
+    assert list(limits.cards) == ["claude", "personal", "work"]
+    assert limits.cards["work"].summary()["remaining_percent"] == 36
+    failures.add("personal")
+    limits.refresh.click()
+    assert limits.cards["personal"].summary()["remaining_percent"] == 17
+    assert limits.cards["personal"].summary()["stale"]
+    core.connections = [connections[0], connections[2]]
+    agents.list_connections()
+    assert list(limits.cards) == ["claude", "work"]
+
+
+def test_chat_refreshes_again_when_a_turn_finishes_during_a_limit_read(make, monkeypatch):
+    def windows(used):
+        return {"ok": True, "checked_at": time.time(), "windows": [
+            {"label": "Weekly limit", "used_percent": used, "duration_minutes": 10080}]}
+
+    agents = make(FakeCore(**{"rate-limits": windows(40)})).agents
+    row = agents.chat.composer.context_row
+    assert row.remaining_percent == 60
+    pending = []
+    original_call = agents._call
+
+    def delay(kind, work, done, cancel=None):
+        if kind == "provider-limits:claude":
+            pending.append(done)
+        else:
+            original_call(kind, work, done, cancel)
+
+    monkeypatch.setattr(agents, "_call", delay)
+    agents._limits_clock.timeout.emit()
+    assert len(pending) == 1
+    agents.chat.turn_finished.emit("claude")
+    assert len(pending) == 1
+    pending.pop(0)(windows(41))
+    assert len(pending) == 1
+    pending.pop(0)(windows(45))
+    assert row.remaining_percent == 55
+    assert not pending
+    assert agents.tabs.currentWidget() is agents.chat
+
+
+def test_connection_can_hide_chat_limits_while_keeping_its_usage_card(make, dispose):
+    core = FakeCore(connections=[_connection(), _connection("work", "Work")], **{"rate-limits": {
+        "ok": True, "checked_at": time.time(),
+        "windows": [{"label": "Weekly limit", "used_percent": 42, "duration_minutes": 10080}],
+    }})
+    page = make(core)
+    agents = page.agents
+    composer = agents.chat.composer
+    assert composer.context_row.remaining_percent == 58
+    dialog = _dialog(page, agents.connections[0])
+    assert dialog.show_limits_in_chat.isChecked()
+    dialog.show_limits_in_chat.setChecked(False)
+    dialog.save.click()
+    dispose(dialog)
+    assert composer.context_row.remaining_percent is None
+    assert "Weekly limit" not in composer.context_row.toolTip()
+    assert composer.context_row.focusPolicy() == Qt.NoFocus
+    QTest.mouseClick(composer.context_row, Qt.LeftButton)
+    assert agents.tabs.currentWidget() is agents.chat
+    agents.tabs.setCurrentWidget(agents.usage)
+    assert agents.usage.limits.cards["claude"].summary()["remaining_percent"] == 58
+    agents.tabs.setCurrentWidget(agents.chat)
+    other = composer.connection.findData("work")
+    composer.connection.setCurrentIndex(other)
+    composer.connection.activated.emit(other)
+    assert composer.context_row.remaining_percent == 58
+    dialog = _dialog(page, agents.connections[0])
+    assert not dialog.show_limits_in_chat.isChecked()
+    dialog.show_limits_in_chat.setChecked(True)
+    dialog.save.click()
+    dispose(dialog)
+    claude = composer.connection.findData("claude")
+    composer.connection.setCurrentIndex(claude)
+    composer.connection.activated.emit(claude)
+    assert composer.context_row.remaining_percent == 58
+
+
+def test_chat_progress_bar_uses_the_saved_window_or_the_combined_average(make, dispose):
+    core = FakeCore(**{"rate-limits": {"ok": True, "checked_at": time.time(), "windows": [
+        {"label": "5-hour limit", "used_percent": 80, "duration_minutes": 300, "account_wide": True},
+        {"label": "Daily limit", "used_percent": 24, "duration_minutes": 1440, "account_wide": True},
+        {"label": "Weekly limit", "used_percent": 52, "duration_minutes": 10080, "account_wide": True},
+        {"label": "Weekly limit · Other model", "used_percent": 103, "duration_minutes": 10080},
+    ]}})
+    page = make(core)
+    agents = page.agents
+    row = agents.chat.composer.context_row
+    assert row.remaining_percent == 62
+    for current, setting, expected in (("combined", "short", 76), ("short", "weekly", 48),
+                                        ("weekly", "combined", 62)):
+        dialog = _dialog(page, agents.connections[0])
+        assert dialog.chat_limit_view.currentData() == current
+        dialog.chat_limit_view.setCurrentIndex(dialog.chat_limit_view.findData(setting))
+        dialog.save.click()
+        dispose(dialog)
+        assert row.remaining_percent == expected
+        assert "Weekly limit · Other model · 0% remaining" in row.toolTip()
 
 
 def test_another_project_reads_again_and_drops_what_the_old_one_showed(make):
@@ -582,12 +737,16 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         assert [dialog.effort.itemData(index) for index in range(dialog.effort.count())] == [
             "", "low", "medium", "high", "xhigh", "max"]
         dialog.save.click()
-        assert core.calls[-1] == (("save",), {"connection": {
+        (args, document), = [call for call in core.calls if call[0][0] == "save"]
+        assert args == ("save",)
+        assert document == {"connection": {
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "", "role": "",
+            "show_limits_in_chat": True,
+            "chat_limit_view": "combined",
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
             "others_default": "approve", "allowed_agents": [], "wake_default": "ask",
-            "budget_task": {}, "budget_conversation": {}}})
+            "budget_task": {}, "budget_conversation": {}}}
         assert dialog.result() == QDialog.Accepted
     finally:
         dispose(dialog)
@@ -682,13 +841,17 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
         dialog.binary.setText("/opt/claude/bin/claude")
         dialog.effort.setCurrentIndex(dialog.effort.findData("high"))
         dialog.save.click()
-        assert core.calls[-1] == (("save",), {"connection": {
+        (args, document), = [call for call in core.calls if call[0][0] == "save"]
+        assert args == ("save",)
+        assert document == {"connection": {
             "id": "claude", "name": "Claude", "kind": "claude",
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high", "role": "",
+            "show_limits_in_chat": True,
+            "chat_limit_view": "combined",
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
             "others_default": "deny", "allowed_agents": [], "wake_default": "ask",
-            "budget_task": {}, "budget_conversation": {}}})
+            "budget_task": {}, "budget_conversation": {}}}
     finally:
         dispose(dialog)
     assert page.agents.connections_tab.table.item(0, 2).text() == "/opt/claude/bin/claude"

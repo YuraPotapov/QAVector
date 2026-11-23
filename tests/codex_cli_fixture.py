@@ -145,6 +145,13 @@ if args[0] == "app-server":
         elif method == "model/list":
             say({"id": ident, "result": {"data": [{"model": "fixture-model", "displayName": "Fixture",
                 "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}], "nextCursor": None}})
+        elif method == "account/rateLimits/read":
+            primary = {"usedPercent": 34, "windowDurationMins": 300, "resetsAt": 1795200000}
+            secondary = {"usedPercent": 48, "windowDurationMins": 10080, "resetsAt": None}
+            default = {"limitId": "codex", "primary": primary, "secondary": secondary}
+            extra = {"limitId": "extra", "limitName": "Example", "primary": primary}
+            say({"id": ident, "result": {"rateLimits": default, "rateLimitsByLimitId": {
+                "codex": default, "extra": extra}}})
         elif method in ("thread/start", "thread/resume"):
             if method == "thread/resume":
                 THREAD = params["threadId"]

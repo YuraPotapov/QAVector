@@ -1329,13 +1329,19 @@ class PulseDot(QWidget):
 
     def paintEvent(self, _event):             # noqa: N802 - Qt's own spelling
         painter = QPainter(self)
+        self.paint_dot(painter, self.rect(), self._opacity)
+
+    @staticmethod
+    def paint_dot(painter, rect, opacity):
+        painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         # Read now, not captured: dark mode rewrites theme.ACCENT in place.
         colour = QColor(theme.ACCENT)
-        colour.setAlphaF(max(0.0, min(1.0, self._opacity)))
+        colour.setAlphaF(max(0.0, min(1.0, opacity)))
         painter.setBrush(colour)
         painter.setPen(Qt.NoPen)
-        painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+        painter.drawEllipse(rect.adjusted(1, 1, -1, -1))
+        painter.restore()
 
 
 class Busy(QWidget):
@@ -2568,10 +2574,13 @@ class FoldingSplitter(QSplitter):
     for the folded panel and a hairline for the open one beside it.
     """
 
+    folded_changed = Signal()
+
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
         self._marks = {}                 # panel index -> _FoldMark
         self._open_sizes = {}            # panel index -> last size seen open
+        self._folded = set()
         self._store = None               # (settings, key) - see remember_in
         self.splitterMoved.connect(lambda *_args: self._moved())
 
@@ -2696,6 +2705,9 @@ class FoldingSplitter(QSplitter):
                 mark.setGeometry(start, edge, length, FOLD_MARK)
             mark.show()
             mark.raise_()
+        if self._folded != folded:
+            self._folded = folded
+            self.folded_changed.emit()
 
 
 # --- tables ------------------------------------------------------------------

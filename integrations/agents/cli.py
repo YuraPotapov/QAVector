@@ -17,6 +17,7 @@ line itself is wrong.
                               to run and watch; --from=F as for test
     models ID                 models offered by that CLI, without sending a
                               prompt; --from=F accepts an unsaved connection
+    rate-limits ID            plan limit windows reported for a saved connection
 
     sessions [--from=F]       the project's conversations, the most recently
                               used first: {"limit", "offset", "query", "ref"} -
@@ -42,8 +43,9 @@ line itself is wrong.
     activity [--from=F]       every turn of every session, newest first:
                               {"limit", "ref"}
     changes ID [--from=F]     changes so far, including a running turn; or one
-                              turn with {"turn": N}. Running turns use a live
-                              git snapshot; completed turns read saved patches
+                              turn with {"turn": N}. Set "summary": true to
+                              read change counts without getting the patch
+    tool-patch ID --from=F    one recorded edit's diff: {"turn": N, "item": "..."}
 
     roles                     the roles agents may hand work to, and the usual
                               ones as a start (ADR-010)
@@ -71,9 +73,9 @@ Options: ``--agents-file=PATH``, the connections file, ``--agent-sessions-dir=
 PATH``, the project's conversations, and ``--agent-skills-dir=PATH``, the
 skills library - each beside the user's data by default.
 
-``test`` starts an agent CLI only to ask who it is signed in as. ``send`` is
-the one command that asks a model anything. ``skill-look`` and ``skill-update``
-are the only ones that reach the network, with git.
+``test`` checks the CLI's sign-in and ``rate-limits`` reads its plan windows.
+``send`` is the one command that asks a model anything. ``skill-look`` and
+``skill-update`` may fetch skill repositories with git.
 """
 
 import json
@@ -161,6 +163,21 @@ def _list(call):
     from integrations.agents import store
     return {"ok": True, "path": store.resolve_path(call.path),
             "connections": store.load(call.path)}
+
+
+def _rate_limits(call):
+    from integrations.agents import adapters, store
+    connection_id = _one(call, "rate-limits")
+    entry = store.get(connection_id, call.path)
+    if entry is None:
+        return _refusal("not_found", "No connection %r." % connection_id)
+    try:
+        read = getattr(adapters.get(entry["kind"]), "rate_limits", None)
+    except adapters.UnknownKind:
+        read = None
+    if read is None:
+        return {"ok": True, "windows": []}
+    return dict(read(entry["binary"]), checked_at=time.time())
 
 
 def _roles(call):
@@ -580,6 +597,7 @@ def _changes(call):
         return _refusal(exc.kind, str(exc))
     where = sessions.directory(call.sessions, session_id)
     turn = document.get("turn")
+    summary = document.get("summary") is True
     turn_dir = None
     if turn is not None:
         if not isinstance(turn, int) or isinstance(turn, bool) or not (
@@ -592,12 +610,40 @@ def _changes(call):
             and sessions.held(call.sessions, session_id)):
         try:
             found = changes.preview(where, sessions.turn_directory(
-                call.sessions, session_id, active["n"]), session["folder"], whole=turn is None)
+                call.sessions, session_id, active["n"]), session["folder"], whole=turn is None,
+                                    include_patch=not summary)
         except (changes.ChangesError, OSError, ValueError) as exc:
             return _refusal("changes_unavailable", str(exc))
     else:
-        found = changes.read(where, turn_dir)
+        found = changes.read(where, turn_dir, include_patch=not summary)
+    if summary:
+        found = {key: found[key] for key in ("added", "removed", "live", "pending", "unkept", "error") if key in found}
     return dict(found, ok=True, session=session_id, turn=turn)
+
+
+def _tool_patch(call):
+    from integrations.agents import sessions
+    from integrations.agents.adapters import codex
+    session_id = _one(call, "tool-patch")
+    document = _document(call.source)
+    turn, item = document.get("turn"), document.get("item")
+    if type(turn) is not int or turn < 1 or not isinstance(item, str) or not item:
+        return _refusal("invalid", "An edit needs a turn number and tool item id.")
+    try:
+        session = sessions.load(call.sessions, session_id)
+        if turn > len(session.get("turns") or []):
+            return _refusal("invalid", "This conversation has no turn %s." % turn)
+        where = sessions.turn_directory(call.sessions, session_id, turn)
+        found = codex.read_patch(os.path.join(where, "stdout.log"), item)
+    except sessions.SessionError as exc:
+        return _refusal(exc.kind, str(exc))
+    except FileNotFoundError:
+        found = None
+    except OSError:
+        return _refusal("patch_unavailable", "Could not read this edit's recorded output.")
+    if found is None:
+        return _refusal("patch_unavailable", "No line diff was recorded for this edit.")
+    return dict(found, ok=True)
 
 
 # -- skills ---------------------------------------------------------------------
@@ -692,11 +738,12 @@ def _import(call):
 
 
 COMMANDS = {"kinds": _kinds, "models": _models, "list": _list, "save": _save, "delete": _delete,
+            "rate-limits": _rate_limits,
             "roles": _roles, "role-save": _role_save, "role-delete": _role_delete,
             "test": _test, "sign-in": _sign_in,
             "sessions": _sessions, "session": _session, "usage": _usage, "budget": _budget, "session-link": _session_link, "session-new": _session_new,
             "session-set": _session_set, "session-delete": _session_delete,
-            "send": _send, "activity": _activity, "changes": _changes,
+            "send": _send, "activity": _activity, "changes": _changes, "tool-patch": _tool_patch,
             "skills": _skills, "skill-look": _skill_look, "skill-add": _skill_add,
             "skill-update": _skill_update, "skill-remove": _skill_remove,
             "export": _export, "import": _import}

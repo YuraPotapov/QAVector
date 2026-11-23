@@ -403,7 +403,7 @@ def _escape(path):
 
 
 # -- what changed ---------------------------------------------------------------
-def compare(session_dir, before, after, run=None):
+def compare(session_dir, before, after, run=None, *, include_patch=True):
     """What changed between two snapshots: ``{"files", "patch", "added",
     "removed", "truncated", "unkept"}``. ``files`` are dicts with ``path``,
     ``status`` (added, modified, deleted, renamed), ``added``, ``removed``,
@@ -422,7 +422,8 @@ def compare(session_dir, before, after, run=None):
             continue
         objects = _objects(part["root"]) if part["kind"] == "git" else None
         files += _files(git, part, old, objects)
-        patches.append(_patch(git, part, old, objects))
+        if include_patch:
+            patches.append(_patch(git, part, old, objects))
     patch = "".join(patches)
     truncated = len(patch) > PATCH_CHARS
     if truncated:
@@ -511,7 +512,7 @@ def begin(session_dir, turn_dir, before):
     os.replace(path + ".tmp", path)
 
 
-def preview(session_dir, turn_dir, folder, whole=True):
+def preview(session_dir, turn_dir, folder, whole=True, *, include_patch=True):
     """Compare a running turn without replacing any completed turn's patch.
 
     Each reader owns its temporary index; the shared git object store supports
@@ -521,7 +522,7 @@ def preview(session_dir, turn_dir, folder, whole=True):
         with open(os.path.join(turn_dir, "changes-before.json"), encoding="utf-8") as handle:
             before = json.load(handle)
     except (OSError, ValueError):
-        return dict(read(session_dir, None if whole else turn_dir), live=True, pending=True)
+        return dict(read(session_dir, None if whole else turn_dir, include_patch=include_patch), live=True, pending=True)
     if before.get("error"):
         raise ChangesError("The folder could not be read before the turn: %s" % before["error"])
     base = before
@@ -530,7 +531,7 @@ def preview(session_dir, turn_dir, folder, whole=True):
             base = json.load(handle)
     with tempfile.TemporaryDirectory(prefix="preview-", dir=store(session_dir)) as scratch:
         after = snapshot(session_dir, folder, layout=before, scratch=scratch)
-        found = compare(session_dir, base, after)
+        found = compare(session_dir, base, after, include_patch=include_patch)
     return dict(found, live=True, kept="partial" if found["unkept"] else "all")
 
 
@@ -616,7 +617,7 @@ def _write(path, text):
         handle.write(text)
 
 
-def read(session_dir, turn_dir=None):
+def read(session_dir, turn_dir=None, *, include_patch=True):
     """What was kept, a turn's (``turn_dir``) or the conversation's so far:
     ``{"files", "patch", "added", "removed", "truncated", "unkept", "kept"}``,
     empty when nothing was. Never runs git."""
@@ -625,8 +626,9 @@ def read(session_dir, turn_dir=None):
     try:
         with open(os.path.join(base, name + ".json"), encoding="utf-8") as handle:
             found = json.load(handle)
-        with open(os.path.join(base, name + ".patch"), encoding="utf-8") as handle:
-            found["patch"] = handle.read()
+        if include_patch:
+            with open(os.path.join(base, name + ".patch"), encoding="utf-8") as handle:
+                found["patch"] = handle.read()
     except (OSError, ValueError):
         return {"files": [], "patch": "", "added": 0, "removed": 0, "truncated": False,
                 "unkept": [], "kept": ""}

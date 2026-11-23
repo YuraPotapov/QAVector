@@ -47,6 +47,30 @@ def test_model_discovery_ignores_unrelated_frames_and_deduplicates(monkeypatch):
         "value": "sonnet", "label": "Sonnet", "description": "", "resolved_model": ""}]}
 
 
+def test_rate_limits_read_windows_without_a_message(monkeypatch):
+    monkeypatch.setattr(claude, "resolve", lambda binary: "/fixture/claude")
+
+    def answer(argv, **kwargs):
+        request = json.loads(kwargs["input"])
+        assert request["request"] == {"subtype": "get_usage", "skip_behaviors": True}
+        assert "--no-session-persistence" in argv
+        reply = {"type": "control_response", "response": {
+            "request_id": request["request_id"], "subtype": "success", "response": {
+                "rate_limits_available": True, "rate_limits": {
+                    "five_hour": {"utilization": 0, "resets_at": "2026-11-20T18:40:00Z"},
+                    "seven_day": {"utilization": None},
+                    "model_scoped": [{"display_name": "Example", "utilization": 81}],
+                }}}}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(reply).encode())
+
+    assert claude.rate_limits(run=answer) == {"ok": True, "windows": [
+        {"label": "5-hour limit", "used_percent": 0, "resets_at": 1795200000.0,
+         "duration_minutes": 300, "account_wide": True},
+        {"label": "Weekly limit · Example", "used_percent": 81, "resets_at": None,
+         "duration_minutes": 10080, "account_wide": False},
+    ]}
+
+
 def _cli(directory, body):
     """A script standing in for the CLI."""
     path = os.path.join(str(directory), "claude")

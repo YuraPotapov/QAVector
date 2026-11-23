@@ -25,7 +25,7 @@ import time
 
 import runtime_paths
 from integrations.agents import codex_turn, locate
-from integrations.agents.contracts import ProviderCapabilities, Unsupported
+from integrations.agents.contracts import ProviderCapabilities, Unsupported, rate_limit_window
 
 KIND, NAME, DEFAULT_BINARY = "codex", "Codex", "codex"
 MODEL_DEFAULT_LABEL = "Use Codex default"
@@ -43,6 +43,7 @@ MODE_DESCRIPTION = ("Read: read-only sandbox. Edit: edit files in the workspace-
 #: Codex's plan item (see :mod:`integrations.agents.codex_turn`).
 PLANS = True
 STATUS_TIMEOUT = 20.0
+PATCH_CHARS = 256 * 1024
 
 #: ``exec`` switches turns back to ``codex exec --json``.
 TRANSPORT_ENV = "QAVECTOR_CODEX_TRANSPORT"
@@ -272,6 +273,76 @@ def _bridge_events(event):
 TOOL_NAMES = {"commandExecution": "shell", "fileChange": "apply_patch", "webSearch": "web_search"}
 
 
+def read_patch(stdout_path, item_id):
+    """Read one completed edit from its turn's saved provider output."""
+    with open(stdout_path, "rb") as stream:
+        for line in stream:
+            if not (b'"item/completed"' in line and b'"fileChange"' in line
+                    or b'"item.completed"' in line and b'"file_change"' in line):
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("method") == "item/completed":
+                params = message.get("params")
+            elif message.get("type") == "item.completed":
+                params = message
+            else:
+                continue
+            item = params.get("item") if isinstance(params, dict) else None
+            if (not isinstance(item, dict) or item.get("type") not in ("fileChange", "file_change")
+                    or item.get("id") != item_id or item.get("status") != "completed" or item.get("error")):
+                continue
+            files, remaining, truncated = [], PATCH_CHARS, False
+            for change in item.get("changes") or []:
+                if not isinstance(change, dict) or not isinstance(change.get("path"), str):
+                    continue
+                diff = change.get("diff")
+                diff = diff if isinstance(diff, str) else ""
+                if remaining <= 0:
+                    truncated = True
+                    break
+                files.append({"path": change["path"], "diff": diff[:remaining]})
+                truncated = truncated or len(diff) > remaining
+                remaining -= len(diff)
+            if any(file["diff"] for file in files):
+                return {"files": files, "truncated": truncated}
+            break
+    return None
+
+
+def _patch_events(item, done, ok, detail):
+    """Keep file operations as structured data for the chat feed."""
+    changes = []
+    for change in item.get("changes") or []:
+        if not isinstance(change, dict) or not isinstance(change.get("path"), str) or not change["path"]:
+            continue
+        kind = change.get("kind")
+        destination = None
+        if isinstance(kind, dict):
+            destination = kind.get("movePath") or kind.get("move_path")
+            kind = kind.get("type")
+        file = {"path": change["path"]}
+        if kind in ("add", "update", "delete"):
+            file["kind"] = kind
+        if isinstance(destination, str) and destination:
+            file["destination"] = destination
+        changes.append(file)
+    event = {"id": str(item.get("id") or ""), "name": "apply_patch", "file_changes": changes}
+    if not done:
+        return [dict(event, type="tool.started", title="Applying patch",
+                     detail=", ".join(file["path"] for file in changes)[:2000])]
+    if item.get("status") == "declined":
+        event["declined"] = True
+    events = [dict(event, type="tool.completed", ok=ok, detail="" if ok else detail[:2000])]
+    if ok:
+        events.extend({"type": "file.written", "path": file["path"]} for file in changes)
+    return events
+
+
 def _server_events(message):
     method = message.get("method")
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
@@ -306,11 +377,9 @@ def _server_events(message):
                                                item.get("tool") or "call")
     if not done:
         if what == "fileChange":
-            detail = ", ".join(str(one.get("path")) for one in item.get("changes") or []
-                               if isinstance(one, dict) and one.get("path"))
-        else:
-            detail = item.get("command") or item.get("query") or json.dumps(item.get("arguments") or {})
-            detail = detail if isinstance(detail, str) else json.dumps(detail)
+            return _patch_events(item, done=False, ok=False, detail="")
+        detail = item.get("command") or item.get("query") or json.dumps(item.get("arguments") or {})
+        detail = detail if isinstance(detail, str) else json.dumps(detail)
         return [{"type": "tool.started", "id": ident, "name": name, "title": detail[:256],
                  "detail": detail[:2000]}]
     ok = item.get("status") == "completed" and not item.get("error")
@@ -320,11 +389,9 @@ def _server_events(message):
         ok = item.get("success") is True
     detail = item.get("aggregatedOutput") or item.get("error") or item.get("result") or ""
     detail = detail if isinstance(detail, str) else json.dumps(detail)
-    result = [{"type": "tool.completed", "id": ident, "ok": bool(ok), "detail": detail[:2000]}]
-    if what == "fileChange" and ok:
-        result += [{"type": "file.written", "path": one["path"]}
-                   for one in item.get("changes") or [] if isinstance(one, dict) and isinstance(one.get("path"), str)]
-    return result
+    if what == "fileChange":
+        return _patch_events(item, done=True, ok=ok, detail=detail)
+    return [{"type": "tool.completed", "id": ident, "ok": bool(ok), "detail": detail[:2000]}]
 
 
 def _questions(questions):
@@ -378,17 +445,17 @@ def _exec_events(event):
     name = {"command_execution": "shell", "file_change": "apply_patch", "web_search": "web_search"}.get(what)
     name = name or "%s.%s" % (item.get("server", "mcp"), item.get("tool", "tool"))
     if not done:
+        if what == "file_change":
+            return _patch_events(item, done=False, ok=False, detail="")
         detail = str(item.get("command") or item.get("query") or json.dumps(item.get("arguments") or {}))
         return [{"type": "tool.started", "id": ident, "name": name, "title": detail[:256], "detail": detail[:2000]}]
     ok = item.get("status") not in ("failed", "declined") and not item.get("error")
     if what == "command_execution":
         ok = ok and item.get("exit_code") == 0
-    result = [{"type": "tool.completed", "id": ident, "ok": bool(ok),
-               "detail": str(item.get("aggregated_output") or item.get("error") or "")[:2000]}]
-    if what == "file_change" and ok:
-        result += [{"type": "file.written", "path": one["path"]}
-                   for one in item.get("changes", []) if isinstance(one, dict) and isinstance(one.get("path"), str)]
-    return result
+    detail = str(item.get("aggregated_output") or item.get("error") or "")
+    if what == "file_change":
+        return _patch_events(item, done=True, ok=ok and item.get("status") == "completed", detail=detail)
+    return [{"type": "tool.completed", "id": ident, "ok": bool(ok), "detail": detail[:2000]}]
 
 
 def stages(line, on_text=None):
@@ -432,3 +499,55 @@ def models(binary=None, timeout=STATUS_TIMEOUT):
     finally:
         if server is not None:
             server.close()
+
+
+def rate_limits(binary=None, timeout=STATUS_TIMEOUT):
+    """Read the account's windows without starting a thread or a model turn."""
+    path = resolve(binary)
+    if not path:
+        return {"ok": False, "error": "Codex is not installed or its program cannot be found."}
+    deadline = time.monotonic() + timeout
+    try:
+        with tempfile.TemporaryDirectory(prefix="qavector-codex-limits-") as folder:
+            server = codex_turn.AppServer([path, "app-server"], cwd=folder,
+                                          env=turn_env(runtime_paths.clean_subprocess_env()))
+            try:
+                server.initialize(timeout=timeout, experimental=False)
+                result = server.call("account/rateLimits/read", {},
+                                     timeout=max(0.001, deadline - time.monotonic()))
+            finally:
+                server.close()
+    except (OSError, codex_turn.ProtocolError, subprocess.SubprocessError):
+        return {"ok": False, "error": "Codex did not return limit data. Check its sign-in and version."}
+
+    buckets = result.get("rateLimitsByLimitId")
+    if not isinstance(buckets, dict) or not buckets:
+        buckets = {"codex": result.get("rateLimits")}
+    windows = []
+    for key, bucket in buckets.items():
+        if not isinstance(bucket, dict):
+            continue
+        name = bucket.get("limitName") or key
+        for field, fallback in (("primary", "Primary limit"), ("secondary", "Secondary limit")):
+            raw = bucket.get(field)
+            if not isinstance(raw, dict):
+                continue
+            minutes = raw.get("windowDurationMins")
+            label = _window_label(minutes, fallback)
+            if key != "codex":
+                label += " · " + str(name)
+            window = rate_limit_window(label, raw.get("usedPercent"), raw.get("resetsAt"),
+                                       duration_minutes=minutes, account_wide=key == "codex")
+            if window:
+                windows.append(window)
+    return {"ok": True, "windows": windows}
+
+
+def _window_label(minutes, fallback):
+    if type(minutes) is not int or minutes <= 0:
+        return fallback
+    if minutes == 7 * 24 * 60:
+        return "Weekly limit"
+    for size, unit in ((24 * 60, "day"), (60, "hour"), (1, "minute")):
+        if minutes % size == 0:
+            return "%d-%s limit" % (minutes // size, unit)

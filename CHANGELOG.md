@@ -16,6 +16,20 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.80] - 2026-11-20
+
+### Added
+- Agents → Usage shows provider limits for each Claude Code and Codex connection.
+- Each connection can show its remaining short-term, weekly, or combined average
+  limit in chat, with per-window values and reset times on hover.
+- Codex edit rows show the affected files and load the individual diff on demand.
+
+### Fixed
+- Provider limits refresh directly in open chats and after a turn finishes.
+- The chat clears the stopping notice when the next message starts or the
+  pending send is cancelled.
+- The Changes badge reads counts without loading the conversation diff.
+
 ## [0.16.79] - 2026-11-20
 
 ### Added

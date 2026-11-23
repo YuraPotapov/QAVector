@@ -21,27 +21,29 @@ is said next to an agent that just did something unexpected.
 """
 
 import html
+import ntpath
 import os
 import time
 from collections import deque
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
-                               QTableWidgetItem, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
+                               QSizePolicy, QStyle, QStyleOptionFocusRect, QTableWidgetItem, QTextBrowser, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .. import codeblocks, icons, restrictions as restrictions_mod, stages, theme, widgets
-from ..diffview import ChangesButton, ChangesDialog
+from ..diffview import ChangesDialog, PatchText, counts_text
 from .agentbudget import BUDGET_NOTE, BudgetCard, BudgetFields, share_text, spend_text
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
 from .chatcontinuation import RelationshipDelegate
 from . import agentcards
 from .agentcards import ChangesLine, IntegrationChangeCard, PlanCard, QuestionsCard
-from .agentwords import (ago_text, clock_text, context_text, cost_text, end_text, folder_text,
-                         refused_text, tokens_text, took_text)
+from .agentwords import (clock_text, context_text, cost_text, end_text, folder_text, kind_name,
+                         refused_text, tokens_text, took_text, when_text)
 
 #: How much the agent may do in a turn, as the composer offers it. (label, mode)
 MODES = (("Read", "read"), ("Edit", "edit"), ("Full", "full"))
@@ -288,6 +290,54 @@ class _Row(QWidget):
         self.body = body
 
 
+class PatchRow(_Row):
+    """A completed edit whose diff is read only when its disclosure opens."""
+
+    requested = Signal(object)
+
+    def __init__(self, stage):
+        disclosure = widgets.Disclosure(stage["title"])
+        super().__init__(stage, disclosure)
+        self.disclosure = disclosure
+        self.stage = stage
+        self._loading = False
+        self._loaded = False
+        self._message = None
+        self.disclosure.toggled.connect(self._opened)
+        self.disclosure.button.setToolTip("Show what changed in this edit")
+
+    def _opened(self, opened):
+        if not opened or self._loading or self._loaded:
+            return
+        self._loading = True
+        if self._message is None:
+            self._message = QLabel()
+            self._message.setTextFormat(Qt.PlainText)
+            self._message.setProperty("role", "muted")
+            self._message.setWordWrap(True)
+            self.disclosure.body().addWidget(self._message)
+        self._message.setText("Loading diff…")
+        self.requested.emit(self._show_patch)
+
+    def _show_patch(self, payload):
+        self._loading = False
+        if not payload.get("ok"):
+            self._message.setText(payload.get("error") or "Could not read this edit's diff.")
+            return
+        self._loaded = True
+        files = payload.get("files") or []
+        text = []
+        for file in files:
+            if len(files) > 1:
+                text.append("diff --git " + file["path"])
+            text.append(file["diff"].rstrip("\n") or "No line diff was recorded for this file.")
+        if self.stage["detail"]:
+            text.insert(0, self.stage["detail"])
+        self.disclosure.body().addWidget(PatchText("\n".join(text)))
+        self._message.setText("Only the first part of this diff is shown." if payload.get("truncated") else "")
+        self._message.setVisible(bool(payload.get("truncated")))
+
+
 #: Tools that run a command line: their row shows what went in and what came
 #: out, on a block of its own, rather than the arguments as a list.
 COMMAND_TOOLS = ("Bash", "shell", "PowerShell")
@@ -399,6 +449,7 @@ class ChatFeed(QScrollArea):
     approve = Signal(str, str)
     #: What a turn changed was asked for: its number.
     changes_wanted = Signal(object)
+    patch_wanted = Signal(str, int, str, object)
     history_wanted = Signal(str)
     #: The person on a change the agent proposed to an integration (ADR-007):
     #: Approve / Deny it, and what they typed into one of its fields.
@@ -637,6 +688,11 @@ class ChatFeed(QScrollArea):
             stage = {"kind": "tool", "title": event.get("title") or event.get("name") or "Tool",
                      "detail": event.get("detail") or "", "status": "running"}
             name = event.get("name") or ""
+            if name == "apply_patch":
+                detail = stage["detail"] or event.get("title") or ""
+                stage["file_changes"] = (event.get("file_changes") if "file_changes" in event else
+                                         [{"path": path} for path in detail.split(", ") if path and path != "{}"])
+                stage["detail"] = ""
             self._tools[event.get("id")] = (len(self._rows), stage, name)
             self._add("tool", self._tool_row(stage, name))
         elif kind == "tool.completed":
@@ -659,9 +715,65 @@ class ChatFeed(QScrollArea):
         elif kind == "changes":
             self._changed(event)
 
-    @staticmethod
-    def _tool_row(stage, name):
+    def _tool_row(self, stage, name):
+        if name == "apply_patch":
+            return self._patch_row(stage)
         return CommandRow(stage, name) if name in COMMAND_TOOLS else stages.StageRow(stage)
+
+    def _patch_row(self, stage):
+        files = stage["file_changes"] or []
+        names, paths, changes = [], [], []
+        for file in files:
+            path = file["path"]
+            name = ntpath.basename(path)
+            paths.append(path)
+            if file.get("destination"):
+                target = file["destination"]
+                name += " to " + ntpath.basename(target)
+                paths[-1] += " to " + target
+                action = "Moved"
+            else:
+                action = {"add": "Added", "update": "Edited", "delete": "Deleted"}.get(file.get("kind"), "Changed")
+            names.append(name)
+            changes.append(action + " " + name)
+        status = stage["status"]
+        title = {"running": "Applying patch", "done": "Patch applied", "failed": "Patch failed",
+                 "declined": "Patch declined", "unknown": "Patch outcome unknown"}[status]
+        detail = stage["detail"]
+        if len(names) == 1:
+            if status == "done" and (files[0].get("kind") or files[0].get("destination")):
+                title = changes[0]
+            else:
+                title += " · " + names[0]
+        elif names:
+            title += " · %d files" % len(names)
+            detail = "\n".join((changes if status == "done" else names) + ([detail] if detail else []))
+        stage = dict(stage, title=title, detail=detail)
+        ref = stage.get("patch_ref")
+        if ref:
+            row = PatchRow(stage)
+
+            def request(done):
+                self._follow = False
+
+                def answered(payload):
+                    if any(widget is row for _, widget in self._rows):
+                        done(payload)
+
+                self.patch_wanted.emit(*ref, answered)
+
+            row.requested.connect(request)
+        else:
+            row = stages.StageRow(stage)
+            row.title.setTextFormat(Qt.PlainText)
+            if row.detail is not None:
+                row.detail.setTextFormat(Qt.PlainText)
+        if paths:
+            tooltip = "<br>".join(html.escape(path) for path in paths)
+            row.setToolTip("<qt>" + tooltip + "</qt>")
+            if ref:
+                row.disclosure.button.setToolTip("<qt>Show what changed in this edit<br>" + tooltip + "</qt>")
+        return row
 
     def _card(self, kind, card):
         self._cards.append(card)
@@ -694,8 +806,13 @@ class ChatFeed(QScrollArea):
     def _returned(self, event):
         found = self._tools.pop(event.get("id"), None)
         if found is None:
+            if event.get("name") == "apply_patch":
+                self._add("tool", self._patch_row(self._patch_result({"kind": "tool", "file_changes": []}, event)))
             return
         index, stage, name = found
+        if name == "apply_patch":
+            self._replace(index, self._patch_row(self._patch_result(stage, event)))
+            return
         if event.get("refused"):
             # Not a failure of the tool: the conversation did not allow it.
             # Said in the access mode's terms rather than the program's, whose
@@ -718,9 +835,27 @@ class ChatFeed(QScrollArea):
                                         if part)
         self._replace(index, stages.StageRow(stage))
 
+    def _patch_result(self, stage, event):
+        if event.get("refused") or event.get("declined"):
+            detail = refused_text(self._mode, "apply_patch", event.get("reason")) if event.get("refused") else ""
+            stage = dict(stage, status="declined", kind="caution", detail=detail or event.get("detail") or "")
+        elif event.get("ok", True):
+            stage = dict(stage, status="done", detail="")
+            turn, item = event.get("turn"), event.get("id")
+            if type(turn) is int and turn > 0 and isinstance(item, str) and item:
+                stage["patch_ref"] = (event.get("history_session") or "", turn, item)
+        else:
+            stage = dict(stage, status="failed", detail=event.get("detail") or "")
+        if event.get("file_changes"):
+            stage["file_changes"] = event["file_changes"]
+        return stage
+
     def _ended(self, event):
         # A call the agent never heard back from is not still running.
         for index, stage, name in list(self._tools.values()):
+            if name == "apply_patch":
+                self._replace(index, self._patch_row(dict(stage, status="unknown", kind="caution")))
+                continue
             if name in COMMAND_TOOLS:
                 self._replace(index, CommandRow(dict(stage, status="unknown", kind="caution"), name))
                 continue
@@ -1034,6 +1169,61 @@ class _FittingScroll(QScrollArea):
         return QSize(inner.width(), min(self.SHORTEST, self.sizeHint().height()))
 
 
+class LimitContextRow(QWidget):
+    """The chat controls share a background that shows the remaining limit."""
+
+    activated = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setProperty("seethrough", True)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.remaining_percent = None
+        self.stale = False
+        self.setAccessibleName("Provider limits")
+
+    def set_limit(self, remaining_percent, stale, available):
+        self.remaining_percent = remaining_percent
+        self.stale = stale
+        self.setFocusPolicy(Qt.StrongFocus if available else Qt.NoFocus)
+        if available:
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if (self.focusPolicy() != Qt.NoFocus and event.button() == Qt.LeftButton
+                and self.rect().contains(event.position().toPoint())):
+            event.accept()
+            self.activated.emit()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.focusPolicy() != Qt.NoFocus:
+            event.accept()
+            self.activated.emit()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        remaining = self.remaining_percent
+        if remaining:
+            color = theme.MARK_TINT
+            if self.stale:
+                color = theme.NEUTRAL[300]
+            elif remaining <= 20:
+                color = theme.WARN_TINT
+            painter.fillRect(0, 0, round(self.width() * remaining / 100), self.height(), QColor(color))
+        if self.hasFocus():
+            option = QStyleOptionFocusRect()
+            option.initFrom(self)
+            self.style().drawPrimitive(QStyle.PE_FrameFocusRect, option, painter, self)
+
+
 class Composer(QFrame):
     """Whom to ask, where, how much it may do - and the box to ask in."""
 
@@ -1047,6 +1237,8 @@ class Composer(QFrame):
     skills_requested = Signal()
     #: A choice was made that is worth remembering for the next conversation.
     chosen = Signal()
+    limit_connection_changed = Signal(str)
+    limits_requested = Signal(str)
     #: What the conversation may do with other agents was changed (ADR-006 D3).
     others_changed = Signal(str)
     wake_changed = Signal(str)
@@ -1062,20 +1254,28 @@ class Composer(QFrame):
         self._attachments = []
         self._task_tags = {}
         self._task_pending = False
+        self._limit_connection = ""
+        self._limit_details = ""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 8, 12, 8)
         outer.setSpacing(6)
 
         self.context_summary = widgets.ElidedLabel(mode=Qt.ElideMiddle)
         self.context_summary.setProperty("role", "muted")
+        self.context_summary.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.settings_button = QPushButton("Settings")
         self.settings_button.setProperty("variant", "ghost")
         icons.button(self.settings_button, "disclosure_closed")
         self.settings_button.setLayoutDirection(Qt.RightToLeft)    # chevron after
         self.settings_button.setCheckable(True)
         self.settings_button.setToolTip("Agent, model, skills, working folder and restrictions")
-        self.context_row = widgets.row(self.context_summary, self.settings_button)
-        self.context_row.layout().setStretchFactor(self.context_summary, 1)
+        self.context_row = LimitContextRow()
+        self.context_row.activated.connect(lambda: self.limits_requested.emit(self._limit_connection))
+        context_layout = QHBoxLayout(self.context_row)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(8)
+        context_layout.addWidget(self.context_summary, 1)
+        context_layout.addWidget(self.settings_button)
         # That the agent is at work, between the things it shows in the feed:
         # a turn can think for minutes with nothing new above, and a still
         # page read as a stopped one. A breathing dot and how long the turn
@@ -1091,7 +1291,8 @@ class Composer(QFrame):
         self._working_clock.setInterval(1000)
         self._working_clock.timeout.connect(self._tick)
         for index, widget in enumerate((self.working_dot, self.working)):
-            self.context_row.layout().insertWidget(index, widget, 0, Qt.AlignVCenter)
+            widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+            context_layout.insertWidget(index, widget, 0, Qt.AlignVCenter)
             widget.setVisible(False)
         outer.addWidget(self.context_row)
         self.options = QWidget()
@@ -1285,6 +1486,12 @@ class Composer(QFrame):
         self.note.setVisible(False)
         outer.addWidget(self.note)
 
+        self.interrupt_note = QLabel("Stopping the current turn. Your message will be sent next.")
+        self.interrupt_note.setProperty("role", "composernote")
+        self.interrupt_note.setWordWrap(True)
+        self.interrupt_note.hide()
+        outer.addWidget(self.interrupt_note)
+
         #: What stands in for all of the above when nothing can be written.
         self.closed = QLabel("")
         self.closed.setProperty("role", "hint")
@@ -1413,6 +1620,22 @@ class Composer(QFrame):
         self.context_summary.setText(" · ".join(parts))
         previous = ran_with_text(self._session or {})
         self.context_summary.setToolTip("\n".join(parts) + ("\nLast turn: " + previous if previous else ""))
+        self._update_context_tooltip()
+        if (chosen or "") != self._limit_connection:
+            self._limit_connection = chosen or ""
+            self.limit_connection_changed.emit(self._limit_connection)
+
+    def set_provider_limit(self, summary):
+        available = summary is not None
+        limits = summary or {}
+        self._limit_details = limits.get("tooltip", "")
+        self.context_row.set_limit(limits.get("remaining_percent"), limits.get("stale", False), available)
+        self._update_context_tooltip()
+
+    def _update_context_tooltip(self):
+        shortcut = "Click to open provider limits" if self.context_row.focusPolicy() != Qt.NoFocus else ""
+        tooltip = "\n\n".join(filter(None, (self._limit_details, shortcut, self.context_summary.toolTip())))
+        self.context_row.setToolTip("<qt>" + html.escape(tooltip).replace("\n", "<br>") + "</qt>" if tooltip else "")
 
     def set_restrictions(self, raw):
         self._restrictions = dict(raw or {})
@@ -1799,7 +2022,7 @@ class Composer(QFrame):
 class ChatTab(QWidget):
     """The project's conversations, and the one that is open."""
 
-    HEADERS = ("Conversation", "Last")
+    HEADERS = ("Conversation",)
 
     #: Nothing can be asked without a connection: take the person to make one.
     connections_wanted = Signal()
@@ -1808,6 +2031,9 @@ class ChatTab(QWidget):
     #: A conversation was begun, or one of its turns ended: its id. For
     #: whatever shows conversations elsewhere and wants to read them again.
     conversation_changed = Signal(str)
+    context_changed = Signal(str)
+    footer_title_changed = Signal(str)
+    turn_finished = Signal(str)
     #: (connection id, key) - an issue a conversation is about, to open (ADR-014).
     issue_wanted = Signal(str, str)
 
@@ -1828,6 +2054,7 @@ class ChatTab(QWidget):
         self.sessions = []
         self.connections = []
         self.current = None             # the conversation that is open, or None
+        self._last_opened = None
         self.turns = {}                 # session id -> the turn being taken
         self._background_waits = set()
         self._turn_began = {}           # session id -> when it began (monotonic)
@@ -1888,12 +2115,22 @@ class ChatTab(QWidget):
         left = QWidget()
         column = QVBoxLayout(left)
         column.setContentsMargins(0, 0, 8, 0)
-        column.setSpacing(8)
+        column.setSpacing(4)
+        self.new_button = QToolButton()
+        icons.button(self.new_button, "plus", "")
+        self.new_button.setAccessibleName("New conversation")
+        self.new_button.setToolTip("New conversation")
+        self.new_button.setProperty("variant", "icon")
+        self.new_button.setFixedSize(22, 22)
+        self.new_button.setIconSize(QSize(16, 16))
+        self.new_button.setStyleSheet("padding: 0px;")
+        self.new_button.clicked.connect(self.new_conversation)
         panel = widgets.BlueprintPanel(padding=(1, 1, 1, 1))
         self.table = widgets.Table(0, len(self.HEADERS), reclick_clears=False)
         # Only a child's row has an icon: room that stands it in from its parent's.
         self.table.setIconSize(QSize(CHILD_INDENT, 1))
-        self.table.setItemDelegateForColumn(0, RelationshipDelegate(self.table))
+        self.sidebar_delegate = RelationshipDelegate(self.table)
+        self.table.setItemDelegateForColumn(0, self.sidebar_delegate)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._session_menu)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
@@ -1906,23 +2143,24 @@ class ChatTab(QWidget):
         header = self.table.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Interactive)
-        self.table.setColumnWidth(1, 96)
+        header.setTextElideMode(Qt.ElideRight)
+        header.setStyleSheet("QHeaderView::section { padding-right: 30px; }")
+        header_actions = QHBoxLayout(header.viewport())
+        header_actions.setContentsMargins(0, 0, 4, 0)
+        header_actions.addStretch(1)
+        header_actions.addWidget(self.new_button, 0, Qt.AlignVCenter)
         self.table.itemSelectionChanged.connect(self._picked)
         self.search = widgets.SearchRow(self.table)
         self.search.changed.connect(self._say_empty)
         self.note = widgets.empty_note(self.table, "No conversations in this project yet.")
         self.skeleton = widgets.Skeleton(self.table, "rows")
         panel.layout().addWidget(self.table)
-        column.addWidget(panel, 1)
-        self.new_button = QPushButton("+ New")
-        self.new_button.setToolTip("Begin another conversation")
-        self.new_button.clicked.connect(self.new_conversation)
         self.more_chats = QPushButton("Show more chats")
         self.more_chats.setProperty("variant", "ghost")
         self.more_chats.hide()
         self.more_chats.clicked.connect(self._load_more_chats)
-        column.addWidget(widgets.row(self.new_button, None, self.more_chats))
+        panel.layout().addWidget(self.more_chats, 0, Qt.AlignHCenter)
+        column.addWidget(panel, 1)
         self.splitter.addWidget(left)
 
         # -- the one that is open
@@ -1930,51 +2168,25 @@ class ChatTab(QWidget):
         column = QVBoxLayout(right)
         column.setContentsMargins(8, 0, 0, 0)
         column.setSpacing(4)
-        self.title = widgets.ElidedLabel(mode=Qt.ElideRight)
-        self.title.setProperty("role", "chattitle")
-        # What is done to the conversation that is open sits with its name,
-        # not under the list of all of them.
-        self.rename_button = QPushButton("Rename…")
-        self.rename_button.setProperty("variant", "ghost")
-        self.rename_button.clicked.connect(self.rename)
-        self.delete_button = QPushButton("Delete…")
-        self.delete_button.setProperty("variant", "ghost")
-        self.delete_button.clicked.connect(self.delete)
-        self.more_button = QToolButton()
+        self.more_button = QToolButton(self)
         icons.button(self.more_button, "more", "")
         self.more_button.setAccessibleName("Conversation actions")
-        self.more_button.setToolTip("Conversation links and history")
+        self.more_button.setToolTip("Conversation actions")
         self.more_button.setPopupMode(QToolButton.InstantPopup)
         self.more_button.setProperty("menuglyph", "true")
         self.more_button.setProperty("variant", "icon")
-        self.more_button.setFixedSize(28, 24)
+        self.more_button.setFixedSize(22, 22)
         self.more_button.setIconSize(QSize(16, 16))
         self.more_button.setStyleSheet("padding: 0px;")
         self.more_menu = QMenu(self.more_button)
+        self.more_menu.setToolTipsVisible(True)
         self.more_button.setMenu(self.more_menu)
-        head = widgets.row(self.title, self.rename_button, self.delete_button, self.more_button)
-        head.layout().setStretchFactor(self.title, 1)
-        column.addWidget(head)
-        self.sub = widgets.ElidedLabel(mode=Qt.ElideMiddle)
-        self.sub.setProperty("role", "muted")
-        # How full the agent's context is and what the conversation cost - the
-        # two things worth knowing before saying more to it.
-        self.previous_chat = QPushButton("Previous chat")
-        self.previous_chat.setProperty("variant", "ghost")
-        self.previous_chat.clicked.connect(lambda: self.open_session(self.current["lineage"]["previous"]))
-        self.previous_chat.hide()
-        self.usage = widgets.ElidedLabel(mode=Qt.ElideMiddle)
-        self.usage.setProperty("role", "muted")
-        self.changes_button = ChangesButton()
-        self.changes_button.setProperty("variant", "ghost")
-        self.changes_button.setToolTip("What changed in the folder during this conversation, "
-                                       "file by file")
-        self.changes_button.clicked.connect(lambda: self.show_changes())
+        self.rename_action = self.more_menu.addAction("Rename…", self.rename)
+        self.delete_action = self.more_menu.addAction("Delete…", self.delete)
+        self.changes_action = self.more_menu.addAction("Changes", lambda: self.show_changes())
         self.changes_dialog = None
-        sub_row = widgets.row(self.sub, self.usage, self.previous_chat, self.changes_button)
-        sub_row.layout().setStretchFactor(self.sub, 2)
-        sub_row.layout().setStretchFactor(self.usage, 3)
-        column.addWidget(sub_row)
+        self.previous_chat = self.more_menu.addAction(
+            "Previous chat", lambda: self.open_session(self.current["lineage"]["previous"]))
         # The issues it is about: started for one, or linked because its agent read
         # one's details (ADR-014). A link can be undone; what it began with stays.
         self.history_links = self.more_menu.addMenu("Linked chats")
@@ -1992,6 +2204,7 @@ class ChatTab(QWidget):
         self.feed.revise.connect(lambda said: self._card_turn(said, plan=True))
         self.feed.approve.connect(lambda mode, said: self._card_turn(said, plan=False, mode=mode))
         self.feed.changes_wanted.connect(self.show_changes)
+        self.feed.patch_wanted.connect(self._read_tool_patch)
         self.feed.history_wanted.connect(self.open_session)
         # A change the agent proposed to Jira is answered where it stands in the conversation.
         self.feed.change_approved.connect(lambda found: ChatTab.qcr_access.answer_integration(found, True))
@@ -2040,16 +2253,40 @@ class ChatTab(QWidget):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([300, 760])
         self.splitter.remember_in(settings, "integrations/agents")
+        self.splitter.folded_changed.connect(self._sync_footer_title)
         self._show_new()
         self._sync()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.more_button.setVisible(self.current is not None)
+        self._sync_footer_title()
+
+    def hideEvent(self, event):
+        self.more_button.hide()
+        self.footer_title_changed.emit("")
+        super().hideEvent(event)
+
+    def _sync_footer_title(self):
+        title = ""
+        session = self.current
+        if session and self.isVisible() and 0 in self.splitter.folded():
+            connection = next((one for one in self.connections
+                               if one.get("id") == session.get("connection")), {})
+            kind = session.get("kind") or connection.get("kind")
+            provider = kind_name(kind, self.composer._kinds)
+            if provider == kind and kind:
+                provider = kind[:1].upper() + kind[1:]
+            provider = provider or session.get("connection_name") or connection.get("name")
+            prefix = "Agents(%s)" % provider if provider else "Agents"
+            title = "%s: %s" % (prefix, session.get("title") or "Untitled")
+        self.footer_title_changed.emit(title)
 
     def _feed_loaded(self):
         self.feed_skeleton.stop()
         self.earlier.setEnabled(True)
         self.earlier.setText("Show the whole conversation")
         self.earlier.setVisible(not self._whole)
-        self.more_button.setEnabled(not self._whole or self.links.menuAction().isVisible()
-                                    or self.history_links.menuAction().isVisible())
         # The other cards (changes, wakes, budgets, other agents) were placed by
         # _show, or kept by the feed while it loaded and placed when it finished:
         # placing them again here would do the work of every switch twice.
@@ -2103,6 +2340,14 @@ class ChatTab(QWidget):
     def core(self):
         return self.host.core if self.host is not None else None
 
+    def _read_tool_patch(self, source, turn, item, done):
+        session = source or self._key()
+        if not session or self.core() is None:
+            done({"ok": False, "error": "Could not read this edit's diff."})
+            return
+        self.ask("tool-patch:%s:%d:%s" % (session, turn, item), lambda core, cancel: core.agents(
+            "tool-patch", session, document={"turn": turn, "item": item}, cancel=cancel), done)
+
     def _load_models(self, done):
         self.request_models(self.composer.connection.currentData(), done)
 
@@ -2137,6 +2382,7 @@ class ChatTab(QWidget):
         """Another project: nothing shown here belongs to it."""
         self.shutdown()
         self.sessions, self.current = [], None
+        self._clear_context(self._last_opened)
         self._sending, self._queued, self._drafts = {}, {}, {}
         self._draft_files = {}
         self._changes_cache = {}
@@ -2242,6 +2488,7 @@ class ChatTab(QWidget):
         chain_roots = {link["root"] for link in lineages}
         parents = {s["source"]["parent"] for s in self.sessions if is_child(s)}
         hidden = {entry["id"] for link in lineages if link.get("joined") for entry in link["sources"]}
+        has_activity = False
         for one in ordered_with_children([s for s in self.sessions if s["id"] not in hidden]):
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -2257,23 +2504,35 @@ class ChatTab(QWidget):
             if is_child(one):
                 title.setIcon(_indent_icon())
             title.setData(Qt.UserRole, one.get("id"))
+            status = ("Answering" if one["id"] in self.turns else
+                      "Working" if one.get("state") == "running" else "")
+            last_active = when_text(one.get("updated"))
             title.setToolTip("\n".join(part for part in (
                 one.get("title"), "%s · %s" % (one.get("connection_name") or one.get("connection"),
                                                folder_text(one.get("folder"))),
                 " - ".join(part for part in (source.get("label"), source.get("detail"))
-                           if part)) if part))
-            answering = one.get("id") in self.turns
-            last = QTableWidgetItem("Answering" if answering else
-                                    "Working" if one.get("state") == "running" else ago_text(one.get("updated")))
-            for item in (title, last):
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                           if part),
+                "Last active: " + last_active if last_active else "", status) if part))
+            title.setFlags(title.flags() & ~Qt.ItemIsEditable)
+            if status:
+                title.setData(RelationshipDelegate.ACTIVITY, True)
+                has_activity = True
             self.table.setItem(row, 0, title)
-            self.table.setItem(row, 1, last)
             if one.get("id") == chosen:
                 self.table.selectRow(row)
         self.table.blockSignals(False)
         self.search.apply()
+        self.sidebar_delegate.set_activity(has_activity)
         self._sync()
+
+    def _publish_context(self, session):
+        context = context_text(session.get("context"))
+        self.context_changed.emit("Context " + context if context else "")
+
+    def _clear_context(self, session_id):
+        if session_id is not None and session_id == self._last_opened:
+            self._last_opened = None
+            self.context_changed.emit("")
 
     def _put(self, session):
         """``session`` as the core now has it: first in the list, as the most
@@ -2284,11 +2543,13 @@ class ChatTab(QWidget):
                         if key in listed}, **session)
         self.sessions = [session] + [one for one in self.sessions
                                      if one.get("id") != session.get("id")]
+        if session["id"] == self._last_opened:
+            self._publish_context(session)
         if self._showing(session.get("id")):
             self.current = session
             if is_child(session):
                 self.composer.update_session(session)
-            self._head()                # a first turn gives it its name
+            self._update_details()                # a first turn gives it its name
             self._sync_cards()
         self._fill()
 
@@ -2353,10 +2614,10 @@ class ChatTab(QWidget):
         refs = (session.get("source") or {}).get("task_refs") or []
         self.composer.set_tasks(refs, bool(refs and not session.get("turns") and self._key() not in self.turns))
         chosen = self.current is not None
-        self.rename_button.setEnabled(chosen)
-        self.delete_button.setEnabled(chosen and self._key() not in self.turns)
-        for button in (self.rename_button, self.delete_button, self.more_button):
-            button.setVisible(chosen)       # nothing to rename before it exists
+        self.rename_action.setEnabled(chosen)
+        self.delete_action.setEnabled(chosen and self._key() not in self.turns)
+        self.more_button.setVisible(chosen and self.isVisible())
+        self._sync_footer_title()
         nobody = not self.connections and (self.current is None)
         self.setup.setVisible(nobody)
         self.composer.setVisible(not nobody)
@@ -2373,6 +2634,7 @@ class ChatTab(QWidget):
         self.composer.stop.setEnabled(self._key() not in self._stopping or
                                       self._key() in self._redirecting)
         self.composer.interrupt.setEnabled(self._key() not in self._stopping)
+        self.composer.interrupt_note.setVisible(self._key() in self._redirecting)
         self.table.setEnabled(not self._creating)
         self.new_button.setEnabled(not self._creating)
         self.composer.text.setEnabled(not self._creating)
@@ -2395,13 +2657,8 @@ class ChatTab(QWidget):
         self.table.clearSelection()
         self.table.blockSignals(False)
         self._show_links({})
-        self.title.setText("New conversation")
-        self.sub.setText("Nothing has been said yet")
-        self.sub.setVisible(True)
-        # Nothing used, nothing changed: not the last conversation's figures.
-        self.usage.setText("")
-        self.usage.setToolTip("")
-        self.changes_button.setVisible(False)
+        self.more_button.setToolTip("Conversation actions")
+        self.changes_action.setVisible(False)
         self.earlier.setVisible(False)
         self.feed.set_empty_text(NEW)
         self.feed.clear()
@@ -2446,6 +2703,7 @@ class ChatTab(QWidget):
                 self.composer.say(payload.get("error") or "The conversation could not "
                                   "be read.", bad=True)
                 if payload.get("kind") == "not_found":
+                    self._clear_context(session_id)
                     self.sessions = [one for one in self.sessions
                                      if one.get("id") != session_id]
                     self._fill()
@@ -2493,9 +2751,11 @@ class ChatTab(QWidget):
         self._reading = None
         self._shown_seq = max((event.get("seq", 0) for event in events), default=0)
         self.current = session
+        self._last_opened = session.get("id")
+        self._publish_context(session)
         self._whole = whole or not events or int(events[0].get("seq") or 1) <= 1
         self._remember(session=session.get("id") or "")
-        self._head()
+        self._update_details()
         self.earlier.setVisible(not self._whole)
         self.feed.set_empty_text("Nothing has been said in this conversation yet.")
         self.feed.load(events, progressive=True)
@@ -2566,9 +2826,10 @@ class ChatTab(QWidget):
         self._changes_dialog_session = session_id
         self.changes_dialog.show_for(session.get("title") or "Untitled", turns, read, turn)
 
-    def _read_changes(self, session_id, number, done):
-        """Coalesce a dialog and button reading the same live snapshot."""
-        key = (session_id, number)
+    def _read_changes(self, session_id, number, done, *, summary=False):
+        """Share a pending full read with the count badge when possible."""
+        full = (session_id, number, False)
+        key = full if full in self._changes_pending else (session_id, number, summary)
         if key in self._changes_pending:
             self._changes_pending[key].append(done)
             return
@@ -2592,8 +2853,11 @@ class ChatTab(QWidget):
             for callback in pending.pop(key, []):
                 callback(payload)
 
-        self.ask("changes:%s:%s" % key, lambda core, cancel: core.agents(
-            "changes", session_id, document={"turn": number} if number else {},
+        document = {"turn": number} if number else {}
+        if summary:
+            document["summary"] = True
+        self.ask("changes:%s:%s:%s" % key, lambda core, cancel: core.agents(
+            "changes", session_id, document=document,
             cancel=cancel), ready)
 
     def _poll_changes(self):
@@ -2618,7 +2882,7 @@ class ChatTab(QWidget):
         session_id = self.current["id"]
         if not (self.current.get("turns") or self.current.get("running") or session_id in self.turns):
             return
-        if (session_id, None) in self._changes_pending:
+        if (session_id, None, True) in self._changes_pending:
             if final:
                 self._changes_final.add(session_id)
             return
@@ -2629,36 +2893,33 @@ class ChatTab(QWidget):
                     self._changes_final.discard(session_id)
                     self._refresh_changes()
 
-        self._read_changes(session_id, None, done)
+        self._read_changes(session_id, None, done, summary=True)
 
     def _changes_label(self):
         session = self.current or {}
         found = self._changes_cache.get(session.get("id")) or {}
         visible = bool(session.get("turns") or session.get("running") or self._key() in self.turns)
-        self.changes_button.setVisible(visible)
+        self.changes_action.setVisible(visible)
         available = found.get("ok") and not found.get("pending")
-        self.changes_button.set_counts(*((found.get("added"), found.get("removed")) if available else ()))
-        self.changes_button.setToolTip(found.get("error") or (
+        counts = counts_text(found.get("added"), found.get("removed")) if available else ""
+        self.changes_action.setText("Changes " + counts if counts else "Changes")
+        self.changes_action.setToolTip(found.get("error") or (
             "Current changes in the conversation's folder. Includes edits made by others."
             + (" Some files could not be compared." if found.get("unkept") else "")))
 
-    def _head(self):
+    def _update_details(self):
         session = self.current or {}
-        self.title.setText(session.get("title") or "Untitled")
         source = (session.get("source") or {}).get("label") or CHAT
-        self.sub.setText("" if source == CHAT else source)
-        self.sub.setVisible(bool(self.sub.text()))
-        context = context_text(session.get("context"))
         # The program's own estimate, priced as its API would be (ADR-008 D3).
         cost = cost_text(session.get("cost_usd")) if session.get("turns") else ""
         cost = "est. " + cost if cost else ""
         # How far into its budget, with what it handed on (ADR-013).
         budget = share_text(self._budgets.get(session.get("id")))
-        self.usage.setText(" · ".join(part for part in (
-            "context " + context if context else "", cost,
-            budget + " budget" if budget else "") if part))
+        usage = " · ".join(part for part in (cost, budget + " budget" if budget else "") if part)
         tokens = tokens_text(session.get("tokens"))
-        self.usage.setToolTip(self.usage.text() + ("\nTokens so far: %s" % tokens if tokens else ""))
+        self.more_button.setToolTip("\n".join(filter(None, (
+            "Conversation actions", source if source != CHAT else "", usage,
+            "Tokens so far: %s" % tokens if tokens else ""))))
         self._show_links(session)
         self._changes_label()
 
@@ -2696,7 +2957,6 @@ class ChatTab(QWidget):
             action.setToolTip(entry["id"])
             action.triggered.connect(lambda _checked=False, sid=entry["id"]: self.open_session(sid))
         self.history_links.menuAction().setVisible(bool(entries))
-        self.more_button.setEnabled(bool(refs or entries) or not self._whole)
 
     def conversation_linked(self, found):
         """An agent read an issue's details: the conversation is about it now."""
@@ -2937,8 +3197,8 @@ class ChatTab(QWidget):
         if access is not None:
             turn.answered.connect(lambda _answer, access=access: ChatTab.qcr_access.end_agent(access))
         turn.event.connect(lambda event, session_id=session_id: self._heard(session_id, event))
-        turn.answered.connect(lambda answer, session_id=session_id:
-                              self._answered(session_id, answer))
+        connection_id = session.get("connection")
+        turn.answered.connect(lambda answer: self._answered(session_id, connection_id, answer))
         self.turns[session_id] = turn
         self._turn_began[session_id] = time.monotonic()
         self._terminal_seen.discard(session_id)
@@ -2984,7 +3244,7 @@ class ChatTab(QWidget):
                 self.feed.append(event)
                 self._shown_seq = max(self._shown_seq, seq)
 
-    def _answered(self, session_id, answer):
+    def _answered(self, session_id, connection_id, answer):
         self.conversation_changed.emit(session_id)
         self.read_budget(session_id)             # what it has cost now, against its budget
         self._background_waits.discard(session_id)
@@ -3005,6 +3265,8 @@ class ChatTab(QWidget):
             self._put(answer["session"])
         state = (answer.get("turn") or {}).get("state")
         reported = session_id in self._terminal_seen
+        if connection_id and (state or reported):
+            self.turn_finished.emit(connection_id)
         self._terminal_seen.discard(session_id)
         if showing and not reported and (state or answer.get("record_unknown")):
             self.feed.append({"type": state or "interrupted",
@@ -3057,6 +3319,7 @@ class ChatTab(QWidget):
                 self._new_restrictions = dict(one.get("restrictions") or {})
                 self._new_skills = list(one.get("skills") or [])
         self.sessions = [one for one in self.sessions if one.get("id") != session_id]
+        self._clear_context(session_id)
         self.ask("session-delete", lambda core, cancel: core.agents(
             "session-delete", session_id), lambda _payload: None)
 
@@ -3086,8 +3349,7 @@ class ChatTab(QWidget):
         self._redirecting.add(key)
         self._stopping.add(key)
         self._waiting()
-        self.composer.interrupt.setEnabled(False)
-        self.composer.say("Stopping the current turn; your message will be sent next.")
+        self._sync()
         self.turns[key].stop()
 
     def stop(self):
@@ -3095,7 +3357,8 @@ class ChatTab(QWidget):
         turn = self.turns.get(self._key())
         if turn is not None:
             self._stopping.add(self._key())
-            self.composer.stop.setEnabled(False)
+            self._waiting()
+            self._sync()
             turn.stop()
 
     # -- what a conversation is called, and removing one --------------------------
@@ -3112,7 +3375,7 @@ class ChatTab(QWidget):
             if payload.get("ok"):
                 self._put(payload.get("session") or session)
                 if self._showing(session["id"]):
-                    self._head()
+                    self._update_details()
             else:
                 self.composer.say(payload.get("error") or "Not renamed.", bad=True)
 
@@ -3135,6 +3398,7 @@ class ChatTab(QWidget):
         def done(payload):
             if payload.get("ok"):
                 self.sessions = [one for one in self.sessions if one.get("id") != session["id"]]
+                self._clear_context(session["id"])
                 self._drafts.pop(session["id"], None)
                 self._draft_files.pop(session["id"], None)
                 self._fill()
@@ -3676,7 +3940,7 @@ class ChatTab(QWidget):
                 self._budgets[session_id] = payload
                 if self._showing(session_id):
                     self.composer.set_budget(payload)
-                    self._head()
+                    self._update_details()
             else:
                 self.composer.say(payload.get("error") or "The budget was not saved.", bad=True)
         self.ask("budget:%s" % session_id, lambda core, cancel: core.agents(
@@ -3692,7 +3956,7 @@ class ChatTab(QWidget):
                 self._budgets[session_id] = payload
                 if self._showing(session_id):
                     self.composer.set_budget(payload)
-                    self._head()
+                    self._update_details()
         self.ask("budget:%s" % session_id, lambda core, cancel: core.agents(
             "budget", session_id, cancel=cancel), done)
 

@@ -189,6 +189,65 @@ def test_a_tool_that_failed_says_what_came_back(qapp):
     assert stage["detail"] == "file_path: /repo/tests/test_login.py\nNo such file"
 
 
+def test_a_recorded_patch_says_what_happened_without_repeating_the_path(qapp):
+    feed = ChatFeed()
+    path = "/repo/gui/tests/test_agents_page.py"
+    for ident in ("first", "second"):
+        feed.append({"type": "tool.started", "id": ident, "name": "apply_patch", "title": path, "detail": path})
+        assert feed.said()[-1] == "Applying patch · test_agents_page.py"
+        feed.append({"type": "tool.completed", "id": ident, "ok": True})
+    assert feed.said() == ["Patch applied · test_agents_page.py"] * 2
+    assert all(row.detail is None and path in row.toolTip() for _, row in feed._rows)
+
+
+def test_patch_rows_show_file_operations_and_unconfirmed_outcomes(qapp):
+    feed = ChatFeed()
+    files = [{"path": "/repo/new.py", "kind": "add"}, {"path": "/repo/edited.py", "kind": "update"},
+             {"path": "/repo/old.py", "kind": "delete"},
+             {"path": "/repo/before.py", "kind": "update", "destination": "/repo/after.py"}]
+    feed.append({"type": "tool.completed", "id": "done", "name": "apply_patch", "ok": True, "file_changes": files})
+    assert feed.said() == ["Patch applied · 4 files"]
+    assert feed._rows[0][1].detail.text() == "Added new.py\nEdited edited.py\nDeleted old.py\nMoved before.py to after.py"
+    feed.append({"type": "tool.started", "id": "failed", "name": "apply_patch", "file_changes": files[:1]})
+    feed.append({"type": "tool.completed", "id": "failed", "ok": False, "detail": "Hunk did not match"})
+    assert feed.said()[-1] == "Patch failed · new.py"
+    assert feed._rows[-1][1].detail.text() == "Hunk did not match"
+    feed.append({"type": "tool.started", "id": "pending", "name": "apply_patch", "file_changes": files[:1]})
+    feed.append({"type": "stopped"})
+    assert feed.said()[-2:] == ["Patch outcome unknown · new.py", "Stopped"]
+
+
+def test_chat_fetches_each_patch_only_when_its_row_is_opened(make, qapp):
+    session = _session()
+    events = [
+        {"type": "tool.completed", "name": "apply_patch", "id": item, "ok": True, "turn": 1,
+         "file_changes": [{"path": "/repo/a.py", "kind": "update"}]}
+        for item in ("first", "second")
+    ]
+
+    def patch(_args, document):
+        return {"ok": True, "files": [{"path": "/repo/a.py", "diff": "-old\n+" + document["item"]}]}
+
+    core = FakeCore(sessions=[session], events={session["id"]: events}, **{"tool-patch": patch})
+    chat = make(core).agents.chat
+    chat.open_session(session["id"])
+    qapp.processEvents()
+    first, second = [widget for _, widget in chat.feed._rows]
+    assert "tool-patch" not in core.asked()
+    summaries = [document for args, document in core.calls if args[0] == "changes"]
+    assert summaries and all(document == {"summary": True} for document in summaries)
+    assert first.disclosure.body().count() == second.disclosure.body().count() == 0
+    second.disclosure.button.click()
+    assert core.calls[-1] == (("tool-patch", session["id"]), {"turn": 1, "item": "second"})
+    assert second.disclosure.findChild(agentchat.PatchText).toPlainText() == "-old\n+second"
+    second.disclosure.button.click()
+    second.disclosure.button.click()
+    assert core.asked().count("tool-patch") == 1
+    assert first.disclosure.body().count() == 0
+    first.disclosure.button.click()
+    assert first.disclosure.findChild(agentchat.PatchText).toPlainText() == "-old\n+first"
+
+
 @pytest.mark.parametrize("mode, name, said", [
     ("read", "Bash", "Not allowed in Read: commands need Full access."),
     ("edit", "Bash", "Not allowed in Edit: commands need Full access."),
@@ -376,14 +435,30 @@ def test_what_a_person_wrote_is_text_always(qapp):
 
 
 # -- the list -----------------------------------------------------------------------
-def test_the_tab_lists_the_conversations_and_opens_on_a_new_one(make):
-    core = FakeCore(sessions=[_session(), _session("20261110-090000-aaaaaa", "Refund flow")])
+def test_the_tab_lists_the_conversations_and_opens_on_a_new_one(make, qapp):
+    recent = _session(updated=1794416445)
+    working = _session("20261110-090000-aaaaaa", "Refund flow", state="running")
+    core = FakeCore(sessions=[recent, working])
     chat = make(core).agents.chat
+    assert chat.table.columnCount() == 1
     assert [chat.table.item(row, 0).text() for row in range(chat.table.rowCount())] == [
         "Flaky login test", "Refund flow"]
-    assert chat.current is None and chat.title.text() == "New conversation"
+    assert "Last active: " + agentchat.when_text(recent["updated"]) in chat.table.item(0, 0).toolTip()
+    assert not chat.table.item(0, 0).data(agentchat.RelationshipDelegate.ACTIVITY)
+    assert chat.table.item(1, 0).toolTip().endswith("Working")
+    assert chat.table.item(1, 0).data(agentchat.RelationshipDelegate.ACTIVITY)
+    assert chat.current is None and chat.more_button.isHidden()
     assert "session" not in core.asked()                # none is read until one is picked
-    assert not chat.rename_button.isEnabled() and not chat.delete_button.isEnabled()
+    assert not chat.rename_action.isEnabled() and not chat.delete_action.isEnabled()
+    row = chat.table.visualItemRect(chat.table.item(0, 0))
+    title = QRect(0, 0, 100, row.height())
+    viewport = chat.table.viewport()
+    before = viewport.grab(row).toImage()
+    chat._put(dict(recent, state="running"))
+    qapp.processEvents()
+    after = viewport.grab(row).toImage()
+    assert before != after
+    assert before.copy(title) == after.copy(title)
 
 
 def test_no_conversation_yet_says_so_and_the_box_is_ready(make, qapp):
@@ -399,8 +474,7 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     chat = make(core).agents.chat
     chat.table.selectRow(0)
     assert (("session", session["id"]), {"limit": agentchat.EVENTS_SHOWN}) in core.calls
-    assert chat.title.text() == "Flaky login test"
-    assert chat.sub.text() == "" and chat.sub.isHidden()
+    assert chat.current["title"] == "Flaky login test"
     assert "/home/someone/src/shop" in chat.composer.context_summary.text()
     assert chat.feed.kinds() == ["you", "thinking", "tool", "answer", "end"]
     composer = chat.composer
@@ -412,7 +486,7 @@ def test_picking_a_conversation_reads_it_once_and_shows_it(make):
     assert not composer.browse.isEnabled()
     chat.table.selectRow(0)
     assert core.asked().count("session") == 1
-    assert chat.rename_button.isEnabled() and chat.delete_button.isEnabled()
+    assert chat.rename_action.isEnabled() and chat.delete_action.isEnabled()
 
 
 def test_the_conversation_that_was_open_is_open_again_next_time(make, settings):
@@ -471,7 +545,8 @@ def test_the_first_message_makes_the_conversation_and_takes_the_first_turn(make,
     # Shown at once, as on its way - and the box is free for the next thought.
     assert chat.feed.waiting() == [("SENDING", QUESTION)]
     assert chat.composer.draft() == "" and chat.composer.stop.isVisible()
-    assert chat.table.item(0, 1).text() == "Answering"
+    assert chat.table.item(0, 0).toolTip().endswith("Answering")
+    assert chat.table.item(0, 0).data(agentchat.RelationshipDelegate.ACTIVITY)
 
 
 def test_the_message_is_a_row_once_the_core_has_it_on_record(make):
@@ -485,9 +560,10 @@ def test_the_message_is_a_row_once_the_core_has_it_on_record(make):
     assert chat.feed.kinds() == ["you", "thinking", "tool", "answer", "end"]
     turn.finish()
     assert not chat.composer.stop.isVisible() and chat.turns == {}
-    assert chat.title.text() == QUESTION                # called by how it began
+    assert chat.current["title"] == QUESTION                # called by how it began
     assert chat.table.item(0, 0).text() == QUESTION
-    assert chat.table.item(0, 1).text() != "Answering"
+    assert "Answering" not in chat.table.item(0, 0).toolTip()
+    assert not chat.table.item(0, 0).data(agentchat.RelationshipDelegate.ACTIVITY)
 
 
 def test_a_breathing_dot_and_the_turn_s_time_say_the_agent_is_working(make, monkeypatch):
@@ -600,7 +676,9 @@ def test_interrupt_sends_selected_message_after_turn_ends(make, state):
     _say(chat, "do not commit")
     chat.feed._waiting[-1].body.interrupt.click()
     assert first.stopped and len(FakeTurn.made) == 1
+    assert chat.composer.interrupt_note.isVisible()
     first.finish(state)
+    assert chat.composer.interrupt_note.isHidden()
     assert FakeTurn.made[1].session_id == first.session_id
     assert FakeTurn.made[1].document["message"] == "do not commit"
     assert chat._queued[first.session_id][0]["message"] == "later"
@@ -619,6 +697,7 @@ def test_interrupt_from_composer_preserves_files_and_does_not_retry_failure(make
     assert first.stopped and len(FakeTurn.made) == 1
     first.finish("failed")
     assert len(FakeTurn.made) == 1
+    assert chat.composer.interrupt_note.isHidden()
     assert chat.composer.draft() == "use these instructions"
     assert chat.composer.attachments() == [str(path)]
 
@@ -631,6 +710,7 @@ def test_stop_cancels_interrupt_resume(make):
     _say(chat, "do not commit")
     chat.interrupt_queued(0)
     chat.stop()
+    assert chat.composer.interrupt_note.isHidden()
     first.finish("stopped")
     assert len(FakeTurn.made) == 1
     assert chat.composer.draft() == "do not commit"
@@ -730,7 +810,7 @@ def test_a_turn_going_on_elsewhere_does_not_write_into_the_one_being_read(make):
     turn.say(*_events()[1:])
     assert chat.feed.said() == shown
     assert not chat.composer.stop.isVisible()           # nothing is being answered here
-    assert chat.table.item(0, 1).text() == "Answering"
+    assert chat.table.item(0, 0).data(agentchat.RelationshipDelegate.ACTIVITY)
     assert page.busy_reason() == ("An agent is still answering. Stop it, or wait for it "
                                   "to finish.")
     turn.finish()
@@ -769,7 +849,7 @@ def test_a_conversation_held_by_something_else_is_shown_not_carried_on(make):
     assert composer.closed.isVisible() and not composer.text.isVisible()
     assert composer.closed.text() == ("This conversation was held by Cycle nightly · step "
                                       "review. It is shown here, not carried on.")
-    assert chat.sub.text().endswith("Cycle nightly · step review")
+    assert "Cycle nightly · step review" in chat.more_button.toolTip()
     chat.new_button.click()
     assert composer.text.isVisible() and not composer.closed.isVisible()
 
@@ -789,7 +869,7 @@ def test_a_conversation_opened_elsewhere_to_talk_in_goes_on_here(make):
     chat = make(core).agents.chat
     chat.table.selectRow(0)
     assert chat.composer.text.isVisible() and not chat.composer.closed.isVisible()
-    assert chat.sub.text().endswith("Jira QA-1")
+    assert "Jira QA-1" in chat.more_button.toolTip()
     chat.table.selectRow(1)
     assert chat.composer.closed.isVisible() and not chat.composer.text.isVisible()
 
@@ -833,9 +913,9 @@ def test_renaming_changes_what_it_is_called_everywhere(make, monkeypatch):
     chat = make(core).agents.chat
     chat.table.selectRow(0)
     monkeypatch.setattr(widgets, "ask_text", lambda *args, **kw: "Login, again")
-    chat.rename_button.click()
+    chat.rename_action.trigger()
     assert core.calls[-1] == (("session-set", session["id"]), {"title": "Login, again"})
-    assert chat.title.text() == "Login, again"
+    assert chat.current["title"] == "Login, again"
     assert chat.table.item(0, 0).text() == "Login, again"
 
 
@@ -846,12 +926,12 @@ def test_deleting_asks_first_and_says_what_is_left_alone(make, monkeypatch):
     core = FakeCore(sessions=[session], events={session["id"]: _events()})
     chat = make(core).agents.chat
     chat.table.selectRow(0)
-    chat.delete_button.click()
+    chat.delete_action.trigger()
     assert asked[0][2] == "Delete Flaky login test?"
     assert "Files the agent changed are left as they are." in asked[0][3]
     assert core.calls[-1] == (("session-delete", session["id"]), None)
     assert chat.table.rowCount() == 0 and chat.current is None
-    assert chat.title.text() == "New conversation"
+    assert chat.more_button.isHidden()
 
 
 def test_a_conversation_being_answered_cannot_be_deleted(make, monkeypatch):
@@ -859,12 +939,12 @@ def test_a_conversation_being_answered_cannot_be_deleted(make, monkeypatch):
     core = FakeCore()
     chat = make(core).agents.chat
     _say(chat, QUESTION)
-    assert not chat.delete_button.isEnabled()
+    assert not chat.delete_action.isEnabled()
     chat.delete()
     assert "session-delete" not in core.asked()
     FakeTurn.made[0].say(_events()[0])
     FakeTurn.made[0].finish()
-    assert chat.delete_button.isEnabled()
+    assert chat.delete_action.isEnabled()
 
 
 # -- nobody to ask ----------------------------------------------------------------------
@@ -1387,21 +1467,21 @@ def test_changes_are_visible_and_refresh_before_the_first_turn_finishes(make):
     _say(chat, "Change the file")
     (turn,) = FakeTurn.made
     assert not chat.current["turns"] and chat.running()
-    assert not chat.changes_button.isHidden()
-    assert chat.changes_button.text() == "Changes" and not chat.changes_button.parts
+    assert chat.changes_action.isVisible()
+    assert chat.changes_action.text() == "Changes"
     found.update(files=[{"path": "app.py", "status": "modified", "added": 100, "removed": 20}],
                  added=100, removed=20,
                  patch="diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n")
     chat._changes_timer.timeout.emit()
-    assert chat.changes_button.text() == "Changes +100 -20"
-    chat.changes_button.click()
+    assert chat.changes_action.text() == "Changes +100 -20"
+    chat.changes_action.trigger()
     dialog = chat.changes_dialog
     assert dialog.isVisible() and dialog._refresh.isActive()
     dialog.view.sections[0].set_expanded(True)
     found.update(added=101)
     dialog._refresh.timeout.emit()
     assert dialog.view.summary.text() == "1 file changed · +101 -20"
-    assert chat.changes_button.text() == "Changes +101 -20"
+    assert chat.changes_action.text() == "Changes +101 -20"
     assert dialog.view.sections[0].is_expanded()
     reads = core.asked().count("changes")
     chat._poll_changes()
@@ -1409,13 +1489,13 @@ def test_changes_are_visible_and_refresh_before_the_first_turn_finishes(make):
     assert chat.running()  # inspection has not stopped or finished the agent
     found.update(live=False, added=102)
     turn.finish()
-    assert chat.changes_button.text() == "Changes +102 -20"
+    assert chat.changes_action.text() == "Changes +102 -20"
     dialog._refresh.timeout.emit()
     assert not dialog._refresh.isActive()
     dialog.close()
 
 
-def test_live_changes_coalesce_slow_reads_and_do_not_update_another_chat(make):
+def test_live_changes_coalesce_counts_and_only_request_a_patch_when_opened(make):
     chat = make().agents.chat
     ask = chat.host.ask
     pending = []
@@ -1431,11 +1511,14 @@ def test_live_changes_coalesce_slow_reads_and_do_not_update_another_chat(make):
     chat._poll_changes()
     chat._poll_changes()
     assert len(pending) == 1
-    chat.changes_button.click()
-    assert len(pending) == 1  # the window shares the button's pending read
+    chat.changes_action.trigger()
+    assert len(pending) == 2
+    chat._poll_changes()
+    assert len(pending) == 2
     chat.new_conversation()
-    pending.pop()({"ok": True, "live": True, "files": [], "added": 100, "removed": 20})
-    assert chat.changes_button.isHidden()
+    pending[0]({"ok": True, "live": True, "added": 100, "removed": 20})
+    pending[1]({"ok": True, "live": True, "files": [], "added": 100, "removed": 20})
+    assert not chat.changes_action.isVisible()
     assert chat.changes_dialog.view.summary.text() == "No files changed."
     chat.changes_dialog.close()
 
@@ -1460,9 +1543,8 @@ def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):
                     changes=lambda args, document: found)
     chat = make(core).agents.chat
     chat.table.selectRow(0)
-    assert chat.usage.text() == "context 25k of 1M · est. $0.25"
-    assert chat.usage.text() in chat.usage.toolTip()
-    assert chat.usage.toolTip().endswith("Tokens so far: 105k in (101k cached) · 2k out")
+    assert "est. $0.25" in chat.more_button.toolTip()
+    assert chat.more_button.toolTip().endswith("Tokens so far: 105k in (101k cached) · 2k out")
     line = chat.feed._rows[-1][1].body
     assert line.said == "Changed 2 files · +3 -1"
     line.view.click()
@@ -1481,7 +1563,7 @@ def test_what_a_turn_changed_is_a_line_that_opens_it_file_by_file(make):
     assert core.calls[-1] == (("changes", session["id"]), {})
     dialog.close()
     chat.new_button.click()                          # nothing used, nothing changed yet
-    assert chat.usage.text() == "" and chat.changes_button.isHidden()
+    assert chat.more_button.toolTip() == "Conversation actions" and not chat.changes_action.isVisible()
 
 
 def test_effort_is_chosen_from_the_program_s_levels_and_goes_with_the_turn(make):
@@ -1698,18 +1780,35 @@ def test_provider_settings_appear_once_and_history_is_in_the_menu(make, qapp):
     session = _session(model="opus", effort="high", source={"label": "Jira", "ref": "jira:team:QA-1"},
                        turns=[{"n": 1, "model_used": "claude-opus", "effort_used": "high"}],
                        context={"used": 24000, "window": 1000000}, cost_usd=.25)
-    chat = make(FakeCore(sessions=[session], events={session["id"]: _events(first=40)})).agents.chat
+    agents = make(FakeCore(sessions=[session], events={session["id"]: _events(first=40)})).agents
+    chat = agents.chat
     chat.open_session(session["id"])
     qapp.processEvents()
-    assert chat.sub.text() == "Jira"
-    assert chat.usage.text() == "context 24k of 1M · est. $0.25"
+    assert chat.more_button.toolTip().splitlines()[1:3] == ["Jira", "est. $0.25"]
     assert "Claude" in chat.composer.context_summary.text()
     assert "opus" in chat.composer.context_summary.text()
     assert "effort high" in chat.composer.context_summary.text()
     assert chat.links.menuAction() in chat.more_menu.actions()
     assert chat.earlier in chat.more_menu.actions()
     assert chat.more_button.isVisible()
-    assert chat.more_button.height() <= chat.rename_button.height()
+    tab_row = agents.fold.widget(0)
+    assert chat.more_button.parentWidget() is agents.tab_bar.parentWidget() is tab_row
+    assert chat.more_button.geometry().right() == tab_row.rect().right()
+    assert all(action in chat.more_menu.actions()
+               for action in (chat.rename_action, chat.delete_action, chat.changes_action))
+    sidebar_panel = chat.table.parentWidget()
+    sidebar = sidebar_panel.geometry()
+    transcript = chat.feed.parentWidget().geometry()
+    assert sidebar.top() == transcript.top()
+    assert sidebar.bottom() == transcript.bottom()
+    header = chat.table.horizontalHeader().viewport()
+    assert chat.new_button.parentWidget() is header
+    assert header.rect().contains(chat.new_button.geometry())
+    chat.splitter.setSizes([110, sum(chat.splitter.sizes()) - 110])
+    qapp.processEvents()
+    assert header.rect().contains(chat.new_button.geometry())
+    QTest.mouseClick(chat.new_button, Qt.LeftButton)
+    assert chat.current is None and chat.more_button.isHidden()
 
 
 def test_failed_navigation_resumes_the_history_it_paused(make, monkeypatch):
@@ -1906,6 +2005,6 @@ def test_deleting_an_unused_join_reloads_the_previously_visible_chats(make, monk
     chat.open_session("joined")
     assert chat.table.rowCount() == 1
     monkeypatch.setattr(widgets, "confirm", lambda *_args, **_kwargs: True)
-    chat.delete_button.click()
+    chat.delete_action.trigger()
     assert chat.current is None
     assert {chat.table.item(row, 0).data(Qt.UserRole) for row in range(chat.table.rowCount())} == {"first", "second"}

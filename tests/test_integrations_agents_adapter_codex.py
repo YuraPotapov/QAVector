@@ -32,6 +32,21 @@ def test_login_output_never_discloses_a_key(tmp_path):
     assert "sk-secret" not in json.dumps(result)
 
 
+def test_rate_limits_read_all_buckets_without_starting_a_thread(tmp_path, monkeypatch):
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+    assert codex.rate_limits(fake_codex(tmp_path)) == {"ok": True, "windows": [
+        {"label": "5-hour limit", "used_percent": 34, "resets_at": 1795200000,
+         "duration_minutes": 300, "account_wide": True},
+        {"label": "Weekly limit", "used_percent": 48, "resets_at": None,
+         "duration_minutes": 10080, "account_wide": True},
+        {"label": "5-hour limit · Example", "used_percent": 34, "resets_at": 1795200000,
+         "duration_minutes": 300, "account_wide": False},
+    ]}
+    requests = [json.loads(line).get("method") for line in log.read_text().splitlines()]
+    assert requests == [None, "initialize", "initialized", "account/rateLimits/read"]
+
+
 def test_capabilities_advertise_planning_skills_and_edit():
     features = codex.capabilities()
     assert features.planning and features.skills and codex.PLANS
@@ -126,13 +141,22 @@ def test_server_and_bridge_lines_become_conversation_events():
 
 
 def test_only_successful_file_changes_are_recorded():
-    item = {"type": "fileChange", "id": "patch", "changes": [{"path": "a.py"}, {"path": "b.py"}]}
+    item = {"type": "fileChange", "id": "patch", "changes": [
+        {"path": "a.py", "kind": {"type": "update", "movePath": "moved.py"}},
+        {"path": "b.py", "kind": {"type": "delete"}}]}
+    started = codex.events(json.dumps({"method": "item/started", "params": {"item": item}}))
+    assert started[0]["file_changes"] == [{"path": "a.py", "kind": "update", "destination": "moved.py"},
+                                          {"path": "b.py", "kind": "delete"}]
     done = codex.events(json.dumps({"method": "item/completed", "params": {"item": dict(item, status="completed")}}))
     assert [one["type"] for one in done] == ["tool.completed", "file.written", "file.written"]
+    assert done[0]["file_changes"] == started[0]["file_changes"]
     declined = codex.events(json.dumps({"method": "item/completed", "params": {"item": dict(item, status="declined")}}))
     assert len(declined) == 1 and declined[0]["ok"] is False
-    exec_item = {"type": "file_change", "id": "patch", "changes": [{"path": "a.py"}]}
-    assert len(codex.events(json.dumps({"type": "item.completed", "item": dict(exec_item, status="completed")}))) == 2
+    assert declined[0]["declined"]
+    exec_item = {"type": "file_change", "id": "patch", "changes": [{"path": "a.py", "kind": "add"}]}
+    done = codex.events(json.dumps({"type": "item.completed", "item": dict(exec_item, status="completed")}))
+    assert [one["type"] for one in done] == ["tool.completed", "file.written"]
+    assert done[0]["file_changes"] == [{"path": "a.py", "kind": "add"}]
 
 
 def test_reader_takes_the_bridge_end_and_its_own_counts():

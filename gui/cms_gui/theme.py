@@ -925,6 +925,8 @@ QProgressBar {{
     text-align: center; color: transparent;
 }}
 QProgressBar::chunk {{ background: {accent}; }}
+QProgressBar#providerLimitBar[state="warning"]::chunk {{ background: {warn}; }}
+QProgressBar#providerLimitBar[state="exhausted"]::chunk {{ background: {bad}; }}
 
 QMenuBar {{ background: {bg}; border-bottom: 1px solid {divider}; }}
 QMenuBar::item {{ padding: 4px 9px; background: transparent; }}

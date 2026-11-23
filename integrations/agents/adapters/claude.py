@@ -43,9 +43,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 
 import runtime_paths
 from integrations.agents import locate
+from integrations.agents.contracts import rate_limit_window
 
 #: What a connection of this kind records, and what a person reads.
 KIND = "claude"
@@ -194,37 +196,13 @@ def models(binary=None, timeout=STATUS_TIMEOUT, run=None):
     if not path:
         return {"ok": False, "kind": "not_installed", "models": [],
                 "error": "Claude Code is not installed or its program cannot be found."}
-    request_id = "qavector-models"
-    request = {"type": "control_request", "request_id": request_id,
-               "request": {"subtype": "initialize", "hooks": {}}}
-    argv = [path, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-            "--verbose", "--safe-mode", "--strict-mcp-config", "--mcp-config",
-            '{"mcpServers":{}}', "--tools", "", "--no-session-persistence"]
     try:
-        with tempfile.TemporaryDirectory(prefix="qavector-models-") as folder:
-            finished = (run or subprocess.run)(
-                argv, input=(json.dumps(request) + "\n").encode("utf-8"),
-                capture_output=True, timeout=timeout, cwd=folder,
-                env=turn_env(runtime_paths.clean_subprocess_env()))
+        payload = _sdk_request(path, {"subtype": "initialize", "hooks": {}}, timeout, run)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"ok": False, "kind": "error", "models": [],
                 "error": "Could not read Claude Code's models: %s" % exc}
-    for line in (finished.stdout or b"").decode("utf-8", "replace").splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict) or event.get("type") != "control_response":
-            continue
-        response = event.get("response")
-        if not isinstance(response, dict) or response.get("request_id") != request_id:
-            continue
-        payload = response.get("response")
-        if response.get("subtype") != "success" or not isinstance(payload, dict):
-            break
-        raw = payload.get("models")
-        if not isinstance(raw, list):
-            break
+    raw = (payload or {}).get("models")
+    if isinstance(raw, list):
         found, seen = [], set()
         for one in raw:
             if not isinstance(one, dict):
@@ -239,10 +217,84 @@ def models(binary=None, timeout=STATUS_TIMEOUT, run=None):
                           "resolved_model": str(one.get("resolvedModel") or "")})
         if found:
             return {"ok": True, "models": found}
-        break
     return {"ok": False, "kind": "unavailable", "models": [],
             "error": "Claude Code did not return a model list. Check its sign-in and version, "
                      "then reopen the list to try again."}
+
+
+def _sdk_request(path, request, timeout, run=None):
+    request_id = "qavector-models" if request["subtype"] == "initialize" else "qavector-limits"
+    envelope = {"type": "control_request", "request_id": request_id, "request": request}
+    argv = [path, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+            "--verbose", "--safe-mode", "--strict-mcp-config", "--mcp-config",
+            '{"mcpServers":{}}', "--tools", "", "--no-session-persistence"]
+    with tempfile.TemporaryDirectory(prefix="qavector-claude-sdk-") as folder:
+        finished = (run or subprocess.run)(
+            argv, input=(json.dumps(envelope) + "\n").encode("utf-8"),
+            capture_output=True, timeout=timeout, cwd=folder,
+            env=turn_env(runtime_paths.clean_subprocess_env()))
+    for line in (finished.stdout or b"").decode("utf-8", "replace").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "control_response":
+            continue
+        response = event.get("response")
+        if not isinstance(response, dict) or response.get("request_id") != request_id:
+            continue
+        payload = response.get("response")
+        return payload if response.get("subtype") == "success" and isinstance(payload, dict) else None
+    return None
+
+
+def rate_limits(binary=None, timeout=STATUS_TIMEOUT, run=None):
+    """Read plan windows through the CLI's SDK control channel."""
+    path = resolve(binary)
+    if not path:
+        return {"ok": False, "error": "Claude Code is not installed or its program cannot be found."}
+    try:
+        payload = _sdk_request(path, {"subtype": "get_usage", "skip_behaviors": True}, timeout, run)
+    except (OSError, subprocess.SubprocessError):
+        payload = None
+    if payload is None or (payload.get("rate_limits_available") is True
+                           and not isinstance(payload.get("rate_limits"), dict)):
+        return {"ok": False, "error": "Claude Code did not return limit data. Check its sign-in and version."}
+    raw = payload.get("rate_limits")
+    windows = []
+    if isinstance(raw, dict):
+        labels = {"five_hour": "5-hour limit", "seven_day": "Weekly limit",
+                  "seven_day_oauth_apps": "Weekly limit · connected apps",
+                  "extra_usage": "Extra usage"}
+        for key, window in raw.items():
+            label = labels.get(key, key.replace("seven_day_", "Weekly limit · ").replace("_", " "))
+            if isinstance(window, dict) and (key != "extra_usage" or window.get("is_enabled")):
+                minutes = None
+                if key == "five_hour":
+                    minutes = 5 * 60
+                elif key == "seven_day" or key.startswith("seven_day_"):
+                    minutes = 7 * 24 * 60
+                windows.append(_usage_window(label, window, minutes, account_wide=key in ("five_hour", "seven_day")))
+        scoped = raw.get("model_scoped")
+        if isinstance(scoped, list):
+            for window in scoped:
+                if isinstance(window, dict) and isinstance(window.get("display_name"), str):
+                    windows.append(_usage_window("Weekly limit · " + window["display_name"], window, 7 * 24 * 60))
+    return {"ok": True, "windows": [window for window in windows if window]}
+
+
+def _usage_window(label, window, minutes, account_wide=False):
+    reset = window.get("resets_at")
+    resets_at = reset if type(reset) in (int, float) else None
+    if isinstance(reset, str):
+        try:
+            parsed = datetime.fromisoformat(reset.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                resets_at = parsed.timestamp()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return rate_limit_window(label, window.get("utilization"), resets_at,
+                             duration_minutes=minutes, account_wide=account_wide)
 
 
 def describe(found):

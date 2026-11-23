@@ -1296,18 +1296,59 @@ def test_the_footer_empties_again_when_they_stop(window, qapp):
         window.services.shutdown(6000)
 
 
-def test_the_footer_is_about_what_is_happening_not_about_settings(window):
-    """Which core and which interpreter are decided once, in Settings.
+def test_the_footer_shows_only_available_status_and_last_opened_chat(window, monkeypatch):
+    chat = window.integrations.agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    monkeypatch.setattr(chat, "_refresh_changes", lambda: None)
+    assert not hasattr(window, "status_config")
+    assert not window.status_right.text()
+    assert window.status_state.isHidden()
+    assert window.status_context.isHidden()
 
-    They were three fixed strings taking the left half of the status bar for
-    facts that never change while the window is open. The config file stays: it
-    is the one of the three that changes what a run actually reads.
-    """
-    assert not hasattr(window, "status_core")
-    assert not hasattr(window, "status_python")
-    assert window.status_config.text().startswith("config: ")
-    assert os.sep not in window.status_config.text()      # the name, not the path
-    assert window.status_config.toolTip()                 # the path is still here
+    session = {"id": "first", "context": {"used": 1000, "window": 2000}}
+    chat._show(session, [], whole=True)
+    assert window.status_context.text() == "Context 1k of 2k"
+    assert window.status_context.isVisible()
+    chat.new_conversation()
+    window.show_page("launch")
+    assert window.status_context.text() == "Context 1k of 2k"
+    chat._put(dict(session, context={"used": 1200, "window": 2000}))
+    assert window.status_context.text() == "Context 1.2k of 2k"
+    chat._show({"id": "second"}, [], whole=True)
+    assert window.status_context.isHidden()
+    chat._show(session, [], whole=True)
+    chat.reset()
+    assert window.status_context.isHidden()
+
+
+def test_footer_names_the_visible_chat_only_while_its_sidebar_is_folded(window, monkeypatch):
+    agents = window.integrations.agents
+    chat = agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    monkeypatch.setattr(chat, "_refresh_changes", lambda: None)
+    window.show_page("integrations")
+    window.integrations.open_provider("agents")
+    session = {"id": "first", "kind": "codex", "title": "Review checkout",
+               "context": {"used": 1000, "window": 2000}}
+    chat._show(session, [], whole=True)
+    assert window.status_chat.isHidden()
+    chat.splitter.setSizes([0, sum(chat.splitter.sizes())])
+    assert window.status_chat.isVisible()
+    assert window.status_chat.text() == "Agents(Codex): Review checkout"
+    assert window.status_context.text() == "Context 1k of 2k"
+    chat._put(dict(session, title="Review payment"))
+    assert window.status_chat.text() == "Agents(Codex): Review payment"
+    agents.tabs.setCurrentWidget(agents.connections_tab)
+    assert window.status_chat.isHidden() and chat.more_button.isHidden()
+    agents.tabs.setCurrentWidget(chat)
+    assert window.status_chat.isVisible() and chat.more_button.isVisible()
+    chat.splitter.unfold(0)
+    assert window.status_chat.isHidden()
+    chat.splitter.setSizes([0, sum(chat.splitter.sizes())])
+    chat.new_conversation()
+    assert window.status_chat.isHidden() and window.status_context.isVisible()
 
 
 # ------------------------------------------------- what is running, on the rail
