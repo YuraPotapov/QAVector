@@ -393,7 +393,7 @@ class AgentRequestCard(QFrame):
         # How long it has gone on through answers: counted, for the person to judge.
         self.meta.setText(REQUEST_STATES.get(state, state) + (
             " - %d question%s so far" % (questions, "" if questions == 1 else "s") if questions else ""))
-        self.stop_button.setVisible(state in ("running", "asks") and self.request.get("kind") not in ("message", "follow_up"))
+        self.stop_button.setVisible(state in ("running", "asks") and self.request.get("kind") != "message")
         waiting = state == "waiting"
         ended = state not in ("waiting", "approved", "running", "asks")
         self.deny_button.setVisible(waiting)

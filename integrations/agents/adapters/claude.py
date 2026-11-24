@@ -326,7 +326,7 @@ SKIPPED_SUBTYPES = ("thinking_tokens",)
 #: Where to look, per tool, for the one value that says what it is doing. First
 #: match wins, so a tool absent from here still gets a row - just a plainer one.
 TELLING = ("file_path", "path", "pattern", "command", "query", "url",
-           "notebook_path", "prompt", "description", "skill")
+           "notebook_path", "prompt", "description", "skill", "capability")
 
 
 def stages(line, on_text=None):
@@ -463,8 +463,20 @@ def _arguments(arguments, used=""):
     for key in sorted(arguments):
         if key and key == used:
             continue                    # the title already says it, in full
-        lines.append("%s: %s" % (key, _one_line(arguments[key])))
+        value = arguments[key]
+        if isinstance(value, dict) and value:
+            # What a QAVector capability is invoked with: one level more of
+            # lines, so its words read as words rather than as escaped JSON.
+            lines.append("%s:" % key)
+            lines.extend("  %s: %s" % (inner, _one_line(value[inner])) for inner in sorted(value))
+        else:
+            lines.append("%s: %s" % (key, _one_line(value)))
     return _clean("\n".join(lines))
+
+
+#: The two for an adapter whose program calls tools of its own shape (Codex):
+#: its rows then read as Claude's do.
+tool_title, tool_arguments = _tool_title, _arguments
 
 
 def _one_line(value):

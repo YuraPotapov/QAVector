@@ -404,6 +404,20 @@ class ConnectionDialog(QDialog):
             "Chat progress bar", self.chat_limit_view,
             "Daily prefers a 24-hour account limit and can use a shorter provider window. "
             "Combined average gives the daily and weekly remaining percentages equal weight."))
+        self.split_week_days = QCheckBox("Split by week days")
+        self.split_week_days.setChecked(self.connection.get("split_week_days") is True)
+        self.split_week_days.setToolTip(
+            "Divide the weekly limit in chat into its seven days, counted from when the provider resets it. "
+            "Hovering over a day for a moment shows its date.")
+        self.split_week_days.setEnabled(self.show_limits_in_chat.isChecked())
+        self.show_limits_in_chat.toggled.connect(self.split_week_days.setEnabled)
+        column.addWidget(self.split_week_days, 0, Qt.AlignLeft)
+        self.git_tracker = QCheckBox("Git Tracker")
+        self.git_tracker.setChecked(self.connection.get("git_tracker") is True)
+        self.git_tracker.setToolTip(
+            "Show the chat folder's git branch after it, with a mark when it has uncommitted changes. "
+            "Git is asked when a chat opens, a folder is chosen or a turn ends - never in the background.")
+        column.addWidget(self.git_tracker, 0, Qt.AlignLeft)
         self.role = QLineEdit(self.connection.get("role", ""))
         self.role.setObjectName("agentRole")
         self.role.setMaxLength(500)
@@ -609,6 +623,8 @@ class ConnectionDialog(QDialog):
                       "effort": self.effort.currentData() or "",
                       "show_limits_in_chat": self.show_limits_in_chat.isChecked(),
                       "chat_limit_view": self.chat_limit_view.currentData(),
+                      "split_week_days": self.split_week_days.isChecked(),
+                      "git_tracker": self.git_tracker.isChecked(),
                       "role": self.role.text().strip(),
                       "qavector_access": {key: box.isChecked() for key, box in self.access.items()},
                       "others_default": self.others_default.currentData(),

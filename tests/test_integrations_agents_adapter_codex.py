@@ -94,7 +94,9 @@ def test_server_argv_switches_off_user_extensions_and_requires_qavector():
     ("full", False, ("workspace-write", "workspaceWrite", "never"))])
 def test_sandbox_per_mode(mode, plan, expected):
     thread, policy, approval = codex_turn.sandbox(mode, plan)
-    assert (thread, policy["type"], approval) == expected and policy["networkAccess"] is False
+    assert (thread, policy["type"], approval) == expected
+    # Only Full runs commands that may need it - git fetch, a package index.
+    assert policy["networkAccess"] is (mode == "full" and not plan)
 
 
 def test_exec_fallback_keeps_the_old_command_and_its_limits(monkeypatch):
@@ -104,6 +106,8 @@ def test_exec_fallback_keeps_the_old_command_and_its_limits(monkeypatch):
     assert all("features.%s=false" % name in argv for name in codex_turn.NATIVE_AGENTS)
     assert argv[-3:] == ["resume", "thread", "-"] and "--ignore-user-config" in argv
     assert 'sandbox_mode="workspace-write"' in argv and 'approval_policy="never"' in argv
+    assert "sandbox_workspace_write.network_access=true" in argv
+    assert "sandbox_workspace_write.network_access=true" not in codex.turn_argv("codex", "read")
     assert any("required=true" in arg and "/tmp/token" in arg for arg in argv)
     assert "mcp_servers={}" in codex.turn_argv("codex")
     assert not codex.capabilities().planning and codex.capabilities().modes == ("read", "full")
@@ -138,6 +142,22 @@ def test_server_and_bridge_lines_become_conversation_events():
         {"type": "context", "used": 900}]
     assert one({"id": 3, "result": {}}) == one({"method": "turn/started", "params": {}}) == []
     assert codex.events("garbage") == codex.events("[]") == codex.events('{"type":"future"}') == []
+
+
+def test_a_capability_call_reads_as_lines_in_its_own_language():
+    item = {"type": "mcpToolCall", "id": "m", "server": "qavector", "tool": "qavector_invoke",
+            "arguments": {"capability": "integrations.jira.team.comment",
+                          "input": {"key": "QA-1", "body": "Виправив\nзауваження", "mentions": ["Ім'я"]}}}
+    started, = codex.events(json.dumps({"method": "item/started", "params": {"item": item}}))
+    assert started["title"] == "qavector.qavector_invoke integrations.jira.team.comment"
+    assert started["detail"] == 'input:\n  body: Виправив зауваження\n  key: QA-1\n  mentions: ["Ім\'я"]'
+    exec_item = {"type": "mcp_tool_call", "id": "m", "server": "qavector", "tool": "qavector_invoke",
+                 "arguments": item["arguments"]}
+    started, = codex.events(json.dumps({"type": "item.started", "item": exec_item}))
+    assert "\\u" not in started["detail"] and "Виправив" in started["detail"]
+    done = dict(item, status="completed", result={"text": "Готово"})
+    assert codex.events(json.dumps({"method": "item/completed", "params": {"item": done}}))[0]["detail"] == \
+        '{"text": "Готово"}'
 
 
 def test_only_successful_file_changes_are_recorded():

@@ -74,7 +74,7 @@ AGENT_GRANTS = {
     "cycles": ("cycles.read", "cycles.run"),
     "approvals": ("cycles.read", "cycles.approve"),
     "jira": ("integrations.jira.read", "integrations.jira.issue", "integrations.jira.comments",
-             "integrations.jira.search", "integrations.jira.statuses"),
+             "integrations.jira.search", "integrations.jira.statuses", "integrations.jira.people"),
     # Each change waits for the person's Approve (ADR-007).
     "jira_write": ("integrations.jira.write", "integrations.jira.comment", "integrations.jira.transition",
                    "integrations.jira.assign", "integrations.jira.edit", "integrations.jira.comment_edit",

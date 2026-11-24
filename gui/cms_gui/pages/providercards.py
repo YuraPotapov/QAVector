@@ -105,6 +105,10 @@ class ProviderCard(QFrame):
     picked = Signal(str)
     open_requested = Signal(str)
     detach_requested = Signal(str)
+    #: Its pin was switched: the provider, and whether it is on the sidebar now.
+    pin_toggled = Signal(str, bool)
+    #: It wears another maker's mark now (Agents: the program used last).
+    mark_changed = Signal(str)
     WHAT_LINES = 3
 
     def __init__(self, provider, parent=None):
@@ -186,6 +190,15 @@ class ProviderCard(QFrame):
         self.open_button.clicked.connect(lambda: self.open_requested.emit(provider.key))
         actions.addWidget(self.open_button)
         actions.addStretch(1)
+        # On the sidebar or not: a mark, no words - the tooltip says which.
+        self.pin_button = icons.button(QToolButton(), "pin")
+        self.pin_button.setObjectName("providerPin")
+        self.pin_button.setCheckable(True)
+        self.pin_button.setIconSize(QSize(16, 16))
+        self.pin_button.setCursor(Qt.PointingHandCursor)
+        self.pin_button.toggled.connect(self._pin_toggled)
+        self._say_pinned(False)
+        actions.addWidget(self.pin_button)
         self.window_button = icons.button(QToolButton(), "popout")
         self.window_button.setIconSize(QSize(16, 16))
         self.window_button.setToolTip("Open %s in a separate window" % provider.name)
@@ -195,6 +208,23 @@ class ProviderCard(QFrame):
         actions.addWidget(self.window_button)
         column.addLayout(actions)
         self.set_standing(Standing())
+
+    # -- the sidebar -----------------------------------------------------------
+    def set_pinned(self, pinned):
+        """Show whether it is on the sidebar, without saying it was switched."""
+        self.pin_button.blockSignals(True)
+        self.pin_button.setChecked(bool(pinned))
+        self.pin_button.blockSignals(False)
+        self._say_pinned(pinned)
+
+    def _pin_toggled(self, pinned):
+        self._say_pinned(pinned)
+        self.pin_toggled.emit(self.provider.key, bool(pinned))
+
+    def _say_pinned(self, pinned):
+        said = ("Take %s off the sidebar" if pinned else "Pin %s to the sidebar") % self.provider.name
+        self.pin_button.setToolTip(said)
+        self.pin_button.setAccessibleName(said)
 
     # -- what it says ---------------------------------------------------------
     def set_standing(self, standing):
@@ -212,7 +242,10 @@ class ProviderCard(QFrame):
 
     def set_mark(self, name):
         """Show another maker's mark - for Agents, the program used last."""
+        before = self.mark.name
         self.mark.set_name(name if name in brandmarks.MARKS else self.provider.mark)
+        if self.mark.name != before:
+            self.mark_changed.emit(self.provider.key)
 
     def set_selected(self, selected):
         if bool(self.property("selected")) != bool(selected):
@@ -254,6 +287,8 @@ class ProviderGrid(QWidget):
     picked = Signal(str)
     open_requested = Signal(str)
     detach_requested = Signal(str)
+    pin_toggled = Signal(str, bool)
+    mark_changed = Signal(str)
 
     def __init__(self, providers, parent=None):
         super().__init__(parent)
@@ -271,6 +306,8 @@ class ProviderGrid(QWidget):
             card.picked.connect(self.pick)
             card.open_requested.connect(self.open_requested)
             card.detach_requested.connect(self.detach_requested)
+            card.pin_toggled.connect(self.pin_toggled)
+            card.mark_changed.connect(self.mark_changed)
             self.cards[provider.key] = card
         self._columns = 0
         self._place(len(self.cards) or 1)
@@ -290,6 +327,11 @@ class ProviderGrid(QWidget):
 
     def columns(self):
         return self._columns
+
+    def set_pinned(self, keys):
+        """Which cards are on the sidebar: their pins show it."""
+        for key, card in self.cards.items():
+            card.set_pinned(key in keys)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

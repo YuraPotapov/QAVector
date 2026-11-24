@@ -50,6 +50,7 @@ from .pages.credentials import CredentialsPage
 from .pages.cycles import CyclesPage
 from .pages.plugins import PluginsPage
 from .pages.integrations import IntegrationsPage
+from .pinnedrail import PinnedRail, Resized
 from .pages.services import ServicesPage
 from .pages.environments import EnvironmentsPage
 from .pages.history import HistoryPage
@@ -780,9 +781,14 @@ class MainWindow(QMainWindow):
         # collapsed width is measured the same way, from an icon-only button,
         # when the rail is first collapsed.
         widest = 0
+        # What is pinned to the sidebar, just above the bottom group: as many as
+        # the rail has room for, the rest behind "+N" (see _fit_pinned).
+        self.pinned_rail = PinnedRail()
         for title, entries in (("Configure", CONFIGURE), ("Observe", OBSERVE), ("QAVector", APPLICATION)):
             if entries is APPLICATION:
                 rail_layout.addStretch(1)
+                rail_layout.addWidget(self.pinned_rail)
+                rail_layout.addSpacing(10)
             heading = widgets.kicker(title)
             heading.setContentsMargins(RAIL_PADDING, 8, RAIL_PADDING, 6)
             widest = max(widest, heading.sizeHint().width() - HEADING_TRIM)
@@ -862,6 +868,12 @@ class MainWindow(QMainWindow):
         self.integrations.set_project_name(self._project(self.settings.project_id).name)
         self.integrations.return_to_main_requested.connect(self._return_to_integrations)
         self.integrations.search_sources_changed.connect(self._search_sources_changed)
+        # Pinned to the sidebar: the page keeps them and opens them; the rail shows them.
+        self.integrations.pinned_changed.connect(self._refresh_pinned)
+        self.pinned_rail.opened.connect(self._open_pinned)
+        self.pinned_rail.unpinned.connect(self.integrations.unpin)
+        self._pinned_room = Resized(self._rail_scroll.viewport(), self._fit_pinned)
+        self._refresh_pinned()
         # A connection added, changed or removed: the host's delegation targets follow.
         self.integrations.agents.connections_changed.connect(
             lambda: getattr(self, "qcr_host", None) is not None and self.qcr_host.refresh_agents())
@@ -1127,6 +1139,27 @@ class MainWindow(QMainWindow):
             action.blockSignals(False)
         # If the page on screen is the one that just went away, move off it.
         self.show_page(self._page_key)
+        self._fit_pinned()                    # the rail's other entries changed: its room did
+
+    # -- pinned to the sidebar -----------------------------------------------------
+    def _refresh_pinned(self):
+        self.pinned_rail.set_links(self.integrations.pinned())
+        self._fit_pinned()
+
+    def _fit_pinned(self):
+        """As many pinned links as the rail has room for: what the window leaves
+        once everything else on the rail is placed. The window is never held
+        taller for them - the rest go behind "+N"."""
+        rail = getattr(self, "pinned_rail", None)
+        if rail is None:
+            return
+        layout = self._rail.layout()
+        others = layout.sizeHint().height() - (rail.sizeHint().height() if rail.isVisibleTo(self._rail) else 0)
+        rail.fit(self._rail_scroll.viewport().height() - others)
+
+    def _open_pinned(self, link):
+        if self.integrations.open_link(link):
+            self.show_page("integrations")
 
     def set_sidebar_collapsed(self, collapsed):
         """Show the rail as marks only, or as marks and their labels."""
@@ -1144,6 +1177,8 @@ class MainWindow(QMainWindow):
             # one fits beside a mark - see NavButton.
             button.set_compact(collapsed)
             button.setToolTip(self._nav_tooltip(key))
+        if getattr(self, "pinned_rail", None) is not None:
+            self.pinned_rail.set_collapsed(collapsed)
         icons.button(self.collapse_button, "expand" if collapsed else "collapse")
         self._refresh_hotkey_hints()
         self._apply_nav_visibility()          # the headings follow the state

@@ -1004,9 +1004,9 @@ def test_a_note_stands_among_the_comments_by_time_and_offers_edit_publish_delete
         "QA-142", comments={"items": [CLOUD_COMMENT], "total": 1, "start": 0})}}, notes=[NOTE])
     _core, page, detail = _opened(make, core)
     QApplication.processEvents()
-    assert [one.comment["id"] for one in detail._comment_views] == ["7", "n-1"]
+    assert [one.comment["id"] for one in detail._comment_views] == ["n-1", "7"]     # newest first
     assert "1 PRIVATE" in detail.comments_title.text()
-    note = detail._comment_views[1]
+    note = detail._comment_views[0]
     actions, _held = _actions(note)
     assert sorted(actions) == ["Delete", "Edit", "Publish to Jira"]
 
@@ -2287,3 +2287,46 @@ def test_an_extension_adds_a_button_and_a_tab_and_hears_of_every_issue(jira_alon
     assert not detail.slot.isHidden()
     detail.clear()
     assert extension.seen[-1] is None
+
+
+def _said(ident, created, text, quote=""):
+    content = [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]
+    if quote:
+        content.insert(0, {"type": "blockquote", "content": [{"type": "paragraph", "content": [
+            {"type": "text", "text": quote}]}]})
+    return {"id": ident, "author": "Someone", "created": "2026-11-%02dT10:00:00.000+0000" % created,
+            "text": ("%s\n\n%s" % (quote, text)) if quote else text,
+            "doc": {"type": "doc", "version": 1, "content": content}}
+
+
+def test_replies_fold_under_what_they_quote_and_threads_go_newest_first():
+    from cms_gui.pages import jira
+    ask = _said("1", 20, "Does the merge keep the archived returns?")
+    other = _said("2", 21, "Also check the Finesse tasks.")
+    answer = _said("3", 22, "Yes, both are kept.", quote="Does the merge keep the archived returns?")
+    again = _said("4", 23, "Thanks.", quote="Does the merge keep the archived returns? Yes, both are kept.")
+    server = {"id": "5", "created": "2026-11-24T10:00:00.000+0000", "doc": None,
+              "text": "{quote}Also check the Finesse…{quote}\n[~olena] Done."}
+    lone = _said("6", 19, "An answer to a comment not loaded.", quote="Something said long ago")
+    found = jira.threads([server, again, answer, other, ask, lone])
+    assert [(first["id"], [one["id"] for one in replies]) for first, replies in found] == [
+        ("2", ["5"]), ("1", ["3", "4"]), ("6", [])]
+
+
+def test_a_thread_s_replies_are_folded_until_opened_and_stay_open_through_a_refresh(make):
+    from cms_gui.pages import jira
+    items = [_said("3", 22, "Yes, both are kept.", quote="Does the merge keep the archived returns?"),
+             _said("1", 20, "Does the merge keep the archived returns?")]
+    core = FakeCore(issue={"ok": True, "result": {"issue": _issue(
+        "QA-142", comments={"items": items, "total": 2, "start": 0})}})
+    _core, page, detail = _opened(make, core)
+    QApplication.processEvents()
+    fold = detail.findChild(jira.QToolButton, "jiraThreadFold")
+    replies = detail.findChild(jira.QFrame, "jiraReplies")
+    assert fold.text().startswith("1 reply") and not replies.isVisibleTo(page)
+    fold.click()
+    assert replies.isVisibleTo(page) and fold.text() == "Hide 1 reply"
+    detail._fill_comments(detail.issue["comments"], False)
+    QApplication.processEvents()                 # a widget placed in a shown one is shown on the next pass
+    reply = next(one for one in detail._comment_views if one.comment["id"] == "3")
+    assert reply.isVisibleTo(page)

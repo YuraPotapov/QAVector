@@ -369,6 +369,17 @@ class Settings:
     def save_hidden_nav_items(self, keys):
         self._qs.setValue("window/hidden_nav", json.dumps(sorted(set(keys))))
 
+    def pinned_links(self):
+        """What is pinned to the sidebar, in the order it was pinned: a list of
+        ``{"provider": key, "target": ...}`` - what the provider gave to open.
+        The application's, not a project's: the same in every project."""
+        found = self._json("window/pinned_links", [])
+        return [one for one in found if isinstance(one, dict) and isinstance(one.get("provider"), str)] \
+            if isinstance(found, list) else []
+
+    def save_pinned_links(self, links):
+        self._qs.setValue("window/pinned_links", json.dumps(list(links)))
+
     def folds(self, page):
         """Which sections on ``page`` are open, as {section key: bool}.
 

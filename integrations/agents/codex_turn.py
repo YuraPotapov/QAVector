@@ -229,11 +229,16 @@ def sandbox(mode, plan):
     Read and planning: read-only. Full: workspace-write, nothing asked. Edit:
     workspace-write with ``untrusted`` - Codex asks before any command it does
     not hold to be safe and read-only, and this turn declines every one.
-    Never danger-full-access, and never network from the sandbox.
+    Never danger-full-access.
+
+    Full's commands reach the network - ``git fetch``, a package index - as
+    the session's folder lets them: a turn runs only where its network is on
+    (the runner refuses Off and Isolated), so that is always. Read, planning
+    and Edit run nothing that needs it, and get none.
     """
     if plan or mode == "read":
         return "read-only", {"type": "readOnly", "networkAccess": False}, "never"
-    policy = {"type": "workspaceWrite", "networkAccess": False}
+    policy = {"type": "workspaceWrite", "networkAccess": mode == "full"}
     return "workspace-write", policy, "untrusted" if mode == "edit" else "never"
 
 

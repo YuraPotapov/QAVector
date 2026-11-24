@@ -55,6 +55,16 @@ def test_chat_limits_default_on_and_an_opt_out_survives_edits(path):
     assert problems == [] and store.get(enabled["id"], path)["show_limits_in_chat"] is True
 
 
+def test_git_tracker_and_week_days_are_off_until_chosen_and_kept_through_edits(path):
+    assert store.normalize({"id": "old"})["git_tracker"] is False
+    assert store.normalize({"id": "old"})["split_week_days"] is False
+    connection = _add(path, git_tracker=True, split_week_days=True)
+    changed, problems = store.upsert({"id": connection["id"], "name": "Renamed", "kind": "claude"}, path)
+    assert problems == [] and changed["git_tracker"] is True and changed["split_week_days"] is True
+    off, problems = store.upsert(dict(changed, git_tracker=False), path)
+    assert problems == [] and store.get(off["id"], path)["git_tracker"] is False
+
+
 def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
     _add(path, model="sonnet", effort="high")
     if os.name != "nt":
@@ -62,7 +72,7 @@ def test_the_file_is_readable_by_its_owner_only_and_holds_no_secret(path):
     entry = json.load(open(path, encoding="utf-8"))["connections"][0]
     assert entry == {"id": "claude", "name": "Claude", "kind": "claude",
                      "binary": "", "model": "sonnet", "effort": "high", "role": "", "show_limits_in_chat": True,
-                     "chat_limit_view": "combined",
+                     "chat_limit_view": "combined", "git_tracker": False, "split_week_days": False,
                      # QAVector through QCR: nothing until somebody turns it on (ADR-003 D6).
                      "qavector_access": {"services": False, "scenarios": False, "cycles": False,
                                          "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},

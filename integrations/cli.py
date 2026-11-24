@@ -112,11 +112,11 @@ def _agents(rest, options):
     from integrations.agents import cli as agents
 
     def read_tasks(refs):
-        from cycle import secrets
+        from cycle import secrets as secret_store
         from integrations import scope, store
         from integrations.reader import ProjectReader
         path = store.resolve_path(_path(options.get("--integrations-file")))
-        reader = ProjectReader(path, secrets.resolve_path(_path(options.get("--cycle-secrets-file"))),
+        reader = ProjectReader(path, secret_store.resolve_path(_path(options.get("--cycle-secrets-file"))),
                                _path(options.get("--environments-file")) or scope.default_environments_path(path))
         tasks = []
         for ref in refs:

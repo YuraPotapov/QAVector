@@ -430,6 +430,22 @@ def _close(painter, ink):
     painter.drawLine(QPointF(17.5, 6.5), QPointF(6.5, 17.5))
 
 
+def _pin(painter, ink):
+    """A push pin, seen from the side: a head, a collar, a point - keep this where
+    it is always in reach."""
+    _stroke(painter, ink)
+    head = QPainterPath()
+    head.moveTo(9.5, 3.5)
+    head.lineTo(14.5, 3.5)
+    head.lineTo(14.5, 9.5)
+    head.lineTo(17.5, 13.5)
+    head.lineTo(6.5, 13.5)
+    head.lineTo(9.5, 9.5)
+    head.closeSubpath()
+    painter.drawPath(head)
+    painter.drawLine(QPointF(12.0, 13.5), QPointF(12.0, 20.5))
+
+
 def _delete(painter, ink):
     """A bin: a lid with a handle over an open-topped can."""
     _stroke(painter, ink)
@@ -921,6 +937,7 @@ DRAWINGS = {
     "minus": _minus,
     "close": _close,
     "delete": _delete,
+    "pin": _pin,
 }
 
 _cache = {}

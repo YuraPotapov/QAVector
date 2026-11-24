@@ -448,3 +448,69 @@ def test_attach_without_a_folder_is_refused(world):
     w = world()
     w.adapter.writer._folder = lambda actor: None
     assert w.invoke("attach", {"key": "QA-142", "path": "log.txt"})["error"]["code"] == "out_of_folder"
+
+
+# -- replies and mentions ---------------------------------------------------------
+REPLIED = {"id": "77", "author": {"accountId": "acc-9", "displayName": "Olena Analyst"},
+           "created": "2026-11-05T10:00:00.000+0000",
+           "body": {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [
+               {"type": "text", "text": "Does the merge keep the archived returns?"}]}]}}
+
+
+def _replying(**more):
+    return _answers(**dict({"GET /rest/api/3/issue/QA-142/comment/77": REPLIED,
+                            "GET /rest/api/3/user/viewissue/search": PEOPLE[:1]}, **more))
+
+
+def test_an_agent_replies_to_a_comment_and_mentions_someone(world):
+    w = world(_replying())
+    execution = w.invoke("comment", {"key": "QA-142", "body": "Yes, both are kept.\n\nChecked on staging.",
+                                     "reply_to": "77", "mentions": ["Dana Tester"]})
+    [told] = w.told
+    card = told["card"]
+    assert card["title"] == "Reply to Olena Analyst's comment on QA-142"
+    assert card["notes"] == ["Quotes: Does the merge keep the archived returns?"]
+    assert card["changes"] == [{"label": "Mentions", "from": "", "to": "Olena Analyst, Dana Tester"}]
+    assert w.posted() == []
+    assert w.adapter.writer.answer(execution["execution_id"], True, "you", {"body": "Yes, both are kept."})
+    assert w.get(execution["execution_id"])["state"] == "succeeded"
+    [post] = w.posted()
+    quote, first = post.body["body"]["content"]
+    assert quote == {"type": "blockquote", "content": [{"type": "paragraph", "content": [
+        {"type": "text", "text": "Does the merge keep the archived returns?"}]}]}
+    assert first["content"] == [
+        {"type": "mention", "attrs": {"id": "acc-9", "text": "@Olena Analyst"}}, {"type": "text", "text": " "},
+        {"type": "mention", "attrs": {"id": "acc-1", "text": "@Dana Tester"}}, {"type": "text", "text": " "},
+        {"type": "text", "text": "Yes, both are kept."}]
+
+
+def test_a_mention_nobody_or_several_match_is_refused_with_who_matched(world):
+    w = world(_replying(**{"GET /rest/api/3/user/viewissue/search": PEOPLE}))
+    execution = w.invoke("comment", {"key": "QA-142", "body": "See this", "mentions": ["Dan"]})
+    failed = w.get(execution["execution_id"])
+    assert failed["state"] == "failed" and failed["error"]["code"] == "not_offered"
+    assert "Dana Tester (id acc-1)" in failed["error"]["message"] and w.told == [] and w.posted() == []
+    nobody = world(_replying(**{"GET /rest/api/3/user/viewissue/search": []}))
+    execution = nobody.invoke("comment", {"key": "QA-142", "body": "See this", "mentions": ["Zed"]})
+    assert "Nobody who can see it matches" in nobody.get(execution["execution_id"])["error"]["message"]
+
+
+def test_a_reply_to_a_comment_that_is_not_there_is_refused(world):
+    w = world(_answers())
+    execution = w.invoke("comment", {"key": "QA-142", "body": "Yes", "reply_to": "404"})
+    assert w.get(execution["execution_id"])["state"] == "failed" and w.posted() == []
+
+
+def test_people_who_may_be_mentioned_are_a_read(world):
+    w = world(_replying(), grants=ACCESS_GRANTS["jira"])
+    found = w.registry.read(w.agent, "p", w.capability("people"), {"key": "qa-142", "query": "Dana"})
+    assert found == {"people": [{"id": "acc-1", "name": "Dana Tester"}]}
+    [search] = [one for one in w.server.seen if "/user/viewissue/search" in one.path]
+    assert "issueKey=QA-142" in search.path and "query=Dana" in search.path
+
+
+def test_a_server_reply_is_wiki_text():
+    connection = {"flavour": "server"}
+    assert jira_caps.reply_body(connection, "Yes", "Does it?", [{"id": "olena", "name": "Olena"}]) == \
+        "{quote}Does it?{quote}\n[~olena] Yes"
+    assert jira_caps.reply_body(connection, "Plain") == "Plain"

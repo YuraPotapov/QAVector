@@ -1906,3 +1906,24 @@ def test_refusing_main_close_keeps_integration_and_draft_alive(window, monkeypat
     assert window.integrations.jira.issues.detail.composer.toPlainText() == 'Unsent'
     window.integrations.jira.issues.detail.composer.clear()
     window.integrations.hosts['jira'].dock()
+
+
+def test_a_pinned_integration_stands_on_the_rail_and_opens_from_it(window, qapp):
+    window.settings.save_pinned_links([])
+    window.integrations.pinned_changed.emit()
+    assert not window.pinned_rail.isVisibleTo(window)
+    window.show_page("launch")
+    window.integrations.cards.cards["teams"].pin_button.click()
+    qapp.processEvents()
+    rail = window.pinned_rail
+    assert [button.text() for button in rail.buttons] == ["Teams"] and rail.buttons[0].isVisibleTo(window)
+    rail.buttons[0].click()
+    assert window._page_key == "integrations"
+    assert window.integrations.stack.currentWidget() is window.integrations.hosts["teams"].view
+    from PySide6.QtCore import Qt
+    window.set_sidebar_collapsed(True)
+    assert rail.buttons[0].toolButtonStyle() == Qt.ToolButtonIconOnly
+    window.set_sidebar_collapsed(False)
+    rail.unpinned.emit({"provider": "teams", "target": None})
+    assert rail.links == [] and not window.integrations.cards.cards["teams"].pin_button.isChecked()
+    window.settings.save_pinned_links([])

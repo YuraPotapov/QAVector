@@ -21,7 +21,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QPushButton, QWidget
 
-from cms_gui import widgets
+from cms_gui import theme, widgets
 from cms_gui.pages import agentchat
 from cms_gui.pages.agentchat import AnswerText, ChatFeed, MessageCard
 from cms_gui.pages.agents import ConnectionDialog
@@ -1049,7 +1049,7 @@ def test_the_model_box_says_what_blank_means_for_the_agent_chosen(make):
     assert chat.composer.effort.currentText() == "high" and chat.composer.effort.currentData() == ""
     # And the folded line says what the turn will run with, inherited or not.
     assert "sonnet" in chat.composer.context_summary.text()
-    assert "effort high" in chat.composer.context_summary.text()
+    assert "· high ·" in chat.composer.context_summary.text()
     chat.composer.connection.setCurrentIndex(1)
     chat.composer.connection.activated.emit(1)
     assert chat.composer.model.currentText() == "Use Claude Code settings"
@@ -1585,7 +1585,7 @@ def test_effort_is_chosen_from_the_program_s_levels_and_goes_with_the_turn(make)
     effort.setCurrentIndex(effort.findData("max"))
     assert _say(chat, "think hard")
     assert FakeTurn.made[-1].document["effort"] == "max"
-    assert "effort max" in chat.composer.context_summary.text()
+    assert "· max ·" in chat.composer.context_summary.text()
 
 
 def test_a_row_taken_out_of_the_feed_never_becomes_a_window(qapp, dispose):
@@ -1787,7 +1787,7 @@ def test_provider_settings_appear_once_and_history_is_in_the_menu(make, qapp):
     assert chat.more_button.toolTip().splitlines()[1:3] == ["Jira", "est. $0.25"]
     assert "Claude" in chat.composer.context_summary.text()
     assert "opus" in chat.composer.context_summary.text()
-    assert "effort high" in chat.composer.context_summary.text()
+    assert "· high ·" in chat.composer.context_summary.text()
     assert chat.links.menuAction() in chat.more_menu.actions()
     assert chat.earlier in chat.more_menu.actions()
     assert chat.more_button.isVisible()
@@ -1927,6 +1927,19 @@ def test_background_answers_stay_in_order_with_one_finished_row(qapp):
     assert len(feed._rows) == 5
 
 
+def test_a_conversation_s_age_is_told_by_the_calendar():
+    import datetime
+    from cms_gui.pages.chatcontinuation import age_of
+    now = datetime.datetime(2026, 11, 24, 0, 30)
+    def stamp(*when):
+        return datetime.datetime(*when).timestamp()
+    assert age_of(stamp(2026, 11, 24, 0, 1), now) == "today"
+    assert age_of(stamp(2026, 11, 23, 23, 59), now) == "days"      # yesterday, though a minute ago
+    assert age_of(stamp(2026, 11, 18, 9, 0), now) == "days"
+    assert age_of(stamp(2026, 11, 17, 9, 0), now) == "week"
+    assert age_of(None, now) == age_of("", now) == ""
+
+
 def test_continuation_and_delegation_stripes_and_joined_source_links(make):
     root = _session("root", "Parent")
     child = _session("child", source={"label": "Delegated", "parent": "root", "record": True})
@@ -1941,8 +1954,11 @@ def test_continuation_and_delegation_stripes_and_joined_source_links(make):
     assert items()["child"].data(agentchat.RelationshipDelegate.ROLE) == ["delegation"]
     rect = chat.table.visualItemRect(items()["root"])
     view = chat.table.viewport().grab().toImage()
-    assert view.pixelColor(rect.left() + 1, rect.center().y()).name() == agentchat.theme.ACCENT.lower()
-    assert view.pixelColor(rect.left() + 5, rect.center().y()).name() == agentchat.theme.WARN.lower()
+    # How long ago first - the fixture's conversations are older than a week - then how they relate.
+    assert items()["root"].data(agentchat.RelationshipDelegate.AGE) == "week"
+    assert view.pixelColor(rect.left() + 1, rect.center().y()).name() == agentchat.theme.AGE_WEEK.lower()
+    assert view.pixelColor(rect.left() + 5, rect.center().y()).name() == agentchat.theme.ACCENT.lower()
+    assert view.pixelColor(rect.left() + 9, rect.center().y()).name() == agentchat.theme.AUTO.lower()
     assert items()["later"].data(agentchat.RelationshipDelegate.ROLE) == ["continuation"]
     entries = entries + [{"id": "later", "title": "Continuation", "connection": "Codex"}]
     joined = _session("joined", "Joined", lineage={"root": "root", "previous": "later", "joined": True,
@@ -2008,3 +2024,86 @@ def test_deleting_an_unused_join_reloads_the_previously_visible_chats(make, monk
     chat.delete_action.trigger()
     assert chat.current is None
     assert {chat.table.item(row, 0).data(Qt.UserRole) for row in range(chat.table.rowCount())} == {"first", "second"}
+
+
+def test_the_summary_says_who_with_what_then_where(make):
+    core = FakeCore(connections=[_connection(model="sonnet", effort="high")])
+    chat = make(core).agents.chat
+    chat.composer.folder.setEditText("/home/someone/src/shop")
+    parts = chat.composer.context_summary.text().split(" · ")
+    assert parts[1:] == ["sonnet", "high", "/home/someone/src/shop"] and parts[0]
+
+
+def test_git_tracker_is_the_connection_s_choice_and_off_it_asks_git_nothing(make, tmp_path, monkeypatch):
+    from cms_gui import gitstate
+    looked = []
+    monkeypatch.setattr(gitstate, "state", lambda folder: looked.append(folder) or {
+        "folder": folder, "name": "modules", "branch": "task-1", "dirty": True, "repositories": 2})
+    monkeypatch.setattr(agentchat.background, "run", lambda work, done, owner=None: done(work(), None))
+    core = FakeCore(connections=[_connection()])
+    chat = make(core).agents.chat
+    composer = chat.composer
+    composer.folder.setEditText(str(tmp_path))
+    composer.refresh_git()
+    assert looked == [] and not composer.git_branch.isVisibleTo(chat)
+    composer.set_connections([_connection(git_tracker=True)])
+    assert looked == [str(tmp_path)] and composer.git_branch.text() == "(modules:task-1)"
+    assert composer.git_branch.isVisibleTo(chat) and composer.git_mark.isVisibleTo(chat)
+    assert "2 repositories" in composer.git_branch.toolTip()
+    composer.set_connections([_connection(git_tracker=False)])
+    assert not composer.git_branch.isVisibleTo(chat)
+
+
+def test_the_weekly_limit_s_days_say_their_date_after_a_rest_and_nothing_else(qapp, monkeypatch):
+    import time as clock
+    row = agentchat.LimitContextRow()
+    row.resize(700, 26)
+    resets = clock.time() + 2.5 * 86400
+    row.set_limit(60, False, True, week=(resets - 7 * 86400, resets))
+    # The bar shrinks from the right as the week goes: its first day is at the right.
+    assert row.day_at(0) == 6 and row.day_at(699) == 0 and row.day_at(350) == 3
+    assert row.day_text(4).splitlines()[0].endswith("day 5 of 7") and "today" in row.day_text(4)
+    assert "today" not in row.day_text(0)
+    plain = row.grab().toImage()
+    row.hovered_day = 4                                     # drawn third from the left
+    bold = row.grab().toImage()
+    foot = row.height() - 1
+    assert bold.pixelColor(250, foot).name() == theme.LIMIT_DAY.lower() != plain.pixelColor(250, foot).name()
+    said = []
+    monkeypatch.setattr(agentchat.QToolTip, "showText", lambda pos, text, widget=None: said.append(text))
+    monkeypatch.setattr(row, "underMouse", lambda: True)
+    row.setToolTip("Weekly limit · 40% remaining")
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QHelpEvent
+    tip = QHelpEvent(QEvent.ToolTip, QPoint(5, 5), QPoint(5, 5))
+    assert row.event(tip) is True and said == []           # split: the limits' tooltip is not shown
+    assert row._day_tip.interval() == 2000
+    row.hovered_day = 3
+    row._say_day()
+    assert said == [row.day_text(3)] and "Weekly limit" not in said[0]
+    row.set_limit(60, False, True, week=None)
+    assert row.day_at(10) is None and row.hovered_day is None
+
+
+
+
+def test_the_bar_and_its_days_end_before_settings_and_settings_leaves_the_days(make, qapp):
+    from PySide6.QtCore import QEvent
+    chat = make(FakeCore()).agents.chat
+    composer = chat.composer
+    row = composer.context_row
+    composer.set_provider_limit({"remaining_percent": 100, "stale": False, "tooltip": "",
+                                 "week": (1, 7 * 86400 + 1)})
+    chat.resize(900, 700)
+    qapp.processEvents()
+    end = composer.settings_button.geometry().left() - row.TRAIL_GAP
+    assert row.track() == end < row.width()
+    assert row.day_at(end - 1) == 0 and row.day_at(end + 2) is None      # nothing of it under Settings
+    image = row.grab().toImage()
+    middle = row.height() // 2
+    assert image.pixelColor(end - 2, middle).name() == theme.MARK_TINT.lower()
+    assert image.pixelColor(end + 2, middle).name() != theme.MARK_TINT.lower()
+    row.hovered_day = 0
+    row._day_tip.start()
+    row.eventFilter(composer.settings_button, QEvent(QEvent.Enter))
+    assert row.hovered_day is None and not row._day_tip.isActive()

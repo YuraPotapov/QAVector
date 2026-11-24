@@ -360,8 +360,8 @@ def test_the_head_says_what_the_last_turn_ran_with(qapp):
     from cms_gui.pages import agentchat
     assert agentchat.ran_with_text({"turns": []}) == ""
     assert agentchat.ran_with_text({"turns": [{"model": "", "effort": "", "model_used": "gpt-x",
-                                               "effort_used": "medium"}]}) == "gpt-x · effort medium"
-    assert agentchat.ran_with_text({"turns": [{"model": "sonnet", "effort": "low"}]}) == "sonnet · effort low"
+                                               "effort_used": "medium"}]}) == "gpt-x · medium"
+    assert agentchat.ran_with_text({"turns": [{"model": "sonnet", "effort": "low"}]}) == "sonnet · low"
 
 
 def test_an_existing_connection_keeps_its_agent_before_the_list_arrives(qapp, dispose):
@@ -373,3 +373,39 @@ def test_an_existing_connection_keeps_its_agent_before_the_list_arrives(qapp, di
         assert dialog.entry()["kind"] == "codex" and dialog.kind.currentText() == "Codex"
     finally:
         dispose(dialog)
+
+
+def test_a_delegated_conversation_at_work_is_stopped_from_itself(chat):
+    tab, agentchat = chat
+    stopped = []
+    host = FakeHost()
+    host.stop_task = stopped.append
+    agentchat.ChatTab.qcr_access = host
+    child = dict(SESSION, id="child", state="running", source={
+        "label": "Delegated", "ref": "qcr-task:task-1", "record": True, "parent": "s-1", "by": "Claude"})
+    tab._show(child, [], whole=True)
+    button = tab.composer.stop_task
+    assert button.isVisibleTo(tab) and tab.composer.closed.isVisibleTo(tab)
+    button.click()
+    assert stopped == ["task-1"] and not button.isVisibleTo(tab)
+    tab.composer.update_session(dict(child, state="idle"))
+    assert not button.isVisibleTo(tab)
+    tab._show(dict(SESSION, state="running"), [], whole=True)
+    assert not button.isVisibleTo(tab)
+
+
+def test_a_follow_up_at_work_may_be_stopped_from_its_card(chat):
+    tab, agentchat = chat
+    stopped = []
+    host = FakeHost()
+    host.stop_task = stopped.append
+    agentchat.ChatTab.qcr_access = host
+    tab._show(dict(SESSION), [], whole=True)
+    tab.agent_request({"execution_id": "reply", "kind": "follow_up", "session": "s-1",
+                       "target_name": "Codex", "session_id": "child", "goal": "Review the fixes", "mode": "read"})
+    tab.agent_execution({"execution_id": "reply", "capability_id": "agents.tasks.reply", "state": "running",
+                         "actor_id": "agent:codex/s-1"})
+    card, = _cards(tab, agentchat.agentcards.AgentRequestCard)
+    assert card.stop_button.isVisibleTo(tab)
+    card.stop_button.click()
+    assert stopped == ["reply"]

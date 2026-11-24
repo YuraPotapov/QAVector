@@ -1,5 +1,7 @@
 """Sidebar markers for related and active conversations."""
 
+import datetime
+
 from PySide6.QtCore import QEvent, QRect, Qt, QVariantAnimation
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
@@ -7,9 +9,22 @@ from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from .. import theme, widgets
 
 
+def age_of(stamp, now=None):
+    """How long ago ``stamp`` was, by the calendar: "today", "days" (yesterday
+    or a few days before), "week" (seven days or more), or "" for no time."""
+    try:
+        then = datetime.datetime.fromtimestamp(float(stamp)).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    days = ((now or datetime.datetime.now()).date() - then).days
+    return "today" if days <= 0 else "days" if days < 7 else "week"
+
+
 class RelationshipDelegate(QStyledItemDelegate):
     ROLE = Qt.UserRole + 1
     ACTIVITY = Qt.UserRole + 2
+    #: How long ago the conversation was last active (:func:`age_of`).
+    AGE = Qt.UserRole + 3
     ACTIVITY_WIDTH = 22
 
     def __init__(self, table):
@@ -40,9 +55,11 @@ class RelationshipDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         groups = index.data(self.ROLE) or []
+        age = index.data(self.AGE) or ""
+        stripes = ([age] if age else []) + list(groups)
         content = QStyleOptionViewItem(option)
         right = self.ACTIVITY_WIDTH if index.data(self.ACTIVITY) else 0
-        content.rect.adjust(4 * len(groups), 0, -right, 0)
+        content.rect.adjust(4 * len(stripes), 0, -right, 0)
         if right and option.state & QStyle.State_Selected:
             painter.fillRect(option.rect, QColor(theme.SELECT_BG))
         super().paint(painter, content, index)
@@ -50,7 +67,9 @@ class RelationshipDelegate(QStyledItemDelegate):
             rect = QRect(option.rect.right() - 15, option.rect.center().y() - 4, 10, 10)
             widgets.PulseDot.paint_dot(painter, rect, self._pulse.currentValue())
         left = option.rect.left()
-        for kind in groups:
-            color = theme.ACCENT if kind == "continuation" else theme.WARN
-            painter.fillRect(left, option.rect.top(), 3, option.rect.height(), QColor(color))
+        # Delegation in the agents' own violet: amber is how old a conversation is.
+        colors = {"today": theme.AGE_TODAY, "days": theme.AGE_DAYS, "week": theme.AGE_WEEK,
+                  "continuation": theme.ACCENT, "delegation": theme.AUTO}
+        for kind in stripes:
+            painter.fillRect(left, option.rect.top(), 3, option.rect.height(), QColor(colors.get(kind, theme.AUTO)))
             left += 4

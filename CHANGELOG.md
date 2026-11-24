@@ -16,6 +16,46 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.81] - 2026-11-24
+
+### Added
+- Agents can reply to a Jira comment and mention people through QAVector: the
+  comment's start is quoted and its author mentioned, and the people named are
+  looked up among those who can see the issue. A new read lists them.
+- A delegated conversation that is still running has its own Stop task button.
+  Follow-up rounds can be stopped from their card too.
+- The chat's limit bar shows the other limit window as a thin line along its foot.
+- Picture paths in an agent's tool rows are links: a click opens the picture.
+- Integrations can be pinned to the sidebar from the pin on their catalog card.
+  They sit above the bottom group, the same in every project, and open as Open
+  does. Those that do not fit wait behind "+N more"; right-click unpins.
+- Two connection options in Edit Connection, both off by default:
+  - **Git Tracker** adds the folder's git branch to the line above the chat box,
+    with a mark for uncommitted changes, as a shell prompt does. A folder with
+    several repositories shows the one that changed last. Git is asked when a
+    chat opens, a folder or connection is chosen or a turn ends, never in the
+    background.
+  - **Split by week days** divides the weekly limit into its seven days, taken
+    from the provider's reset time. A day under the pointer thickens, and after
+    two seconds its date shows instead of the limits tooltip.
+
+### Changed
+- Jira comments sit in a section of their own under the issue. The comment box
+  is at the top, newest comments come first, and replies fold under the comment
+  they quote.
+- In the chat sidebar, the leftmost stripe shows when a chat was last active:
+  green for today, amber for yesterday or earlier, red for a week or more.
+  The delegation stripe is now violet.
+- The line above the chat box reads agent, model, effort, then folder. The effort
+  shows its value only.
+
+### Fixed
+- Codex in Full mode reaches the network (`git fetch`, package indexes). Its
+  own sandbox kept the network off even when the folder had no restrictions.
+  Read, Edit and planning stay without it.
+- Codex tool calls in chat read as lines in their own language instead of
+  escaped JSON (`\u0412...`).
+
 ## [0.16.80] - 2026-11-20
 
 ### Added

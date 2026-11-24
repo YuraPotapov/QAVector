@@ -748,6 +748,70 @@ def quoted(comment, limit=QUOTE_CHARS):
     return cut + "…"
 
 
+def quote_of(comment):
+    """What a reply quotes at its start - as Reply writes one, on the page or
+    by an agent: a block quote first on Cloud, ``{quote}`` on Server - or ""."""
+    doc = comment.get("doc")
+    content = (doc.get("content") or []) if isinstance(doc, dict) else []
+    if content and isinstance(content[0], dict) and content[0].get("type") == "blockquote":
+        words = []
+        stack = [content[0]]
+        while stack:
+            node = stack.pop(0)
+            if isinstance(node, dict):
+                if node.get("type") == "text":
+                    words.append(str(node.get("text") or ""))
+                stack[:0] = node.get("content") or []
+        return " ".join(" ".join(words).split())
+    found = re.match(r"\s*\{quote\}(.*?)\{quote\}", str(comment.get("text") or ""), re.S)
+    return " ".join(found.group(1).split()) if found else ""
+
+
+def _said(comment):
+    """A comment's words as a reply may quote them: all of it, and - for a
+    reply itself - what it says after its own quote."""
+    text = " ".join(str(comment.get("text") or "").split())
+    quote = quote_of(comment)
+    if quote and text.startswith(quote):
+        return text, text[len(quote):].lstrip()
+    found = re.match(r"\{quote\}.*?\{quote\}\s*(.*)", text, re.S)
+    return (text, found.group(1)) if found else (text,)
+
+
+def threads(items, notes=()):
+    """Comments and notes as threads, newest first: ``[(first, replies)]``.
+
+    Jira's comments have no threads; a reply is a comment that starts by
+    quoting an earlier one. It goes under the thread of the comment it quotes,
+    the replies in the order they were written; a thread stands where its
+    newest word puts it. One whose quoted comment is not loaded stands alone.
+    """
+    ordered = sorted([dict(one) for one in items] + [dict(one) for one in notes],
+                     key=lambda one: _moment(one.get("created")))
+    root_of, replies, firsts = {}, {}, []
+    for index, one in enumerate(ordered):
+        quote = quote_of(one) if not one.get("private") else ""
+        quote = quote[:-1].rstrip() if quote.endswith("\u2026") else quote
+        parent = None
+        if quote:
+            for earlier in reversed(ordered[:index]):
+                if not earlier.get("private") and any(text.startswith(quote) for text in _said(earlier)):
+                    parent = earlier
+                    break
+        if parent is None:
+            root_of[id(one)] = one
+            replies[id(one)] = []
+            firsts.append(one)
+        else:
+            root = root_of[id(parent)]
+            root_of[id(one)] = root
+            replies[id(root)].append(one)
+
+    def newest(first):
+        return max([_moment(first.get("created"))] + [_moment(one.get("created")) for one in replies[id(first)]])
+    return [(first, replies[id(first)]) for first in sorted(firsts, key=newest, reverse=True)]
+
+
 # -- one issue ----------------------------------------------------------------
 class IssueDetail(QFrame):
     """The opened issue: what the core read of it, and what can be done to it.
@@ -1017,16 +1081,20 @@ class IssueDetail(QFrame):
         self.files.setSpacing(4)
         layout.addLayout(self.files)
 
-        layout.addWidget(widgets.hline())
+        # The discussion is a place of its own, on its own ground, so it never
+        # reads as more of the description: the box to write in first, then
+        # the comments, newest first, replies folded under what they answer.
+        self.comments_box = QFrame()
+        self.comments_box.setObjectName("jiraComments")
+        self.comments_box.setProperty("role", "section")
+        outer = layout
+        layout = QVBoxLayout(self.comments_box)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+        outer.addSpacing(6)
+        outer.addWidget(self.comments_box)
         self.comments_title = widgets.kicker("Comments")
         layout.addWidget(self.comments_title)
-        self.earlier = QPushButton("Show earlier comments")
-        self.earlier.setProperty("variant", "ghost")
-        self.earlier.clicked.connect(self.earlier_requested)
-        layout.addWidget(self.earlier, 0, Qt.AlignLeft)
-        self.comments = QVBoxLayout()
-        self.comments.setSpacing(10)
-        layout.addLayout(self.comments)
 
         self.composer = DescriptionEditor(name="Comment",
                                           placeholder="Add a comment… (@ mentions someone)",
@@ -1066,6 +1134,16 @@ class IssueDetail(QFrame):
         self.note = _label("", "muted", wrap=True)
         self.note.setVisible(False)
         layout.addWidget(self.note)
+        self.comments = QVBoxLayout()
+        self.comments.setSpacing(0)
+        layout.addLayout(self.comments)
+        self.earlier = QPushButton("Show earlier comments")
+        self.earlier.setProperty("variant", "ghost")
+        self.earlier.clicked.connect(self.earlier_requested)
+        layout.addWidget(self.earlier, 0, Qt.AlignLeft)
+        #: The threads whose replies are unfolded, by the first comment's id.
+        self._open_threads = set()
+        layout = outer
         layout.addStretch(1)
         self.scroll.setWidget(body)
         # The issue's page: the issue - and the tabs something outside Jira
@@ -1629,11 +1707,12 @@ class IssueDetail(QFrame):
             self.files.addWidget(holder)
 
     def _fill_comments(self, comments, partial):
-        """The comments, oldest at the top. One being edited stays as it is -
-        what was typed in it is kept through a Refresh."""
+        """The comments, newest first: each with the replies that quote it
+        folded under it, a thread placed by its newest word. One being edited
+        stays as it is - what was typed in it is kept through a Refresh."""
         kept = self.comment_editing
         if kept is not None:
-            self.comments.removeWidget(kept)
+            kept.setParent(None)          # out of whatever thread held it, before those go
         self._comment_views = []
         _empty_layout(self.comments)
         items = list(comments.get("items") or [])
@@ -1658,25 +1737,65 @@ class IssueDetail(QFrame):
             if not partial:
                 self.comments.addWidget(_label("No comments yet.", "muted"))
             return
-        # Newest first from the core; read top to bottom as a conversation, with
-        # the private notes where they were written.
-        shown = sorted(list(reversed(items)) + notes, key=lambda one: _moment(one.get("created")))
-        for one in shown:
-            if kept is not None and one.get("id") == kept.comment.get("id"):
-                view = kept
-                view.show_comment(one)
-            else:
-                view = CommentView(one)
-                view.reply_requested.connect(self.reply_to)
-                view.edit_requested.connect(self._edit_comment)
-                view.delete_requested.connect(self._delete_comment)
-                view.save_requested.connect(self._save_comment)
-                view.put_down.connect(self._put_down_comment)
-                view.people_wanted.connect(self._want_people)
-                view.publish_requested.connect(self._publish_note)
-            self._comment_views.append(view)
-            self.comments.addWidget(view)
+        for index, (first, replies) in enumerate(threads(items, notes)):
+            if index:
+                self.comments.addWidget(widgets.hline())
+            thread = QWidget()
+            thread.setObjectName("jiraThread")
+            column = QVBoxLayout(thread)
+            column.setContentsMargins(0, 10, 0, 10)
+            column.setSpacing(6)
+            column.addWidget(self._comment_view(first, kept))
+            if replies:
+                ident = first.get("id")
+                if kept is not None and any(one.get("id") == kept.comment.get("id") for one in replies):
+                    self._open_threads.add(ident)
+                box = QFrame()
+                box.setObjectName("jiraReplies")
+                inner = QVBoxLayout(box)
+                inner.setContentsMargins(12, 2, 0, 2)
+                inner.setSpacing(10)
+                for one in replies:
+                    inner.addWidget(self._comment_view(one, kept))
+                fold = QToolButton()
+                fold.setObjectName("jiraThreadFold")
+                fold.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+                fold.setCheckable(True)
+                fold.setProperty("variant", "ghost")
+
+                def unfold(opened, box=box, fold=fold, ident=ident, replies=replies):
+                    (self._open_threads.add if opened else self._open_threads.discard)(ident)
+                    box.setVisible(opened)
+                    icons.button(fold, "disclosure_open" if opened else "disclosure_closed")
+                    count = "%d %s" % (len(replies), "reply" if len(replies) == 1 else "replies")
+                    fold.setText(("Hide " + count) if opened else "%s  ·  last %s" % (
+                        count, ago(replies[-1].get("created"))))
+                fold.toggled.connect(unfold)
+                column.addWidget(fold, 0, Qt.AlignLeft)
+                column.addWidget(box)
+                # Shown or not once it is in the thread: a box shown before it
+                # has a parent is a window, and hidden again by being placed.
+                opened = ident in self._open_threads
+                fold.setChecked(opened)
+                unfold(opened)
+            self.comments.addWidget(thread)
         self._apply_mode()
+
+    def _comment_view(self, one, kept):
+        if kept is not None and one.get("id") == kept.comment.get("id"):
+            kept.show_comment(one)
+            view = kept
+        else:
+            view = CommentView(one)
+            view.reply_requested.connect(self.reply_to)
+            view.edit_requested.connect(self._edit_comment)
+            view.delete_requested.connect(self._delete_comment)
+            view.save_requested.connect(self._save_comment)
+            view.put_down.connect(self._put_down_comment)
+            view.people_wanted.connect(self._want_people)
+            view.publish_requested.connect(self._publish_note)
+        self._comment_views.append(view)
+        return view
 
     # -- one comment ----------------------------------------------------------
     def _edit_comment(self, view):

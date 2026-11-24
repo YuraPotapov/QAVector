@@ -27,19 +27,20 @@ import time
 from collections import deque
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor,
+from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
-                               QSizePolicy, QStyle, QStyleOptionFocusRect, QTableWidgetItem, QTextBrowser, QToolButton,
+                               QSizePolicy, QStyle, QStyleOptionFocusRect, QTableWidgetItem, QTextBrowser, QToolButton, QToolTip,
                                QVBoxLayout, QWidget)
 
-from .. import codeblocks, icons, restrictions as restrictions_mod, stages, theme, widgets
+from .. import (background, codeblocks, gitstate, icons, imagelinks, restrictions as restrictions_mod, stages,
+               theme, widgets)
 from ..diffview import ChangesDialog, PatchText, counts_text
 from .agentbudget import BUDGET_NOTE, BudgetCard, BudgetFields, share_text, spend_text
 from ..agentturn import AgentTurn
 from ..agentmodel import ModelPicker
-from .chatcontinuation import RelationshipDelegate
+from .chatcontinuation import RelationshipDelegate, age_of
 from . import agentcards
 from .agentcards import ChangesLine, IntegrationChangeCard, PlanCard, QuestionsCard
 from .agentwords import (clock_text, context_text, cost_text, end_text, folder_text, kind_name,
@@ -718,7 +719,15 @@ class ChatFeed(QScrollArea):
     def _tool_row(self, stage, name):
         if name == "apply_patch":
             return self._patch_row(stage)
-        return CommandRow(stage, name) if name in COMMAND_TOOLS else stages.StageRow(stage)
+        return CommandRow(stage, name) if name in COMMAND_TOOLS else self._stage_row(stage)
+
+    @staticmethod
+    def _stage_row(stage):
+        """A tool's row, the pictures it names links that open them."""
+        row = stages.StageRow(stage)
+        if row.detail is not None:
+            imagelinks.link(row.detail)
+        return row
 
     def _patch_row(self, stage):
         files = stage["file_changes"] or []
@@ -821,7 +830,7 @@ class ChatFeed(QScrollArea):
             if name in COMMAND_TOOLS:
                 self._replace(index, CommandRow(dict(stage, status="done", kind="caution"), name, why))
                 return
-            self._replace(index, stages.StageRow(dict(
+            self._replace(index, self._stage_row(dict(
                 stage, status="done", kind="caution",
                 detail="\n".join(part for part in (stage["detail"], why) if part))))
             return
@@ -833,7 +842,7 @@ class ChatFeed(QScrollArea):
             # What came back is worth a line only when it is why it failed.
             stage["detail"] = "\n".join(part for part in (stage["detail"], event["detail"])
                                         if part)
-        self._replace(index, stages.StageRow(stage))
+        self._replace(index, self._stage_row(stage))
 
     def _patch_result(self, stage, event):
         if event.get("refused") or event.get("declined"):
@@ -1070,7 +1079,17 @@ def ran_with_text(session):
     last = turns[-1]
     model = last.get("model_used") or last.get("model") or ""
     effort = last.get("effort_used") or last.get("effort") or ""
-    return " · ".join(part for part in (model, "effort " + effort if effort else "") if part)
+    return " · ".join(part for part in (model, effort) if part)
+
+
+#: How a delegated conversation names the task it is the record of.
+TASK_REF = "qcr-task:"
+
+
+def task_of(session):
+    """The task a delegated conversation carries out, or "" for any other."""
+    ref = str(((session or {}).get("source") or {}).get("ref") or "")
+    return ref[len(TASK_REF):] if is_child(session) and ref.startswith(TASK_REF) else ""
 
 
 def record_text(session):
@@ -1170,20 +1189,44 @@ class _FittingScroll(QScrollArea):
 
 
 class LimitContextRow(QWidget):
-    """The chat controls share a background that shows the remaining limit."""
+    """The chat controls share a background that shows the remaining limit,
+    and a thin line along its foot the other limit window's."""
 
     activated = Signal()
+    SECONDARY_HEIGHT = 2
+    #: The weekly window's days: a tick along the foot between two, and the
+    #: day under the pointer drawn bolder, with its date said.
+    DAYS, DAY_TICK, DAY_BAND = 7, 5, 4
+    #: How long the pointer rests on a day before its date is said.
+    DAY_TIP_MS = 2000
 
     def __init__(self):
         super().__init__()
         self.setProperty("seethrough", True)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.remaining_percent = None
+        self.secondary_percent = None
         self.stale = False
+        #: ``(start, end)`` of the weekly window, as the provider gives it; None without one.
+        self.week = None
+        self.hovered_day = None
+        #: The control at the row's end (Settings): the bar stops short of it.
+        self.trailing = None
+        # One shot per day the pointer comes to rest on - a hover delay, not a poll.
+        self._day_tip = QTimer(self)
+        self._day_tip.setSingleShot(True)
+        self._day_tip.setInterval(self.DAY_TIP_MS)
+        self._day_tip.timeout.connect(self._say_day)
+        self.setMouseTracking(True)
         self.setAccessibleName("Provider limits")
 
-    def set_limit(self, remaining_percent, stale, available):
+    def set_limit(self, remaining_percent, stale, available, secondary_percent=None, week=None):
         self.remaining_percent = remaining_percent
+        self.secondary_percent = secondary_percent
+        self.week = tuple(week) if week else None
+        if self.week is None:
+            self.hovered_day = None
+            self._day_tip.stop()
         self.stale = stale
         self.setFocusPolicy(Qt.StrongFocus if available else Qt.NoFocus)
         if available:
@@ -1199,6 +1242,92 @@ class LimitContextRow(QWidget):
             self.activated.emit()
             return
         super().mouseReleaseEvent(event)
+
+    # -- where the bar runs --------------------------------------------------------
+    #: Between the bar's end and the control after it.
+    TRAIL_GAP = 6
+
+    def set_trailing(self, widget):
+        """The bar - its fill, its line, its days - ends before ``widget``, so
+        nothing of it lies under a control; pointing at the control leaves the days."""
+        self.trailing = widget
+        widget.installEventFilter(self)
+        self.update()
+
+    def track(self):
+        """How wide the bar runs: to the trailing control, or the whole row."""
+        if self.trailing is not None and self.trailing.isVisible():
+            return max(0, min(self.width(), self.trailing.geometry().left() - self.TRAIL_GAP))
+        return self.width()
+
+    def eventFilter(self, watched, event):
+        if watched is self.trailing and event.type() == QEvent.Enter:
+            self._leave_days()
+        return False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update()
+
+    # -- the week's days --------------------------------------------------------
+    def day_at(self, x):
+        """Which day of the weekly window ``x`` is over, 0 (the first) to 6, or None.
+
+        The bar is what is left, and it shrinks from the right as the week goes:
+        so the first day is at the right, the day it resets at the left."""
+        track = self.track()
+        if self.week is None or track <= 0 or not 0 <= x < track:
+            return None
+        return self.DAYS - 1 - min(self.DAYS - 1, int(x * self.DAYS / track))
+
+    def day_text(self, day):
+        """A day of the weekly window as a person says it: its date, and the
+        hours it runs - the window starts when the provider's did, not at midnight."""
+        start = self.week[0] + day * (self.week[1] - self.week[0]) / self.DAYS
+        end = start + (self.week[1] - self.week[0]) / self.DAYS
+        began, ends = time.localtime(start), time.localtime(end)
+        text = "%s · day %d of %d" % (time.strftime("%a %d %b", began), day + 1, self.DAYS)
+        text += "\n%s - %s" % (time.strftime("%H:%M", began), time.strftime(
+            "%H:%M" if began.tm_yday == ends.tm_yday else "%a %d %b %H:%M", ends))
+        if start <= time.time() < end:
+            text += " · today"
+        return text
+
+    def mouseMoveEvent(self, event):
+        day = self.day_at(event.position().x())
+        if day != self.hovered_day:
+            self.hovered_day = day
+            self.update()
+            QToolTip.hideText()
+            if day is None:
+                self._day_tip.stop()
+            else:
+                self._day_tip.start()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._leave_days()
+        super().leaveEvent(event)
+
+    def _leave_days(self):
+        self._day_tip.stop()
+        QToolTip.hideText()
+        if self.hovered_day is not None:
+            self.hovered_day = None
+            self.update()
+
+    def _say_day(self):
+        if (self.hovered_day is not None and self.underMouse()
+                and not (self.trailing is not None and self.trailing.underMouse())):
+            QToolTip.showText(QCursor.pos(), self.day_text(self.hovered_day), self)
+
+    def event(self, event):
+        # Split into days, the bar speaks of its days only - after the pointer
+        # rests on one (_say_day); the limits' own tooltip is for an unsplit bar.
+        if event.type() == QEvent.ToolTip and self.week is not None:
+            event.ignore()
+            return True
+        return super().event(event)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.focusPolicy() != Qt.NoFocus:
@@ -1217,11 +1346,36 @@ class LimitContextRow(QWidget):
                 color = theme.NEUTRAL[300]
             elif remaining <= 20:
                 color = theme.WARN_TINT
-            painter.fillRect(0, 0, round(self.width() * remaining / 100), self.height(), QColor(color))
+            painter.fillRect(0, 0, round(self.track() * remaining / 100), self.height(), QColor(color))
+        secondary = self.secondary_percent
+        if secondary:
+            # The limit the bar does not show: a hairline pair along its foot.
+            color = theme.LIMIT_LINE
+            if self.stale:
+                color = theme.NEUTRAL[400]
+            elif secondary <= 20:
+                color = theme.WARN
+            painter.fillRect(0, self.height() - self.SECONDARY_HEIGHT, round(self.track() * secondary / 100),
+                             self.SECONDARY_HEIGHT, QColor(color))
+        if self.week is not None:
+            self._paint_days(painter)
         if self.hasFocus():
             option = QStyleOptionFocusRect()
             option.initFrom(self)
             self.style().drawPrimitive(QStyle.PE_FrameFocusRect, option, painter, self)
+
+
+    def _paint_days(self, painter):
+        """Ticks along the foot between the week's days; the hovered day bolder."""
+        width, height = self.track(), self.height()
+        edges = [round(width * day / self.DAYS) for day in range(self.DAYS + 1)]
+        tick = QColor(theme.DIVIDER_STRONG)
+        for x in edges[1:-1]:
+            painter.fillRect(x, height - self.DAY_TICK, 1, self.DAY_TICK, tick)
+        if self.hovered_day is not None:
+            place = self.DAYS - 1 - self.hovered_day          # the first day is at the right
+            left, right = edges[place], edges[place + 1]
+            painter.fillRect(left, height - self.DAY_BAND, right - left, self.DAY_BAND, QColor(theme.LIMIT_DAY))
 
 
 class Composer(QFrame):
@@ -1232,6 +1386,8 @@ class Composer(QFrame):
     interrupt_requested = Signal()
     content_changed = Signal()
     stop_requested = Signal()
+    #: A delegated task's own conversation stops it: its task id.
+    task_stop_requested = Signal(str)
     restrictions_requested = Signal()
     #: Somebody wants to choose which skills the agent is handed.
     skills_requested = Signal()
@@ -1274,8 +1430,34 @@ class Composer(QFrame):
         context_layout = QHBoxLayout(self.context_row)
         context_layout.setContentsMargins(0, 0, 0, 0)
         context_layout.setSpacing(8)
-        context_layout.addWidget(self.context_summary, 1)
+        # The folder's branch, and a mark when it has changes, as a shell prompt
+        # says them: right after the folder, which ends the summary - no gap.
+        said = QWidget()
+        said.setProperty("seethrough", True)
+        said.setAttribute(Qt.WA_TransparentForMouseEvents)
+        said_layout = QHBoxLayout(said)
+        said_layout.setContentsMargins(0, 0, 0, 0)
+        said_layout.setSpacing(0)
+        # As wide as its words ask - so the branch stands right after the
+        # folder - and narrower, eliding, only when the row is.
+        self.context_summary.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        said_layout.addWidget(self.context_summary, 1)
+        self.git_branch = QLabel()
+        self.git_branch.setProperty("role", "muted")
+        self.git_mark = QLabel()
+        self.git_mark.setPixmap(icons.pixmap("close", 11, theme.WARN))
+        self.git_mark.setContentsMargins(3, 0, 0, 0)
+        for widget in (self.git_branch, self.git_mark):
+            widget.setVisible(False)
+            said_layout.addWidget(widget, 0, Qt.AlignVCenter)
+        # Room past the words is the row's, not the summary's: it only ever
+        # grows to its text.
+        said_layout.addStretch(0)
+        self._git = None
+        self._git_serial = 0
+        context_layout.addWidget(said, 1)
         context_layout.addWidget(self.settings_button)
+        self.context_row.set_trailing(self.settings_button)
         # That the agent is at work, between the things it shows in the feed:
         # a turn can think for minutes with nothing new above, and a still
         # page read as a stopped one. A breathing dot and how long the turn
@@ -1327,6 +1509,9 @@ class Composer(QFrame):
         self.folder.lineEdit().setPlaceholderText("The folder the agent works in")
         self.folder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.folder.editTextChanged.connect(self._folder_changed)
+        # Its branch is looked at once the folder is settled, not per keystroke.
+        self.folder.activated.connect(lambda _index: self.refresh_git())
+        self.folder.lineEdit().editingFinished.connect(self.refresh_git)
         self.browse = QPushButton("Browse…")
         self.browse.setProperty("variant", "ghost")
         self.browse.clicked.connect(self._browse)
@@ -1496,8 +1681,19 @@ class Composer(QFrame):
         self.closed = QLabel("")
         self.closed.setProperty("role", "hint")
         self.closed.setWordWrap(True)
+        # A delegated task still at work is stopped from its own conversation
+        # too, not only from the card in the chat that handed it on.
+        self.stop_task = QPushButton("Stop task")
+        self.stop_task.setProperty("variant", "ghost")
+        self.stop_task.setToolTip("End this task: it takes no more answers, and what of it runs is "
+                                  "canceled. What it has done until now stands.")
+        self.stop_task.clicked.connect(self._stop_task)
+        self.closed_row = widgets.row(self.closed, self.stop_task)
+        self.closed_row.layout().setStretchFactor(self.closed, 1)
+        self.closed_row.setVisible(False)
         self.closed.setVisible(False)
-        outer.addWidget(self.closed)
+        self.stop_task.setVisible(False)
+        outer.addWidget(self.closed_row)
         self._fit()
         self._sync_restrictions()
         self.set_options_open(False)
@@ -1509,6 +1705,7 @@ class Composer(QFrame):
     def set_connections(self, connections):
         self._connections = list(connections or [])
         self._fill_connections(self.connection.currentData())
+        self.refresh_git()                       # Git Tracker may have been switched
 
     def _fill_connections(self, wanted):
         session = self._session
@@ -1575,9 +1772,12 @@ class Composer(QFrame):
             widget.setVisible(not readonly)
         self.settings_button.setVisible(not readonly)
         self.set_options_open(not readonly and not bool(chosen.get("folder")))
+        self.closed_row.setVisible(readonly)
         self.closed.setVisible(readonly)
         if readonly:
             self.closed.setText(record_text(session))
+        self._sync_stop_task()
+        self.refresh_git()
         self.say("")
         self._say_model()
         self._sync_restrictions()
@@ -1594,13 +1794,25 @@ class Composer(QFrame):
         """The shown conversation read again - a delegated task's record moved
         on: what it ran with is said anew, nothing the person chose is reset."""
         self._session = session
+        self._sync_stop_task()
         self._summarize()
+
+    def _sync_stop_task(self):
+        session = self._session or {}
+        self.stop_task.setVisible(bool(task_of(session)) and session.get("state") == "running")
+
+    def _stop_task(self):
+        task = task_of(self._session)
+        if task:
+            self.stop_task.setVisible(False)
+            self.task_stop_requested.emit(task)
 
     def _summarize(self):
         if not hasattr(self, "_skills"):
             return
-        parts = [self.connection.currentText() or "Choose an agent",
-                 folder_text(self.folder.currentText()) or "Choose a folder"]
+        # Who, with what, then where: the folder last, its branch beside it.
+        parts = [self.connection.currentText() or "Choose an agent"]
+        folder = folder_text(self.folder.currentText()) or "Choose a folder"
         # What the turn will run with - chosen here, or the connection's default.
         chosen = self.connection.currentData()
         connection = next((one for one in getattr(self, "_connections", ()) if one.get("id") == chosen), {})
@@ -1608,15 +1820,16 @@ class Composer(QFrame):
             parts.append(self.model.currentText())
         effort = (self.effort.currentData() if hasattr(self, "effort") else "") or connection.get("effort")
         if effort:
-            parts.append("effort " + effort)
+            parts.append(effort)            # the value alone: where it stands says what it is
         if self._skills:
             parts.append("%d skill%s" % (len(self._skills), "s" if len(self._skills) != 1 else ""))
         if self._restrictions:
             parts.append("Restricted")
         if self._session is not None and not _is_chat(self._session):
             # A record has no next-turn choices: show what actually ran here.
-            parts = parts[:2] + [ran_with_text(self._session)]
+            parts = parts[:1] + [ran_with_text(self._session)]
             parts = [part for part in parts if part]
+        parts.append(folder)
         self.context_summary.setText(" · ".join(parts))
         previous = ran_with_text(self._session or {})
         self.context_summary.setToolTip("\n".join(parts) + ("\nLast turn: " + previous if previous else ""))
@@ -1629,7 +1842,9 @@ class Composer(QFrame):
         available = summary is not None
         limits = summary or {}
         self._limit_details = limits.get("tooltip", "")
-        self.context_row.set_limit(limits.get("remaining_percent"), limits.get("stale", False), available)
+        # The week's days come only from a connection with Split by week days on.
+        self.context_row.set_limit(limits.get("remaining_percent"), limits.get("stale", False), available,
+                                   limits.get("secondary_percent"), limits.get("week"))
         self._update_context_tooltip()
 
     def _update_context_tooltip(self):
@@ -1687,6 +1902,7 @@ class Composer(QFrame):
             self.effort.clear()
         self._say_model()
         self.chosen.emit()
+        self.refresh_git()
 
     def _say_wake(self, connection):
         """How the conversation goes on when its tasks end: its own once begun,
@@ -1807,6 +2023,49 @@ class Composer(QFrame):
     def _folder_changed(self, _text):
         self._sync_restrictions()
         self._summarize()
+        if self._git is not None and self._git.get("folder") != os.path.expanduser(
+                self.folder.currentText().strip()):
+            self.set_git(None)               # another folder: its branch is not known yet
+
+    # -- the folder's branch --------------------------------------------------
+    def git_tracked(self):
+        """Whether the chosen connection has Git Tracker on."""
+        chosen = self.connection.currentData()
+        return any(one.get("id") == chosen and one.get("git_tracker") is True for one in self._connections)
+
+    def refresh_git(self):
+        """Look at the folder's repository once, on a thread: when a
+        conversation is shown, a folder or a connection chosen, a turn ended.
+        Never on a timer, and not at all unless the connection's Git Tracker is on."""
+        folder = os.path.expanduser(self.folder.currentText().strip())
+        self._git_serial += 1
+        if not self.git_tracked() or not folder or not os.path.isdir(folder):
+            self.set_git(None)
+            return
+        serial = self._git_serial
+
+        def done(found, error):
+            if serial == self._git_serial:
+                self.set_git(None if error else found)
+        background.run(lambda: gitstate.state(folder), done, owner=self)
+
+    def set_git(self, found):
+        """``found`` from :func:`gitstate.state`, or None to say nothing."""
+        self._git = found
+        if not found:
+            self.git_branch.setVisible(False)
+            self.git_mark.setVisible(False)
+            return
+        where = ("%s:" % found["name"]) if found.get("name") else ""
+        self.git_branch.setText("(%s%s)" % (where, found.get("branch") or "detached"))
+        self.git_branch.setVisible(True)
+        self.git_mark.setVisible(bool(found.get("dirty")))
+        said = "Git: %s on %s" % (found.get("name") or "this folder", found.get("branch") or "a detached HEAD")
+        said += " - uncommitted changes" if found.get("dirty") else " - nothing uncommitted"
+        if found.get("repositories", 1) > 1:
+            said += "\nThe one of %d repositories here that changed last." % found["repositories"]
+        for widget in (self.git_branch, self.git_mark):
+            widget.setToolTip(said)
 
     def _browse(self):
         chosen = widgets.pick_path(self, "The folder the agent works in",
@@ -1814,6 +2073,7 @@ class Composer(QFrame):
         if chosen:
             self.folder.setEditText(chosen)
             self.chosen.emit()
+            self.refresh_git()
 
     def _sync_restrictions(self):
         folder = self.folder.currentText().strip()
@@ -2221,6 +2481,7 @@ class ChatTab(QWidget):
         self.composer.submitted.connect(self.submit)
         self.composer.interrupt_requested.connect(self.interrupt_submit)
         self.composer.stop_requested.connect(self.stop)
+        self.composer.task_stop_requested.connect(self.stop_task)
         self.composer.restrictions_requested.connect(self.edit_restrictions)
         self.composer.skills_requested.connect(self.choose_skills)
         self.composer.chosen.connect(self._remember_choices)
@@ -2501,6 +2762,7 @@ class ChatTab(QWidget):
                 groups.append("delegation")
             if groups:
                 title.setData(RelationshipDelegate.ROLE, groups)
+            title.setData(RelationshipDelegate.AGE, age_of(one.get("updated")))
             if is_child(one):
                 title.setIcon(_indent_icon())
             title.setData(Qt.UserRole, one.get("id"))
@@ -3246,6 +3508,8 @@ class ChatTab(QWidget):
 
     def _answered(self, session_id, connection_id, answer):
         self.conversation_changed.emit(session_id)
+        if self._showing(session_id):
+            self.composer.refresh_git()          # what the turn did to the branch
         self.read_budget(session_id)             # what it has cost now, against its budget
         self._background_waits.discard(session_id)
         turn = self.turns.pop(session_id, None)

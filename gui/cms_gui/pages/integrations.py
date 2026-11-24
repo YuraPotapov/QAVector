@@ -45,6 +45,8 @@ class IntegrationsPage(QWidget):
     #: What Search may ask this page to search changed: a connection was
     #: added, lost its token, or was read for the first time.
     search_sources_changed = Signal()
+    #: What is pinned to the sidebar changed.
+    pinned_changed = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -79,6 +81,9 @@ class IntegrationsPage(QWidget):
         self.cards = ProviderGrid([Provider(*one) for one in PROVIDERS])
         self.cards.open_requested.connect(self.open_provider)
         self.cards.detach_requested.connect(self.detach_provider)
+        self.cards.pin_toggled.connect(self._pin)
+        self.cards.mark_changed.connect(lambda _provider: self.pinned_changed.emit())
+        self.cards.set_pinned({one["provider"] for one in settings.pinned_links() if not one.get("target")})
         # The cards scroll: stacked one to a row on a narrow window they are
         # taller than a laptop's screen, and must not hold the window tall.
         scroll = QScrollArea()
@@ -320,6 +325,53 @@ class IntegrationsPage(QWidget):
     def _back_to_issue(self, connection_id, key):
         self.jira.open_key(connection_id, key)
         self.open_provider("jira")
+
+    # -- pinned to the sidebar -------------------------------------------------
+    # A link is what a provider hands out to be opened again: its id, and the
+    # target its own view knows (none for the provider itself). The sidebar
+    # keeps links and opens them through here, knowing no provider by name.
+    def pinned(self):
+        """What is pinned, as the sidebar shows it: each link with its title and
+        the mark to draw. Links to a provider this build lacks are left out."""
+        names = {provider: name for provider, name, *_rest in PROVIDERS}
+        found = []
+        for link in self.settings.pinned_links():
+            provider = link["provider"]
+            if provider not in names:
+                continue
+            card = self.cards.cards.get(provider)
+            found.append(dict(link, title=link.get("title") or names[provider],
+                              mark=card.mark.name if card is not None else provider))
+        return found
+
+    def _pin(self, provider, pinned):
+        links = [one for one in self.settings.pinned_links()
+                 if not (one["provider"] == provider and not one.get("target"))]
+        if pinned:
+            links.append({"provider": provider, "target": None})
+        self.settings.save_pinned_links(links)
+        self.pinned_changed.emit()
+
+    def unpin(self, link):
+        """Take a link off the sidebar; a provider's own card shows it."""
+        self.settings.save_pinned_links([one for one in self.settings.pinned_links()
+                                         if (one["provider"], one.get("target")) != (link["provider"], link.get("target"))])
+        if not link.get("target"):
+            self.cards.set_pinned({one["provider"] for one in self.settings.pinned_links() if not one.get("target")})
+        self.pinned_changed.emit()
+
+    def open_link(self, link):
+        """Open what a link points at, as Open or a search result would. Returns
+        whether it is shown on this page - False when it has a window of its own."""
+        provider = link.get("provider")
+        if provider not in self.hosts:
+            return False
+        if link.get("target") is not None:
+            if not self.show_found((provider, link["target"])):
+                self.open_provider(provider)
+        else:
+            self.open_provider(provider)
+        return self.hosts[provider].window is None
 
     def open_provider(self, provider, trail=()):
         """A provider in front. ``trail`` is the way it was reached, for its

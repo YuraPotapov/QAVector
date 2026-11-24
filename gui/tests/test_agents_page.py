@@ -374,6 +374,15 @@ def test_provider_limits_follow_connections_and_open_from_chat(make):
     composer = agents.chat.composer
     assert composer.context_row.remaining_percent == 58
     assert "Weekly limit · 58% remaining" in composer.context_row.toolTip()
+    # The window the bar does not show: a thin line along its foot.
+    assert round(composer.context_row.secondary_percent, 6) == 89.876543
+    assert "Line under it · 5-hour limit" in composer.context_row.toolTip()
+    row = composer.context_row
+    image = row.grab().toImage()
+    foot = image.height() - 1
+    assert image.pixelColor(2, foot).name() == theme.LIMIT_LINE.lower()
+    assert image.pixelColor(2, foot - row.SECONDARY_HEIGHT).name() == theme.MARK_TINT.lower()
+    assert image.pixelColor(round(image.width() * 0.95), foot).name() != theme.LIMIT_LINE.lower()
     assert "5-hour limit · 89.876543211% remaining · Resets" in composer.context_row.toolTip()
     assert not hasattr(composer, "limits_button")
     personal = composer.connection.findData("personal")
@@ -742,7 +751,7 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         assert document == {"connection": {
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "", "role": "",
             "show_limits_in_chat": True,
-            "chat_limit_view": "combined",
+            "chat_limit_view": "combined", "split_week_days": False, "git_tracker": False,
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
             "others_default": "approve", "allowed_agents": [], "wake_default": "ask",
@@ -847,7 +856,7 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
             "id": "claude", "name": "Claude", "kind": "claude",
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high", "role": "",
             "show_limits_in_chat": True,
-            "chat_limit_view": "combined",
+            "chat_limit_view": "combined", "split_week_days": False, "git_tracker": False,
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
             "others_default": "deny", "allowed_agents": [], "wake_default": "ask",
@@ -1232,3 +1241,29 @@ def test_a_role_is_removed_once_agreed(make, monkeypatch):
     page.agents.roles_tab.remove_button.click()
     assert ("role-delete", "tester") in [args for args, _doc in core.calls]
     assert page.agents.roles_tab.table.rowCount() == 0
+
+
+def test_the_week_s_days_reach_chat_only_from_a_connection_that_splits_them(qapp, dispose):
+    from cms_gui.pages.agentusage import ProviderLimitCard
+    resets = time.time() + 86400
+    payload = {"ok": True, "checked_at": time.time(), "windows": [
+        {"label": "Weekly limit", "used_percent": 30, "duration_minutes": 10080, "resets_at": resets}]}
+    plain = ProviderLimitCard(_connection(chat_limit_view="weekly"))
+    plain.set_result(payload)
+    assert plain.summary()["week"] is None
+    split = ProviderLimitCard(_connection(chat_limit_view="weekly", split_week_days=True))
+    split.set_result(payload)
+    assert split.summary()["week"] == (resets - 7 * 86400, resets)
+    dispose(plain)
+    dispose(split)
+
+
+def test_the_connection_form_keeps_git_tracker_and_split_by_week_days(qapp, dispose):
+    dialog = ConnectionDialog(None, {"id": "c", "name": "C", "kind": "claude", "git_tracker": True}, kinds=KINDS)
+    assert dialog.git_tracker.isChecked() and not dialog.split_week_days.isChecked()
+    dialog.split_week_days.setChecked(True)
+    entry = dialog.entry()
+    assert entry["git_tracker"] is True and entry["split_week_days"] is True
+    dialog.show_limits_in_chat.setChecked(False)
+    assert not dialog.split_week_days.isEnabled()
+    dispose(dialog)

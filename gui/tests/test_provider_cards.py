@@ -241,3 +241,48 @@ def test_switching_projects_on_the_catalog_reads_the_new_project_s_connections(p
     assert shown.stack.currentWidget() is shown.catalog
     assert shown.cards.cards["jira"].count.text() == "3"
     assert shown.cards.cards["jira"].tag.text() == "CONNECTED"
+
+
+# -- pinned to the sidebar ------------------------------------------------------------
+def test_a_card_s_pin_puts_its_provider_on_the_sidebar_and_takes_it_off(page, settings):
+    shown = page()
+    told = []
+    shown.pinned_changed.connect(lambda: told.append(True))
+    jira = shown.cards.cards["jira"]
+    assert not jira.pin_button.isChecked() and jira.pin_button.text() == ""
+    assert jira.pin_button.toolTip() == "Pin Jira to the sidebar"
+    jira.pin_button.click()
+    assert settings.pinned_links() == [{"provider": "jira", "target": None}] and told == [True]
+    assert [(one["provider"], one["title"], one["mark"]) for one in shown.pinned()] == [("jira", "Jira", "jira")]
+    assert jira.pin_button.toolTip() == "Take Jira off the sidebar"
+    shown.cards.cards["teams"].pin_button.click()
+    assert [one["provider"] for one in shown.pinned()] == ["jira", "teams"]       # in the order pinned
+    shown.unpin({"provider": "jira", "target": None})
+    assert not jira.pin_button.isChecked() and [one["provider"] for one in shown.pinned()] == ["teams"]
+    jira.pin_button.click()
+    jira.pin_button.click()
+    assert [one["provider"] for one in shown.pinned()] == ["teams"]
+
+
+def test_pins_are_the_application_s_and_unknown_providers_are_left_out(page, settings):
+    settings.save_pinned_links([{"provider": "teams", "target": None}, {"provider": "gone", "target": None},
+                                "junk"])
+    shown = page()
+    assert shown.cards.cards["teams"].pin_button.isChecked()
+    assert [one["provider"] for one in shown.pinned()] == ["teams"]
+
+
+def test_a_link_opens_its_provider_as_open_does(page):
+    shown = page()
+    assert shown.open_link({"provider": "teams", "target": None}) is True
+    assert shown.stack.currentWidget() is shown.hosts["teams"].view
+    assert shown.open_link({"provider": "nowhere", "target": None}) is False
+
+
+def test_the_agents_card_s_new_mark_reaches_the_sidebar(page, settings):
+    settings.save_pinned_links([{"provider": "agents", "target": None}])
+    shown = page()
+    told = []
+    shown.pinned_changed.connect(lambda: told.append(True))
+    shown.cards.cards["agents"].set_mark("codex")
+    assert told == [True] and shown.pinned()[0]["mark"] == "codex"

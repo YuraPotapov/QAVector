@@ -25,6 +25,7 @@ import time
 
 import runtime_paths
 from integrations.agents import codex_turn, locate
+from integrations.agents.adapters import claude
 from integrations.agents.contracts import ProviderCapabilities, Unsupported, rate_limit_window
 
 KIND, NAME, DEFAULT_BINARY = "codex", "Codex", "codex"
@@ -37,8 +38,8 @@ EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 MODES = ("read", "edit", "full")
 MODE_DESCRIPTION = ("Read: read-only sandbox. Edit: edit files in the workspace-write sandbox; "
                     "of the commands, only those Codex reads as reading, listing or searching "
-                    "files run. Full: edit files and run commands in the workspace-write "
-                    "sandbox. Folder restrictions still apply.")
+                    "files run. Full: edit files and run commands, with the network, in the "
+                    "workspace-write sandbox. Folder restrictions still apply.")
 #: Plans with Codex's own plan mode: questions end the turn, a plan comes as
 #: Codex's plan item (see :mod:`integrations.agents.codex_turn`).
 PLANS = True
@@ -173,6 +174,9 @@ def exec_argv(binary, mode="read", model="", effort="", session="", resume=False
     argv = [binary, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
             "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
             "-c", 'sandbox_mode=' + json.dumps("read-only" if mode == "read" else "workspace-write")]
+    if mode == "full":
+        # As the app-server turn's (codex_turn.sandbox): Full's commands reach the network.
+        argv += ["-c", "sandbox_workspace_write.network_access=true"]
     for feature in codex_turn.NATIVE_AGENTS:
         argv += ["-c", "features.%s=false" % feature]
     # This invocation's MCP table replaces the ignored user configuration.
@@ -378,20 +382,31 @@ def _server_events(message):
     if not done:
         if what == "fileChange":
             return _patch_events(item, done=False, ok=False, detail="")
-        detail = item.get("command") or item.get("query") or json.dumps(item.get("arguments") or {})
-        detail = detail if isinstance(detail, str) else json.dumps(detail)
-        return [{"type": "tool.started", "id": ident, "name": name, "title": detail[:256],
-                 "detail": detail[:2000]}]
+        return [_started(ident, name, item)]
     ok = item.get("status") == "completed" and not item.get("error")
     if what == "commandExecution":
         ok = ok and item.get("exitCode") == 0
     if what == "dynamicToolCall":
         ok = item.get("success") is True
     detail = item.get("aggregatedOutput") or item.get("error") or item.get("result") or ""
-    detail = detail if isinstance(detail, str) else json.dumps(detail)
+    detail = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
     if what == "fileChange":
         return _patch_events(item, done=True, ok=ok, detail=detail)
     return [{"type": "tool.completed", "id": ident, "ok": bool(ok), "detail": detail[:2000]}]
+
+
+def _started(ident, name, item):
+    """A tool call as it begins: a command or query as it is, and a call's
+    arguments as Claude's rows say them - lines, not escaped JSON."""
+    said = item.get("command") or item.get("query")
+    arguments = item.get("arguments")
+    if not said and isinstance(arguments, dict):
+        title, used = claude.tool_title(name, arguments)
+        return {"type": "tool.started", "id": ident, "name": name, "title": title[:256],
+                "detail": claude.tool_arguments(arguments, used)[:2000]}
+    detail = said or json.dumps(arguments or {}, ensure_ascii=False)
+    detail = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+    return {"type": "tool.started", "id": ident, "name": name, "title": detail[:256], "detail": detail[:2000]}
 
 
 def _questions(questions):
@@ -447,8 +462,7 @@ def _exec_events(event):
     if not done:
         if what == "file_change":
             return _patch_events(item, done=False, ok=False, detail="")
-        detail = str(item.get("command") or item.get("query") or json.dumps(item.get("arguments") or {}))
-        return [{"type": "tool.started", "id": ident, "name": name, "title": detail[:256], "detail": detail[:2000]}]
+        return [_started(ident, name, item)]
     ok = item.get("status") not in ("failed", "declined") and not item.get("error")
     if what == "command_execution":
         ok = ok and item.get("exit_code") == 0

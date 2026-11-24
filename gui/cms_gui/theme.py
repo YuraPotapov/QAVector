@@ -78,6 +78,16 @@ WARN_TINT = "#f7efe2"
 #: the accent ramp, which is the brand and stays pale in the dark theme, where
 #: a pale pill is the brightest thing on the screen.
 MARK_TINT = ACCENT_RAMP[200]
+#: The chat's second limit window, a thin line along the foot of the
+#: MARK_TINT bar: the same hue, a little deeper, so it reads as part of it.
+LIMIT_LINE = ACCENT_RAMP[400]
+#: The weekly limit's day under the pointer, along the bar's foot.
+LIMIT_DAY = ACCENT_RAMP[700]
+#: How long ago a conversation was last active, on the stripe at the left of
+#: its sidebar row: today, a day or more, a week or more.
+AGE_TODAY = "#2f7d43"
+AGE_DAYS = WARN
+AGE_WEEK = BAD
 MARK_INK = ACCENT_RAMP[800]
 #: A status pill that says "good" (widgets.Tag's accent): the palest accent in
 #: the light theme, and for the same reason as the mark above its own pair in
@@ -166,7 +176,7 @@ def set_dark_mode(enabled: bool):
     global DIFF_ADD_BG, DIFF_ADD_INK, DIFF_DEL_BG, DIFF_DEL_INK
     global SELECT_BG, SELECT_INK, SELECT_MUTED
     global CANVAS_BG, CANVAS_GRID, CANVAS_GRID_MAJOR, PLUGIN_TINT
-    global AUTO, AUTO_TINT
+    global AUTO, AUTO_TINT, LIMIT_LINE, LIMIT_DAY, AGE_TODAY, AGE_DAYS, AGE_WEEK
 
     if enabled:
         BG = "#1a1b1e"
@@ -192,6 +202,11 @@ def set_dark_mode(enabled: bool):
         DIFF_DEL_INK = "#e8918a"
         MARK_TINT = ACCENT_RAMP[800]
         MARK_INK = ACCENT_RAMP[300]
+        LIMIT_LINE = ACCENT_RAMP[600]
+        LIMIT_DAY = ACCENT_RAMP[300]
+        AGE_TODAY = "#5fbf7d"
+        AGE_DAYS = "#e0a33f"
+        AGE_WEEK = "#ef6a5e"
         TAG_TINT = ACCENT_RAMP[800]
         TAG_INK = ACCENT_RAMP[300]
         # A band a few steps into the accent, light ink on it: plainly the
@@ -260,6 +275,11 @@ def set_dark_mode(enabled: bool):
         WARN_TINT = "#f7efe2"
         MARK_TINT = ACCENT_RAMP[200]
         MARK_INK = ACCENT_RAMP[800]
+        LIMIT_LINE = ACCENT_RAMP[400]
+        LIMIT_DAY = ACCENT_RAMP[700]
+        AGE_TODAY = "#2f7d43"
+        AGE_DAYS = WARN
+        AGE_WEEK = BAD
         TAG_TINT = ACCENT_RAMP[100]
         TAG_INK = ACCENT_RAMP[800]
         SELECT_BG = ACCENT_RAMP[200]
@@ -846,11 +866,18 @@ QLabel[role="initials"] {{
 }}
 QFrame#jiraDetailBody {{ background: {surface}; border: none; }}
 QToolButton#jiraMore::menu-indicator {{ image: none; width: 0; }}
+QToolButton#pinnedMore::menu-indicator {{ image: none; width: 0; }}
 /* A comment, its Save/Cancel and a file waiting to go with the next one sit
    on the detail's own ground; the comment's menu is a mark, not a box. */
-QWidget#jiraComment, QWidget#jiraCommentButtons, QWidget#jiraPendingFile {{
+QWidget#jiraComment, QWidget#jiraCommentButtons, QWidget#jiraPendingFile, QWidget#jiraThread {{
     background: transparent;
 }}
+/* The discussion under an issue: its own ground, ruled off from the issue. */
+QFrame#jiraComments {{ border-top: 1px solid {divider_strong}; }}
+/* The replies to a comment, stood in under it on a rule of their own. */
+QFrame#jiraReplies {{ background: transparent; border: none; border-left: 2px solid {divider_strong}; }}
+QToolButton#jiraThreadFold {{ background: transparent; border: none; padding: 2px 4px; color: {n700}; }}
+QToolButton#jiraThreadFold:hover {{ background: {a100}; }}
 QToolButton#jiraCommentMore::menu-indicator {{ image: none; width: 0; }}
 QFrame#jiraDetail QPlainTextEdit {{ background: {bg}; border: 1px solid {divider}; }}
 /* An issue being edited: its summary keeps the size it is read at. */
@@ -1152,6 +1179,8 @@ QFrame[role="providercard"] {{
 QFrame[role="providercard"]:hover {{ border-color: {divider_strong}; border-top-color: {divider_strong}; }}
 QFrame[role="providercard"][selected="true"] {{ border-color: {accent}; border-top-color: {accent}; }}
 QFrame[role="providercard"] QWidget[seethrough="true"] {{ background: transparent; }}
+/* Pinned to the sidebar: the pin stands pressed in. */
+QToolButton#providerPin:checked {{ background: {select_bg}; border-color: {accent}; }}
 QLabel[role="providername"] {{
     font-family: {heading}; font-size: 18px; font-weight: 600; color: {text}; background: transparent;
 }}

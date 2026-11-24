@@ -4,6 +4,8 @@ Legacy GUI/Cycle operations retain their contracts and routing. Entries here
 describe operations.call results, not a second HTTP client. Other operations
 are deliberately not advertised until their contracts/policies are implemented.
 
+``people`` reads who may be mentioned on an issue, for a comment's mentions.
+
 Writes (``comment``, ``transition``, ``assign``, ``edit``, ``comment_edit``,
 ``create``, ``attach``) are each confirmed by a person before they are made
 (QCR ADR-007): :func:`prepare` reads what the person decides on and says what
@@ -14,8 +16,8 @@ functions. Deleting a comment is for people only, so it is not declared.
 import os
 
 from integrations.contracts import OperationContract, Provider, ReadError, WriteError
-from . import operations, query, writes
-from .client import JiraError, api
+from . import adf, operations, query, writes
+from .client import CLOUD, JiraError, api
 
 
 def obj(properties, required=None):
@@ -57,6 +59,18 @@ TEXT_OR_EMPTY = {"type": "string", "maxLength": COMMENT_CHARS}
 SUMMARY = {"type": "string", "minLength": 1, "maxLength": 255}
 LABELS = array({"type": "string", "minLength": 1, "maxLength": 255}, 50)
 PROJECT = {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
+COMMENT_ID = {"type": "string", "pattern": "^[0-9]{1,30}$"}
+#: The most people one comment may mention.
+MOST_MENTIONS = 20
+NAME = {"type": "string", "minLength": 1, "maxLength": 255}
+#: Who to mention: as an agent names them, or as found - an id with its name.
+MENTIONS = dict(array({"anyOf": [NAME, obj(dict(id=NAME, name=SHORT))]}, MOST_MENTIONS), description=(
+    "People to mention, before the text: ids from people, or a name or email looked up among those who can "
+    "see the issue. Do not write @names in the body."))
+REPLY_TO = dict(COMMENT_ID, description="A comment id from the issue's comments: this one replies to it - its "
+                                        "start is quoted and its author mentioned.")
+#: How much of a comment a reply quotes - as the Integrations page's Reply does.
+QUOTE_CHARS = 200
 EDIT_FIELDS = {"type": "object", "additionalProperties": False, "minProperties": 1, "properties": {
     "summary": SUMMARY, "description": TEXT_OR_EMPTY, "labels": LABELS, "priority": SHORT}}
 #: Other create-screen fields: a value as text, or a choice by its id.
@@ -75,10 +89,17 @@ CONTRACTS = {
         SEARCH_INPUT, obj(dict(rows=array(ROW, operations.MOST_ROWS), cursor=CURSOR, jql=STRING, scope=STRING))),
     "statuses": OperationContract("statuses", "Read site-wide status names and categories, without issue content.",
         obj({}), obj(dict(statuses=array(obj(dict(name=SHORT, category=SHORT)), 10000)))),
+    "people": OperationContract("people", "Read who can be mentioned on an issue - people who can see it - "
+                                "matching query (a name or email; empty: whoever Jira lists first): each "
+                                "one's id, for a comment's mentions, and name.",
+        obj(dict(key=KEY, query=SHORT), ["key"]),
+        obj(dict(people=array(obj(dict(id=SHORT, name=SHORT)), operations.MENTION_PEOPLE)))),
     # -- writes: each one confirmed by a person (QCR ADR-007) ---------------------
-    "comment": OperationContract("comment", "Propose a plain-text comment on an issue. A person sees it, may edit "
-                                 "it, and approves or denies it; the result is the issue after the change.",
-        obj(dict(key=KEY, body=TEXT)), WRITE_OUTPUT, access="write", risk="high", idempotent=False),
+    "comment": OperationContract("comment", "Propose a plain-text comment on an issue - optionally a reply to "
+                                 "one of its comments, mentioning people. A person sees it, may edit the text, "
+                                 "and approves or denies it; the result is the issue after the change.",
+        obj(dict(key=KEY, body=TEXT, reply_to=REPLY_TO, mentions=MENTIONS), ["key", "body"]),
+        WRITE_OUTPUT, access="write", risk="high", idempotent=False),
     "transition": OperationContract("transition", "Propose moving an issue: to is a transition id from the "
                                     "issue's transitions, or its target status name. A person approves it; "
                                     "already there is no change.",
@@ -95,7 +116,7 @@ CONTRACTS = {
     "comment_edit": OperationContract("comment_edit", "Propose new text for one comment (id from the issue's "
                                       "comments). A person may edit it first; a comment changed meanwhile is "
                                       "not overwritten.",
-        obj(dict(key=KEY, id={"type": "string", "pattern": "^[0-9]{1,30}$"}, body=TEXT, updated=SHORT),
+        obj(dict(key=KEY, id=COMMENT_ID, body=TEXT, updated=SHORT),
             ["key", "id", "body"]), WRITE_OUTPUT, access="write", risk="high", idempotent=True),
     "create": OperationContract("create", "Propose a new issue: project key, type (name or id), summary, and "
                                 "optionally description, labels, priority and other create-screen fields by id.",
@@ -129,8 +150,11 @@ def read(name, connection, token, request, get=None):
     if name not in CONTRACTS or CONTRACTS[name].access != "read":
         raise ReadError("unsupported")
     get = get or operations.session(connection, token)
-    if name in ("issue", "comments"):
+    if name in ("issue", "comments", "people"):
         _in_scope(get, connection, request["key"].upper())
+    if name == "people":
+        return operations.mentionable(get, connection, {"key": request["key"].upper(),
+                                                        "query": request.get("query") or ""})
     return operations.call(name, connection, token, request, get=get)
 
 
@@ -183,9 +207,76 @@ def prepare(name, connection, token, request, get=None):
 
 
 def _prepare_comment(get, connection, key, issue, request):
-    return {"request": {"key": key, "body": request["body"]}, "noop": None, "card": _card(
-        "comment", key, issue, "Comment on %s" % key,
+    made, title, notes, changes = {"key": key, "body": request["body"]}, "Comment on %s" % key, [], []
+    people = []
+    if request.get("reply_to"):
+        flavour = connection["flavour"]
+        raw = get("/rest/api/%s/issue/%s/comment/%s" % (api(flavour), key, request["reply_to"]))
+        found = operations._comment(raw if isinstance(raw, dict) else {}, flavour)
+        if not found["id"]:
+            raise ReadError("not_found")
+        made["reply_to"] = found["id"]
+        title = "Reply to %s comment on %s" % ("%s's" % found["author"] if found["author"] else "a", key)
+        if quoted(found["text"]):
+            notes.append("Quotes: %s" % quoted(found["text"]))
+        if found["author_id"]:
+            people.append({"id": found["author_id"], "name": found["author"] or found["author_id"]})
+    for wanted in request.get("mentions") or []:
+        one = _mentioned(get, connection, key, wanted["id"] if isinstance(wanted, dict) else wanted)
+        if all(one["id"] != other["id"] for other in people):
+            people.append(one)
+    if people:
+        made["mentions"] = people
+        changes.append({"label": "Mentions", "from": "", "to": ", ".join(one["name"] for one in people)})
+    return {"request": made, "noop": None, "card": _card(
+        "comment", key, issue, title, changes, notes,
         edit={"body": {"label": "Comment", "value": request["body"], "multiline": True, "required": True}})}
+
+
+def quoted(text, limit=QUOTE_CHARS):
+    """The start of a comment, as a reply quotes it: one line, cut at a word."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return (text[:limit].rsplit(" ", 1)[0] or text[:limit]) + "\u2026"
+
+
+def _mentioned(get, connection, key, wanted):
+    """One person to mention: an id, a name or an email, among those who can see
+    the issue - one match, or the write is refused with who matched."""
+    wanted = wanted.strip()
+    people = operations.mentionable(get, connection, {"key": key, "query": wanted})["people"]
+    found = ([one for one in people if one["id"] == wanted] or [one for one in people if _is(one["name"], wanted)]
+             or (people if len(people) == 1 else []))
+    if not found:
+        raise WriteError("not_offered", "%s cannot be mentioned on %s. %s" % (
+            wanted, key, ("Several people match: %s." % ", ".join("%s (id %s)" % (one["name"], one["id"])
+                                                              for one in people[:10]))
+            if people else "Nobody who can see it matches."))
+    return {"id": found[0]["id"], "name": found[0]["name"]}
+
+
+def reply_body(connection, body, quote="", mentions=()):
+    """A comment's text with what a reply and its mentions add, in the shape the
+    flavour takes: on Cloud a document - the quote, then the mentions starting
+    the first paragraph - and on Server wiki text, ``{quote}`` and ``[~name]``."""
+    if not quote and not mentions:
+        return body
+    if connection["flavour"] != CLOUD:
+        line = " ".join("[~%s]" % one["id"] for one in mentions)
+        parts = ["{quote}%s{quote}" % quote if quote else "", ("%s %s" % (line, body.strip())).strip()]
+        return "\n".join(part for part in parts if part)
+    document = adf.from_text(body, CLOUD)
+    paragraphs = list(document.get("content") or []) or [{"type": "paragraph", "content": []}]
+    lead = []
+    for one in mentions:
+        lead += [{"type": "mention", "attrs": {"id": one["id"], "text": "@" + one["name"]}},
+                 {"type": "text", "text": " "}]
+    paragraphs[0] = dict(paragraphs[0], content=lead + list(paragraphs[0].get("content") or []))
+    if quote:
+        paragraphs.insert(0, {"type": "blockquote", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": quote}]}]})
+    return dict(document, content=paragraphs)
 
 
 def _prepare_transition(get, connection, key, issue, request):
@@ -383,6 +474,21 @@ def write(name, connection, token, request, get=None):
         if request.get("priority"):
             fields["priority"] = {"id": request["priority"]}
         request = {"project": request["project"], "type": request["type"], "fields": fields}
+    elif name == "comment":
+        quote = ""
+        if request.get("reply_to"):
+            # The replied comment's start as it reads now; gone meanwhile, the
+            # reply still goes, its author still mentioned.
+            flavour = connection["flavour"]
+            try:
+                raw = get("/rest/api/%s/issue/%s/comment/%s" % (api(flavour), request["key"], request["reply_to"]))
+                quote = quoted(operations._comment(raw if isinstance(raw, dict) else {}, flavour)["text"])
+            except JiraError as exc:
+                if exc.status != 404:
+                    raise
+        mentions = [one if isinstance(one, dict) else {"id": one, "name": one}
+                    for one in request.get("mentions") or ()]
+        request = {"key": request["key"], "body": reply_body(connection, request["body"], quote, mentions)}
     try:
         made = writes.OPERATIONS[name](get, connection, request)
     except writes.Refused as exc:
@@ -396,5 +502,6 @@ def write(name, connection, token, request, get=None):
 
 
 def provider():
-    return Provider("jira", CONTRACTS, dict(operations.OPERATIONS, **writes.OPERATIONS), read,
+    return Provider("jira", CONTRACTS, dict(operations.OPERATIONS, people=operations.mentionable,
+                                            **writes.OPERATIONS), read,
                     prepare=prepare, write=write)

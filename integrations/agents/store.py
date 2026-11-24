@@ -36,7 +36,7 @@ ACCESS_GRANTS = {
     "cycles": ("cycles.read", "cycles.run"),
     "approvals": ("cycles.read", "cycles.approve"),
     "jira": ("integrations.jira.read", "integrations.jira.issue", "integrations.jira.comments",
-             "integrations.jira.search", "integrations.jira.statuses"),
+             "integrations.jira.search", "integrations.jira.statuses", "integrations.jira.people"),
     # Each change waits for the person's Approve (ADR-007).
     "jira_write": ("integrations.jira.write", "integrations.jira.comment", "integrations.jira.transition",
                    "integrations.jira.assign", "integrations.jira.edit", "integrations.jira.comment_edit",
@@ -107,6 +107,10 @@ def normalize(entry):
         "effort": str(entry.get("effort") or "").strip(),
         "show_limits_in_chat": entry.get("show_limits_in_chat") is not False,
         "chat_limit_view": entry.get("chat_limit_view") if entry.get("chat_limit_view") in CHAT_LIMIT_VIEWS else "combined",
+        # Chat extras, off unless chosen: the folder's git branch beside it, and
+        # the weekly limit divided into its days.
+        "git_tracker": entry.get("git_tracker") is True,
+        "split_week_days": entry.get("split_week_days") is True,
         # What other agents are told it is good at, when they may hand it work.
         "role": str(entry.get("role") or "").strip()[:500],
         "qavector_access": {key: (entry.get("qavector_access") or {}).get(key) is True
@@ -228,7 +232,7 @@ def upsert(entry, path=None):
         connections.append(entry)
     else:
         previous = next(one for one in connections if one["id"] == entry["id"])
-        for key in ("show_limits_in_chat", "chat_limit_view"):
+        for key in ("show_limits_in_chat", "chat_limit_view", "git_tracker", "split_week_days"):
             if key not in raw:
                 entry[key] = previous[key]
         if any(previous.get(key) != entry.get(key) for key in PROGRAM):
