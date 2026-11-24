@@ -44,10 +44,11 @@ import shutil
 import subprocess
 import tempfile
 from datetime import datetime
+from itertools import islice
 
 import runtime_paths
 from integrations.agents import locate
-from integrations.agents.contracts import rate_limit_window
+from integrations.agents.contracts import PATCH_CHARS, rate_limit_window
 
 #: What a connection of this kind records, and what a person reads.
 KIND = "claude"
@@ -848,9 +849,10 @@ def events(line):
 
         started          model, provider_session
         thinking, text   text
-        tool.started     id, name, title, detail - and ``writes``, the path,
+        tool.started     id, name, title, detail, and writes and file_changes
                          for a tool that changes a file
-        tool.completed   id, ok, detail
+        tool.completed   id, ok, detail, and file_changes and patch_available
+                         when Claude returned a structured edit result
         tool.refused     id, reason - the CLI would not run that call; its
                          ``tool.completed`` follows, as a failure
         context          used - how much of the agent's context one request
@@ -950,13 +952,90 @@ def events(line):
             target = _write_target(name, arguments)
             if target:
                 started["writes"] = target
+                change = {"path": target}
+                if name != "Write":
+                    change["kind"] = "update"
+                started["file_changes"] = [change]
             found.append(started)
         elif what == "tool_result":
-            found.append({"type": "tool.completed",
-                          "id": str(block.get("tool_use_id") or ""),
-                          "ok": not block.get("is_error"),
-                          "detail": _clean(_content(block.get("content")), RESULT_CHARS)})
+            completed = {"type": "tool.completed", "id": str(block.get("tool_use_id") or ""),
+                         "ok": not block.get("is_error"),
+                         "detail": _clean(_content(block.get("content")), RESULT_CHARS)}
+            if kind == "user" and completed["ok"] and len(blocks) == 1:
+                result = _edit_result(event)
+                if result:
+                    completed["file_changes"] = [{"path": result["filePath"],
+                                                  "kind": "add" if result.get("type") == "create" else "update"}]
+                    completed["patch_available"] = bool(
+                        result.get("structuredPatch") or
+                        (result.get("type") == "create" and result.get("content")))
+            found.append(completed)
     return found
+
+
+def _edit_result(event):
+    result = event.get("tool_use_result", event.get("toolUseResult"))
+    if not isinstance(result, dict) or not isinstance(result.get("filePath"), str) or not result["filePath"]:
+        return None
+    if isinstance(result.get("structuredPatch"), list):
+        return result
+    if result.get("type") == "create" and isinstance(result.get("content"), str):
+        return result
+    return None
+
+
+def read_patch(stdout_path, item_id):
+    """Build a diff from the saved, successful result of one file edit."""
+    with open(stdout_path, "rb") as stream:
+        for line in stream:
+            if b'"tool_use_id"' not in line:
+                continue
+            event = _parse(line)
+            if not isinstance(event, dict):
+                continue
+            if event.get("subtype") == "permission_denied" and event.get("tool_use_id") == item_id:
+                return None
+            if event.get("type") != "user":
+                continue
+            blocks = (event.get("message") or {}).get("content")
+            if not isinstance(blocks, list) or len(blocks) != 1:
+                continue
+            block = blocks[0]
+            if (not isinstance(block, dict) or block.get("type") != "tool_result"
+                    or block.get("tool_use_id") != item_id):
+                continue
+            result = _edit_result(event)
+            if not result or block.get("is_error"):
+                return None
+            diff = "".join(islice(_patch_chars(result), PATCH_CHARS + 1))
+            if diff:
+                return {"files": [{"path": result["filePath"], "diff": diff[:PATCH_CHARS]}],
+                        "truncated": len(diff) > PATCH_CHARS}
+            return None
+    return None
+
+
+def _patch_chars(result):
+    for hunk in result.get("structuredPatch") or ():
+        if not isinstance(hunk, dict):
+            continue
+        ranges = [hunk.get(key) for key in ("oldStart", "oldLines", "newStart", "newLines")]
+        lines = hunk.get("lines")
+        if not all(type(value) is int for value in ranges) or not isinstance(lines, list):
+            continue
+        yield from "@@ -%d,%d +%d,%d @@\n" % tuple(ranges)
+        for line in lines:
+            if isinstance(line, str):
+                yield from line
+                yield "\n"
+    if not result.get("structuredPatch") and result.get("type") == "create":
+        content = result.get("content")
+        if isinstance(content, str):
+            # A created file has no before state. Bound the preview before splitting it.
+            for line in content[:PATCH_CHARS + 1].splitlines():
+                yield "+"
+                yield from line
+                yield "\n"
 
 
 def _count(value):

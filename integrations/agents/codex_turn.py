@@ -3,8 +3,15 @@
 The runner treats this like any agent CLI: the message on stdin, one JSON line
 per event on stdout, the exit code at the end. Behind that it speaks the
 app-server's JSON-RPC (``initialize`` -> ``thread/start|resume`` ->
-``turn/start`` -> ``turn/completed``) and lives exactly one turn, so nothing is
-held open between turns.
+``turn/start`` -> ``turn/completed``) and lives for one QAVector turn, so
+nothing is held open between turns.
+
+With ``stream`` in its spec its input is JSON lines, ``{"message": ...}``, as
+Claude Code's is: the first is the turn's message, and each later one is what
+the person says meanwhile - handed to the running turn (``turn/steer``), or,
+when that turn has ended, taken as another turn of the same thread before this
+process ends. Every ``end`` line counts its own tokens; closing the input says
+nothing more will come, and the process ends once all of it is answered.
 
     https://learn.chatgpt.com/docs/app-server
 
@@ -245,9 +252,14 @@ def sandbox(mode, plan):
 class Turn:
     """One turn, as :func:`main` runs it."""
 
-    def __init__(self, spec, prompt, out=None, env=None):
+    def __init__(self, spec, prompt, out=None, env=None, said=None, closed=None):
         self.spec = spec
         self.prompt = prompt
+        # What the person says while this runs (texts), and whether they can
+        # say more - None for a turn told everything at its start.
+        self.said = said
+        self.closed = closed
+        self.waiting = []                 # said, and not yet handed to Codex
         self.out = out or sys.stdout.buffer
         self.env = env if env is not None else dict(os.environ)
         self.cwd = os.getcwd()
@@ -425,7 +437,7 @@ class Turn:
         _sandbox, policy, approval = sandbox(self.spec.get("mode"), self.spec.get("plan"))
         effort = self.spec.get("effort") or None
         params = {"threadId": self.thread_id, "cwd": self.cwd,
-                  "input": [{"type": "text", "text": self.prompt, "text_elements": []}],
+                  "input": [_text(self.prompt)],
                   "approvalPolicy": approval, "approvalsReviewer": "user", "sandboxPolicy": policy,
                   # Always said: a mode chosen for one turn stays for the next.
                   "collaborationMode": {"mode": "plan" if self.spec.get("plan") else "default",
@@ -440,6 +452,28 @@ class Turn:
         if not self.turn_id:
             raise ProtocolError("Codex started no turn.")
 
+    def _heard(self):
+        """What was said since last asked, moved to :attr:`waiting`."""
+        while self.said is not None:
+            try:
+                self.waiting.append(self.said.get_nowait())
+            except queue.Empty:
+                return
+
+    def _steer(self):
+        """Hand what was said to the turn while it runs. When the turn ended
+        meanwhile, it waits for the next one."""
+        self._heard()
+        if not self.waiting or not self.turn_id or self.ended is not None or self.interrupting:
+            return
+        texts, self.waiting = self.waiting, []
+        try:
+            self.server.call("turn/steer", {"threadId": self.thread_id, "expectedTurnId": self.turn_id,
+                                            "input": [_text(text) for text in texts]},
+                             interrupted=self.stopping.is_set)
+        except ProtocolError:
+            self.waiting = texts + self.waiting
+
     def _follow(self):
         """Read until the turn ends; its ``turn`` object."""
         deadline = None
@@ -449,8 +483,21 @@ class Turn:
                 deadline = deadline or time.monotonic() + INTERRUPT_GRACE
                 if time.monotonic() >= deadline:
                     return None
+            else:
+                self._steer()
             self.server.pump(0.1)
         return self.ended
+
+    def _more(self):
+        """Whether anything said is still unanswered: waited for until the
+        input closes - the runner closes it once it has read an end."""
+        while True:
+            self._heard()
+            if self.waiting or self.stopping.is_set():
+                return bool(self.waiting) and not self.stopping.is_set()
+            if self.closed is None or self.closed.wait(0.05):
+                self._heard()
+                return bool(self.waiting) and not self.stopping.is_set()
 
     def run(self):
         """The exit code: 0 completed, 1 failed, 130 stopped."""
@@ -460,7 +507,17 @@ class Turn:
             self._open()
             model = self._thread()
             self._start_turn(model)
-            turn = self._follow()
+            while True:
+                turn = self._follow()
+                if turn is None or (self.stopping.is_set() and not self.asked):
+                    return STOPPED_EXIT
+                code = self._end(turn)
+                if code != 0 or not self._more():
+                    return code
+                # Said after that turn ended: answered as the next, in this thread.
+                self.prompt, self.waiting = "\n\n".join(self.waiting), []
+                self.ended, self.turn_id, self.asked, self.interrupting = None, "", False, False
+                self._start_turn(model)
         except ProtocolError as exc:
             if self.stopping.is_set():
                 return STOPPED_EXIT
@@ -469,9 +526,12 @@ class Turn:
         finally:
             if self.server is not None:
                 self.server.close()
-        if turn is None or (self.stopping.is_set() and not self.asked):
-            return STOPPED_EXIT
+
+    def _end(self, turn):
+        """Say how ``turn`` ended, with its own tokens; the exit code it means."""
         tokens, window = self.tokens()
+        if self.usage is not None:
+            self.usage[0] = dict(self.usage[1])       # the next end counts from here
         status = turn.get("status")
         error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
         if status == "completed" or (status == "interrupted" and self.asked):
@@ -488,6 +548,10 @@ def _int(value):
     return value if type(value) is int else 0
 
 
+def _text(text):
+    return {"type": "text", "text": text, "text_elements": []}
+
+
 def main(argv):
     """``--codex-turn --spec=<json>``; the message on stdin."""
     spec = None
@@ -500,5 +564,28 @@ def main(argv):
     if not isinstance(spec, dict) or not isinstance(spec.get("binary"), str) or not spec["binary"]:
         print("--codex-turn needs --spec with the Codex binary.", file=sys.stderr)
         return 2
-    prompt = sys.stdin.buffer.read().decode("utf-8", "replace")
-    return Turn(spec, prompt).run()
+    if not spec.get("stream"):
+        prompt = sys.stdin.buffer.read().decode("utf-8", "replace")
+        return Turn(spec, prompt).run()
+    said, closed = queue.Queue(), threading.Event()
+    lines = iter(sys.stdin.buffer.readline, b"")
+    prompt = _said(next(lines, b"")) or ""
+
+    def hear():
+        for line in lines:
+            text = _said(line)
+            if text:
+                said.put(text)
+        closed.set()
+
+    threading.Thread(target=hear, daemon=True).start()
+    return Turn(spec, prompt, said=said, closed=closed).run()
+
+
+def _said(line):
+    """The message of one input line, ``{"message": ...}``; None for noise."""
+    try:
+        message = json.loads(line.decode("utf-8", "replace")).get("message")
+    except (ValueError, AttributeError):
+        return None
+    return message if isinstance(message, str) else None

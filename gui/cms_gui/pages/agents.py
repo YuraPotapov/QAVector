@@ -393,7 +393,7 @@ class ConnectionDialog(QDialog):
         self.show_limits_in_chat.setToolTip("Show the remaining provider limit in this connection's chats.")
         column.addWidget(self.show_limits_in_chat, 0, Qt.AlignLeft)
         self.chat_limit_view = QComboBox()
-        for label, value in (("Daily / short-term", "short"), ("Weekly", "weekly"), ("Combined average", "combined")):
+        for label, value in (("Daily / short-term (D)", "short"), ("Weekly (W)", "weekly"), ("Both", "combined")):
             self.chat_limit_view.addItem(label, value)
         selected_view = self.chat_limit_view.findData(self.connection.get("chat_limit_view", "combined"))
         self.chat_limit_view.setCurrentIndex(selected_view if selected_view >= 0
@@ -401,17 +401,9 @@ class ConnectionDialog(QDialog):
         self.chat_limit_view.setEnabled(self.show_limits_in_chat.isChecked())
         self.show_limits_in_chat.toggled.connect(self.chat_limit_view.setEnabled)
         column.addWidget(widgets.field(
-            "Chat progress bar", self.chat_limit_view,
-            "Daily prefers a 24-hour account limit and can use a shorter provider window. "
-            "Combined average gives the daily and weekly remaining percentages equal weight."))
-        self.split_week_days = QCheckBox("Split by week days")
-        self.split_week_days.setChecked(self.connection.get("split_week_days") is True)
-        self.split_week_days.setToolTip(
-            "Divide the weekly limit in chat into its seven days, counted from when the provider resets it. "
-            "Hovering over a day for a moment shows its date.")
-        self.split_week_days.setEnabled(self.show_limits_in_chat.isChecked())
-        self.show_limits_in_chat.toggled.connect(self.split_week_days.setEnabled)
-        column.addWidget(self.split_week_days, 0, Qt.AlignLeft)
+            "Limits in chat", self.chat_limit_view,
+            "What is left, said before Settings - D: the daily limit (a 24-hour account limit, "
+            "else a shorter provider window), W: the weekly one."))
         self.git_tracker = QCheckBox("Git Tracker")
         self.git_tracker.setChecked(self.connection.get("git_tracker") is True)
         self.git_tracker.setToolTip(
@@ -623,7 +615,6 @@ class ConnectionDialog(QDialog):
                       "effort": self.effort.currentData() or "",
                       "show_limits_in_chat": self.show_limits_in_chat.isChecked(),
                       "chat_limit_view": self.chat_limit_view.currentData(),
-                      "split_week_days": self.split_week_days.isChecked(),
                       "git_tracker": self.git_tracker.isChecked(),
                       "role": self.role.text().strip(),
                       "qavector_access": {key: box.isChecked() for key, box in self.access.items()},

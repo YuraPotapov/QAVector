@@ -872,6 +872,7 @@ class MainWindow(QMainWindow):
         self.integrations.pinned_changed.connect(self._refresh_pinned)
         self.pinned_rail.opened.connect(self._open_pinned)
         self.pinned_rail.unpinned.connect(self.integrations.unpin)
+        self.integrations.shown_changed.connect(self._mark_pinned)
         self._pinned_room = Resized(self._rail_scroll.viewport(), self._fit_pinned)
         self._refresh_pinned()
         # A connection added, changed or removed: the host's delegation targets follow.
@@ -1066,6 +1067,7 @@ class MainWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
         self._page_key = key
+        self._mark_pinned()
         self.cycle_strip.refresh()
         self.settings.page = key
         # RUN follows whichever of the two launching pages you were last in, so
@@ -1145,6 +1147,27 @@ class MainWindow(QMainWindow):
     def _refresh_pinned(self):
         self.pinned_rail.set_links(self.integrations.pinned())
         self._fit_pinned()
+        self._mark_pinned()
+
+    def _mark_pinned(self):
+        """The rail marks where the window is: a pinned link when the
+        Integrations page has its provider in front, else the page's own entry."""
+        rail = getattr(self, "pinned_rail", None)
+        if rail is None:
+            return
+        on_page = getattr(self, "_page_key", None) == "integrations"
+        shown = self.integrations.shown_provider() if on_page else ""
+        key = (shown, None) if shown else None
+        pinned = key is not None and any((link.get("provider"), link.get("target")) == key
+                                         for link in rail.links)
+        rail.set_active(key if pinned else None)
+        button = self._nav_buttons.get("integrations")
+        if button is not None:
+            wanted = "true" if on_page and not pinned else "false"
+            if button.property("active") != wanted:
+                button.setProperty("active", wanted)
+                button.style().unpolish(button)
+                button.style().polish(button)
 
     def _fit_pinned(self):
         """As many pinned links as the rail has room for: what the window leaves

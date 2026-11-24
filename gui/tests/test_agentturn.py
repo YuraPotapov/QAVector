@@ -58,6 +58,14 @@ if "UNICODE" in message:
     sys.stdout.buffer.write(b"\n")
     say({"ok": True})
     sys.exit(0)
+if "FOLLOW" in message:
+    # Heard on stdin, only when the document asks for it, as the core does.
+    say({"event": {"type": "thinking", "text": "listening", "seq": 2,
+                   "asked": document.get("follow_ups")}})
+    said = json.loads(sys.stdin.readline())["say"]
+    say({"event": {"type": "user", "text": said["message"], "follow_up": True, "id": said["id"], "seq": 3}})
+    say({"ok": True, "turn": {"state": "completed", "n": 1}})
+    sys.exit(0)
 say({"event": {"type": "thinking", "text": "hm", "seq": 2}})
 if "HANG" in message:
     time.sleep(60)
@@ -189,3 +197,16 @@ def test_shutting_down_mid_turn_ends_the_process_before_the_object_goes(qapp, co
     qapp.processEvents()
     assert not turn.is_running()
     assert len(answers) == 1 and answers[0]["kind"] == "stopped"
+
+
+def test_what_is_said_meanwhile_reaches_the_core_on_its_stdin(qapp, core):
+    turn = AgentTurn(core, "20261111-172345-3fa91c", {"message": "FOLLOW"})
+
+    def during(event, _events):
+        if event["type"] == "thinking":
+            assert turn.follow_up("f-1", "and the tests too")
+
+    events, answers = _run(qapp, turn, during)
+    assert events[1]["asked"] is True
+    assert events[-1] == {"type": "user", "text": "and the tests too", "follow_up": True, "id": "f-1", "seq": 3}
+    assert answers[0]["ok"] and not turn.follow_up("f-2", "too late")       # over: nothing more is heard

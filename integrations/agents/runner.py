@@ -19,6 +19,7 @@ person, who can see what it did and say what to do next.
 
 import json
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -56,6 +57,26 @@ class TurnStop(threading.Event):
     def set(self):
         super().set()
         self.wake.set()
+
+
+class FollowUps:
+    """What the person says to a turn while it runs: put by whoever hears
+    them, taken by the turn, which hands each to the agent's program while its
+    input is open - one process, one conversation - and otherwise says it was
+    not taken, for the caller to send as the next turn."""
+
+    def __init__(self):
+        self._said = queue.Queue()
+
+    def put(self, message_id, text):
+        self._said.put({"id": str(message_id or ""), "text": str(text or "")})
+
+    def take(self, timeout=None):
+        """The next thing said, or None when nothing is said within ``timeout``."""
+        try:
+            return self._said.get(timeout=timeout) if timeout else self._said.get_nowait()
+        except queue.Empty:
+            return None
 
 
 class Refused(Exception):
@@ -222,7 +243,7 @@ TRIGGERS = ("tasks_finished",)
 
 def send(root, session_id, message, agents_path=None, mode=None, model=None,
          effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None,
-         plan=None, qavector=None, trigger=None, read_tasks=None):
+         plan=None, qavector=None, trigger=None, read_tasks=None, follow_ups=None):
     """Take one turn. Returns ``{"session", "turn"}``; raises :class:`Refused`.
 
     ``mode``, ``model``, ``effort``, ``skills`` (names in the library at
@@ -234,6 +255,10 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     turn QAVector through MCP, as its connection's grants allow (ADR-003).
     ``emit`` is told each event once it is on disk. ``stop`` is an Event: set,
     it ends the CLI and the turn is recorded as stopped.
+    ``follow_ups`` (:class:`FollowUps`) is what the person says while the turn
+    runs: each is handed to the agent and recorded as a ``user`` event with
+    ``follow_up`` and its ``id``, or - when the program can take no more -
+    answered by a ``follow_up.refused`` event, recorded nowhere.
 
     A turn that was started always returns, however it ended - ``turn["state"]``
     says how. Only a turn that could not be started at all is refused.
@@ -243,7 +268,8 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     stop = stop or TurnStop()
     chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
               "skills_root": skills_root, "attachments": attachments if attachments is not None else [],
-              "qavector": qavector, "trigger": trigger if trigger in TRIGGERS else None}
+              "qavector": qavector, "trigger": trigger if trigger in TRIGGERS else None,
+              "follow_ups": follow_ups}
     try:
         sessions.load(root, session_id)             # not there: said before the lock
         with sessions.lock(root, session_id):
@@ -448,7 +474,10 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             except (OSError, ValueError):
                 pass  # Live inspection must not prevent a turn from running.
         outcome = _run(adapter, argv, folder, effective, seen, prompt, where, record, tell, stop,
-                       cost_before=sessions.cost_so_far(session) if resume else None)
+                       cost_before=sessions.cost_so_far(session) if resume else None,
+                       # A planning turn answers in a shape of its own: what is
+                       # said meanwhile waits for the next turn.
+                       follow_ups=None if planning else chosen.get("follow_ups"))
         if before is not None:
             turn["changes"] = _changed(session_dir, where, folder, before, written)
             emit(record.add(dict(turn["changes"], type="changes")))
@@ -535,11 +564,17 @@ def _collect_result(outcome, event):
 
 
 def _run(adapter, argv, folder, effective, seen, message, where, record, emit, stop,
-         cost_before=None):
+         cost_before=None, follow_ups=None):
     """Run the CLI once and read it to the end. Never raises for the CLI's
     sake: how it went is the answer. ``seen`` is what a restricted CLI is
     shown besides the session's folder; ``cost_before`` what the conversation
-    had cost when this turn began, for one the CLI continues."""
+    had cost when this turn began, for one the CLI continues.
+
+    ``follow_ups`` are handed to a program that reads its input as a stream,
+    for as long as that input is open: until its answer with nothing left
+    running in the background, or its stop. Closing the input does not take
+    back what was written before it - the program reads that, answers it, and
+    only then ends, and every answer is read here to the end of its stream."""
     outcome = {"state": sessions.FAILED, "error": "", "cost_usd": None,
                "cost_total_usd": None, "steps": None, "tokens": None, "context": None,
                "provider_session": "", "reported": False}
@@ -565,19 +600,59 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
         if isinstance(stop, TurnStop):
             stop.wake.clear()
         stream_message = getattr(adapter, "stream_message", None)
+        if stream_message is not None and not getattr(adapter, "streaming", lambda: True)():
+            stream_message = None           # this transport reads one message to its end
+        # The program's input, written by the feeder, the relay and the reader
+        # (which closes it): one at a time, and nothing after it is closed.
+        input_lock = threading.Lock()
+        input_open = [True]
+        # The record is written from the reader and the relay alike.
+        record_lock = threading.Lock()
+
+        def note(event):
+            with record_lock:
+                emit(record.add(event))
+
+        def close_input():
+            with input_lock:
+                input_open[0] = False
+                _close_input(process)
 
         def feed():
             # On a thread of its own: a long message fills the pipe, and the
             # CLI may write before it has read all of it.
-            try:
-                payload = stream_message(message) if stream_message else message
-                process.stdin.write(payload.encode("utf-8"))
-                if stream_message:
-                    process.stdin.flush()
-                else:
-                    process.stdin.close()
-            except (OSError, ValueError):
-                pass                    # it ended without reading; the stream says why
+            with input_lock:
+                try:
+                    payload = stream_message(message) if stream_message else message
+                    process.stdin.write(payload.encode("utf-8"))
+                    if stream_message:
+                        process.stdin.flush()
+                    else:
+                        input_open[0] = False
+                        process.stdin.close()
+                except (OSError, ValueError):
+                    input_open[0] = False   # it ended without reading; the stream says why
+
+        def relay():
+            # What the person says meanwhile, handed on while the input is open.
+            while True:
+                said = follow_ups.take(0.1)
+                if said is None:
+                    if finished.is_set():
+                        return
+                    continue
+                with input_lock:
+                    taken = bool(stream_message) and input_open[0] and not stop.is_set()
+                    if taken:
+                        try:
+                            process.stdin.write(stream_message(said["text"]).encode("utf-8"))
+                            process.stdin.flush()
+                        except (OSError, ValueError):
+                            input_open[0] = taken = False
+                    if taken:
+                        note({"type": "user", "text": said["text"], "follow_up": True, "id": said["id"]})
+                    else:
+                        emit({"type": "follow_up.refused", "id": said["id"]})
 
         def watch():
             if isinstance(stop, TurnStop):
@@ -594,6 +669,8 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
 
         threads = [threading.Thread(target=feed, daemon=True),
                    threading.Thread(target=watch, daemon=True)]
+        if follow_ups is not None:
+            threads.append(threading.Thread(target=relay, daemon=True))
         for thread in threads:
             thread.start()
         reader = Reader(adapter, cost_before=cost_before)
@@ -609,7 +686,7 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                     if event["type"] == "background.tasks":
                         background_count = event["count"]
                         if awaiting_reply and not background_count:
-                            _close_input(process)
+                            close_input()
                         continue
                     if event["type"] in (sessions.COMPLETED, sessions.FAILED):
                         _collect_result(outcome, event)
@@ -618,18 +695,18 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                         outcome.update(state=event["type"], reported=True, error=event.get("error", ""))
                         awaiting_reply = bool(background_count and event["type"] == sessions.COMPLETED)
                         if awaiting_reply:
-                            emit(record.add({"type": "background.waiting", "count": background_count,
-                                             "text": event.get("text") or ""}))
+                            note({"type": "background.waiting", "count": background_count,
+                                  "text": event.get("text") or ""})
                             continue
                         if stream_message:
-                            _close_input(process)
+                            close_input()
                         # Said once what the turn changed is kept: the end
                         # is the last thing a turn says.
                         outcome["end"] = event
                         continue
                     if event["type"] in ("plan", "questions"):
                         outcome["asked"] = event["type"]
-                    emit(record.add(event))
+                    note(event)
             code = process.wait()
         finally:
             finished.set()
@@ -640,7 +717,7 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                 process.wait()
             for thread in threads:
                 thread.join(STOP_GRACE + 1)
-            _close_input(process)
+            close_input()
     if awaiting_reply:
         outcome.update(state=sessions.STOPPED if stop.is_set() else sessions.FAILED,
                        error="" if stop.is_set() else "The agent exited before its background follow-up arrived.")

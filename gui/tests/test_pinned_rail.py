@@ -54,3 +54,16 @@ def test_folded_it_shows_marks_only(rail):
     assert all(button.toolButtonStyle() == Qt.ToolButtonIconOnly for button in rail.buttons)
     rail.set_collapsed(False)
     assert all(button.toolButtonStyle() == Qt.ToolButtonTextBesideIcon for button in rail.buttons)
+
+
+def test_the_link_in_front_is_marked_and_stays_marked_through_a_refit_or_behind_more(rail):
+    rail.set_links(LINKS)
+    rail.fit(rail.row_height() * 3)
+    rail.set_active(("agents", None))
+    assert [button.property("active") for button in rail.buttons] == ["false", "true", "false"]
+    rail.set_links(LINKS)                                    # rebuilt: still marked
+    assert rail.buttons[1].property("active") == "true"
+    rail.fit(rail.row_height() * 1)                          # behind "+N": "+N" is marked
+    assert rail.more.isVisible() and rail.more.property("active") == "true"
+    rail.set_active(None)
+    assert {button.property("active") for button in rail.buttons + [rail.more]} == {"false"}

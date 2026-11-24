@@ -4,6 +4,7 @@ The app-server side speaks enough JSON-RPC for one QAVector turn. What the
 message says decides the turn:
 
     HANG    nothing until turn/interrupt, then an interrupted turn
+    STEER   says it is working, waits for turn/steer, answers with what it was told
     CRASH   the process exits 3
     REFUSE  a failed turn
     ASK     request_user_input, then (after turn/interrupt) an interrupted turn
@@ -180,6 +181,16 @@ if args[0] == "app-server":
                                                {"label": "SQLite", "description": "s"}]}]}})
                 wait_interrupt(turn)
                 continue
+            if "STEER" in text:
+                say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn,
+                     "item": {"type": "agentMessage", "id": "w-%d" % turns, "text": "Working"}}})
+                while True:
+                    message = read()
+                    if message.get("method") == "turn/steer":
+                        assert message["params"]["expectedTurnId"] == turn
+                        say({"id": message["id"], "result": {"turnId": turn}})
+                        text = "steered by " + message["params"]["input"][0]["text"]
+                        break
             if "PLAN" in text:
                 say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn,
                      "item": {"type": "plan", "id": "plan-1", "text": "1. Change a.py\n2. Test"}}})

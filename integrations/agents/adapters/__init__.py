@@ -15,8 +15,13 @@ An adapter is a module with:
     stages(line, ...)     one line of the CLI's event stream, as rows to show
     MODES                 what a conversation may let the agent do, narrowest first
     turn_argv(binary, ..) the command line for one turn; the message goes to stdin
+    stream_message(text)  optional: one message as a line of a turn's input, which
+                          then stays open for what is said while the turn runs
+    streaming()           optional: False when this transport reads one message
+                          to its end after all
     turn_env(env)         the environment a turn is started with
     events(line)          one line of the stream, for a conversation's record
+    read_patch(log, id)   optional diff of a completed file operation from its saved stream
 
 Imported by name rather than discovered, so a frozen build carries every one of
 them and a kind that is not listed here cannot be loaded by writing it into a

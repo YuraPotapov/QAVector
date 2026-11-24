@@ -47,6 +47,8 @@ class IntegrationsPage(QWidget):
     search_sources_changed = Signal()
     #: What is pinned to the sidebar changed.
     pinned_changed = Signal()
+    #: Another provider came to the front, or the catalog: see :meth:`shown_provider`.
+    shown_changed = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -55,6 +57,7 @@ class IntegrationsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
+        self.stack.currentChanged.connect(lambda _index: self.shown_changed.emit())
         outer.addWidget(self.stack)
 
         catalog = QWidget()
@@ -372,6 +375,15 @@ class IntegrationsPage(QWidget):
         else:
             self.open_provider(provider)
         return self.hosts[provider].window is None
+
+    def shown_provider(self):
+        """The provider this page has in front - its view, or the note that it
+        is in a window of its own - or "" for the catalog."""
+        current = self.stack.currentWidget()
+        for provider, host in self.hosts.items():
+            if current in (host.view, host.placeholder):
+                return provider
+        return ""
 
     def open_provider(self, provider, trail=()):
         """A provider in front. ``trail`` is the way it was reached, for its

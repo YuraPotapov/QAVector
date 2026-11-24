@@ -26,7 +26,7 @@ import time
 import runtime_paths
 from integrations.agents import codex_turn, locate
 from integrations.agents.adapters import claude
-from integrations.agents.contracts import ProviderCapabilities, Unsupported, rate_limit_window
+from integrations.agents.contracts import PATCH_CHARS, ProviderCapabilities, Unsupported, rate_limit_window
 
 KIND, NAME, DEFAULT_BINARY = "codex", "Codex", "codex"
 MODEL_DEFAULT_LABEL = "Use Codex default"
@@ -44,7 +44,6 @@ MODE_DESCRIPTION = ("Read: read-only sandbox. Edit: edit files in the workspace-
 #: Codex's plan item (see :mod:`integrations.agents.codex_turn`).
 PLANS = True
 STATUS_TIMEOUT = 20.0
-PATCH_CHARS = 256 * 1024
 
 #: ``exec`` switches turns back to ``codex exec --json``.
 TRANSPORT_ENV = "QAVECTOR_CODEX_TRANSPORT"
@@ -154,13 +153,24 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
         server = server_command(qavector["socket"], qavector["token_file"])
     spec = {"binary": binary, "mode": mode, "model": str(model or ""), "effort": str(effort or ""),
             "thread": session if resume else "", "plan": bool(plan),
-            "skills_root": skills_dir or "", "qavector": server}
+            "skills_root": skills_dir or "", "qavector": server, "stream": True}
     return codex_turn.launcher() + ["--codex-turn", "--spec=" + json.dumps(spec, separators=(",", ":"))]
 
 
 def plan_prompt(message):
     """A planning turn's message as it is: Codex's plan mode says how to plan."""
     return str(message or "")
+
+
+def streaming():
+    """Whether a turn reads its input as lines it may be given more of: the
+    app-server bridge does; ``codex exec`` reads one message to its end."""
+    return not exec_transport()
+
+
+def stream_message(message):
+    """One message for the bridge, which reads its input a line at a time."""
+    return json.dumps({"message": str(message or "")}, ensure_ascii=False) + "\n"
 
 
 def exec_argv(binary, mode="read", model="", effort="", session="", resume=False,

@@ -198,33 +198,14 @@ class ProviderLimitCard(widgets.BlueprintPanel):
         selected = {"short": max(short, key=priority, default=None),
                     "weekly": max(weekly, key=priority, default=None)}
         mode = self.connection.get("chat_limit_view", "combined")
-        windows = [window for key, window in selected.items() if window and (key == mode or mode == "combined")]
+
         def remaining(window):
             return max(Decimal(0), 100 - Decimal(str(window["used_percent"])))
 
-        left = sum(remaining(window) for window in windows) / len(windows) if windows else None
-        # The window the bar does not show is a thin line under it.
-        other = selected.get({"short": "weekly", "weekly": "short"}.get(mode, ""))
-        secondary = float(remaining(other)) if other else None
-        # The weekly window's days, from when the provider says it resets - on
-        # the bar or on the line, wherever the week is shown on its own.
-        weekly = selected["weekly"] if mode in ("weekly", "short") and self.connection.get("split_week_days") else None
-        week = None
-        if weekly and weekly.get("resets_at"):
-            week = (weekly["resets_at"] - weekly["duration_minutes"] * 60, weekly["resets_at"])
-        label = {"short": "Daily / short-term limit", "weekly": "Weekly limit"}.get(mode, "Combined average")
-        if len(windows) == 2:
-            label += " (%s and %s)" % (windows[0]["label"], windows[1]["label"])
-        elif windows:
-            label = windows[0]["label"]
-            if mode == "combined":
-                label += " (only available window)"
-        line = "%s unavailable" % label if left is None else "%s · %s%% remaining" % (
-            label, format(left.normalize(), "f"))
-        tooltip = ["Chat bar · " + line] if self.windows else []
-        if other:
-            tooltip.append("Line under it · %s · %s%% remaining" % (
-                other["label"], format(remaining(other).normalize(), "f")))
+        # What the chat says before Settings: each window the view takes, left.
+        shown = {key: float(remaining(window)) if window and (key == mode or mode == "combined") else None
+                 for key, window in selected.items()}
+        tooltip = []
         for window in self.windows:
             percent = format(remaining(window).normalize(), "f")
             line = "%s · %s%% remaining" % (window["label"], percent)
@@ -234,9 +215,7 @@ class ProviderLimitCard(widgets.BlueprintPanel):
             tooltip.append(line)
         if self.status.text():
             tooltip.append(self.status.text())
-        return {"remaining_percent": float(left) if left is not None else None,
-                "secondary_percent": secondary, "week": week, "stale": self.stale(),
-                "tooltip": "\n".join(tooltip)}
+        return {"windows": shown, "stale": self.stale(), "tooltip": "\n".join(tooltip)}
 
     def update_status(self):
         checked = _local_time(self.checked_at)

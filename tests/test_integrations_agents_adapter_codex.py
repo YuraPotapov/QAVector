@@ -243,6 +243,39 @@ def test_new_and_resumed_turns_keep_provider_identity_and_raw_events(world):
     assert len(starts) == 2 and all("features.plugins=false" in argv for argv in starts)
 
 
+def test_what_is_said_while_codex_works_steers_its_turn(world):
+    root, path, session, logged, _work = world
+    follow_ups = runner.FollowUps()
+    events = []
+
+    def emit(event):
+        events.append(event)
+        if event.get("type") == "text" and event.get("text") == "Working":
+            follow_ups.put("f-1", "and the tests too")
+
+    result = runner.send(root, session["id"], "STEER", agents_path=path, emit=emit, follow_ups=follow_ups)
+    assert result["turn"]["state"] == "completed"
+    assert [one["input"][0]["text"] for one in _requests(logged, "turn/steer")] == ["and the tests too"]
+    assert len(_requests(logged, "turn/start")) == 1
+    assert any(event.get("follow_up") and event.get("id") == "f-1" for event in events)
+    # Codex has no closing text of its own: the end says all of the turn, as ever.
+    assert sessions.events(root, session["id"])[-1]["text"] == "Working\n\nAnswer: steered by and the tests too"
+
+
+def test_what_is_said_as_codex_ends_its_turn_is_answered_as_the_next_in_the_same_run(world):
+    root, path, session, logged, _work = world
+    follow_ups = runner.FollowUps()
+    follow_ups.put("f-1", "and more")            # written as the turn starts; it ends before steering
+    events = []
+    result = runner.send(root, session["id"], "hello", agents_path=path, emit=events.append,
+                         follow_ups=follow_ups)
+    assert result["turn"]["state"] == "completed"
+    assert [one["input"][0]["text"] for one in _requests(logged, "turn/start")] == ["hello", "and more"]
+    assert len([one for one in logged() if "argv" in one]) == 1                 # one process
+    assert [event["text"] for event in events if event["type"] == "text"] == ["Answer: hello", "Answer: and more"]
+    assert sessions.events(root, session["id"])[-1]["text"].endswith("Answer: and more")
+
+
 @pytest.mark.parametrize("message,state", [("CRASH", "failed"), ("REFUSE", "failed"), ("HANG", "stopped")])
 def test_failure_and_stop_are_not_success(world, message, state):
     root, path, session, logged, _work = world

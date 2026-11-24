@@ -81,6 +81,7 @@ skills library - each beside the user's data by default.
 import json
 import os
 import sys
+import threading
 import time
 from collections import namedtuple
 
@@ -538,6 +539,22 @@ def _send(call):
     document = _document(call.source)
     stop = runner.TurnStop()
     listening = [True]
+    follow_ups = None
+    if document.get("follow_ups") is True:
+        # Asked for by the one reading this turn (the chat): what the person
+        # says meanwhile comes on stdin, a JSON line each - {"say": {"id", "message"}}.
+        follow_ups = runner.FollowUps()
+
+        def hear():
+            for line in sys.stdin:
+                try:
+                    said = json.loads(line).get("say")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(said, dict) and str(said.get("message") or "").strip():
+                    follow_ups.put(said.get("id"), said["message"])
+
+        threading.Thread(target=hear, daemon=True).start()
 
     def emit(event):
         # A reader that went away must not end the turn: what the agent does
@@ -565,7 +582,8 @@ def _send(call):
                              skills=document.get("skills"), skills_root=call.skills,
                              emit=emit, stop=stop, attachments=document.get("attachments"),
                              plan=document.get("plan"), qavector=document.get("qavector"),
-                             trigger=document.get("trigger"), read_tasks=call.read_tasks)
+                             trigger=document.get("trigger"), read_tasks=call.read_tasks,
+                             follow_ups=follow_ups)
     except runner.Refused as exc:
         return _refusal(exc.kind, str(exc))
     finally:
@@ -622,8 +640,7 @@ def _changes(call):
 
 
 def _tool_patch(call):
-    from integrations.agents import sessions
-    from integrations.agents.adapters import codex
+    from integrations.agents import adapters, sessions
     session_id = _one(call, "tool-patch")
     document = _document(call.source)
     turn, item = document.get("turn"), document.get("item")
@@ -634,7 +651,8 @@ def _tool_patch(call):
         if turn > len(session.get("turns") or []):
             return _refusal("invalid", "This conversation has no turn %s." % turn)
         where = sessions.turn_directory(call.sessions, session_id, turn)
-        found = codex.read_patch(os.path.join(where, "stdout.log"), item)
+        read_patch = getattr(adapters.get(session["kind"]), "read_patch", None)
+        found = read_patch(os.path.join(where, "stdout.log"), item) if read_patch else None
     except sessions.SessionError as exc:
         return _refusal(exc.kind, str(exc))
     except FileNotFoundError:

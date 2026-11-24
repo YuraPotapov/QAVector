@@ -22,6 +22,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent_cli_fixture import fake_agent, starts                    # noqa: E402
+from codex_cli_fixture import fake_codex                             # noqa: E402
 from integrations import cli                                        # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the stand-in CLI is a script")
@@ -105,8 +106,26 @@ def test_send_accepts_files_and_history_keeps_their_metadata(agents):
     assert os.path.isfile(os.path.join(agents.sessions, session["id"], attached[0]["path"]))
 
 
-def test_tool_patch_reads_the_requested_operation_from_the_saved_turn(agents):
+def test_send_hears_follow_ups_on_stdin_only_when_asked(agents, monkeypatch):
+    import io
     session = agents.new()
+    said = json.dumps({"say": {"id": "f-1", "message": "and the tests too"}}) + "\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(said))
+    code, lines = agents.lines("send", session["id"], document={"message": "hello"})
+    assert code == 0 and sys.stdin.tell() == 0                  # not asked: stdin left alone
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not json\n" + said))
+    code, lines = agents.lines("send", session["id"], document={"message": "FOLLOW", "follow_ups": True})
+    assert code == 0 and lines[-1]["ok"] and len(starts(agents.log)) == 2
+    followed = [line["event"] for line in lines if line.get("event", {}).get("follow_up")]
+    assert [(one["id"], one["text"]) for one in followed] == [("f-1", "and the tests too")]
+    assert lines[-2]["event"]["text"] == "Done: and the tests too"
+
+
+def test_tool_patch_reads_the_requested_operation_from_the_saved_turn(agents):
+    code, saved = agents("save", document={"connection": {
+        "name": "Codex", "kind": "codex", "binary": fake_codex(agents.tmp)}})
+    assert code == 0
+    session = agents.new(connection=saved["connection"]["id"])
     session_id = session["id"]
     code, _ = agents.lines("send", session_id, document={"message": "hello"})
     assert code == 0
@@ -119,6 +138,30 @@ def test_tool_patch_reads_the_requested_operation_from_the_saved_turn(agents):
     code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "first"})
     assert code == 0 and answer["files"] == first["changes"]
     code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "missing"})
+    assert code == 1 and answer["kind"] == "patch_unavailable"
+
+
+def test_tool_patch_reads_claude_edits_and_created_files(agents):
+    session_id = agents.new()["id"]
+    code, _ = agents.lines("send", session_id, document={"message": "hello"})
+    assert code == 0
+    recorded = Path(agents.sessions) / session_id / "turns" / "0001" / "stdout.log"
+    patch = [{"oldStart": 2, "oldLines": 1, "newStart": 2, "newLines": 1,
+              "lines": ["-old", "+new"]}]
+    records = []
+    for item_id, result, failed in (
+            ("edit", {"filePath": "a.py", "structuredPatch": patch}, False),
+            ("create", {"filePath": "b.py", "type": "create", "structuredPatch": [], "content": "new\n"}, False),
+            ("failed", {"filePath": "a.py", "structuredPatch": patch}, True)):
+        records.append({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": item_id, "is_error": failed}]}, "tool_use_result": result})
+    recorded.write_text("\n".join(map(json.dumps, records)), encoding="utf-8")
+
+    code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "edit"})
+    assert code == 0 and answer["files"] == [{"path": "a.py", "diff": "@@ -2,1 +2,1 @@\n-old\n+new\n"}]
+    code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "create"})
+    assert code == 0 and answer["files"] == [{"path": "b.py", "diff": "+new\n"}]
+    code, answer = agents("tool-patch", session_id, document={"turn": 1, "item": "failed"})
     assert code == 1 and answer["kind"] == "patch_unavailable"
 
 

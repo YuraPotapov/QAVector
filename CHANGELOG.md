@@ -16,6 +16,40 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.83] - 2026-11-25
+
+### Added
+
+- Claude Code file edits open a per-edit diff in chat using the same row as Codex.
+
+## [0.16.82] - 2026-11-25
+
+### Added
+- A message sent while an agent works goes to it at once, in the same turn,
+  instead of waiting in a queue. Claude Code takes it into its running work,
+  and also while it waits for a background task such as a dev server, which
+  keeps running. Codex takes it into its running turn, or answers it as the next
+  turn of the same run if the first has just ended. A message the turn can no
+  longer take waits first in line for the next turn, in the order it was typed.
+  A different access mode, model or effort, Plan first or attached files still
+  wait for the next turn, and Interrupt & send still stops the current work first.
+- A pinned integration is marked on the sidebar while its page is open, in place
+  of Integrations. When it is behind "+N more", that entry is marked instead.
+
+### Changed
+- The provider limit is now text before Settings: `D: 58% W: 90%` - what is left
+  of the daily and the weekly window. A window at 20% or less shows in the
+  warning colour. A click opens the limits. In Edit Connection, "Limits in chat"
+  chooses Daily, Weekly or Both. The limit bar and "Split by week days" are gone.
+- A new chat shows its name as soon as its first message is sent, not when the
+  agent has finished.
+- With Git Tracker on, the branch and the uncommitted-changes mark update about
+  a second and a half after each step of a running turn, not only at its end.
+- Resizing the window or the chat sidebar lays the conversation out once the
+  size has stopped changing. Meanwhile a skeleton covers it. Changing only the
+  height lays out nothing.
+- The Send button keeps its name while an agent works.
+
 ## [0.16.81] - 2026-11-24
 
 ### Added

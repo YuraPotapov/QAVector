@@ -11,6 +11,10 @@ use, and then what the message asks for by keyword::
     CRASH        writes to stderr and exits 3 with no result
     SILENT       exits 0 with no result
     HANG         thinks, then waits to be stopped
+    FOLLOW       says it is working, reads what is said meanwhile, answers the
+                 message and then that, and ends when its input does
+    BACKGROUND HOLD  starts a server that never ends, answers, then answers
+                 what is said while it waits, and waits to be stopped
 
 Every start is written to the file ``FAKE_AGENT_LOG`` names - its argv, where
 it ran, what it was told and its pid - so a test can say what the CLI was
@@ -38,8 +42,20 @@ def say(payload):
     print(json.dumps(payload), flush=True)
 
 
+def line():
+    # Byte by byte from the descriptor: nothing said after the first line is
+    # held in a buffer where select() cannot see it.
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = os.read(0, 1)
+        if not chunk:
+            break
+        data += chunk
+    return data.decode("utf-8")
+
+
 session = value("--session-id") or value("--resume")
-message = (json.loads(sys.stdin.readline())["message"]["content"]
+message = (json.loads(line())["message"]["content"]
            if "--input-format" in args else sys.stdin.read())
 log = os.environ.get("FAKE_AGENT_LOG")
 COST = 0.0125                               # what one turn costs
@@ -55,6 +71,32 @@ if log:
     with open(log, encoding="utf-8") as handle:
         taken = sum(1 for line in handle if session and session in json.loads(line)["argv"])
 say({"type": "system", "subtype": "init", "model": "fake-model", "session_id": session})
+if message.startswith("FOLLOW") or message.startswith("BACKGROUND HOLD"):
+    import select
+
+    def heard():
+        assert select.select([0], [], [], 5)[0]
+        return json.loads(line())["message"]["content"]
+
+    def result(text, count):
+        say({"type": "result", "result": text, "session_id": session, "num_turns": 1,
+             "total_cost_usd": COST * (taken + count), "usage": USAGE})
+
+    if message.startswith("FOLLOW"):
+        say({"type": "assistant", "message": {"content": [{"type": "text", "text": "Working on it"}]}})
+        more = heard()                      # read while it works, answered after
+        result("Done: FOLLOW", 0)
+        say({"type": "assistant", "message": {"content": [{"type": "text", "text": "You also said: " + more}]}})
+        result("Done: " + more, 1)
+        # Its input closed after the first answer; what came before it was still answered.
+        assert select.select([0], [], [], 5)[0] and os.read(0, 1) == b""
+        sys.exit(0)
+    say({"type": "system", "subtype": "background_tasks_changed",
+         "tasks": [{"task_id": "server", "task_type": "local_bash"}]})
+    result("Started the server", 0)
+    result("Still serving: " + heard(), 1)
+    time.sleep(30)
+    sys.exit(0)
 if message.startswith("BACKGROUND"):
     import select
     def background(ids):

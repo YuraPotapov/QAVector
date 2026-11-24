@@ -372,35 +372,29 @@ def test_provider_limits_follow_connections_and_open_from_chat(make):
     core = FakeCore(connections=connections, **{"rate-limits": read})
     agents = make(core).agents
     composer = agents.chat.composer
-    assert composer.context_row.remaining_percent == 58
-    assert "Weekly limit · 58% remaining" in composer.context_row.toolTip()
-    # The window the bar does not show: a thin line along its foot.
-    assert round(composer.context_row.secondary_percent, 6) == 89.876543
-    assert "Line under it · 5-hour limit" in composer.context_row.toolTip()
-    row = composer.context_row
-    image = row.grab().toImage()
-    foot = image.height() - 1
-    assert image.pixelColor(2, foot).name() == theme.LIMIT_LINE.lower()
-    assert image.pixelColor(2, foot - row.SECONDARY_HEIGHT).name() == theme.MARK_TINT.lower()
-    assert image.pixelColor(round(image.width() * 0.95), foot).name() != theme.LIMIT_LINE.lower()
-    assert "5-hour limit · 89.876543211% remaining · Resets" in composer.context_row.toolTip()
+    # Weekly only, as the connection's view says; every window in the tooltip.
+    assert composer.limit_text.plain() == "W: 58%" and composer.limit_text.isVisibleTo(agents.chat)
+    assert "Weekly limit · 58% remaining" in composer.limit_text.toolTip()
+    assert "5-hour limit · 89.876543211% remaining · Resets" in composer.limit_text.toolTip()
+    assert theme.WARN_INK not in composer.limit_text.text()
     assert not hasattr(composer, "limits_button")
     personal = composer.connection.findData("personal")
     composer.connection.setCurrentIndex(personal)
     composer.connection.activated.emit(personal)
-    assert composer.context_row.remaining_percent == 19
-    assert "Weekly limit · 19% remaining" in composer.context_row.toolTip()
+    assert composer.limit_text.plain() == "W: 19%"
+    assert "Weekly limit · 19% remaining" in composer.limit_text.toolTip()
+    assert theme.WARN_INK in composer.limit_text.text()          # nearly spent: said so
     limits = agents.usage.limits
     usage["personal"] = 83
     agents._limits_clock.timeout.emit()
-    assert composer.context_row.remaining_percent == 17
-    QTest.mouseClick(composer.context_row, Qt.LeftButton)
+    assert composer.limit_text.plain() == "W: 17%"
+    QTest.mouseClick(composer.limit_text, Qt.LeftButton)
     assert agents.tabs.currentWidget() is agents.usage
     assert list(limits.cards) == ["claude", "personal", "work"]
-    assert limits.cards["work"].summary()["remaining_percent"] == 36
+    assert limits.cards["work"].summary()["windows"] == {"short": None, "weekly": 36}
     failures.add("personal")
     limits.refresh.click()
-    assert limits.cards["personal"].summary()["remaining_percent"] == 17
+    assert limits.cards["personal"].summary()["windows"]["weekly"] == 17
     assert limits.cards["personal"].summary()["stale"]
     core.connections = [connections[0], connections[2]]
     agents.list_connections()
@@ -413,8 +407,8 @@ def test_chat_refreshes_again_when_a_turn_finishes_during_a_limit_read(make, mon
             {"label": "Weekly limit", "used_percent": used, "duration_minutes": 10080}]}
 
     agents = make(FakeCore(**{"rate-limits": windows(40)})).agents
-    row = agents.chat.composer.context_row
-    assert row.remaining_percent == 60
+    row = agents.chat.composer.limit_text
+    assert row.plain() == "W: 60%"
     pending = []
     original_call = agents._call
 
@@ -432,7 +426,7 @@ def test_chat_refreshes_again_when_a_turn_finishes_during_a_limit_read(make, mon
     pending.pop(0)(windows(41))
     assert len(pending) == 1
     pending.pop(0)(windows(45))
-    assert row.remaining_percent == 55
+    assert row.plain() == "W: 55%"
     assert not pending
     assert agents.tabs.currentWidget() is agents.chat
 
@@ -445,24 +439,24 @@ def test_connection_can_hide_chat_limits_while_keeping_its_usage_card(make, disp
     page = make(core)
     agents = page.agents
     composer = agents.chat.composer
-    assert composer.context_row.remaining_percent == 58
+    assert composer.limit_text.plain() == "W: 58%"
     dialog = _dialog(page, agents.connections[0])
     assert dialog.show_limits_in_chat.isChecked()
     dialog.show_limits_in_chat.setChecked(False)
     dialog.save.click()
     dispose(dialog)
-    assert composer.context_row.remaining_percent is None
-    assert "Weekly limit" not in composer.context_row.toolTip()
-    assert composer.context_row.focusPolicy() == Qt.NoFocus
-    QTest.mouseClick(composer.context_row, Qt.LeftButton)
+    assert not composer.limit_text.isVisibleTo(agents.chat)
+    assert "Weekly limit" not in composer.limit_text.toolTip()
+    assert composer.limit_text.focusPolicy() == Qt.NoFocus
+    QTest.mouseClick(composer.limit_text, Qt.LeftButton)
     assert agents.tabs.currentWidget() is agents.chat
     agents.tabs.setCurrentWidget(agents.usage)
-    assert agents.usage.limits.cards["claude"].summary()["remaining_percent"] == 58
+    assert agents.usage.limits.cards["claude"].summary()["windows"]["weekly"] == 58
     agents.tabs.setCurrentWidget(agents.chat)
     other = composer.connection.findData("work")
     composer.connection.setCurrentIndex(other)
     composer.connection.activated.emit(other)
-    assert composer.context_row.remaining_percent == 58
+    assert composer.limit_text.plain() == "W: 58%"
     dialog = _dialog(page, agents.connections[0])
     assert not dialog.show_limits_in_chat.isChecked()
     dialog.show_limits_in_chat.setChecked(True)
@@ -471,7 +465,7 @@ def test_connection_can_hide_chat_limits_while_keeping_its_usage_card(make, disp
     claude = composer.connection.findData("claude")
     composer.connection.setCurrentIndex(claude)
     composer.connection.activated.emit(claude)
-    assert composer.context_row.remaining_percent == 58
+    assert composer.limit_text.plain() == "W: 58%"
 
 
 def test_chat_progress_bar_uses_the_saved_window_or_the_combined_average(make, dispose):
@@ -483,16 +477,16 @@ def test_chat_progress_bar_uses_the_saved_window_or_the_combined_average(make, d
     ]}})
     page = make(core)
     agents = page.agents
-    row = agents.chat.composer.context_row
-    assert row.remaining_percent == 62
-    for current, setting, expected in (("combined", "short", 76), ("short", "weekly", 48),
-                                        ("weekly", "combined", 62)):
+    row = agents.chat.composer.limit_text
+    assert row.plain() == "D: 76% W: 48%"
+    for current, setting, expected in (("combined", "short", "D: 76%"), ("short", "weekly", "W: 48%"),
+                                        ("weekly", "combined", "D: 76% W: 48%")):
         dialog = _dialog(page, agents.connections[0])
         assert dialog.chat_limit_view.currentData() == current
         dialog.chat_limit_view.setCurrentIndex(dialog.chat_limit_view.findData(setting))
         dialog.save.click()
         dispose(dialog)
-        assert row.remaining_percent == expected
+        assert row.plain() == expected
         assert "Weekly limit · Other model · 0% remaining" in row.toolTip()
 
 
@@ -751,7 +745,7 @@ def test_a_first_connection_needs_no_thought(make, dispose):
         assert document == {"connection": {
             "name": "Claude Code", "kind": "claude", "binary": "", "model": "", "effort": "", "role": "",
             "show_limits_in_chat": True,
-            "chat_limit_view": "combined", "split_week_days": False, "git_tracker": False,
+            "chat_limit_view": "combined", "git_tracker": False,
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A new connection asks each time; there is nobody else here yet (ADR-006 D3).
             "others_default": "approve", "allowed_agents": [], "wake_default": "ask",
@@ -856,7 +850,7 @@ def test_editing_keeps_the_id_and_the_agent_and_sends_what_changed(make, dispose
             "id": "claude", "name": "Claude", "kind": "claude",
             "binary": "/opt/claude/bin/claude", "model": "sonnet", "effort": "high", "role": "",
             "show_limits_in_chat": True,
-            "chat_limit_view": "combined", "split_week_days": False, "git_tracker": False,
+            "chat_limit_view": "combined", "git_tracker": False,
             "qavector_access": {"services": False, "scenarios": False, "cycles": False, "approvals": False, "jira": False, "jira_write": False, "teams": False, "usage": False},
             # A connection from before ADR-006 keeps working alone until somebody says otherwise.
             "others_default": "deny", "allowed_agents": [], "wake_default": "ask",
@@ -1243,27 +1237,8 @@ def test_a_role_is_removed_once_agreed(make, monkeypatch):
     assert page.agents.roles_tab.table.rowCount() == 0
 
 
-def test_the_week_s_days_reach_chat_only_from_a_connection_that_splits_them(qapp, dispose):
-    from cms_gui.pages.agentusage import ProviderLimitCard
-    resets = time.time() + 86400
-    payload = {"ok": True, "checked_at": time.time(), "windows": [
-        {"label": "Weekly limit", "used_percent": 30, "duration_minutes": 10080, "resets_at": resets}]}
-    plain = ProviderLimitCard(_connection(chat_limit_view="weekly"))
-    plain.set_result(payload)
-    assert plain.summary()["week"] is None
-    split = ProviderLimitCard(_connection(chat_limit_view="weekly", split_week_days=True))
-    split.set_result(payload)
-    assert split.summary()["week"] == (resets - 7 * 86400, resets)
-    dispose(plain)
-    dispose(split)
-
-
-def test_the_connection_form_keeps_git_tracker_and_split_by_week_days(qapp, dispose):
+def test_the_connection_form_keeps_git_tracker(qapp, dispose):
     dialog = ConnectionDialog(None, {"id": "c", "name": "C", "kind": "claude", "git_tracker": True}, kinds=KINDS)
-    assert dialog.git_tracker.isChecked() and not dialog.split_week_days.isChecked()
-    dialog.split_week_days.setChecked(True)
-    entry = dialog.entry()
-    assert entry["git_tracker"] is True and entry["split_week_days"] is True
-    dialog.show_limits_in_chat.setChecked(False)
-    assert not dialog.split_week_days.isEnabled()
+    assert dialog.git_tracker.isChecked() and not hasattr(dialog, "split_week_days")
+    assert dialog.entry()["git_tracker"] is True and "split_week_days" not in dialog.entry()
     dispose(dialog)

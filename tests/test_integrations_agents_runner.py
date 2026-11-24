@@ -155,6 +155,74 @@ def test_background_turn_cannot_succeed_on_its_intermediate_answer(world, action
     assert not sessions.held(world.root, session["id"])
 
 
+def test_what_is_said_while_a_turn_works_reaches_the_agent_and_the_record(world):
+    session = world.session()
+    follow_ups = runner.FollowUps()
+    events = []
+
+    def receive(event):
+        events.append(event)
+        if event.get("text") == "Working on it":
+            follow_ups.put("f-1", "and the tests too")
+
+    answer = runner.send(world.root, session["id"], "FOLLOW", agents_path=world.agents,
+                         emit=receive, follow_ups=follow_ups)
+    assert answer["turn"]["state"] == "completed" and len(starts(world.log)) == 1     # one process
+    said = [event for event in events if event["type"] == "user"]
+    assert [(one["text"], one.get("follow_up"), one.get("id")) for one in said] == [
+        ("FOLLOW", None, None), ("and the tests too", True, "f-1")]
+    assert [event["text"] for event in events if event["type"] == "text"] == [
+        "Working on it", "You also said: and the tests too"]
+    assert events[-1]["type"] == "completed" and events[-1]["text"] == "Done: and the tests too"
+    assert [event["type"] for event in events].count("completed") == 1
+    recorded = sessions.events(world.root, session["id"])
+    assert any(one.get("follow_up") and one["text"] == "and the tests too" for one in recorded)
+
+
+def test_what_is_said_while_a_server_runs_is_answered_and_the_server_left_running(world):
+    session = world.session()
+    follow_ups = runner.FollowUps()
+    stop = runner.TurnStop()
+    events = []
+
+    def receive(event):
+        events.append(event)
+        if event["type"] == "background.waiting":
+            if event["text"] == "Started the server":
+                follow_ups.put("f-1", "many screenshots are missing")
+            else:
+                stop.set()
+
+    answer = runner.send(world.root, session["id"], "BACKGROUND HOLD", agents_path=world.agents,
+                         emit=receive, stop=stop, follow_ups=follow_ups)
+    # Answered in the same process, the server still running: not queued
+    # behind a task that never ends, and not stopped to be heard.
+    assert [event["text"] for event in events if event["type"] == "background.waiting"] == [
+        "Started the server", "Still serving: many screenshots are missing"]
+    assert any(event.get("follow_up") for event in events if event["type"] == "user")
+    assert answer["turn"]["state"] == "stopped" and len(starts(world.log)) == 1
+
+
+def test_what_is_said_to_a_turn_that_can_take_no_more_is_handed_back(world):
+    session = world.session()
+    follow_ups = runner.FollowUps()
+    stop = runner.TurnStop()
+    events = []
+
+    def receive(event):
+        events.append(event)
+        if event["type"] == "thinking":
+            stop.set()
+            follow_ups.put("f-1", "too late")
+
+    answer = runner.send(world.root, session["id"], "HANG", agents_path=world.agents,
+                         emit=receive, stop=stop, follow_ups=follow_ups)
+    assert answer["turn"]["state"] == "stopped"
+    assert {"type": "follow_up.refused", "id": "f-1"} in events
+    assert not any(event.get("follow_up") for event in events)
+    assert not any(one.get("follow_up") for one in sessions.events(world.root, session["id"]))
+
+
 def test_a_turn_is_said_answered_and_all_of_it_kept(world):
     session = world.session()
     answer, seen = world.send(session, "Why does the login test fail?")

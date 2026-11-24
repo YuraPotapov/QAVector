@@ -4,6 +4,9 @@ from dataclasses import asdict, dataclass
 from typing import Protocol
 
 
+PATCH_CHARS = 256 * 1024
+
+
 class Unsupported(ValueError):
     code = "unsupported"
 

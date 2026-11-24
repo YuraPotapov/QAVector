@@ -52,6 +52,8 @@ class PinnedRail(QWidget):
         self._layout.setSpacing(0)
         self.links = []
         self.buttons = []
+        #: The link in front, as ``(provider, target)``, or None.
+        self.active = None
         self.collapsed = False
         self.room = None
         self.more = icons.button(self._entry(), "more")
@@ -100,6 +102,25 @@ class PinnedRail(QWidget):
         self.set_collapsed(self.collapsed)
         self.fit(self.room)
 
+    def set_active(self, key):
+        """Mark the link in front as the rail marks its page: ``key`` is its
+        ``(provider, target)``, None for none. Behind "+N", "+N" is marked."""
+        self.active = tuple(key) if key is not None else None
+        self._say_active()
+
+    def is_active(self, link):
+        return self.active is not None and (link.get("provider"), link.get("target")) == self.active
+
+    def _say_active(self):
+        hidden = getattr(self, "hidden_links", None) or []
+        marked = [(button, self.is_active(link)) for button, link in zip(self.buttons, self.links)]
+        marked.append((self.more, any(self.is_active(link) for link in hidden)))
+        for button, active in marked:
+            if button.property("active") != ("true" if active else "false"):
+                button.setProperty("active", "true" if active else "false")
+                button.style().unpolish(button)
+                button.style().polish(button)
+
     def _menu(self, button, link, point):
         menu = QMenu(button)
         menu.addAction("Open", lambda: self.opened.emit(dict(link)))
@@ -137,6 +158,7 @@ class PinnedRail(QWidget):
                                      lambda link=link: self.opened.emit(dict(link)))
         self.more.setVisible(bool(self.hidden_links))
         self._say_more()
+        self._say_active()
         self.setVisible(bool(self.links))
 
     def _say_more(self):

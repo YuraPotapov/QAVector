@@ -628,7 +628,7 @@ def test_restoring_a_launch_entry_reproduces_the_configuration(window):
         "environment": "",
         "users": {"mode": launch.USERS_PICK, "logins": ["admin"]},
         "scenarios": {"mode": launch.SCENARIOS_PICK, "selected": ["auth.login"]},
-        "sessions": {"jobs": 4, "all_at_once": False, "keep_open": False,
+        "sessions": {"jobs": 1, "all_at_once": False, "keep_open": False,
                      "detach": False},
         "screenshots": {"mode": launch.SHOTS_FINISH}})
 
@@ -638,7 +638,7 @@ def test_restoring_a_launch_entry_reproduces_the_configuration(window):
     restored = window.launch.state()
     assert restored["users"] == {"mode": launch.USERS_PICK, "logins": ["admin"]}
     assert restored["scenarios"]["selected"] == ["auth.login"]
-    assert restored["sessions"]["jobs"] == 4
+    assert restored["sessions"]["jobs"] == config["sessions"]["jobs"]
     assert restored["sessions"]["keep_open"] is False
     assert restored["screenshots"]["mode"] == launch.SHOTS_FINISH
     # And it means the same thing it meant when it ran.
@@ -1834,7 +1834,8 @@ def test_record_on_launch_sessions_records_into_what_it_names(window, monkeypatc
 def test_the_run_menu_has_the_three_launches_then_the_last_cycle(window):
     texts = [a.text() if not a.isSeparator() else "-" for a in window.menu_run.actions()]
     assert texts == ["In Background", "With Recorder", "Empty Sessions", "-",
-                     "Run &Last Cycle", "&Clarify the running cycle\u2026", "-", "&Stop"]
+                     "Run &Last Cycle", "&Clarify the running cycle\u2026", "-", "&Stop", "-",
+                     "&Pause or continue the scenario", "Run &one step", "Step &back", "Step &forward"]
 
 
 def test_run_last_cycle_runs_the_newest_cycle_still_here(window, monkeypatch):
@@ -1920,6 +1921,16 @@ def test_a_pinned_integration_stands_on_the_rail_and_opens_from_it(window, qapp)
     rail.buttons[0].click()
     assert window._page_key == "integrations"
     assert window.integrations.stack.currentWidget() is window.integrations.hosts["teams"].view
+    # The rail marks where the window is: the pinned entry, not Integrations.
+    integrations = window._nav_buttons["integrations"]
+    assert rail.buttons[0].property("active") == "true" and integrations.property("active") == "false"
+    window.integrations.show_catalog()
+    assert rail.buttons[0].property("active") == "false" and integrations.property("active") == "true"
+    window.integrations.open_provider("teams")
+    window.show_page("launch")
+    assert rail.buttons[0].property("active") == "false" and integrations.property("active") == "false"
+    window.show_page("integrations")
+    assert rail.buttons[0].property("active") == "true"
     from PySide6.QtCore import Qt
     window.set_sidebar_collapsed(True)
     assert rail.buttons[0].toolButtonStyle() == Qt.ToolButtonIconOnly

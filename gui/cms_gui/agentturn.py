@@ -11,6 +11,10 @@ What the core prints is already on disk by the time it is printed (see
 ``integrations/agents/runner.py``), so nothing here is the record. A window
 closed mid-turn loses nothing; it only stops being told.
 
+**Follow-ups**: what the person says while the turn runs goes to the core on
+its stdin, a line each, and the core hands it to the agent's program in the
+same process - or says it could not (see ``integrations/agents/runner.py``).
+
 **Stop** ends the core's process the polite way, which the core takes as "stop
 the agent": it ends the agent's program, writes the turn down as stopped, and
 says so in its last line - so a stopped turn is answered like any other.
@@ -68,7 +72,8 @@ class AgentTurn(QObject):
             handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json",
                                                  prefix="cms-agent-turn-", delete=False)
             with handle:
-                json.dump(self.document, handle, ensure_ascii=False)
+                # The core listens for follow-ups on its stdin only when asked.
+                json.dump(dict(self.document, follow_ups=True), handle, ensure_ascii=False)
             os.chmod(handle.name, 0o600)
             self._source = handle.name
             argv = self.core.agents_argv("send", self.session_id, source=self._source)
@@ -87,6 +92,15 @@ class AgentTurn(QObject):
             proc.setWorkingDirectory(where)
         self._proc = proc
         proc.start(argv[0], list(argv[1:]))
+
+    def follow_up(self, message_id, text):
+        """Say ``text`` to the agent while the turn runs. Whether it was taken
+        comes back as an event: ``user`` with ``follow_up`` and this id, or
+        ``follow_up.refused``. False when the turn can hear nothing more."""
+        if not self.is_running() or self._stopping:
+            return False
+        line = json.dumps({"say": {"id": message_id, "message": text}}, ensure_ascii=False) + "\n"
+        return self._proc.write(line.encode("utf-8")) > 0
 
     def stop(self):
         """Ask the core to stop the agent. The turn still answers, as stopped."""

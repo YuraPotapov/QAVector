@@ -24,14 +24,15 @@ import html
 import ntpath
 import os
 import time
+import uuid
 from collections import deque
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor,
+from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
-                               QSizePolicy, QStyle, QStyleOptionFocusRect, QTableWidgetItem, QTextBrowser, QToolButton, QToolTip,
+                               QSizePolicy, QTableWidgetItem, QTextBrowser, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import (background, codeblocks, gitstate, icons, imagelinks, restrictions as restrictions_mod, stages,
@@ -458,6 +459,9 @@ class ChatFeed(QScrollArea):
     change_denied = Signal(str)
     change_edited = Signal(str, str, str)
     loaded = Signal()
+    #: How long the width must stay put - a drag paused or let go, a maximise
+    #: done - before the conversation is laid out to it again.
+    SETTLE_MS = 200
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -497,14 +501,55 @@ class ChatFeed(QScrollArea):
         self._column.addWidget(self._empty)
         self._column.addStretch(1)
         self.setWidget(self._body)
+        # Every answer is laid out again at a new width: once the width has
+        # settled, not at each step of a drag. Meanwhile the rows keep the
+        # width they had, under a skeleton.
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(self.SETTLE_MS)
+        self._settle.timeout.connect(self._settled)
+        self._resizing = widgets.Skeleton(self, "lines")
+        self._anchor = None
 
     def viewportEvent(self, event):
         # A single long label must never widen the scroll body and move every
         # card's approval buttons outside the viewport (horizontal scroll is off).
         # The viewport, not the area: it narrows when the scroll bar appears.
         if event.type() == QEvent.Resize:
-            self._body.setFixedWidth(self.viewport().width())
+            self._width_changed()
         return super().viewportEvent(event)
+
+    def _width_changed(self):
+        width = self.viewport().width()
+        if width == self._body.width() and not self._settle.isActive():
+            return                                # taller or shorter: nothing to lay out
+        if not self._rows or not self.isVisible() or self._body.width() <= 0:
+            self._body.setFixedWidth(width)       # nothing laid out yet: at once
+            return
+        if not self._settle.isActive():
+            bar = self.verticalScrollBar()
+            self._anchor = (self._follow, bar.value() / bar.maximum() if bar.maximum() else 0.0)
+            self._resizing.start(delay=0)
+        self._settle.start()
+
+    def resizing(self):
+        """Whether the width is still moving and the rows wait for it."""
+        return self._settle.isActive()
+
+    def _settled(self):
+        self._body.setFixedWidth(self.viewport().width())
+        self._body.layout().activate()
+        follow, share = self._anchor or (self._follow, 0.0)
+        self._anchor = None
+        # Where the reader was: the newest when they followed it, else the
+        # same part of the conversation - its height changed with its width.
+        QTimer.singleShot(0, self, lambda: self._place(follow, share))
+        self._resizing.stop()
+
+    def _place(self, follow, share):
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum() if follow else round(share * bar.maximum()))
+        self._follow = follow
 
     # -- what it holds ----------------------------------------------------------
     def clear(self):
@@ -586,9 +631,10 @@ class ChatFeed(QScrollArea):
         self._take(event)
         self._sync()
 
-    def set_waiting(self, sending, queued, interrupting=False):
+    def set_waiting(self, sending, queued, interrupting=False, following=()):
         """What has been typed and is not on record yet: the message being
-        handed over, and the ones waiting for the agent to finish."""
+        handed over, those said to the running turn, and the ones waiting for
+        the agent to finish."""
         for widget in self._waiting:
             self._drop(widget)
         self._waiting = []
@@ -597,6 +643,8 @@ class ChatFeed(QScrollArea):
             self._add_waiting(MessageCard(document.get("message"), state="sending",
                                           attachments=document.get("attachments"), task_refs=document.get("task_refs"),
                                           who=FROM_QAVECTOR if document.get("trigger") else "YOU"))
+        for document in following or ():
+            self._add_waiting(MessageCard(document.get("message"), state="sending"))
         for index, text in enumerate(queued or []):
             document = text if isinstance(text, dict) else {"message": text}
             card = MessageCard(document.get("message"), state="queued", removable=True,
@@ -689,11 +737,12 @@ class ChatFeed(QScrollArea):
             stage = {"kind": "tool", "title": event.get("title") or event.get("name") or "Tool",
                      "detail": event.get("detail") or "", "status": "running"}
             name = event.get("name") or ""
-            if name == "apply_patch":
+            if "file_changes" in event or name == "apply_patch":
                 detail = stage["detail"] or event.get("title") or ""
                 stage["file_changes"] = (event.get("file_changes") if "file_changes" in event else
                                          [{"path": path} for path in detail.split(", ") if path and path != "{}"])
                 stage["detail"] = ""
+                stage["patch_available"] = name == "apply_patch"
             self._tools[event.get("id")] = (len(self._rows), stage, name)
             self._add("tool", self._tool_row(stage, name))
         elif kind == "tool.completed":
@@ -717,7 +766,7 @@ class ChatFeed(QScrollArea):
             self._changed(event)
 
     def _tool_row(self, stage, name):
-        if name == "apply_patch":
+        if "file_changes" in stage:
             return self._patch_row(stage)
         return CommandRow(stage, name) if name in COMMAND_TOOLS else self._stage_row(stage)
 
@@ -730,7 +779,7 @@ class ChatFeed(QScrollArea):
         return row
 
     def _patch_row(self, stage):
-        files = stage["file_changes"] or []
+        files = stage.get("file_changes") or []
         names, paths, changes = [], [], []
         for file in files:
             path = file["path"]
@@ -815,11 +864,11 @@ class ChatFeed(QScrollArea):
     def _returned(self, event):
         found = self._tools.pop(event.get("id"), None)
         if found is None:
-            if event.get("name") == "apply_patch":
+            if "file_changes" in event or event.get("name") == "apply_patch":
                 self._add("tool", self._patch_row(self._patch_result({"kind": "tool", "file_changes": []}, event)))
             return
         index, stage, name = found
-        if name == "apply_patch":
+        if "file_changes" in stage or "file_changes" in event:
             self._replace(index, self._patch_row(self._patch_result(stage, event)))
             return
         if event.get("refused"):
@@ -851,7 +900,8 @@ class ChatFeed(QScrollArea):
         elif event.get("ok", True):
             stage = dict(stage, status="done", detail="")
             turn, item = event.get("turn"), event.get("id")
-            if type(turn) is int and turn > 0 and isinstance(item, str) and item:
+            available = event.get("patch_available", stage.get("patch_available") or event.get("name") == "apply_patch")
+            if available and type(turn) is int and turn > 0 and isinstance(item, str) and item:
                 stage["patch_ref"] = (event.get("history_session") or "", turn, item)
         else:
             stage = dict(stage, status="failed", detail=event.get("detail") or "")
@@ -862,7 +912,7 @@ class ChatFeed(QScrollArea):
     def _ended(self, event):
         # A call the agent never heard back from is not still running.
         for index, stage, name in list(self._tools.values()):
-            if name == "apply_patch":
+            if "file_changes" in stage:
                 self._replace(index, self._patch_row(dict(stage, status="unknown", kind="caution")))
                 continue
             if name in COMMAND_TOOLS:
@@ -1188,54 +1238,64 @@ class _FittingScroll(QScrollArea):
         return QSize(inner.width(), min(self.SHORTEST, self.sizeHint().height()))
 
 
-class LimitContextRow(QWidget):
-    """The chat controls share a background that shows the remaining limit,
-    and a thin line along its foot the other limit window's."""
+class LimitText(QLabel):
+    """What is left of the provider's limits, said before Settings:
+    ``D: 58% W: 90%`` - the daily (short) window and the weekly one. A window
+    nearly spent says so in the warning colour; a click opens the limits."""
 
     activated = Signal()
-    SECONDARY_HEIGHT = 2
-    #: The weekly window's days: a tick along the foot between two, and the
-    #: day under the pointer drawn bolder, with its date said.
-    DAYS, DAY_TICK, DAY_BAND = 7, 5, 4
-    #: How long the pointer rests on a day before its date is said.
-    DAY_TIP_MS = 2000
+    #: At or below this many percent left, a window is nearly spent.
+    LOW = 20
+    LETTERS = (("short", "D"), ("weekly", "W"))
 
     def __init__(self):
         super().__init__()
-        self.setProperty("seethrough", True)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.remaining_percent = None
-        self.secondary_percent = None
+        self.setProperty("role", "muted")
+        self.setTextFormat(Qt.RichText)
+        self.windows = {}
         self.stale = False
-        #: ``(start, end)`` of the weekly window, as the provider gives it; None without one.
-        self.week = None
-        self.hovered_day = None
-        #: The control at the row's end (Settings): the bar stops short of it.
-        self.trailing = None
-        # One shot per day the pointer comes to rest on - a hover delay, not a poll.
-        self._day_tip = QTimer(self)
-        self._day_tip.setSingleShot(True)
-        self._day_tip.setInterval(self.DAY_TIP_MS)
-        self._day_tip.timeout.connect(self._say_day)
-        self.setMouseTracking(True)
         self.setAccessibleName("Provider limits")
+        self.setVisible(False)
 
-    def set_limit(self, remaining_percent, stale, available, secondary_percent=None, week=None):
-        self.remaining_percent = remaining_percent
-        self.secondary_percent = secondary_percent
-        self.week = tuple(week) if week else None
-        if self.week is None:
-            self.hovered_day = None
-            self._day_tip.stop()
-        self.stale = stale
+    def set_limit(self, windows, stale, available):
+        """``windows`` maps "short" and "weekly" to the percent left, None
+        for a window the provider has not given."""
+        self.windows = {key: value for key, value in (windows or {}).items() if value is not None}
+        self.stale = bool(stale)
         self.setFocusPolicy(Qt.StrongFocus if available else Qt.NoFocus)
         if available:
             self.setCursor(Qt.PointingHandCursor)
         else:
             self.unsetCursor()
-        self.update()
+        self._say()
+        self.setVisible(bool(available and self.windows))
 
-    def mouseReleaseEvent(self, event):
+    def plain(self):
+        """What it says, without the markup."""
+        return " ".join("%s: %d%%" % (letter, round(self.windows[key]))
+                        for key, letter in self.LETTERS if key in self.windows)
+
+    def _say(self):
+        parts = []
+        for key, letter in self.LETTERS:
+            if key not in self.windows:
+                continue
+            percent = "%d%%" % round(self.windows[key])
+            if self.windows[key] <= self.LOW and not self.stale:
+                percent = '<span style="color: %s; font-weight: 600;">%s</span>' % (theme.WARN_INK, percent)
+            parts.append("%s: %s" % (letter, percent))
+        text = "&nbsp;".join(parts) + "&nbsp;&nbsp;\u00b7" if parts else ""
+        if text and self.stale:
+            # Not read again since it failed: said, but quieter.
+            text = '<span style="color: %s;">%s</span>' % (theme.NEUTRAL[400], text)
+        self.setText(text)
+
+    def changeEvent(self, event):                # noqa: N802 - Qt's own spelling
+        super().changeEvent(event)
+        if event.type() in (QEvent.StyleChange, QEvent.PaletteChange):
+            self._say()                          # the theme's colours, light or dark
+
+    def mouseReleaseEvent(self, event):          # noqa: N802
         if (self.focusPolicy() != Qt.NoFocus and event.button() == Qt.LeftButton
                 and self.rect().contains(event.position().toPoint())):
             event.accept()
@@ -1243,139 +1303,12 @@ class LimitContextRow(QWidget):
             return
         super().mouseReleaseEvent(event)
 
-    # -- where the bar runs --------------------------------------------------------
-    #: Between the bar's end and the control after it.
-    TRAIL_GAP = 6
-
-    def set_trailing(self, widget):
-        """The bar - its fill, its line, its days - ends before ``widget``, so
-        nothing of it lies under a control; pointing at the control leaves the days."""
-        self.trailing = widget
-        widget.installEventFilter(self)
-        self.update()
-
-    def track(self):
-        """How wide the bar runs: to the trailing control, or the whole row."""
-        if self.trailing is not None and self.trailing.isVisible():
-            return max(0, min(self.width(), self.trailing.geometry().left() - self.TRAIL_GAP))
-        return self.width()
-
-    def eventFilter(self, watched, event):
-        if watched is self.trailing and event.type() == QEvent.Enter:
-            self._leave_days()
-        return False
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.update()
-
-    # -- the week's days --------------------------------------------------------
-    def day_at(self, x):
-        """Which day of the weekly window ``x`` is over, 0 (the first) to 6, or None.
-
-        The bar is what is left, and it shrinks from the right as the week goes:
-        so the first day is at the right, the day it resets at the left."""
-        track = self.track()
-        if self.week is None or track <= 0 or not 0 <= x < track:
-            return None
-        return self.DAYS - 1 - min(self.DAYS - 1, int(x * self.DAYS / track))
-
-    def day_text(self, day):
-        """A day of the weekly window as a person says it: its date, and the
-        hours it runs - the window starts when the provider's did, not at midnight."""
-        start = self.week[0] + day * (self.week[1] - self.week[0]) / self.DAYS
-        end = start + (self.week[1] - self.week[0]) / self.DAYS
-        began, ends = time.localtime(start), time.localtime(end)
-        text = "%s · day %d of %d" % (time.strftime("%a %d %b", began), day + 1, self.DAYS)
-        text += "\n%s - %s" % (time.strftime("%H:%M", began), time.strftime(
-            "%H:%M" if began.tm_yday == ends.tm_yday else "%a %d %b %H:%M", ends))
-        if start <= time.time() < end:
-            text += " · today"
-        return text
-
-    def mouseMoveEvent(self, event):
-        day = self.day_at(event.position().x())
-        if day != self.hovered_day:
-            self.hovered_day = day
-            self.update()
-            QToolTip.hideText()
-            if day is None:
-                self._day_tip.stop()
-            else:
-                self._day_tip.start()
-        super().mouseMoveEvent(event)
-
-    def leaveEvent(self, event):
-        self._leave_days()
-        super().leaveEvent(event)
-
-    def _leave_days(self):
-        self._day_tip.stop()
-        QToolTip.hideText()
-        if self.hovered_day is not None:
-            self.hovered_day = None
-            self.update()
-
-    def _say_day(self):
-        if (self.hovered_day is not None and self.underMouse()
-                and not (self.trailing is not None and self.trailing.underMouse())):
-            QToolTip.showText(QCursor.pos(), self.day_text(self.hovered_day), self)
-
-    def event(self, event):
-        # Split into days, the bar speaks of its days only - after the pointer
-        # rests on one (_say_day); the limits' own tooltip is for an unsplit bar.
-        if event.type() == QEvent.ToolTip and self.week is not None:
-            event.ignore()
-            return True
-        return super().event(event)
-
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event):              # noqa: N802
         if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.focusPolicy() != Qt.NoFocus:
             event.accept()
             self.activated.emit()
             return
         super().keyPressEvent(event)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        remaining = self.remaining_percent
-        if remaining:
-            color = theme.MARK_TINT
-            if self.stale:
-                color = theme.NEUTRAL[300]
-            elif remaining <= 20:
-                color = theme.WARN_TINT
-            painter.fillRect(0, 0, round(self.track() * remaining / 100), self.height(), QColor(color))
-        secondary = self.secondary_percent
-        if secondary:
-            # The limit the bar does not show: a hairline pair along its foot.
-            color = theme.LIMIT_LINE
-            if self.stale:
-                color = theme.NEUTRAL[400]
-            elif secondary <= 20:
-                color = theme.WARN
-            painter.fillRect(0, self.height() - self.SECONDARY_HEIGHT, round(self.track() * secondary / 100),
-                             self.SECONDARY_HEIGHT, QColor(color))
-        if self.week is not None:
-            self._paint_days(painter)
-        if self.hasFocus():
-            option = QStyleOptionFocusRect()
-            option.initFrom(self)
-            self.style().drawPrimitive(QStyle.PE_FrameFocusRect, option, painter, self)
-
-
-    def _paint_days(self, painter):
-        """Ticks along the foot between the week's days; the hovered day bolder."""
-        width, height = self.track(), self.height()
-        edges = [round(width * day / self.DAYS) for day in range(self.DAYS + 1)]
-        tick = QColor(theme.DIVIDER_STRONG)
-        for x in edges[1:-1]:
-            painter.fillRect(x, height - self.DAY_TICK, 1, self.DAY_TICK, tick)
-        if self.hovered_day is not None:
-            place = self.DAYS - 1 - self.hovered_day          # the first day is at the right
-            left, right = edges[place], edges[place + 1]
-            painter.fillRect(left, height - self.DAY_BAND, right - left, self.DAY_BAND, QColor(theme.LIMIT_DAY))
 
 
 class Composer(QFrame):
@@ -1400,6 +1333,8 @@ class Composer(QFrame):
     wake_changed = Signal(str)
     #: The conversation's own budget, as the person set it (ADR-013): {} is none.
     budget_changed = Signal(dict)
+    #: How long after a step the branch is looked at again.
+    GIT_SOON_MS = 1500
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1425,8 +1360,9 @@ class Composer(QFrame):
         self.settings_button.setLayoutDirection(Qt.RightToLeft)    # chevron after
         self.settings_button.setCheckable(True)
         self.settings_button.setToolTip("Agent, model, skills, working folder and restrictions")
-        self.context_row = LimitContextRow()
-        self.context_row.activated.connect(lambda: self.limits_requested.emit(self._limit_connection))
+        self.context_row = QWidget()
+        self.context_row.setProperty("seethrough", True)
+        self.context_row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         context_layout = QHBoxLayout(self.context_row)
         context_layout.setContentsMargins(0, 0, 0, 0)
         context_layout.setSpacing(8)
@@ -1455,9 +1391,17 @@ class Composer(QFrame):
         said_layout.addStretch(0)
         self._git = None
         self._git_serial = 0
+        # What a running turn does to the branch, a moment after the step that
+        # did it: one look for each burst of steps - started by them, not a poll.
+        self._git_soon = QTimer(self)
+        self._git_soon.setSingleShot(True)
+        self._git_soon.setInterval(self.GIT_SOON_MS)
+        self._git_soon.timeout.connect(self.refresh_git)
         context_layout.addWidget(said, 1)
+        self.limit_text = LimitText()
+        self.limit_text.activated.connect(lambda: self.limits_requested.emit(self._limit_connection))
+        context_layout.addWidget(self.limit_text, 0, Qt.AlignVCenter)
         context_layout.addWidget(self.settings_button)
-        self.context_row.set_trailing(self.settings_button)
         # That the agent is at work, between the things it shows in the feed:
         # a turn can think for minutes with nothing new above, and a still
         # page read as a stopped one. A breathing dot and how long the turn
@@ -1654,12 +1598,12 @@ class Composer(QFrame):
         self.interrupt.setToolTip("Stop the current turn, then send this message in the same chat. Existing changes remain.")
         self.interrupt.clicked.connect(self.interrupt_requested)
         self.interrupt.hide()
-        for button in (self.attach, self.stop, self.send_button):
+        for button in (self.attach, self.interrupt, self.stop, self.send_button):
             button.setStyleSheet("min-height: 30px; max-height: 30px; padding-top: 0px; padding-bottom: 0px;")
         for button in (self.stop, self.send_button):
             button.setFixedWidth(80)
         self.footer = widgets.flow_row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
-                                  None, self.interrupt, self.stop, self.send_button)
+                                       None, self.interrupt, self.stop, self.send_button)
         outer.addWidget(self.footer)
         self.text.textChanged.connect(self._sync_send)
         self._sync_send()
@@ -1842,15 +1786,15 @@ class Composer(QFrame):
         available = summary is not None
         limits = summary or {}
         self._limit_details = limits.get("tooltip", "")
-        # The week's days come only from a connection with Split by week days on.
-        self.context_row.set_limit(limits.get("remaining_percent"), limits.get("stale", False), available,
-                                   limits.get("secondary_percent"), limits.get("week"))
+        self.limit_text.set_limit(limits.get("windows"), limits.get("stale", False), available)
         self._update_context_tooltip()
 
     def _update_context_tooltip(self):
-        shortcut = "Click to open provider limits" if self.context_row.focusPolicy() != Qt.NoFocus else ""
-        tooltip = "\n\n".join(filter(None, (self._limit_details, shortcut, self.context_summary.toolTip())))
-        self.context_row.setToolTip("<qt>" + html.escape(tooltip).replace("\n", "<br>") + "</qt>" if tooltip else "")
+        shortcut = "Click to open provider limits" if self.limit_text.focusPolicy() != Qt.NoFocus else ""
+        for widget, parts in ((self.limit_text, (self._limit_details, shortcut)),
+                              (self.context_row, (self.context_summary.toolTip(),))):
+            tooltip = "\n\n".join(filter(None, parts))
+            widget.setToolTip("<qt>" + html.escape(tooltip).replace("\n", "<br>") + "</qt>" if tooltip else "")
 
     def set_restrictions(self, raw):
         self._restrictions = dict(raw or {})
@@ -2035,8 +1979,10 @@ class Composer(QFrame):
 
     def refresh_git(self):
         """Look at the folder's repository once, on a thread: when a
-        conversation is shown, a folder or a connection chosen, a turn ended.
-        Never on a timer, and not at all unless the connection's Git Tracker is on."""
+        conversation is shown, a folder or a connection chosen, a turn ended,
+        and soon after a running turn's step (:meth:`refresh_git_soon`).
+        Never on a poll, and not at all unless the connection's Git Tracker is on."""
+        self._git_soon.stop()
         folder = os.path.expanduser(self.folder.currentText().strip())
         self._git_serial += 1
         if not self.git_tracked() or not folder or not os.path.isdir(folder):
@@ -2048,6 +1994,12 @@ class Composer(QFrame):
             if serial == self._git_serial:
                 self.set_git(None if error else found)
         background.run(lambda: gitstate.state(folder), done, owner=self)
+
+    def refresh_git_soon(self):
+        """A step of a running turn ended: look again shortly, once for all
+        the steps that end before then."""
+        if self.git_tracked() and not self._git_soon.isActive():
+            self._git_soon.start()
 
     def set_git(self, found):
         """``found`` from :func:`gitstate.state`, or None to say nothing."""
@@ -2109,9 +2061,8 @@ class Composer(QFrame):
         self.stop.setVisible(bool(running))
         self.interrupt.setVisible(bool(running))
         self.stop.setEnabled(True)
-        self.send_button.setText("Queue" if running else "Send")
         self.text.setPlaceholderText(
-            "Queue a follow-up, or use Interrupt & send to change the current work"
+            "Say more - the agent reads it as it works; Interrupt & send stops the current work first"
             if running else "Message - Enter sends, Shift+Enter starts a new line")
 
     def working_text(self):
@@ -2320,6 +2271,11 @@ class ChatTab(QWidget):
         self._turn_began = {}           # session id -> when it began (monotonic)
         self._sending = {}              # session id -> what is being handed over
         self._queued = {}               # session id -> what waits for the agent
+        # session id -> what was said to its running turn and not yet taken
+        # (on record) or handed back; and what that turn runs with.
+        self._following = {}
+        self._turn_settings = {}
+        self._handed_back = {}          # session id -> how many of its queue those are
         self._fresh = set()             # sessions made for a turn not yet recorded
         self._drafts = {}               # session id ("" for new) -> what was typed
         self._draft_files = {}
@@ -3253,11 +3209,14 @@ class ChatTab(QWidget):
     def _waiting(self):
         key = self._key()
         self.feed.set_waiting(self._sending.get(key, ""), self._queued.get(key, []),
-                              interrupting=key in self._redirecting)
+                              interrupting=key in self._redirecting,
+                              following=self._following.get(key, []))
 
     # -- saying something --------------------------------------------------------
-    def submit(self, text):
-        """What Enter does: begin a conversation, take a turn, or wait for one."""
+    def submit(self, text, follow=True):
+        """What Enter does: begin a conversation, take a turn, say it to the
+        turn that runs - or, when that turn cannot take it as it is, wait for it.
+        ``follow`` False always waits."""
         if self._creating or self.core() is None or not _is_chat(self.current):
             return
         self.composer.say("")
@@ -3268,12 +3227,49 @@ class ChatTab(QWidget):
             self._begin(text, files)
         elif self._key() in self.turns:
             document = self._message(text, files)
-            self._queued.setdefault(self._key(), []).append(document)
             self.composer.set_draft("")
             self.composer.set_attachments([])
+            if not (follow and self._follow(self._key(), document)):
+                self._queued.setdefault(self._key(), []).append(document)
             self._waiting()
         else:
             self._submit_existing(self.current, text, files)
+
+    def _follow(self, session_id, document):
+        """Say ``document`` to the running turn, as the agent's programs take
+        it mid-work. Not when it asks for what that turn was not started with
+        - another mode, model or effort, a plan, files - or the turn is
+        stopping: then it waits, as before. True when it was handed over."""
+        turn = self.turns.get(session_id)
+        running = self._turn_settings.get(session_id) or {}
+        if (turn is None or not hasattr(turn, "follow_up") or session_id in self._stopping
+                or document.get("attachments") or document.get("plan") or running.get("plan")
+                or any((document.get(key) or "") != (running.get(key) or "")
+                       for key in ("mode", "model", "effort"))):
+            return False
+        document = dict(document, id=uuid.uuid4().hex)
+        if not turn.follow_up(document["id"], document["message"]):
+            return False
+        self._following.setdefault(session_id, []).append(document)
+        return True
+
+    def _followed(self, session_id, message_id, taken):
+        """The core said what became of a follow-up: on record, or handed back
+        - then it waits for the turn's end, first in line."""
+        following = self._following.get(session_id, [])
+        document = next((one for one in following if one["id"] == message_id), None)
+        if document is None:
+            return
+        following.remove(document)
+        if not taken:
+            # Ahead of what waited already, behind those handed back before it.
+            document = {key: value for key, value in document.items() if key != "id"}
+            queued = self._queued.setdefault(session_id, [])
+            place = min(self._handed_back.get(session_id, 0), len(queued))
+            queued.insert(place, document)
+            self._handed_back[session_id] = place + 1
+        if self._showing(session_id):
+            self._waiting()
 
     def _submit_existing(self, session, text, files):
         document = self._message(text, files)
@@ -3462,6 +3458,7 @@ class ChatTab(QWidget):
         connection_id = session.get("connection")
         turn.answered.connect(lambda answer: self._answered(session_id, connection_id, answer))
         self.turns[session_id] = turn
+        self._turn_settings[session_id] = {key: document.get(key) for key in ("mode", "model", "effort", "plan")}
         self._turn_began[session_id] = time.monotonic()
         self._terminal_seen.discard(session_id)
         if self._showing(session_id):
@@ -3495,16 +3492,45 @@ class ChatTab(QWidget):
             self._reading[1].append(event)
         if event.get("type") in ("completed", "failed", "stopped"):
             self._terminal_seen.add(session_id)
-        if event.get("type") == "user":
+        if kind == "follow_up.refused":
+            self._followed(session_id, event.get("id"), taken=False)
+            return
+        if kind == "user" and event.get("follow_up"):
+            self._followed(session_id, event.get("id"), taken=True)
+        elif kind == "user":
             self._sending.pop(session_id, None)     # on record now: no longer waiting
             self._fresh.discard(session_id)
+            self._read_title(session_id)
         if self._showing(session_id):
+            if kind in ("tool.completed", "file.written"):
+                self.composer.refresh_git_soon()      # a commit, a checkout, an edit
             if event.get("type") == "user":
                 self._waiting()
             seq = event.get("seq", 0)
             if not seq or seq > self._shown_seq:
                 self.feed.append(event)
                 self._shown_seq = max(self._shown_seq, seq)
+
+    def _read_title(self, session_id):
+        """The name a first turn gives a conversation is saved as the turn
+        begins: shown then, not when the agent has finished."""
+        listed = next((one for one in self.sessions if one.get("id") == session_id), None)
+        if listed is None or listed.get("title"):
+            return
+
+        def done(payload):
+            title = (payload.get("session") or {}).get("title") if payload.get("ok") else ""
+            listed = next((one for one in self.sessions if one.get("id") == session_id), None)
+            if not title or listed is None or listed.get("title"):
+                return
+            listed["title"] = title
+            if self.current is not None and self.current.get("id") == session_id:
+                self.current["title"] = title
+                self._sync_footer_title()
+            self._fill()
+
+        self.ask("session-title-" + session_id, lambda core, cancel: core.agents(
+            "session", session_id, document={"limit": 1}, cancel=cancel), done)
 
     def _answered(self, session_id, connection_id, answer):
         self.conversation_changed.emit(session_id)
@@ -3517,7 +3543,11 @@ class ChatTab(QWidget):
         if turn is not None:
             turn.deleteLater()
         unsent = self._sending.pop(session_id, None)
-        queued = self._queued.pop(session_id, [])
+        self._turn_settings.pop(session_id, None)
+        self._handed_back.pop(session_id, None)
+        # Said to the turn and never answered for: as if it had waited.
+        queued = [{key: value for key, value in one.items() if key != "id"}
+                  for one in self._following.pop(session_id, [])] + self._queued.pop(session_id, [])
         stopped = session_id in self._stopping
         redirecting = session_id in self._redirecting
         self._redirecting.discard(session_id)
@@ -3593,6 +3623,8 @@ class ChatTab(QWidget):
         queued = self._queued.get(self._key(), [])
         if 0 <= index < len(queued):
             del queued[index]
+            if index < self._handed_back.get(self._key(), 0):
+                self._handed_back[self._key()] -= 1
             self._waiting()
 
     def interrupt_submit(self):
@@ -3601,7 +3633,7 @@ class ChatTab(QWidget):
             return
         if not self.composer.draft().strip() and not self.composer.attachments():
             return
-        self.submit(self.composer.draft())
+        self.submit(self.composer.draft(), follow=False)
         self.interrupt_queued(len(self._queued.get(key, [])) - 1)
 
     def interrupt_queued(self, index):

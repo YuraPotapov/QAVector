@@ -96,6 +96,26 @@ class FakeTurn(QObject):
         self.answered.emit({"ok": False, "kind": kind, "error": error})
 
 
+class FollowingTurn(FakeTurn):
+    """A turn whose core hears what is said while it runs, as AgentTurn's does."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.followed = []
+
+    def follow_up(self, message_id, text):
+        self.followed.append((message_id, text))
+        return True
+
+    def taken(self, index=-1, seq=50):
+        """The core put what was said on record."""
+        message_id, text = self.followed[index]
+        self.say({"type": "user", "text": text, "follow_up": True, "id": message_id, "seq": seq})
+
+    def refused(self, index=-1):
+        self.say({"type": "follow_up.refused", "id": self.followed[index][0]})
+
+
 @pytest.fixture
 def settings(tmp_path):
     made = Settings()
@@ -140,6 +160,51 @@ def test_a_turn_reads_as_what_was_asked_what_was_done_and_what_was_said(qapp):
     assert feed.said() == [QUESTION, "Thinking", "Read test_login.py", ANSWER, "Finished"]
     end = feed._rows[-1][1]
     assert end.stage["detail"] == "3 steps · est. $0.04 · 42 s"
+
+
+def test_a_conversation_is_laid_out_again_once_its_width_settles_under_a_skeleton(qapp, dispose):
+    feed = ChatFeed()
+    feed.resize(700, 400)
+    feed.show()
+    feed.load(_events() * 6)
+    qapp.processEvents()
+    feed.resize(700, 300)                                   # its scroll bar appears: narrower
+    qapp.processEvents()
+    if feed.resizing():
+        feed._settle.stop()
+        feed._settled()
+        qapp.processEvents()
+    width = feed._body.width()
+    assert width == feed.viewport().width() and feed.verticalScrollBar().maximum() > 0
+    feed.verticalScrollBar().setValue(feed.verticalScrollBar().maximum())
+    feed.resize(700, 280)                                   # shorter only: nothing to lay out
+    qapp.processEvents()
+    assert not feed.resizing() and not feed._resizing.isVisible()
+    for step in (650, 600, 560):                            # a drag, step by step
+        feed.resize(step, 300)
+        qapp.processEvents()
+        assert feed._body.width() == width and feed.resizing()
+    assert feed._resizing.isVisible()                       # the wait shows, at once
+    feed._settle.timeout.emit()
+    feed._settle.stop()
+    qapp.processEvents()
+    assert feed._body.width() == feed.viewport().width() < width
+    assert not feed._resizing.isVisible()
+    bar = feed.verticalScrollBar()
+    assert bar.value() == bar.maximum()                     # still at the newest
+    assert feed.SETTLE_MS == feed._settle.interval() == 200
+    dispose(feed)
+
+
+def test_an_empty_conversation_takes_a_new_width_at_once(qapp, dispose):
+    feed = ChatFeed()
+    feed.resize(700, 400)
+    feed.show()
+    qapp.processEvents()
+    feed.resize(500, 400)
+    qapp.processEvents()
+    assert not feed.resizing() and feed._body.width() == feed.viewport().width()
+    dispose(feed)
 
 
 def test_the_last_line_is_not_said_twice_but_one_that_differs_is_said(qapp):
@@ -217,13 +282,20 @@ def test_patch_rows_show_file_operations_and_unconfirmed_outcomes(qapp):
     assert feed.said()[-2:] == ["Patch outcome unknown · new.py", "Stopped"]
 
 
-def test_chat_fetches_each_patch_only_when_its_row_is_opened(make, qapp):
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_chat_fetches_each_patch_only_when_its_row_is_opened(make, qapp, provider):
     session = _session()
     events = [
         {"type": "tool.completed", "name": "apply_patch", "id": item, "ok": True, "turn": 1,
          "file_changes": [{"path": "/repo/a.py", "kind": "update"}]}
         for item in ("first", "second")
     ]
+    if provider == "claude":
+        for event in events:
+            event.pop("name")
+            event["patch_available"] = True
+        events.insert(0, {"type": "tool.started", "name": "Edit", "id": "first",
+                          "file_changes": events[0]["file_changes"]})
 
     def patch(_args, document):
         return {"ok": True, "files": [{"path": "/repo/a.py", "diff": "-old\n+" + document["item"]}]}
@@ -233,6 +305,7 @@ def test_chat_fetches_each_patch_only_when_its_row_is_opened(make, qapp):
     chat.open_session(session["id"])
     qapp.processEvents()
     first, second = [widget for _, widget in chat.feed._rows]
+    assert first.disclosure.button.text() == second.disclosure.button.text() == "Edited a.py"
     assert "tool-patch" not in core.asked()
     summaries = [document for args, document in core.calls if args[0] == "changes"]
     assert summaries and all(document == {"summary": True} for document in summaries)
@@ -566,6 +639,22 @@ def test_the_message_is_a_row_once_the_core_has_it_on_record(make):
     assert not chat.table.item(0, 0).data(agentchat.RelationshipDelegate.ACTIVITY)
 
 
+def test_the_conversation_is_named_once_its_first_turn_is_on_record_not_when_it_ends(make):
+    core = FakeCore()
+    chat = make(core).agents.chat
+    _say(chat, QUESTION)
+    turn = FakeTurn.made[0]
+    assert chat.table.item(0, 0).text() == "Untitled"
+    # The core names it as the turn begins and records the message.
+    core._session(chat.current["id"])["title"] = QUESTION
+    turn.say(_events()[0])
+    assert chat.table.item(0, 0).text() == QUESTION and chat.current["title"] == QUESTION
+    assert chat.turns                                         # the agent is still at work
+    asked = sum(1 for args, _document in core.calls if args[0] == "session")
+    turn.say(dict(_events()[0], seq=9))                       # named: nothing more to ask
+    assert sum(1 for args, _document in core.calls if args[0] == "session") == asked
+
+
 def test_a_breathing_dot_and_the_turn_s_time_say_the_agent_is_working(make, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(agentchat.time, "monotonic", lambda: clock[0])
@@ -602,12 +691,65 @@ def test_background_wait_is_idle_and_keeps_the_next_message_queued(make):
     chat._poll_changes()
     assert core.asked().count("changes") == reads
     _say(chat, "What next?")
-    assert len(FakeTurn.made) == 1 and composer.send_button.text() == "Queue"
+    assert len(FakeTurn.made) == 1 and composer.send_button.text() == "Send"
     turn.say({"type": "text", "text": "Finished in the background."})
     assert composer.working_dot.running()
     turn.say({"type": "completed", "text": "Finished in the background."})
     turn.finish()
     assert len(FakeTurn.made) == 2
+
+
+def _following(make, core=None):
+    page = make(core or FakeCore())
+    chat = page.agents.chat
+    chat.turn_factory = FollowingTurn
+    _say(chat, QUESTION)
+    turn = FakeTurn.made[0]
+    turn.say(_events()[0])
+    return chat, turn
+
+
+def test_what_is_said_while_the_agent_works_goes_to_it_at_once(make):
+    chat, turn = _following(make)
+    _say(chat, "and the tests too")
+    assert len(FakeTurn.made) == 1 and [text for _id, text in turn.followed] == ["and the tests too"]
+    assert chat.feed.waiting() == [("SENDING", "and the tests too")] and chat.composer.draft() == ""
+    turn.taken()
+    assert chat.feed.waiting() == [] and chat.feed.said().count("and the tests too") == 1
+    turn.finish()
+    assert len(FakeTurn.made) == 1                              # nothing left to send after it
+
+
+def test_what_the_turn_could_not_take_waits_first_in_line_and_is_sent_after_it(make):
+    chat, turn = _following(make)
+    _say(chat, "first")
+    turn.refused()
+    assert chat.feed.waiting() == [("QUEUED", "first")]
+    _say(chat, "second")
+    turn.refused()
+    turn.finish()
+    (_first, following) = FakeTurn.made
+    assert following.document["message"] == "first"            # in the order said
+    assert chat.feed.waiting() == [("SENDING", "first"), ("QUEUED", "second")]
+
+
+def test_what_was_never_answered_for_is_sent_when_the_turn_ends(make):
+    chat, turn = _following(make)
+    _say(chat, "never heard back")
+    turn.finish()
+    assert FakeTurn.made[1].document["message"] == "never heard back"
+    assert not FakeTurn.made[1].document.get("id")
+
+
+def test_another_mode_or_interrupt_and_send_waits_for_the_turn_as_before(make):
+    chat, turn = _following(make)
+    chat.composer.set_work("edit", False)
+    _say(chat, "now in edit")
+    assert turn.followed == [] and chat.feed.waiting() == [("QUEUED", "now in edit")]
+    chat.composer.set_work("read", False)
+    chat.composer.set_draft("stop and do this")
+    chat.interrupt_submit()
+    assert turn.followed == [] and turn.stopped
 
 
 def test_enter_sends_and_shift_enter_starts_a_line(make):
@@ -2054,56 +2196,44 @@ def test_git_tracker_is_the_connection_s_choice_and_off_it_asks_git_nothing(make
     assert not composer.git_branch.isVisibleTo(chat)
 
 
-def test_the_weekly_limit_s_days_say_their_date_after_a_rest_and_nothing_else(qapp, monkeypatch):
-    import time as clock
-    row = agentchat.LimitContextRow()
-    row.resize(700, 26)
-    resets = clock.time() + 2.5 * 86400
-    row.set_limit(60, False, True, week=(resets - 7 * 86400, resets))
-    # The bar shrinks from the right as the week goes: its first day is at the right.
-    assert row.day_at(0) == 6 and row.day_at(699) == 0 and row.day_at(350) == 3
-    assert row.day_text(4).splitlines()[0].endswith("day 5 of 7") and "today" in row.day_text(4)
-    assert "today" not in row.day_text(0)
-    plain = row.grab().toImage()
-    row.hovered_day = 4                                     # drawn third from the left
-    bold = row.grab().toImage()
-    foot = row.height() - 1
-    assert bold.pixelColor(250, foot).name() == theme.LIMIT_DAY.lower() != plain.pixelColor(250, foot).name()
-    said = []
-    monkeypatch.setattr(agentchat.QToolTip, "showText", lambda pos, text, widget=None: said.append(text))
-    monkeypatch.setattr(row, "underMouse", lambda: True)
-    row.setToolTip("Weekly limit · 40% remaining")
-    from PySide6.QtCore import QEvent, QPoint
-    from PySide6.QtGui import QHelpEvent
-    tip = QHelpEvent(QEvent.ToolTip, QPoint(5, 5), QPoint(5, 5))
-    assert row.event(tip) is True and said == []           # split: the limits' tooltip is not shown
-    assert row._day_tip.interval() == 2000
-    row.hovered_day = 3
-    row._say_day()
-    assert said == [row.day_text(3)] and "Weekly limit" not in said[0]
-    row.set_limit(60, False, True, week=None)
-    assert row.day_at(10) is None and row.hovered_day is None
-
-
-
-
-def test_the_bar_and_its_days_end_before_settings_and_settings_leaves_the_days(make, qapp):
-    from PySide6.QtCore import QEvent
+def test_the_limits_are_said_before_settings_and_a_nearly_spent_one_is_marked(make, qapp):
     chat = make(FakeCore()).agents.chat
     composer = chat.composer
-    row = composer.context_row
-    composer.set_provider_limit({"remaining_percent": 100, "stale": False, "tooltip": "",
-                                 "week": (1, 7 * 86400 + 1)})
-    chat.resize(900, 700)
+    said = composer.limit_text
+    composer.set_provider_limit({"windows": {"short": 10.4, "weekly": 57.6}, "stale": False,
+                                 "tooltip": "Weekly limit · 57.6% remaining"})
     qapp.processEvents()
-    end = composer.settings_button.geometry().left() - row.TRAIL_GAP
-    assert row.track() == end < row.width()
-    assert row.day_at(end - 1) == 0 and row.day_at(end + 2) is None      # nothing of it under Settings
-    image = row.grab().toImage()
-    middle = row.height() // 2
-    assert image.pixelColor(end - 2, middle).name() == theme.MARK_TINT.lower()
-    assert image.pixelColor(end + 2, middle).name() != theme.MARK_TINT.lower()
-    row.hovered_day = 0
-    row._day_tip.start()
-    row.eventFilter(composer.settings_button, QEvent(QEvent.Enter))
-    assert row.hovered_day is None and not row._day_tip.isActive()
+    assert said.plain() == "D: 10% W: 58%" and said.text().endswith("\u00b7")
+    assert said.isVisibleTo(chat) and said.geometry().right() < composer.settings_button.geometry().left()
+    assert theme.WARN_INK in said.text() and said.text().count("<span") == 1      # D only
+    assert "Weekly limit · 57.6% remaining" in said.toolTip() and "Click to open" in said.toolTip()
+    asked = []
+    composer.limits_requested.connect(asked.append)
+    QTest.mouseClick(said, Qt.LeftButton)
+    assert len(asked) == 1
+    composer.set_provider_limit({"windows": {"short": None, "weekly": 90}, "stale": True, "tooltip": ""})
+    assert said.plain() == "W: 90%" and theme.NEUTRAL[400] in said.text()          # stale: quieter
+    composer.set_provider_limit(None)
+    assert not said.isVisibleTo(chat) and said.focusPolicy() == Qt.NoFocus
+
+
+def test_a_running_turn_s_steps_look_at_the_branch_again_once_per_burst(make, tmp_path, monkeypatch):
+    from cms_gui import gitstate
+    looked = []
+    monkeypatch.setattr(gitstate, "state", lambda folder: looked.append(folder) or {
+        "folder": folder, "name": "", "branch": "task-%d" % len(looked), "dirty": False})
+    monkeypatch.setattr(agentchat.background, "run", lambda work, done, owner=None: done(work(), None))
+    chat = make(FakeCore(connections=[_connection(git_tracker=True)])).agents.chat
+    composer = chat.composer
+    _say(chat, QUESTION)
+    turn = FakeTurn.made[0]
+    before = len(looked)
+    events = _events()
+    turn.say(*events[:6])                                     # an edit and a tool's end
+    assert len(looked) == before and composer._git_soon.isActive()
+    composer._git_soon.timeout.emit()
+    assert len(looked) == before + 1 and composer.git_branch.text() == "(task-%d)" % len(looked)
+    assert not composer._git_soon.isActive()
+    composer.set_connections([_connection(git_tracker=False)])
+    turn.say(dict(events[5], seq=20))
+    assert not composer._git_soon.isActive()                  # Git Tracker off: no look at all
