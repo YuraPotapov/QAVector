@@ -16,6 +16,7 @@ import urllib.parse
 
 from integrations.jira import adf
 from integrations.jira.client import CLOUD, JiraError, api
+from integrations.jira.fieldvalues import transition_input, wire_scalar
 from integrations.jira.operations import _key, _person, account_of, issue
 
 #: The largest file the page uploads. Jira Cloud's own default limit is larger,
@@ -46,7 +47,7 @@ def _after(get, connection, key):
 
 
 # -- the workflow -------------------------------------------------------------
-def transition(get, connection, request):
+def transition(get, connection, request, *, offered=None, read_back=True):
     """Move an issue by one of the transitions it offers.
 
     ``to`` is the transition's id. When its screen requires fields that have no
@@ -56,8 +57,9 @@ def transition(get, connection, request):
     key = _key(request)
     wanted = str(request.get("to") or "")
     version = _version(connection)
-    offered = get("/rest/api/%s/issue/%s/transitions" % (version, key),
-                  {"expand": "transitions.fields"}).get("transitions") or []
+    if offered is None:
+        offered = get("/rest/api/%s/issue/%s/transitions" % (version, key),
+                      {"expand": "transitions.fields"}).get("transitions") or []
     chosen = next((one for one in offered if str(one.get("id")) == wanted), None)
     if chosen is None:
         raise Refused("%s cannot be moved that way now. It offers: %s."
@@ -65,25 +67,41 @@ def transition(get, connection, request):
                          or "nothing"))
     given = dict(request.get("fields") or {})
     needs = []
-    for field_id, spec in (chosen.get("fields") or {}).items():
+    metadata = chosen.get("fields") or {}
+    for field_id, spec in metadata.items():
         if not spec.get("required") or spec.get("hasDefaultValue") or field_id in given:
             continue
-        needs.append({"key": field_id, "name": str(spec.get("name") or field_id),
-                      "allowed": [{"id": str(one.get("id") or ""),
-                                   "name": str(one.get("name") or one.get("value") or "")}
-                                  for one in spec.get("allowedValues") or []
-                                  if isinstance(one, dict)]})
+        allowed = [{"id": str(one["id"]), "name": str(one.get("name") or one.get("value") or "")}
+                   for one in spec.get("allowedValues") or [] if isinstance(one, dict) and one.get("id")]
+        need = {"key": field_id, "name": str(spec.get("name") or field_id), "allowed": allowed}
+        if allowed and (spec.get("schema") or {}).get("type") == "array":
+            need["multiple"] = True
+        typed = transition_input(field_id, spec)
+        if typed and not allowed:
+            need.update(typed)
+        needs.append(need)
     if needs:
         raise Refused("%s asks for %s." % (chosen.get("name"),
                                            ", ".join(one["name"] for one in needs)),
                       "fields", needs=needs, transition=str(chosen.get("name") or ""))
     body = {"transition": {"id": wanted}}
     if given:
-        body["fields"] = {name: ({"id": value} if isinstance(value, str) else value)
+        body["fields"] = {name: _transition_value(name, value, metadata.get(name) or {}, connection)
                           for name, value in given.items()}
     get("/rest/api/%s/issue/%s/transitions" % (version, key), body=body)
-    return dict(_after(get, connection, key),
-                summary="%s: %s" % (key, chosen.get("name") or wanted))
+    result = _after(get, connection, key) if read_back else {}
+    return dict(result, summary="%s: %s" % (key, chosen.get("name") or wanted))
+
+
+def _transition_value(name, value, metadata, connection):
+    if (metadata.get("schema") or {}).get("type") == "array" and metadata.get("allowedValues"):
+        items = value if isinstance(value, list) else [value]
+        return [{"id": item} if isinstance(item, str) else item for item in items]
+    spec = transition_input(name, metadata)
+    if spec and not isinstance(value, dict) and not any(
+            isinstance(item, dict) and item.get("id") for item in metadata.get("allowedValues") or []):
+        return wire_scalar(value, spec, connection["flavour"])
+    return {"id": value} if isinstance(value, str) else value
 
 
 # -- comments -----------------------------------------------------------------
@@ -465,4 +483,4 @@ OPERATIONS = {"transition": transition, "comment": comment, "comment_edit": comm
 
 #: The ones that change Jira - what the activity log records.
 CHANGES = ("transition", "comment", "comment_edit", "comment_delete", "edit", "assign",
-           "create", "attach")
+           "create", "attach", "board_move")

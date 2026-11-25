@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QComp
 
 from .. import (background, core as core_mod, icons, launchprojectsfile as lpf, search,
                theme, widgets)
+from .jiraboard import BoardTab
 from .jiraconnections import ActivityTab, ConnectionsTab, SettingsTab
 from .jiradialogs import split_labels
 from .jiradoc import DescriptionEditor
@@ -44,7 +45,7 @@ DESCRIPTION_HEIGHT = 420
 
 #: Requests that change something - in Jira or in the project's files. They
 #: are never cancelled, and leaving the project or the application waits for them.
-WRITES = frozenset(("write", "save", "remove", "app-save"))
+WRITES = frozenset(("write", "save", "remove", "app-save", "board-write"))
 
 #: Comments an opened issue shows before "Show earlier".
 COMMENTS = 20
@@ -2492,10 +2493,13 @@ class JiraView(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("jiraTabs")
         self.issues = IssuesTab()
+        self.board = BoardTab(self, LazyCombo)
+        self._board_waiting_for_connections = False
         self.connections_tab = ConnectionsTab()
         self.activity = ActivityTab()
         self.settings_tab = SettingsTab()
         self.tabs.addTab(self.issues, "Issues")
+        self.tabs.addTab(self.board, "Board")
         self.tabs.addTab(self.connections_tab, "Connections")
         self.tabs.addTab(self.activity, "Activity")
         self.tabs.addTab(self.settings_tab, "Settings")
@@ -2579,6 +2583,8 @@ class JiraView(QWidget):
         self._started = False
         self._activity_stale = True
         self.auto.stop()
+        self.board.reset()
+        self._board_waiting_for_connections = False
         self.issues.projects.reset()
         self.issues.statuses.reset()
         self.issues.list_skeleton.stop()
@@ -2605,7 +2611,7 @@ class JiraView(QWidget):
                 self.load_activity()
 
     def busy_reason(self, include_dialogs=True):
-        if any(kind in WRITES for kind in self._pending.values()):
+        if self.board.writing or any(kind in WRITES for kind in self._pending.values()):
             return "A Jira change is being saved. Wait for it to finish."
         if include_dialogs and any(dialog.isVisible() for dialog in self.findChildren(QDialog)):
             return "Finish or cancel the open Jira dialog first."
@@ -2680,7 +2686,11 @@ class JiraView(QWidget):
             return
         self.ticker.start()
         if not self._listed:
+            if self.tabs.currentWidget() is self.board:
+                self._board_waiting_for_connections = True
             self.list_connections()
+        elif self.tabs.currentWidget() is self.board:
+            self.board.show_connection(opened=True)
         elif not self._started:
             self._first_look()
         self._arm_auto()
@@ -2753,12 +2763,25 @@ class JiraView(QWidget):
             if then is not None:
                 then()
             self._first_look()
+            if self._board_waiting_for_connections:
+                self._board_waiting_for_connections = False
+                if self.tabs.currentWidget() is self.board:
+                    self.board.show_connection(opened=True)
 
         self._call("list", lambda core, cancel: core.integrations("list", cancel=cancel), done)
 
     def _set_connections(self, connections, pick=""):
         # The project's connections of every provider come; this page is Jira's.
-        self.connections = [one for one in connections if (one.get("provider") or "jira") == "jira"]
+        fresh = [one for one in connections if (one.get("provider") or "jira") == "jira"]
+        by_id = {one["id"]: one for one in fresh}
+        for old in self.connections:
+            connection_id = old["id"]
+            saved = by_id.get(connection_id)
+            if (saved is None or _moved((old,), saved)
+                    or old.get("token_set") != saved.get("token_set")
+                    or old.get("cloud_id") != saved.get("cloud_id")):
+                self.board.invalidate(connection_id)
+        self.connections = fresh
         wanted = pick or self.picker.currentData() or \
             self.settings.integrations_state().get("connection", "")
         self.picker.blockSignals(True)
@@ -2773,6 +2796,7 @@ class JiraView(QWidget):
         self.settings_tab.set_connection(self.current())
         self._show_health()
         self._show_issues()
+        self.board.show_connection()
         self.connections_changed.emit()
 
     def _connection_picked(self, _index):
@@ -2780,6 +2804,9 @@ class JiraView(QWidget):
         it was opened through: leaving that puts the edit down, or - if the
         person would rather keep it - puts the picker back."""
         detail = self.issues.detail
+        if self.board.writing and self.picker.currentData() != self.board.connection_id:
+            self.picker.setCurrentIndex(self.picker.findData(self.board.connection_id))
+            return False
         if (detail.editing_key() and self.picker.currentData() != self._editing_on
                 and not detail.may_put_down()):
             self.picker.setCurrentIndex(max(0, self.picker.findData(self._editing_on)))
@@ -2788,6 +2815,7 @@ class JiraView(QWidget):
         self.settings_tab.set_connection(self.current())
         self._show_health()
         self._show_issues()
+        self.board.show_connection(changed_by_user=True)
         self._arm_auto()
         return True
 
@@ -2833,6 +2861,11 @@ class JiraView(QWidget):
     # -- the Issues tab: what is shown ----------------------------------------
     def _tab_changed(self, _index):
         self._first_look()
+        if self.tabs.currentWidget() is self.board or not self.auto.isActive():
+            self._arm_auto()
+        if self.tabs.currentWidget() is self.board and self.isVisible():
+            self._board_waiting_for_connections = not self._listed
+            self.board.show_connection(opened=True)
         if self.tabs.currentWidget() is self.activity:
             self.activity.shown()
 
@@ -3022,7 +3055,7 @@ class JiraView(QWidget):
         self._call("list", lambda core, cancel: core.integrations(
             "call", connection_id, "search", document=request, cancel=cancel), done)
 
-    def open_issue(self, row):
+    def open_issue(self, row, *, from_board=False):
         """An issue opened: read it, alone, with its newest comments."""
         connection = self.current()
         key = (row or {}).get("key")
@@ -3037,7 +3070,7 @@ class JiraView(QWidget):
         cache = self._cache(connection)
         cache.opened = key
         held = cache.details.get(key)
-        if held:
+        if held and not from_board:
             self.issues.detail.show_issue(held)
             self.issues.detail.skeleton.start()
         else:
@@ -3067,9 +3100,38 @@ class JiraView(QWidget):
             if cache.opened == key and self.current() is connection:
                 self.issues.detail.show_issue(issue)
 
+        operation = "board_issue" if from_board else "issue"
         self._call("issue", lambda core, cancel: core.integrations(
-            "call", connection_id, "issue", document={"key": key, "comments": COMMENTS},
+            "call", connection_id, operation, document={"key": key, "comments": COMMENTS},
             cancel=cancel), done)
+
+    def open_board_card(self, row):
+        detail = self.issues.detail
+        if detail.editing_key() and detail.editing_key() != row["key"] and not detail.may_put_down():
+            return
+        self._started = True
+        self.tabs.setCurrentWidget(self.issues)
+        self.issues.ready()
+        self.issues.select_key(row["key"], emit=False)
+        self.open_issue(row, from_board=True)
+
+    def _take_board_change(self, issue):
+        cache = self._cache(self.current())
+        key = issue["key"]
+        cache.details[key] = issue
+        for row in cache.rows:
+            if row["key"] == key:
+                row.update({name: issue[name] for name in
+                            ("summary", "type", "priority", "status", "category",
+                             "assignee", "updated") if name in issue})
+                break
+        self.issues.update_row(issue)
+        detail = self.issues.detail
+        if cache.opened == key and not detail.editing_key():
+            detail.show_issue(issue)
+
+    def _forget_board_card(self, key):
+        self._cache(self.current()).details.pop(key, None)
 
     def earlier_comments(self):
         connection = self.current()
@@ -3611,14 +3673,15 @@ class JiraView(QWidget):
     def _arm_auto(self):
         connection = self.current()
         minutes = int(((connection or {}).get("settings") or {}).get("refresh_minutes") or 0)
-        if minutes > 0 and self.isVisible() and not self._closing:
+        if (minutes > 0 and self.isVisible() and not self._closing
+                and self.tabs.currentWidget() is not self.board):
             self.auto.start(minutes * 60000)
         else:
             self.auto.stop()
 
     def _auto_refresh(self):
         connection = self.current()
-        if (self.isVisible() and connection is not None
+        if (self.isVisible() and self.tabs.currentWidget() is not self.board and connection is not None
                 and self._cache(connection).loaded_at is not None):
             self.refresh()
 
@@ -3637,6 +3700,8 @@ class JiraView(QWidget):
                     self.cache.pop(saved.get("id"), None)
                     # The projects offered come from the old answer too.
                     self.issues.projects.reset()
+                if document.get("token"):
+                    self.board.invalidate(saved.get("id"))
                 self._set_connections(others, pick=saved.get("id"))
                 self._arm_auto()
             if done is not None:
@@ -3693,6 +3758,7 @@ class JiraView(QWidget):
             if payload.get("ok") and payload.get("connection"):
                 saved = payload["connection"]
                 self.health.pop(saved.get("id"), None)
+                self.board.invalidate(saved.get("id"))
                 self._set_connections([saved if one.get("id") == saved.get("id") else one
                                        for one in self.connections], pick=saved.get("id"))
             done(payload)

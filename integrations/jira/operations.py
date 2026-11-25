@@ -157,7 +157,8 @@ def jql(request, connection=None, picked=()):
     return "%s ORDER BY %s" % (" AND ".join(clauses), order)
 
 
-def search(get, connection, request):
+def search(get, connection, request, *, fields=LIST_FIELDS, project_row=None,
+           reconcile=(), size_limit=MOST_ROWS):
     """One page of the list: ``{rows, cursor, jql, scope}`` - ``scope`` the
     connection's predefined query as it was ANDed, for the page to say.
 
@@ -166,7 +167,7 @@ def search(get, connection, request):
     may take more than one request of Jira but never more than those rows.
     """
     flavour = connection["flavour"]
-    wanted = _bounded(request.get("size"), PAGE_ROWS, MOST_ROWS)
+    wanted = _bounded(request.get("size"), PAGE_ROWS, size_limit)
     text = str(request.get("text") or "").strip()
     found = (picked(get, flavour, text, connection.get("scope") or "")
              if text and not request.get("jql") and not ISSUE_KEY.match(text) else [])
@@ -175,10 +176,11 @@ def search(get, connection, request):
     first = cursor
     try:
         while len(rows) < wanted:
+            options = {"reconcile": reconcile} if reconcile and not cursor else {}
             raw, cursor = query.page(get, flavour, question,
                                      min(query.PAGE, wanted - len(rows)),
-                                     LIST_FIELDS, cursor)
-            rows.extend(row(one, get.site) for one in raw)
+                                     fields, cursor, **options)
+            rows.extend((project_row or row)(one, get.site) for one in raw)
             if cursor is None:
                 break
         if not rows and not first:
@@ -187,7 +189,8 @@ def search(get, connection, request):
             before = get.api
             query.signed_in(get, flavour)
             if get.api != before:
-                return search(get, connection, request)
+                return search(get, connection, request, fields=fields, project_row=project_row,
+                              reconcile=reconcile, size_limit=size_limit)
     except JiraError as exc:
         typed = str(request.get("text") or "").strip().upper()
         if (exc.status == 400 and not request.get("jql") and ISSUE_KEY.match(typed)
@@ -328,11 +331,12 @@ def call(name, connection, token, request, get=None):
     ``get`` is the session to ask with, for a caller that wants to see
     afterwards whether it found the gateway (``get.switched``).
     """
-    from integrations.jira import writes
-    operation = OPERATIONS.get(name) or writes.OPERATIONS.get(name)
+    from integrations.jira import board, writes
+    operation = OPERATIONS.get(name) or writes.OPERATIONS.get(name) or board.OPERATIONS.get(name)
     if operation is None:
         raise ValueError("Unknown Jira operation %r. Known: %s"
-                         % (name, ", ".join(sorted(set(OPERATIONS) | set(writes.OPERATIONS)))))
+                         % (name, ", ".join(sorted(OPERATIONS.keys() | writes.OPERATIONS.keys()
+                                                   | board.OPERATIONS.keys()))))
     return operation(get or session(connection, token), connection, dict(request or {}))
 
 

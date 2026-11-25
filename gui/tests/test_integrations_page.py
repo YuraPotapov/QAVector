@@ -238,8 +238,9 @@ def test_coming_back_and_changing_tabs_asks_jira_nothing(make, qapp):
     before = core.asked()
     page.hide()
     page.show()
-    for index in (1, 2, 3, 0):
-        page.jira.tabs.setCurrentIndex(index)
+    for tab in (page.jira.connections_tab, page.jira.activity,
+                page.jira.settings_tab, page.jira.issues):
+        page.jira.tabs.setCurrentWidget(tab)
         qapp.processEvents()
     assert core.asked() == before
     # The Activity tab read the project's own log - a file, not Jira.

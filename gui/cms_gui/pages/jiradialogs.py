@@ -7,9 +7,13 @@ sent until the person presses the button that sends it, and what Jira says back
 an issue is not a window: it happens in place, in the issue (``jira.py``).
 """
 
-from PySide6.QtCore import Signal
+import datetime
+import math
+import re
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel,
-                               QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout,
+                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QVBoxLayout,
                                QWidget)
 
 from .. import widgets
@@ -45,10 +49,32 @@ def split_labels(text):
             if one]
 
 
+INPUT_HINTS = {"date": "YYYY-MM-DD", "datetime": "ISO 8601 with timezone", "number": "Number"}
+
+
+def input_scalar(raw, spec):
+    kind = spec["kind"]
+    if kind == "number":
+        if re.fullmatch(r"[+-]?\d+", raw.strip()):
+            return int(raw)
+        number = float(raw)
+        if math.isfinite(number) and (not spec.get("integer") or number.is_integer()):
+            return int(number) if number.is_integer() else number
+    elif kind == "date":
+        return datetime.date.fromisoformat(raw.strip()).isoformat()
+    elif kind == "datetime":
+        iso = re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", raw.strip().replace("Z", "+00:00"))
+        value = datetime.datetime.fromisoformat(iso)
+        if value.tzinfo is not None:
+            return value.astimezone(datetime.timezone.utc).isoformat()
+    elif raw.strip():
+        return raw
+    raise ValueError(raw)
+
+
 # -- a transition's screen ----------------------------------------------------
 class TransitionFieldsDialog(QDialog):
-    """What a transition's screen asks for - each a choice among what Jira allows.
-    A field with nothing to choose from cannot be filled here: Jira does it."""
+    """Required choices and scalar values for a Jira workflow transition."""
 
     def __init__(self, parent, transition, needs):
         super().__init__(parent)
@@ -59,16 +85,38 @@ class TransitionFieldsDialog(QDialog):
         column.setSpacing(8)
         column.addWidget(widgets.lede("%s asks for a little more." % (transition or "This move")))
         self.choices = {}
+        self.multi_choices = {}
+        self.inputs = {}
+        self.values = {}
         missing = []
         for need in needs or []:
-            if not need.get("allowed"):
-                missing.append(need.get("name") or need.get("key"))
+            title = need.get("name") or need["key"]
+            kind = need.get("kind")
+            if need.get("multiple"):
+                editor = QListWidget()
+                editor.setMaximumHeight(144)
+                for one in need["allowed"]:
+                    item = QListWidgetItem(one.get("name") or one["id"])
+                    item.setData(Qt.UserRole, one["id"])
+                    item.setCheckState(Qt.Unchecked)
+                    editor.addItem(item)
+                self.multi_choices[need["key"]] = editor, title
+            elif need.get("allowed") or kind == "boolean":
+                editor = QComboBox()
+                choices = need["allowed"] or [{"name": "Yes", "id": True}, {"name": "No", "id": False}]
+                for one in choices:
+                    editor.addItem(one.get("name") or one["id"], one["id"])
+                self.choices[need["key"]] = editor
+            elif kind == "multiline":
+                editor = QPlainTextEdit()
+                self.inputs[need["key"]] = editor.toPlainText, need
+            elif kind in {"text", "number", "date", "datetime"}:
+                editor = QLineEdit(placeholderText=INPUT_HINTS.get(kind, ""))
+                self.inputs[need["key"]] = editor.text, need
+            else:
+                missing.append(title)
                 continue
-            combo = QComboBox()
-            for one in need["allowed"]:
-                combo.addItem(one.get("name") or one.get("id"), one.get("id"))
-            self.choices[need["key"]] = combo
-            column.addWidget(widgets.field(need.get("name") or need["key"], combo))
+            column.addWidget(widgets.field(title, editor))
         self.problem = _problem()
         if missing:
             self.problem.setText("It also asks for %s, which can only be filled in Jira. "
@@ -77,11 +125,29 @@ class TransitionFieldsDialog(QDialog):
         column.addWidget(self.problem)
         row, self.move = _buttons(self, transition or "Move")
         self.move.setEnabled(not missing)
-        self.move.clicked.connect(self.accept)
+        self.move.clicked.connect(self._submit)
         column.addLayout(row)
 
+    def _submit(self):
+        for key, (editor, title) in self.multi_choices.items():
+            items = (editor.item(index) for index in range(editor.count()))
+            values = [item.data(Qt.UserRole) for item in items if item.checkState() == Qt.Checked]
+            if not values:
+                self.problem.setText("Choose at least one value for %s." % title)
+                self.problem.setVisible(True)
+                return
+            self.values[key] = values
+        for key, (read, spec) in self.inputs.items():
+            try:
+                self.values[key] = input_scalar(read(), spec)
+            except (ValueError, OverflowError):
+                self.problem.setText("Enter a valid value for %s." % (spec.get("name") or key))
+                self.problem.setVisible(True)
+                return
+        self.accept()
+
     def fields(self):
-        return {key: combo.currentData() for key, combo in self.choices.items()}
+        return dict(self.values, **{key: combo.currentData() for key, combo in self.choices.items()})
 
 
 # -- creating -----------------------------------------------------------------

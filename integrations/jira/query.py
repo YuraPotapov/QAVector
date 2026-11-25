@@ -124,7 +124,7 @@ def escape(text):
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def page(get, flavour, query, size, fields, cursor=None):
+def page(get, flavour, query, size, fields, cursor=None, *, reconcile=()):
     """One page of issues: ``(raw issues, cursor of the next page or None)``.
 
     The cursor is whatever the flavour pages by - Cloud's opaque
@@ -137,6 +137,8 @@ def page(get, flavour, query, size, fields, cursor=None):
         body = {"jql": query, "maxResults": size, "fields": list(fields)}
         if cursor:
             body["nextPageToken"] = cursor
+        if reconcile:
+            body["reconcileIssues"] = list(reconcile)
         answer = get("/rest/api/3/search/jql", body=body)
         issues = answer.get("issues") or []
         token = answer.get("nextPageToken")
