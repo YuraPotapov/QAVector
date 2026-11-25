@@ -16,6 +16,23 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.84] - 2026-11-25
+
+### Added
+- Integrations -> Jira -> Board: the connection's issues as cards in columns,
+  grouped by Status or any single-value field (priority, a user, a single
+  choice, short text, a number, a date). Dragging a card sets that field in
+  Jira: a status through an allowed transition, asking for one when there are
+  several and for the fields Jira requires. Columns include the values Jira
+  offers even when empty, a No value column, and columns you add. Ctrl+click
+  selects several cards to move together, with up to 3 tries per issue; after a
+  lost answer the issue is read back before another try, and a card stays in
+  its column until Jira confirms the change. Status columns follow the chosen
+  Jira board, or a familiar workflow order. Cards show the assignee in their
+  own colour, priority, Story Points, due date and Blocker. The Board asks Jira
+  only when you do something - open it, search, refresh, Load more - 100
+  issues at a time, and the Issues timer pauses while it is open.
+
 ## [0.16.83] - 2026-11-25
 
 ### Added
