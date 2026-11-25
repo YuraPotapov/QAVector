@@ -28,11 +28,11 @@ import uuid
 from collections import deque
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor,
+from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QMouseEvent, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
-                               QSizePolicy, QTableWidgetItem, QTextBrowser, QToolButton,
+                               QSizePolicy, QTableWidgetItem, QTextBrowser, QTextEdit, QToolButton,
                                QVBoxLayout, QWidget)
 
 from .. import (background, codeblocks, gitstate, icons, imagelinks, restrictions as restrictions_mod, stages,
@@ -122,6 +122,62 @@ def _continuation_draft(session):
 
 
 # -- the feed -------------------------------------------------------------------
+class CopyButton(QToolButton):
+    """Copies what a message says, as it was written. Only its mark, and only
+    while the pointer is over the message; a check for a moment once copied.
+    Its room is kept while hidden, so the text never moves under the pointer."""
+
+    #: How long the check stays, the pointer gone or not.
+    COPIED_MS = 1500
+
+    def __init__(self, text):
+        super().__init__()
+        self.said = str(text or "")
+        self.setProperty("variant", "icon")
+        self.setAccessibleName("Copy message")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(24, 24)
+        self.setIconSize(QSize(16, 16))
+        kept = self.sizePolicy()
+        kept.setRetainSizeWhenHidden(True)
+        self.setSizePolicy(kept)
+        self._over = False
+        self._copied = QTimer(self)
+        self._copied.setSingleShot(True)
+        self._copied.setInterval(self.COPIED_MS)
+        self._copied.timeout.connect(self._settle)
+        self.clicked.connect(self._copy)
+        self._paint()
+        self.hide()
+
+    def hover(self, over):
+        self._over = over
+        self.setVisible(over or self.copied())
+
+    def copied(self):
+        return self._copied.isActive()
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.said)
+        self._copied.start()
+        self._paint()
+
+    def _settle(self):
+        self._paint()
+        self.setVisible(self._over)
+
+    def _paint(self):
+        done = self.copied()
+        self.setIcon(icons.icon("check", theme.OK) if done else icons.icon("copy", theme.NEUTRAL[600]))
+        self.setToolTip("Copied" if done else "Copy")
+
+    def changeEvent(self, event):               # noqa: N802 - Qt's own spelling
+        super().changeEvent(event)
+        if event.type() == QEvent.StyleChange:
+            self._paint()                       # light to dark or back: the inks again
+
+
 class MessageCard(QFrame):
     """What a person said: a card, so it is told from what the agent said."""
 
@@ -159,6 +215,8 @@ class MessageCard(QFrame):
             self.remove.setToolTip("Take it out of the queue; it is not sent.")
             self.remove.clicked.connect(self.removed)
             head.addWidget(self.remove)
+        self.copy = CopyButton(self.said)
+        head.addWidget(self.copy)
         self.state = QLabel({"sending": "SENDING", "queued": "QUEUED"}.get(state, ""))
         self.state.setProperty("role", "msgstate")
         # Outlined, as a clarification still on its way is under Stages.
@@ -188,6 +246,38 @@ class MessageCard(QFrame):
             label.setProperty("role", "msgmeta")
             column.addWidget(label)
             self.files.append(label)
+
+    def enterEvent(self, event):                # noqa: N802 - Qt's own spelling
+        super().enterEvent(event)
+        self.copy.hover(True)
+
+    def leaveEvent(self, event):                # noqa: N802
+        super().leaveEvent(event)
+        self.copy.hover(False)
+
+
+class AnswerRow(QWidget):
+    """What the agent said, with the copy button where a message card has it."""
+
+    def __init__(self, text):
+        super().__init__()
+        self.text = AnswerText(text)
+        self.said = self.text.said
+        self.copy = CopyButton(self.said)
+        line = QHBoxLayout(self)
+        # The card's border and padding on the right: one column of buttons.
+        line.setContentsMargins(0, 0, 11, 0)
+        line.setSpacing(6)
+        line.addWidget(self.text, 1)
+        line.addWidget(self.copy, 0, Qt.AlignTop)
+
+    def enterEvent(self, event):                # noqa: N802 - Qt's own spelling
+        super().enterEvent(event)
+        self.copy.hover(True)
+
+    def leaveEvent(self, event):                # noqa: N802
+        super().leaveEvent(event)
+        self.copy.hover(False)
 
 
 class AnswerText(QTextBrowser):
@@ -462,6 +552,9 @@ class ChatFeed(QScrollArea):
     #: How long the width must stay put - a drag paused or let go, a maximise
     #: done - before the conversation is laid out to it again.
     SETTLE_MS = 200
+    #: Text being selected scrolls the feed while the pointer is this near its
+    #: top or bottom edge, or past it: a step each tick, longer further out.
+    EDGE_PX, EDGE_TICK_MS, EDGE_MOST_PX = 28, 25, 48
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -510,6 +603,11 @@ class ChatFeed(QScrollArea):
         self._settle.timeout.connect(self._settled)
         self._resizing = widgets.Skeleton(self, "lines")
         self._anchor = None
+        self._selecting = None          # the text a held left button is selecting in
+        self._pointer = None            # where that button's pointer last was, on the screen
+        self._edge = QTimer(self)
+        self._edge.setInterval(self.EDGE_TICK_MS)
+        self._edge.timeout.connect(self._scroll_selection)
 
     def viewportEvent(self, event):
         # A single long label must never widen the scroll body and move every
@@ -859,7 +957,7 @@ class ChatFeed(QScrollArea):
             return
         self._last_text = text
         self._said.append(text)
-        self._add("answer", _Row({"kind": "text"}, AnswerText(text)))
+        self._add("answer", _Row({"kind": "text"}, AnswerRow(text)))
 
     def _returned(self, event):
         found = self._tools.pop(event.get("id"), None)
@@ -994,14 +1092,74 @@ class ChatFeed(QScrollArea):
     def placed(self, group):
         return list(self._placed.get(group, {}).values())
 
+    # -- selecting past the edge -----------------------------------------------
+    def _watch(self, row):
+        """A label or answer knows only its own box: a selection dragged past
+        the feed's edge would stop at what is in view. Watched, the feed
+        scrolls under the pointer and the selection follows it."""
+        for one in [row, *row.findChildren(QWidget)]:
+            if isinstance(one, QLabel) and one.textInteractionFlags() & Qt.TextSelectableByMouse:
+                one.installEventFilter(self)
+            elif isinstance(one, (QTextEdit, QPlainTextEdit)):
+                one.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event):      # noqa: N802 - Qt's own spelling
+        kind = event.type()
+        if kind == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self._selecting, self._pointer = watched, event.globalPosition()
+        elif kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            self._selecting = None
+            self._edge.stop()
+        elif kind == QEvent.MouseMove and watched is self._selecting and event.buttons() & Qt.LeftButton:
+            self._pointer = event.globalPosition()
+            if not self._edge.isActive() and self._edge_step():
+                self._edge.start()
+        return False
+
+    def _edge_step(self):
+        """How far to scroll now: up when negative, 0 when the pointer is clear of both edges."""
+        if self._pointer is None:
+            return 0
+        y = int(self.viewport().mapFromGlobal(self._pointer).y())
+        height = self.viewport().height()
+        if y < self.EDGE_PX:
+            return -min(self.EDGE_MOST_PX, max(2, (self.EDGE_PX - y) // 2))
+        if y > height - self.EDGE_PX:
+            return min(self.EDGE_MOST_PX, max(2, (y - height + self.EDGE_PX) // 2))
+        return 0
+
+    def _scroll_selection(self):
+        watched = self._selecting
+        step = self._edge_step()
+        if watched is None or not step or not QApplication.mouseButtons() & Qt.LeftButton:
+            self._edge.stop()
+            return
+        bar = self.verticalScrollBar()
+        before = bar.value()
+        bar.setValue(before + step)
+        if bar.value() == before:
+            return
+        # The text moved under a pointer that did not: told it moved, the
+        # selection reaches what has just come into view.
+        pointer = self._pointer
+        try:
+            QApplication.sendEvent(watched, QMouseEvent(
+                QEvent.MouseMove, watched.mapFromGlobal(pointer), pointer,
+                Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+        except RuntimeError:                    # its row was taken out meanwhile
+            self._selecting = None
+            self._edge.stop()
+
     # -- rows in the column -----------------------------------------------------
     def _add(self, kind, widget):
+        self._watch(widget)
         self._column.insertWidget(1 + len(self._rows), widget)
         self._rows.append((kind, widget))
         self._times.append(self._now if self._now is not None else time.time())
 
     def _insert(self, index, kind, widget, at):
         """A row put between others: the tools still running below it move down one."""
+        self._watch(widget)
         self._column.insertWidget(1 + index, widget)
         self._rows.insert(index, (kind, widget))
         self._times.insert(index, at)
@@ -1027,11 +1185,13 @@ class ChatFeed(QScrollArea):
 
     def _add_waiting(self, card):
         row = _Row({"status": "running"}, card)
+        self._watch(row)
         self._column.insertWidget(1 + len(self._rows) + len(self._waiting), row)
         self._waiting.append(row)
 
     def _replace(self, index, widget):
         kind, old = self._rows[index]
+        self._watch(widget)
         self._column.replaceWidget(old, widget)
         self._rows[index] = (kind, widget)
         self._drop(old)

@@ -196,6 +196,84 @@ def test_a_conversation_is_laid_out_again_once_its_width_settles_under_a_skeleto
     dispose(feed)
 
 
+def _drag(target, kind, point, buttons=Qt.LeftButton):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    button = Qt.LeftButton if kind != QEvent.MouseMove else Qt.NoButton
+    QApplication.sendEvent(target, QMouseEvent(kind, point, target.mapToGlobal(point),
+                                               button, buttons, Qt.NoModifier))
+
+
+def test_selecting_past_the_feed_s_edge_scrolls_it_and_the_selection_follows(qapp, dispose, monkeypatch):
+    from PySide6.QtCore import QEvent, QPointF
+    held = {"buttons": Qt.LeftButton}                       # what a real held button reports
+    monkeypatch.setattr(agentchat.QApplication, "mouseButtons", staticmethod(lambda: held["buttons"]))
+    long = "\n".join("Line %d of what was asked" % number for number in range(80))
+    feed = ChatFeed()
+    feed.resize(500, 240)
+    feed.show()
+    feed.load(_events(question=long, answer=long))
+    for _turn_of_the_loop in range(3):                      # laid out, and at the newest
+        qapp.processEvents()
+    bar = feed.verticalScrollBar()
+    bar.setValue(0)                                         # the reader went up to the start
+    qapp.processEvents()
+    assert bar.value() == 0 < bar.maximum()
+    asked = feed._rows[0][1].body.text
+    _drag(asked, QEvent.MouseButtonPress, QPointF(4, 4))
+    below = asked.mapFromGlobal(feed.viewport().mapToGlobal(feed.viewport().rect().bottomLeft()))
+    _drag(asked, QEvent.MouseMove, QPointF(below.x() + 40, below.y() + 20), Qt.LeftButton)
+    assert feed._edge.isActive()
+    shown = len(asked.selectedText())
+    for _tick in range(10):                                 # the pointer held still below the edge
+        feed._edge.timeout.emit()
+    assert bar.value() > 0
+    assert len(asked.selectedText()) > shown                # it reached what scrolled into view
+    _drag(asked, QEvent.MouseButtonRelease, QPointF(4, 4), Qt.NoButton)
+    assert not feed._edge.isActive()
+    at = bar.value()
+    feed._scroll_selection()
+    assert bar.value() == at                                # let go: nothing scrolls on
+    _drag(asked, QEvent.MouseButtonPress, QPointF(4, 4))
+    _drag(asked, QEvent.MouseMove, QPointF(below.x() + 40, below.y() + 20), Qt.LeftButton)
+    held["buttons"] = Qt.NoButton                           # its release went somewhere else
+    feed._edge.timeout.emit()
+    assert bar.value() == at and not feed._edge.isActive()
+    dispose(feed)
+
+
+def test_a_message_shows_its_copy_button_while_hovered_and_a_check_once_copied(qapp, dispose):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent
+    from PySide6.QtWidgets import QApplication
+    feed = ChatFeed()
+    feed.resize(600, 400)
+    feed.show()
+    feed.load(_events())
+    qapp.processEvents()
+    asked = feed._rows[0][1].body
+    answer = next(row.body for kind, row in feed._rows if kind == "answer")
+    assert feed.said()[0] == QUESTION and feed.said()[3] == ANSWER
+    for message, said in ((asked, QUESTION), (answer, ANSWER)):
+        button = message.copy
+        assert button.isHidden() and not button.text()       # only its mark, and only on hover
+        room = button.geometry()
+        QApplication.sendEvent(message, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+        assert button.isVisible() and button.geometry() == room   # the text did not move
+        button.click()
+        assert QApplication.clipboard().text() == said
+        assert button.copied() and button.toolTip() == "Copied"
+        QApplication.sendEvent(message, QEvent(QEvent.Leave))
+        assert button.isVisible()                             # the check stays its moment
+        button._copied.stop()
+        button._copied.timeout.emit()
+        assert button.isHidden() and button.toolTip() == "Copy"
+    assert asked.copy.x() + asked.copy.width() + asked.mapTo(feed._body, asked.rect().topLeft()).x() == \
+        answer.copy.x() + answer.copy.width() + answer.mapTo(feed._body, answer.rect().topLeft()).x()
+    dispose(feed)
+
+
 def test_an_empty_conversation_takes_a_new_width_at_once(qapp, dispose):
     feed = ChatFeed()
     feed.resize(700, 400)
@@ -489,7 +567,7 @@ def test_an_answer_keeps_its_first_line_in_sight_when_the_feed_narrows(qapp):
     feed.resize(700, 400)
     feed.show()
     feed.load([{"type": "text", "text": "First line.\n\n" + "A long sentence that wraps. " * 12}])
-    answer = feed._rows[0][1].body
+    answer = feed._rows[0][1].body.text
     for width in (700, 420, 900):
         feed.resize(width, 400)
         for _pass in range(3):

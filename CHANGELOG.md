@@ -16,6 +16,17 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.85] - 2026-11-26
+
+### Added
+- A copy button on every chat message, yours and the agent's: only its icon, at
+  the top right, shown while the pointer is over the message. It copies the text
+  as written - an answer as its Markdown - and shows a check for a moment.
+
+### Changed
+- Selecting text in a chat message and dragging past the top or bottom of the
+  conversation scrolls it, faster the further out, and the selection follows.
+
 ## [0.16.84] - 2026-11-25
 
 ### Added
