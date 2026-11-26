@@ -13,6 +13,11 @@
 # inside a freeze).
 set -euo pipefail
 
+# A shell started from an installed QAVector (an agent's terminal, say) inherits
+# the app's LD_LIBRARY_PATH. PyInstaller then resolves libpython and Qt from
+# /opt/qavector, collects none of Qt's plugins, and the package does not start.
+unset LD_LIBRARY_PATH
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
 VENV="$BUILD/venv"
@@ -96,6 +101,9 @@ CORE_BIN="$BUILD/dist/core/qavector-core"
 GUI_BIN="$BUILD/dist/gui/qavector-gui"
 [ -x "$CORE_BIN" ] || die "the core bundle was not produced"
 [ -x "$GUI_BIN" ] || die "the GUI bundle was not produced"
+# Without its platform plugin Qt aborts before the first window.
+[ -f "$BUILD/dist/gui/_internal/PySide6/Qt/plugins/platforms/libqxcb.so" ] \
+  || die "Qt's xcb platform plugin is missing from the GUI bundle"
 
 # Copy after PyInstaller so it cannot rewrite the ELF/RUNPATH/checksum manifests.
 mkdir -p "$BUILD/dist/core/_internal/runtime"
