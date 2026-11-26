@@ -355,11 +355,19 @@ def settle(session):
             if key in TOKEN_KEYS and isinstance(value, int):
                 tokens[key] = tokens.get(key, 0) + value
     session["tokens"] = tokens
-    context = {}
+    context, found_in = {}, None
     for turn in reversed(turns):
-        if (turn.get("context") or {}).get("used"):
-            context = dict(turn["context"])
+        # A compaction counts though it may not know the size now: the figure
+        # of the turn before it is no longer true.
+        if (turn.get("context") or {}).get("used") or (turn.get("context") or {}).get("compacted"):
+            context, found_in = dict(turn["context"]), turn
             break
+    if context.get("compacted") and not context.get("window"):
+        # A compaction turn does not report the model's window; an earlier turn did.
+        context["window"] = next((one["context"]["window"] for one in reversed(turns)
+                                  if (one.get("context") or {}).get("window")
+                                  and found_in.get("model_used")
+                                  and one.get("model_used") == found_in.get("model_used")), 0)
     session["context"] = context
     return session
 

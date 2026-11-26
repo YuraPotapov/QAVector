@@ -576,14 +576,17 @@ def _send(call):
             except ValueError:          # not the main thread: nobody can signal us
                 pass
     try:
-        answer = runner.send(call.sessions, session_id, document.get("message"),
+        compact = document.get("compact") is True
+        # What to keep is its own field: a core that does not know a compaction
+        # then finds no message and refuses, rather than running the hint as work.
+        answer = runner.send(call.sessions, session_id, document.get("hint") if compact else document.get("message"),
                              agents_path=call.path, mode=document.get("mode"),
                              model=document.get("model"), effort=document.get("effort"),
                              skills=document.get("skills"), skills_root=call.skills,
                              emit=emit, stop=stop, attachments=document.get("attachments"),
                              plan=document.get("plan"), qavector=document.get("qavector"),
                              trigger=document.get("trigger"), read_tasks=call.read_tasks,
-                             follow_ups=follow_ups)
+                             follow_ups=follow_ups, compact=compact)
     except runner.Refused as exc:
         return _refusal(exc.kind, str(exc))
     finally:

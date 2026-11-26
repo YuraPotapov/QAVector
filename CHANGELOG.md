@@ -16,6 +16,21 @@ app-agnostic, since that will break things on purpose.
 
 ## [Unreleased]
 
+## [0.16.86] - 2026-11-26
+
+### Added
+- Compact in a chat: a button beside Plan first that has the agent replace its
+  context with a summary to make room. It asks first - for Claude also what the
+  summary should keep - and works for Claude and Codex. The chat shows a row
+  with the context's size before and after, and says so when the agent
+  compacted by itself.
+- The context size in the status bar turns amber from 80% of the model's window
+  and red from 95%, with the share in its tooltip.
+
+### Changed
+- Plan first is a button that stays pressed while it is on, in the same style as
+  Compact.
+
 ## [0.16.85] - 2026-11-26
 
 ### Added

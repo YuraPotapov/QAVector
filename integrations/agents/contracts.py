@@ -39,6 +39,8 @@ class ProviderCapabilities:
     fork_session: bool = False
     interactive_approvals: bool = False
     assigns_session_id: bool = False
+    compact: bool = False
+    compact_hint: bool = False
     cost_scope: str = "unknown"
 
     def document(self):

@@ -984,6 +984,11 @@ QWidget#agentChat QPushButton[variant="ghost"]:hover {{
     background: {select_bg}; color: {select_ink};
 }}
 QWidget#agentChat QPushButton[variant="ghost"]:disabled {{ color: {n500}; }}
+/* A chat action that stays on once pressed (Plan first): held down in the
+   accent's own tint and ink, the pair a selected row and the Jira filters use. */
+QWidget#agentChat QPushButton[variant="ghost"]:checked {{
+    background: {select_bg}; color: {select_ink}; border-color: {accent};
+}}
 /* Who the message goes to. A field, not a command: the page's own ink on the
    page's ground with a hairline, the name in the body face - the tool-button
    default is the condensed mono of RUN, which would make a step name read

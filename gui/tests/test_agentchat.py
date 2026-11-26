@@ -22,7 +22,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QPushButton, QWidget
 
 from cms_gui import theme, widgets
-from cms_gui.pages import agentchat
+from cms_gui.pages import agentchat, agentwords
 from cms_gui.pages.agentchat import AnswerText, ChatFeed, MessageCard
 from cms_gui.pages.agents import ConnectionDialog
 from cms_gui.pages.integrations import IntegrationsPage
@@ -2315,3 +2315,168 @@ def test_a_running_turn_s_steps_look_at_the_branch_again_once_per_burst(make, tm
     composer.set_connections([_connection(git_tracker=False)])
     turn.say(dict(events[5], seq=20))
     assert not composer._git_soon.isActive()                  # Git Tracker off: no look at all
+
+
+# -- compacting -------------------------------------------------------------------
+def test_the_context_is_called_warm_from_80_percent_and_full_from_95(qapp):
+    level = agentwords.context_level
+    assert level({"used": 790, "window": 1000}) == ""
+    assert level({"used": 800, "window": 1000}) == "warn"
+    assert level({"used": 949, "window": 1000}) == "warn"
+    assert level({"used": 950, "window": 1000}) == "full"
+    assert level({"used": 5000, "window": 0}) == "" and level({}) == ""        # no window, no verdict
+    assert agentwords.context_share({"used": 500, "window": 1000}) == 0.5
+
+
+def test_a_compaction_row_says_what_the_context_shrank_to(qapp):
+    feed = ChatFeed()
+    feed.load([{"type": "compacted", "before": 840000, "after": 40000, "trigger": "manual"},
+               {"type": "compacted", "before": 0, "after": 0, "trigger": ""}])
+    assert feed.kinds() == ["compacted", "compacted"]
+    first, second = (row.stage for _kind, row in feed._rows)
+    assert first["title"] == "Conversation compacted" and first["detail"] == "840k -> 40k tokens"
+    assert "summary" in second["detail"]
+
+
+def _compactable(**more):
+    return dict({"id": "one", "kind": "claude", "provider_started": True, "folder": "work",
+                 "turns": [{"n": 1, "state": "completed"}]}, **more)
+
+
+def test_compact_is_offered_only_for_a_conversation_the_agent_holds_and_nobody_is_working_in(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    button = chat.composer.compact
+    chat._show(_compactable(), [], whole=True)
+    assert chat.can_compact() and not button.isHidden()
+    chat._show(_compactable(provider_started=False), [], whole=True)
+    assert not chat.can_compact() and button.isHidden()
+    chat._show(_compactable(kind="other"), [], whole=True)
+    assert not chat.can_compact()
+    chat._show(_compactable(), [], whole=True)
+    chat.turns["one"] = object()                               # a turn is running in it
+    assert not chat.can_compact()
+    chat.turns.clear()
+
+
+def test_compact_asks_what_to_keep_and_runs_a_turn_that_is_a_compaction_only(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    session = _compactable()
+    chat.sessions = [session]
+    chat._show(session, [], whole=True)
+    monkeypatch.setattr(agentchat.widgets, "ask_text", lambda *args, **kwargs: None)
+    chat.compact_current()
+    assert FakeTurn.made == []                                 # cancelled: nothing runs
+    monkeypatch.setattr(agentchat.widgets, "ask_text", lambda *args, **kwargs: "keep the plan")
+    chat.compact_current()
+    (turn,) = FakeTurn.made
+    assert turn.started and turn.document == {"message": "", "compact": True, "hint": "keep the plan"}
+    assert chat.composer.draft() == ""                         # not what the person typed
+    turn.say({"type": "compacted", "before": 900, "after": 100, "trigger": "manual"})
+    turn.answered.emit({"ok": True, "session": dict(session, context={"used": 0, "window": 200000, "compacted": True}),
+                        "turn": {"n": 2, "state": "completed", "error": "", "compact": True}})
+    assert chat.composer.draft() == ""                         # a finished compaction leaves no draft
+
+
+def test_codex_is_asked_to_confirm_and_not_what_to_keep(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    session = _compactable(kind="codex")
+    chat.sessions = [session]
+    chat._show(session, [], whole=True)
+    monkeypatch.setattr(agentchat.widgets, "ask_text", lambda *args, **kwargs: pytest.fail("no hint for Codex"))
+    monkeypatch.setattr(agentchat.widgets, "confirm", lambda *args, **kwargs: True)
+    chat.compact_current()
+    (turn,) = FakeTurn.made
+    assert turn.document == {"message": "", "compact": True, "hint": ""}
+
+
+def test_a_compaction_leaves_the_card_waiting_for_an_answer_active(qapp):
+    feed = ChatFeed()
+    feed.load([{"type": "user", "text": "plan it"},
+               {"type": "questions", "items": [{"question": "Which?", "options": ["a", "b"], "multiple": False}]}])
+    card = feed.cards()[-1]
+    assert card.property("settled") != "true"
+    feed.append({"type": "user", "text": "/compact", "compact": True})
+    assert card.property("settled") != "true"
+    feed.append({"type": "user", "text": "an answer"})
+    assert card.property("settled") == "true"
+
+
+def test_a_compaction_does_not_take_the_messages_other_agents_left(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    taken = []
+    access = type("Access", (), {"acknowledge_message": lambda self, key: taken.append(key),
+                                 "grant_agent": lambda self, *args, **kwargs: None,
+                                 "messages": lambda self, *args, **kwargs: None})()
+    monkeypatch.setattr(agentchat.ChatTab, "qcr_access", access)
+    session = _compactable()
+    chat.sessions = [session]
+    chat._show(session, [], whole=True)
+    chat._inbox = [{"message_id": "m1", "text": "hi"}]
+    monkeypatch.setattr(agentchat.widgets, "ask_text", lambda *args, **kwargs: "")
+    chat.compact_current()
+    (turn,) = FakeTurn.made
+    assert turn.document["message"] == "" and taken == [] and len(chat._inbox) == 1
+
+
+def test_compact_is_not_offered_while_the_core_says_a_turn_runs_and_not_for_an_unknown_size(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    chat._show(_compactable(running=True), [], whole=True)
+    assert not chat.can_compact()
+    assert agentwords.context_share({"used": 0, "window": 1000}) is None
+
+
+def test_a_record_only_conversation_cannot_be_compacted_and_a_refresh_does_not_cancel_a_compaction(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    chat._show(_compactable(record=True), [], whole=True)
+    assert not chat.can_compact()
+    session = _compactable()
+    chat.sessions = [session]
+    chat._show(session, [], whole=True)
+    chat._woke["one"] = 2
+
+    def refreshed(*_args, **_kwargs):
+        chat.current = dict(session)                      # the same conversation, read again
+        return "keep"
+    monkeypatch.setattr(agentchat.widgets, "ask_text", refreshed)
+    chat.compact_current()
+    assert len(FakeTurn.made) == 1 and chat._woke == {"one": 2}      # run, and no round counter reset
+
+
+def test_the_composer_s_compact_button_asks_first_and_a_refusal_runs_nothing(make, monkeypatch):
+    chat = make().agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    for kind in ("claude", "codex"):
+        session = _compactable(kind=kind)
+        chat.sessions = [session]
+        chat._show(session, [], whole=True)
+        asked = []
+        monkeypatch.setattr(agentchat.widgets, "ask_text",
+                            lambda *args, **kwargs: asked.append(kwargs.get("detail")) or None)
+        monkeypatch.setattr(agentchat.widgets, "confirm", lambda *args, **kwargs: asked.append(args[3]) or False)
+        chat.composer.compact.click()
+        assert len(asked) == 1 and "summary" in asked[0]        # said what it costs, and asked
+        assert FakeTurn.made == []
+
+
+def test_plan_first_is_a_button_that_stays_pressed_while_it_is_on(make):
+    chat = make().agents.chat
+    plan = chat.composer.plan
+    assert isinstance(plan, QPushButton) and plan.isCheckable() and plan.property("variant") == "ghost"
+    assert plan.property("variant") == chat.composer.compact.property("variant")
+    plan.click()
+    assert plan.isChecked() and chat.composer.settings()["plan"] is True
+    plan.click()
+    assert not plan.isChecked() and chat.composer.settings()["plan"] is False

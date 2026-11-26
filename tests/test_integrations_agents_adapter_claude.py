@@ -441,3 +441,15 @@ def test_the_runner_hands_qavector_only_to_an_adapter_that_takes_it():
     assert runner._qavector(claude_adapter, None) == {}
     assert runner._qavector(claude_adapter, {"socket": "/s", "token_file": "/t"}) == {
         "qavector": {"socket": "/s", "token_file": "/t"}}
+
+
+def test_the_cli_s_compaction_is_one_event_with_the_sizes_before_and_after():
+    """As the CLI 2.1.291 writes it for /compact, manual or automatic."""
+    boundary = {"type": "system", "subtype": "compact_boundary", "session_id": "s",
+                "compact_metadata": {"trigger": "auto", "pre_tokens": 6761, "post_tokens": 586,
+                                     "cumulative_dropped_tokens": 6175, "duration_ms": 8858}}
+    assert claude.events(json.dumps(boundary)) == [
+        {"type": "compacted", "before": 6761, "after": 586, "trigger": "auto"}]
+    status = {"type": "system", "subtype": "status", "status": "compacting", "session_id": "s"}
+    assert claude.events(json.dumps(status)) == []
+    assert claude.capabilities().compact and claude.capabilities().compact_hint

@@ -30,7 +30,7 @@ from collections import deque
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QDesktopServices, QFont, QIcon, QMouseEvent, QPixmap, QTextCharFormat, QTextCursor,
                            QTextDocument, QTextFormat)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
                                QSizePolicy, QTableWidgetItem, QTextBrowser, QTextEdit, QToolButton,
                                QVBoxLayout, QWidget)
@@ -44,8 +44,8 @@ from ..agentmodel import ModelPicker
 from .chatcontinuation import RelationshipDelegate, age_of
 from . import agentcards
 from .agentcards import ChangesLine, IntegrationChangeCard, PlanCard, QuestionsCard
-from .agentwords import (clock_text, context_text, cost_text, end_text, folder_text, kind_name,
-                         refused_text, tokens_text, took_text, when_text)
+from .agentwords import (clock_text, context_level, context_share, context_text, cost_text, count_text,
+                         end_text, folder_text, kind_name, refused_text, tokens_text, took_text, when_text)
 
 #: How much the agent may do in a turn, as the composer offers it. (label, mode)
 MODES = (("Read", "read"), ("Edit", "edit"), ("Full", "full"))
@@ -88,6 +88,10 @@ SESSIONS_SHOWN = 200
 
 #: How many folders the composer remembers.
 RECENT_FOLDERS = 8
+
+#: The providers whose conversations the app can have compact (a connection's
+#: kind); the core refuses one whose transport cannot.
+COMPACT_KINDS = ("claude", "codex")
 
 #: How tall the box may grow, in lines, before it scrolls.
 MAX_LINES = 6
@@ -738,6 +742,8 @@ class ChatFeed(QScrollArea):
         self._waiting = []
         if sending:
             document = sending if isinstance(sending, dict) else {"message": sending}
+            if document.get("compact"):
+                document = dict(document, message=("/compact " + str(document.get("hint") or "")).strip())
             self._add_waiting(MessageCard(document.get("message"), state="sending",
                                           attachments=document.get("attachments"), task_refs=document.get("task_refs"),
                                           who=FROM_QAVECTOR if document.get("trigger") else "YOU"))
@@ -802,7 +808,7 @@ class ChatFeed(QScrollArea):
             self._began, self._last_text, self._said = event.get("at"), "", []
             self._mode = event.get("mode") or self._mode
             for card in self._cards:
-                if card.property("settled") != "true":
+                if card.property("settled") != "true" and not event.get("compact"):
                     card.settle()
             self._add("you", _Row({"kind": "result"},
                                   MessageCard(event.get("text"), clock_text(event.get("at")),
@@ -831,6 +837,13 @@ class ChatFeed(QScrollArea):
             self._add("background", stages.StageRow({
                 "kind": "caution" if status in ("failed", "stopped") else "result",
                 "title": "Background task %s" % status, "detail": event.get("summary") or ""}))
+        elif kind == "compacted":
+            before, after = count_text(event.get("before")), count_text(event.get("after"))
+            self._add("compacted", stages.StageRow({
+                "kind": "result", "title": "Conversation compacted",
+                "detail": "%s -> %s tokens" % (before, after) if before and after
+                and event.get("before") and event.get("after") else
+                "The agent keeps a summary of what came before."}))
         elif kind == "tool.started":
             stage = {"kind": "tool", "title": event.get("title") or event.get("name") or "Tool",
                      "detail": event.get("detail") or "", "status": "running"}
@@ -1476,6 +1489,8 @@ class Composer(QFrame):
 
     issue_wanted = Signal(str, str)
     submitted = Signal(str)
+    #: The person asked to compact the open conversation's context.
+    compact_requested = Signal()
     interrupt_requested = Signal()
     content_changed = Signal()
     stop_requested = Signal()
@@ -1634,9 +1649,19 @@ class Composer(QFrame):
         self.wake = widgets.Segmented([label for label, _value in WAKE], "Ask")
         self.wake.setToolTip(WAKE_MEANS)
         self.wake.changed.connect(lambda label: self.wake_changed.emit(dict(WAKE)[label]))
-        self.plan = QCheckBox("Plan first")
+        # A button that stays pressed while it is on, as Compact beside it is
+        # a button: the two read as one family of actions.
+        self.plan = QPushButton("Plan first")
+        self.plan.setProperty("variant", "ghost")
+        self.plan.setCheckable(True)
         self.plan.setToolTip(PLAN_MEANS)
         self.plan.toggled.connect(lambda _on: self.chosen.emit())
+        self.compact = QPushButton("Compact")
+        self.compact.setProperty("variant", "ghost")
+        self.compact.setToolTip("Replace the agent's context with a summary to make room. "
+                                "What was said stays here as it is.")
+        self.compact.clicked.connect(self.compact_requested)
+        self.compact.hide()
         self.model = ModelPicker()
         self.model.setMinimumWidth(160)
         self.model.setMaximumWidth(240)
@@ -1762,8 +1787,8 @@ class Composer(QFrame):
             button.setStyleSheet("min-height: 30px; max-height: 30px; padding-top: 0px; padding-bottom: 0px;")
         for button in (self.stop, self.send_button):
             button.setFixedWidth(80)
-        self.footer = widgets.flow_row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan,
-                                       None, self.interrupt, self.stop, self.send_button)
+        self.footer = widgets.flow_row(self.attach, 6, _caption("ACCESS"), self.mode, 10, self.plan, 6,
+                                       self.compact, None, self.interrupt, self.stop, self.send_button)
         outer.addWidget(self.footer)
         self.text.textChanged.connect(self._sync_send)
         self._sync_send()
@@ -2403,6 +2428,9 @@ class ChatTab(QWidget):
     #: whatever shows conversations elsewhere and wants to read them again.
     conversation_changed = Signal(str)
     context_changed = Signal(str)
+    #: (level, tooltip) of the open conversation's context: level is "", "warn"
+    #: or "full" (agentwords.context_level), the tooltip says the share.
+    context_level_changed = Signal(str, str)
     footer_title_changed = Signal(str)
     turn_finished = Signal(str)
     #: (connection id, key) - an issue a conversation is about, to open (ADR-014).
@@ -2595,6 +2623,7 @@ class ChatTab(QWidget):
         self.composer = Composer()
         self.composer.issue_wanted.connect(self.issue_wanted)
         self.composer.submitted.connect(self.submit)
+        self.composer.compact_requested.connect(self.compact_current)
         self.composer.interrupt_requested.connect(self.interrupt_submit)
         self.composer.stop_requested.connect(self.stop)
         self.composer.task_stop_requested.connect(self.stop_task)
@@ -2904,13 +2933,56 @@ class ChatTab(QWidget):
         self._sync()
 
     def _publish_context(self, session):
-        context = context_text(session.get("context"))
-        self.context_changed.emit("Context " + context if context else "")
+        context = session.get("context") or {}
+        text = context_text(context) or ("compacted" if context.get("compacted") else "")
+        self.context_changed.emit("Context " + text if text else "")
+        share = context_share(context)
+        self.context_level_changed.emit(
+            context_level(context), "%d%% of the context window" % round(share * 100)
+            if share is not None else "")
+        self._publish_compact()
 
     def _clear_context(self, session_id):
         if session_id is not None and session_id == self._last_opened:
             self._last_opened = None
             self.context_changed.emit("")
+            self.context_level_changed.emit("", "")
+            self.composer.compact.hide()
+
+    def _publish_compact(self):
+        self.composer.compact.setVisible(self.can_compact())
+
+    def can_compact(self):
+        """Whether the open conversation holds a context to compact, and
+        nothing is running in it."""
+        session = self.current or {}
+        return bool(_is_chat(session) and session.get("provider_started") and session.get("turns")
+                    and session.get("kind") in COMPACT_KINDS and self._showing(session.get("id"))
+                    and session.get("id") not in self.turns and not self._creating
+                    and not session.get("running"))
+
+    def compact_current(self):
+        """Have the provider compact the open conversation: its context is
+        replaced by a summary, the record here stays whole."""
+        session = self.current
+        if not self.can_compact():
+            return
+        detail = ("The agent continues from a summary of the conversation so far; what was said "
+                  "stays here as it is, but the agent will no longer remember it word for word.")
+        if session.get("kind") == "claude":
+            hint = widgets.ask_text(self, "Compact conversation",
+                                    "What should the summary keep? Leave empty to let the agent decide.",
+                                    "", detail=detail, agree="Compact")
+            if hint is None:
+                return
+        else:
+            if not widgets.confirm(self, "Compact conversation", "Compact the agent's context?", detail,
+                                   agree="Compact", kind="warn"):
+                return
+            hint = ""
+        if not self.can_compact() or (self.current or {}).get("id") != session.get("id"):
+            return                  # something started while the question was open
+        self._start(session, "", document={"message": "", "compact": True, "hint": hint})
 
     def _put(self, session):
         """``session`` as the core now has it: first in the list, as the most
@@ -3017,6 +3089,7 @@ class ChatTab(QWidget):
         self.new_button.setEnabled(not self._creating)
         self.composer.text.setEnabled(not self._creating)
         self.composer.footer.setEnabled(not self._creating)
+        self._publish_compact()
 
     # -- the conversation --------------------------------------------------------
     def _leave(self):
@@ -3584,7 +3657,7 @@ class ChatTab(QWidget):
 
     def _start(self, session, text, document=None):
         session_id = session["id"]
-        if not (document or {}).get("trigger"):
+        if not (document or {}).get("trigger") and not (document or {}).get("compact"):
             # The person spoke: QAVector may go on by itself again (ADR-009 D6).
             self._woke.pop(session_id, None)
         if document is None:
@@ -3593,7 +3666,8 @@ class ChatTab(QWidget):
             for key in ("mode", "model", "effort", "plan"):
                 if key in chosen:
                     document[key] = chosen[key]
-        waiting = [one for one in self._inbox if self._showing(session_id)]
+        waiting = [one for one in self._inbox if self._showing(session_id)
+                   and not document.get("compact")]
         if waiting and ChatTab.qcr_access is not None:
             # What other agents wrote goes with the person's message, said as theirs (ADR-006 D4).
             document = dict(document, message=agentcards.inbox_prefix(waiting) + str(document.get("message") or ""))
@@ -3734,7 +3808,9 @@ class ChatTab(QWidget):
                 self._start(session, queued[0]["message"], document=queued[0])
                 return
         # Anything else, and what was not said is the person's to say again.
-        back = [doc for doc in ([unsent] if state is None else []) + queued if doc]
+        # A compaction is not something typed: nothing of it goes back to the draft.
+        back = [doc for doc in ([unsent] if state is None else []) + queued
+                if doc and not doc.get("compact")]
         unborn = fresh and state is None and not answer.get("record_unknown")
         key = "" if unborn else session_id
         if back:

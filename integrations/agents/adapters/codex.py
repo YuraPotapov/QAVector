@@ -65,7 +65,7 @@ def capabilities():
                                     cancel=True, usage=True, qavector=True, assigns_session_id=True)
     return ProviderCapabilities(KIND, MODES, resume=True, selected_model=True, effort=True,
                                 cancel=True, usage=True, qavector=True, planning=True, skills=True,
-                                assigns_session_id=True)
+                                assigns_session_id=True, compact=True)
 
 
 #: Where Codex's installers put it, after PATH (see :mod:`integrations.agents.locate`).
@@ -131,13 +131,16 @@ def turn_env(env):
 
 
 def turn_argv(binary, mode="read", model="", effort="", session="", resume=False,
-              skills_dir="", attachments_dir="", plan=False, qavector=None):
+              skills_dir="", attachments_dir="", plan=False, qavector=None, compact=False):
     """The command line for one turn: the bridge, told what the turn is.
 
     Only paths and choices are in it - the message goes to stdin and the
     QAVector token stays in its file. ``qavector`` is not given to a planning
-    turn, which only reads.
+    turn, which only reads. ``compact`` makes it a turn that only has Codex
+    compact the thread, and says nothing to the model.
     """
+    if compact and (exec_transport() or not resume):
+        raise Unsupported("Codex compacts a thread it already has, over the app-server transport.")
     if exec_transport():
         return exec_argv(binary, mode, model, effort, session, resume, skills_dir,
                          attachments_dir, plan, qavector)
@@ -154,6 +157,8 @@ def turn_argv(binary, mode="read", model="", effort="", session="", resume=False
     spec = {"binary": binary, "mode": mode, "model": str(model or ""), "effort": str(effort or ""),
             "thread": session if resume else "", "plan": bool(plan),
             "skills_root": skills_dir or "", "qavector": server, "stream": True}
+    if compact:
+        spec["compact"] = True
     return codex_turn.launcher() + ["--codex-turn", "--spec=" + json.dumps(spec, separators=(",", ":"))]
 
 
@@ -266,6 +271,10 @@ def _bridge_events(event):
         if event.get("effort"):
             found["effort"] = str(event["effort"])
         return [found]
+    if kind == "compacted":
+        # Said by the bridge, which heard it of its own thread: Codex does not
+        # say how large the thread was; the next usage report does.
+        return [{"type": "compacted", "before": 0, "after": 0, "trigger": ""}]
     if kind == "decision" and event.get("decision") == "declined" and event.get("item"):
         return [{"type": "tool.refused", "id": str(event["item"]), "reason": str(event.get("reason") or "")}]
     if kind != "end":

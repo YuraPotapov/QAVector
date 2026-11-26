@@ -159,6 +159,17 @@ if args[0] == "app-server":
             else:
                 say({"method": "thread/started", "params": {"thread": {"id": THREAD}}})
             say({"id": ident, "result": {"thread": {"id": THREAD}, "model": params.get("model") or "fixture-default"}})
+        elif method == "thread/compact/start":
+            # As the real app-server does it: a turn of its own, with one item and no usage.
+            turns += 1
+            turn = "turn-%d" % turns
+            say({"id": ident, "result": {}})
+            say({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": turn}}})
+            item = {"type": "contextCompaction", "id": "compact-%d" % turns}
+            say({"method": "item/started", "params": {"threadId": THREAD, "turnId": turn, "item": item}})
+            say({"method": "item/completed", "params": {"threadId": THREAD, "turnId": turn, "item": item}})
+            say({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {
+                 "id": turn, "status": "completed", "items": [], "error": None}}})
         elif method == "turn/start":
             turns += 1
             turn = "turn-%d" % turns

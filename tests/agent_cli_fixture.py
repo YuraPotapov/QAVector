@@ -71,6 +71,16 @@ if log:
     with open(log, encoding="utf-8") as handle:
         taken = sum(1 for line in handle if session and session in json.loads(line)["argv"])
 say({"type": "system", "subtype": "init", "model": "fake-model", "session_id": session})
+if message.startswith("/compact"):
+    # As the real CLI answers it: a boundary with the sizes, then a result of nothing.
+    say({"type": "system", "subtype": "status", "status": "compacting", "session_id": session})
+    say({"type": "system", "subtype": "compact_boundary", "session_id": session,
+         "compact_metadata": {"trigger": "manual", "pre_tokens": 1205, "post_tokens": 586}})
+    if "CUT" in message:
+        sys.exit(3)                         # gone between the boundary and the result
+    say({"type": "result", "is_error": False, "result": "", "session_id": session, "num_turns": 0,
+         "total_cost_usd": round(COST * taken, 6), "usage": {"input_tokens": 0, "output_tokens": 0}})
+    sys.exit(0)
 if message.startswith("FOLLOW") or message.startswith("BACKGROUND HOLD"):
     import select
 

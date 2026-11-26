@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cms_gui import history as history_mod, launch, main_window as main_window_mod
+from cms_gui import history as history_mod, launch, main_window as main_window_mod, theme
 from cms_gui import launchpresetsfile as lps
 from cms_gui.settings import Settings
 
@@ -1938,3 +1938,23 @@ def test_a_pinned_integration_stands_on_the_rail_and_opens_from_it(window, qapp)
     rail.unpinned.emit({"provider": "teams", "target": None})
     assert rail.links == [] and not window.integrations.cards.cards["teams"].pin_button.isChecked()
     window.settings.save_pinned_links([])
+
+
+def test_the_footer_warms_the_context_from_80_percent_and_the_composer_offers_compact(window, monkeypatch):
+    chat = window.integrations.agents.chat
+    monkeypatch.setattr(chat, "_remember", lambda **_changes: None)
+    monkeypatch.setattr(chat, "read_budget", lambda _sid: None)
+    monkeypatch.setattr(chat, "_refresh_changes", lambda: None)
+    session = {"id": "first", "kind": "claude", "provider_started": True, "turns": [{"n": 1, "state": "completed"}]}
+    chat._show(dict(session, context={"used": 500, "window": 1000}), [], whole=True)
+    calm = window.status_context.styleSheet()
+    assert not chat.composer.compact.isHidden() and window.status_context.toolTip() == "50% of the context window"
+    chat._put(dict(session, context={"used": 850, "window": 1000}))
+    assert theme.WARN_INK in window.status_context.styleSheet() != calm
+    chat._put(dict(session, context={"used": 960, "window": 1000}))
+    assert theme.BAD_INK in window.status_context.styleSheet()
+    chat._put(dict(session, context={"used": 0, "window": 1000, "compacted": True}))
+    assert window.status_context.text() == "Context compacted"
+    assert theme.WARN_INK not in window.status_context.styleSheet()
+    chat._show({"id": "second"}, [], whole=True)
+    assert chat.composer.compact.isHidden() and window.status_context.toolTip() == ""

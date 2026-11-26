@@ -56,6 +56,13 @@ REPLY_TIMEOUT = 120.0
 #: How long an interrupted turn has to end before the app-server is stopped.
 INTERRUPT_GRACE = 3.0
 
+#: How long after Codex says a thread is compacted its turn has to end before
+#: the compaction is taken as done.
+COMPACT_GRACE = 3.0
+
+#: How long a compaction may take in all before it is taken as failed.
+COMPACT_TIMEOUT = 300.0
+
 #: Codex features a QAVector turn never has, whatever the user's configuration
 #: says: it ran with ``exec --ignore-user-config`` before, and none of these
 #: belong in a turn whose access QAVector decides.
@@ -271,6 +278,9 @@ class Turn:
         self.interrupting = False
         self.usage = None                 # (total before this turn, last total, window)
         self.ended = None                 # the turn/completed params' turn
+        self.compacted = None             # when Codex said the thread was compacted (compact turns)
+        self.announced = set()            # compactions of its own said: item ids, and turns
+        self.bare = set()                 # turns said compacted by a bare notice alone
 
     # -- output ---------------------------------------------------------------
     def _write(self, raw):
@@ -290,10 +300,61 @@ class Turn:
             self._answer(message["id"], method, params)
         elif method == "thread/tokenUsage/updated" and params.get("turnId") == self.turn_id:
             self._count(params.get("tokenUsage") or {})
+        elif params.get("threadId") == self.thread_id and self._compaction(method, params):
+            pass
         elif method == "turn/completed":
             turn = params.get("turn") or {}
             if isinstance(turn, dict) and turn.get("id") == self.turn_id:
                 self.ended = turn
+
+    def _compaction(self, method, params):
+        """What this thread says of being compacted - by a request of ours or
+        by Codex itself during an ordinary turn. True when it was one of those."""
+        compacting = bool(self.spec.get("compact"))
+        if method == "turn/started" and compacting and not self.turn_id:
+            # A compaction is a turn Codex starts itself: its id is only said here.
+            turn = params.get("turn") or {}
+            self.turn_id = str(turn.get("id") or "") if isinstance(turn, dict) else ""
+            return True
+        if method == "turn/completed" and compacting:
+            turn = params.get("turn") or {}
+            if isinstance(turn, dict) and (not self.turn_id or turn.get("id") == self.turn_id):
+                self.ended = turn
+                if turn.get("status") == "completed" and self.compacted is None:
+                    # A compaction that ended well compacted, whether or not it said so first.
+                    self.compacted = time.monotonic()
+                    self.say("compacted")
+            return True
+        said = params.get("turnId")
+        done = method == "thread/compacted" or (
+            method == "item/completed" and (params.get("item") or {}).get("type") == "contextCompaction")
+        if not done:
+            return False
+        if self.turn_id and said not in (None, "", self.turn_id):
+            return True                   # another turn's compaction
+        if compacting:
+            self.turn_id = self.turn_id or str(said or "")
+            if self.compacted is None:
+                self.compacted = time.monotonic()
+                self.say("compacted")
+        else:
+            # Codex compacted by itself in this turn: each item is one compaction,
+            # and a bare notice is one only when no item says it too.
+            turn = ("turn", self.turn_id)
+            if method == "item/completed":
+                key = (params.get("item") or {}).get("id")
+                if turn in self.announced and turn in self.bare:
+                    self.bare.discard(turn)         # the notice said this one already
+                    self.announced.add(key)
+                elif key not in self.announced:
+                    self.announced.add(key)
+                    self.announced.add(turn)
+                    self.say("compacted")
+            elif turn not in self.announced:
+                self.announced.add(turn)
+                self.bare.add(turn)
+                self.say("compacted")
+        return True
 
     # -- requests Codex makes of us ------------------------------------------
     def _answer(self, ident, method, params):
@@ -474,15 +535,29 @@ class Turn:
         except ProtocolError:
             self.waiting = texts + self.waiting
 
+    def _compact(self):
+        """Ask Codex to compact the thread; nothing is said to the model."""
+        self.server.call("thread/compact/start", {"threadId": self.thread_id},
+                         interrupted=self.stopping.is_set)
+
     def _follow(self):
         """Read until the turn ends; its ``turn`` object."""
         deadline = None
+        began = time.monotonic()
         while self.ended is None:
             if self.stopping.is_set():
                 self._interrupt()
                 deadline = deadline or time.monotonic() + INTERRUPT_GRACE
                 if time.monotonic() >= deadline:
                     return None
+            elif self.spec.get("compact"):
+                now = time.monotonic()
+                if (self.compacted is not None and not self.turn_id
+                        and now - self.compacted > COMPACT_GRACE):
+                    # Said compacted by a thread that never said its turn: it is done.
+                    return {"status": "completed"}
+                if now - began > COMPACT_TIMEOUT:
+                    return {"status": "failed", "error": {"message": "Codex did not finish compacting the thread."}}
             else:
                 self._steer()
             self.server.pump(0.1)
@@ -506,6 +581,12 @@ class Turn:
         try:
             self._open()
             model = self._thread()
+            if self.spec.get("compact"):
+                self._compact()
+                turn = self._follow()
+                if turn is None or self.stopping.is_set():
+                    return STOPPED_EXIT
+                return self._end(turn)
             self._start_turn(model)
             while True:
                 turn = self._follow()

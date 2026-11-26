@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -421,3 +422,155 @@ def test_a_turn_keeps_the_model_and_effort_codex_ran_with(world):
     assert turn["model"] == "" and turn["model_used"] == "fixture-default"
     assert sessions.load(root, session["id"])["turns"][0]["model_used"] == "fixture-default"
     assert codex.events(json.dumps({"qavector": "thread", "id": "t", "model": "m", "effort": "high"}))[0]["effort"] == "high"
+
+
+def test_a_compaction_asks_the_thread_to_compact_and_starts_no_turn_of_the_model(world):
+    root, path, session, logged, _work = world
+    first = runner.send(root, session["id"], "hello", agents_path=path)
+    seen = []
+    answer = runner.send(root, session["id"], "", agents_path=path, compact=True, emit=seen.append)
+    thread = first["session"]["provider_session"]
+    assert [one["threadId"] for one in _requests(logged, "thread/compact/start")] == [thread]
+    assert len(_requests(logged, "turn/start")) == 1                 # only the first message
+    assert answer["turn"]["state"] == "completed" and answer["turn"]["compact"] is True
+    assert [one["type"] for one in seen if one["type"] == "compacted"] == ["compacted"]
+    # Codex does not say the new size: nothing is claimed, and the old figure is gone.
+    assert answer["session"]["context"] == {"used": 0, "window": 272000, "compacted": True}
+
+
+def test_a_compaction_needs_a_thread_the_app_server_transport_and_no_hint(world):
+    root, path, session, _logged, _work = world
+    with pytest.raises(runner.Refused) as refused:
+        runner.send(root, session["id"], "", agents_path=path, compact=True)
+    assert refused.value.kind == "invalid"
+    runner.send(root, session["id"], "hello", agents_path=path)
+    with pytest.raises(runner.Refused) as refused:
+        runner.send(root, session["id"], "keep the plan", agents_path=path, compact=True)
+    assert refused.value.kind == "unsupported"
+    with pytest.raises(Unsupported):
+        codex.turn_argv("/bin/codex", session="thread", resume=False, compact=True)
+    assert _spec(codex.turn_argv("/bin/codex", session="thread", resume=True, compact=True))["compact"] is True
+    assert "compact" not in _spec(codex.turn_argv("/bin/codex", session="thread", resume=True))
+
+
+def _bridge(**spec):
+    turn = codex_turn.Turn(dict({"binary": "codex", "compact": True}, **spec), "", out=open(os.devnull, "wb"))
+    turn.thread_id = "mine"
+    return turn
+
+
+def _note(bridge, method, **params):
+    bridge._on_message(b"{}", {"method": method, "params": params})
+
+
+def test_a_compaction_heeds_only_its_own_thread_and_takes_a_completion_without_a_start():
+    turn = _bridge()
+    _note(turn, "turn/started", threadId="other", turn={"id": "t-other"})
+    assert turn.turn_id == ""
+    _note(turn, "turn/completed", threadId="other", turn={"id": "t-other", "status": "completed"})
+    assert turn.ended is None
+    _note(turn, "turn/completed", threadId="mine", turn={"id": "t-1", "status": "completed"})
+    assert turn.ended["id"] == "t-1"                   # no turn/started was said: still ended
+
+
+def test_a_compaction_that_never_ends_fails_and_one_that_was_said_done_completes(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(codex_turn.time, "monotonic", lambda: clock[0])
+    quiet = _bridge()
+    quiet.server = type("S", (), {"pump": lambda self, _t: clock.__setitem__(0, clock[0] + 100)})()
+    assert quiet._follow()["status"] == "failed"
+    done = _bridge()
+    _note(done, "item/completed", threadId="mine", item={"type": "contextCompaction"})
+    done.server = quiet.server
+    assert done._follow() == {"status": "completed"}
+
+
+def test_the_bridge_says_compacted_only_for_its_own_turn_and_only_once(capsys):
+    import io
+    buffer = io.BytesIO()
+    turn = codex_turn.Turn({"binary": "codex", "compact": True}, "", out=buffer)
+    turn.thread_id, turn.turn_id = "mine", "t-1"
+    item = {"type": "contextCompaction"}
+    _note(turn, "item/completed", threadId="other", turnId="t-9", item=item)
+    _note(turn, "item/completed", threadId="mine", turnId="t-9", item=item)    # another turn of this thread
+    assert turn.compacted is None and b'"compacted"' not in buffer.getvalue().replace(b"{}", b"")
+    _note(turn, "item/completed", threadId="mine", turnId="t-1", item=item)
+    _note(turn, "thread/compacted", threadId="mine", turnId="t-1")
+    assert buffer.getvalue().count(b'{"qavector": "compacted"}') == 1
+    assert codex.events('{"qavector": "compacted"}')[0]["type"] == "compacted"
+
+
+def test_a_known_turn_is_waited_for_so_a_late_failure_is_heard(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(codex_turn.time, "monotonic", lambda: clock[0])
+    turn = _bridge()
+    _note(turn, "turn/started", threadId="mine", turn={"id": "t-1"})
+    _note(turn, "item/completed", threadId="mine", turnId="t-1", item={"type": "contextCompaction"})
+    steps = []
+
+    def pump(_timeout):
+        clock[0] += 10                                  # well past the grace, every poll
+        steps.append(1)
+        if len(steps) == 3:
+            _note(turn, "turn/completed", threadId="mine",
+                  turn={"id": "t-1", "status": "failed", "error": {"message": "late"}})
+    turn.server = type("S", (), {"pump": lambda self, timeout: pump(timeout)})()
+    assert turn._follow()["status"] == "failed" and len(steps) == 3
+
+
+def test_a_compaction_whose_start_was_missed_still_counts_and_ends_on_its_own_turn():
+    turn = _bridge()
+    _note(turn, "item/completed", threadId="mine", turnId="t-7", item={"type": "contextCompaction"})
+    assert turn.turn_id == "t-7" and turn.compacted is not None
+    _note(turn, "thread/compacted", threadId="mine", turnId="t-other")      # another turn's
+    _note(turn, "turn/completed", threadId="mine", turn={"id": "t-7", "status": "completed"})
+    assert turn.ended["id"] == "t-7"
+
+
+def test_a_compaction_codex_makes_by_itself_in_an_ordinary_turn_is_said():
+    import io
+    buffer = io.BytesIO()
+    turn = codex_turn.Turn({"binary": "codex"}, "", out=buffer)
+    turn.thread_id, turn.turn_id = "mine", "t-1"
+    _note(turn, "item/completed", threadId="mine", turnId="t-1", item={"type": "contextCompaction"})
+    assert buffer.getvalue().count(b'"compacted"') == 1
+
+
+def test_a_compaction_that_ended_well_is_said_even_when_no_boundary_was():
+    import io
+    buffer = io.BytesIO()
+    turn = codex_turn.Turn({"binary": "codex", "compact": True}, "", out=buffer)
+    turn.thread_id = "mine"
+    _note(turn, "turn/completed", threadId="mine", turn={"id": "t-1", "status": "completed"})
+    assert buffer.getvalue().count(b'"compacted"') == 1
+    failed = codex_turn.Turn({"binary": "codex", "compact": True}, "", out=io.BytesIO())
+    failed.thread_id = "mine"
+    _note(failed, "turn/completed", threadId="mine", turn={"id": "t-1", "status": "failed"})
+    assert failed.compacted is None
+
+
+def test_codex_s_own_compaction_is_said_once_whichever_notification_comes_first():
+    import io
+    for order in (("thread/compacted", "item/completed"), ("item/completed", "thread/compacted")):
+        buffer = io.BytesIO()
+        turn = codex_turn.Turn({"binary": "codex"}, "", out=buffer)
+        turn.thread_id, turn.turn_id = "mine", "t-1"
+        for method in order:
+            _note(turn, method, threadId="mine", turnId="t-1", item={"type": "contextCompaction"})
+        assert buffer.getvalue().count(b'"compacted"') == 1
+
+
+def test_two_compactions_in_one_turn_are_both_said_and_the_bare_notice_counts_when_alone():
+    import io
+    buffer = io.BytesIO()
+    turn = codex_turn.Turn({"binary": "codex"}, "", out=buffer)
+    turn.thread_id, turn.turn_id = "mine", "t-1"
+    for ident in ("c-1", "c-2", "c-2"):
+        _note(turn, "item/completed", threadId="mine", turnId="t-1", item={"type": "contextCompaction", "id": ident})
+    assert buffer.getvalue().count(b'"compacted"') == 2
+    alone = io.BytesIO()
+    other = codex_turn.Turn({"binary": "codex"}, "", out=alone)
+    other.thread_id, other.turn_id = "mine", "t-1"
+    _note(other, "thread/compacted", threadId="mine", turnId="t-1")
+    _note(other, "thread/compacted", threadId="mine", turnId="t-1")
+    assert alone.getvalue().count(b'"compacted"') == 1

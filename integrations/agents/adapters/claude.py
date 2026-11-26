@@ -75,7 +75,8 @@ def capabilities():
     from integrations.agents.contracts import ProviderCapabilities
     return ProviderCapabilities(KIND, MODES, resume=True, selected_model=True, effort=True,
                                 cancel=True, usage=True, qavector=True,
-                                planning=True, skills=True, cost_scope="session")
+                                planning=True, skills=True, compact=True, compact_hint=True,
+                                cost_scope="session")
 
 
 #: Where Claude Code's installers put it, after PATH (see
@@ -729,8 +730,11 @@ def qavector_mcp(socket_path, token_file):
 
 
 def turn_argv(binary, mode="read", model="", effort="", session="", resume=False,
-              skills_dir="", attachments_dir="", plan=False, qavector=None):
+              skills_dir="", attachments_dir="", plan=False, qavector=None, compact=False):
     """The command line for one turn. The message itself is written to stdin.
+
+    ``compact`` changes nothing here: a compaction is the CLI's own ``/compact``
+    command, which is the message the runner then writes.
 
     On stdin rather than in argv for two reasons: argv is readable by every
     process on the machine, and one argument cannot be longer than the kernel
@@ -858,6 +862,9 @@ def events(line):
         context          used - how much of the agent's context one request
                          filled (input, cache read and cache write together);
                          the last one is how full it was when the turn ended
+        compacted        before, after, trigger - the CLI stored a summary in
+                         place of the conversation: its size in tokens then
+                         and now
         plan             text - a planning turn's plan, in Markdown
         questions        items - a planning turn's questions, each
                          {question, options, multiple}
@@ -887,6 +894,11 @@ def events(line):
         if event.get("subtype") == "task_notification":
             return [{"type": "background.notification", "id": event.get("task_id"),
                      "status": event.get("status"), "summary": event.get("summary") or ""}]
+        if event.get("subtype") == "compact_boundary":
+            meta = event.get("compact_metadata") if isinstance(event.get("compact_metadata"), dict) else {}
+            return [{"type": "compacted", "before": _count(meta.get("pre_tokens")),
+                     "after": _count(meta.get("post_tokens")),
+                     "trigger": str(meta.get("trigger") or "")}]
         if event.get("subtype") == "permission_denied":
             # Said apart from the call's own result, whose text reads as a
             # question ("requires approval") nobody in a turn can answer.

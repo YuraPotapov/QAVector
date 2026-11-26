@@ -848,3 +848,73 @@ def test_a_turn_keeps_no_changes_unless_tracking_is_turned_on(world, monkeypatch
                          emit=seen.append)
     assert "changes" not in answer["turn"]
     assert "changes" not in [one["type"] for one in seen]
+
+
+# ------------------------------------------------------------------ compacting
+def test_a_compaction_resumes_the_conversation_and_says_what_it_made_of_the_context(world):
+    session = world.session()
+    world.send(session, "Hello")
+    answer, seen = world.send(session, "keep the decisions", compact=True)
+    _first, second = starts(world.log)
+    assert second["message"] == "/compact keep the decisions"
+    assert flag(second, "--resume") == flag(starts(world.log)[0], "--session-id")
+    (compacted,) = [one for one in seen if one["type"] == "compacted"]
+    assert (compacted["before"], compacted["after"]) == (1205, 586)
+    assert answer["turn"]["compact"] is True and answer["turn"]["state"] == "completed"
+    # The figure of the turn before it is no longer true: the summary's size is.
+    assert answer["session"]["context"] == {"used": 586, "window": 200000, "compacted": True}
+
+
+def test_nothing_is_compacted_before_the_agent_holds_a_conversation(world):
+    session = world.session()
+    with pytest.raises(runner.Refused) as refused:
+        world.send(session, "", compact=True)
+    assert refused.value.kind == "invalid"
+    assert starts(world.log) == []
+    assert sessions.load(world.root, session["id"]).get("turns") in (None, [])
+
+
+def test_a_compaction_leaves_the_plan_and_what_the_conversation_waits_for_alone(world):
+    session = world.session(mode="edit")
+    world.send(session, "Make divide safe. ASK", plan=True)
+    world.send(session, "", compact=True)
+    saved = sessions.load(world.root, session["id"])
+    assert (saved["phase"], saved["plan"]) == ("questions", True)
+    assert "--json-schema" not in starts(world.log)[1]["argv"]
+
+
+def test_a_compaction_cut_off_after_its_boundary_still_leaves_the_smaller_context(world):
+    session = world.session()
+    world.send(session, "Hello")
+    answer, _seen = world.send(session, "CUT", compact=True)
+    assert answer["turn"]["state"] == "failed"
+    assert answer["session"]["context"] == {"used": 586, "window": 200000, "compacted": True}
+
+
+def test_an_ordinary_turn_without_a_window_does_not_borrow_another_model_s(world):
+    turns = [{"n": 1, "state": "completed", "context": {"used": 10, "window": 1000000}},
+             {"n": 2, "state": "completed", "context": {"used": 900, "window": 0}}]
+    assert sessions.settle({"turns": turns})["context"] == {"used": 900, "window": 0}
+
+
+def test_a_compaction_takes_its_window_only_from_a_turn_of_the_same_model():
+    old = {"n": 1, "state": "completed", "model_used": "big", "context": {"used": 10, "window": 1000000}}
+    other = {"n": 2, "state": "completed", "model_used": "small", "context": {"used": 5, "window": 0}}
+    squeezed = {"n": 3, "state": "completed", "model_used": "small", "context": {"used": 99, "window": 0, "compacted": True}}
+    assert sessions.settle({"turns": [old, other, squeezed]})["context"]["window"] == 0
+    same = dict(other, context={"used": 5, "window": 200000})
+    assert sessions.settle({"turns": [old, same, squeezed]})["context"]["window"] == 200000
+
+
+def test_a_window_is_not_borrowed_when_neither_turn_names_its_model():
+    first = {"n": 1, "state": "completed", "context": {"used": 10, "window": 1000000}}
+    squeezed = {"n": 2, "state": "completed", "context": {"used": 99, "window": 0, "compacted": True}}
+    assert sessions.settle({"turns": [first, squeezed]})["context"]["window"] == 0
+
+
+def test_only_a_real_true_compacts_for_a_direct_caller_as_for_the_cli(world):
+    session = world.session()
+    world.send(session, "Hello")
+    answer, _seen = world.send(session, "keep this as a plain message", compact="false")
+    assert answer["turn"].get("compact") is None
+    assert starts(world.log)[-1]["message"] == "keep this as a plain message"

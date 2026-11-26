@@ -1029,6 +1029,7 @@ class MainWindow(QMainWindow):
         self.status_chat.hide()
         chat = self.integrations.agents.chat
         chat.context_changed.connect(self._set_status_context)
+        chat.context_level_changed.connect(self._set_status_context_level)
         chat.footer_title_changed.connect(self._set_status_chat)
         self.status_right = QLabel("")
         self.status_right.setStyleSheet("font-family: %s; font-size: 11px; color: %s;"
@@ -3720,6 +3721,14 @@ class MainWindow(QMainWindow):
     def _set_status_context(self, text):
         self.status_context.setText(text)
         self.status_context.setVisible(bool(text))
+
+    def _set_status_context_level(self, level, tip):
+        """The context's share in the colour of a warning from 80%, of an
+        error from 95% - in the theme's own inks."""
+        color = {"warn": theme.WARN_INK, "full": theme.BAD_INK}.get(level, theme.NEUTRAL[700])
+        self.status_context.setStyleSheet("font-family: %s; font-size: 11px; color: %s;%s"
+                                          % (theme.MONO_CSS, color, " font-weight: 600;" if level else ""))
+        self.status_context.setToolTip(tip)
 
     def _set_status_chat(self, text):
         self.status_chat.setText(text)

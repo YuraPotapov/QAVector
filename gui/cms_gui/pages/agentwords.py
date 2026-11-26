@@ -177,6 +177,30 @@ def count_text(number):
     return ("%.1fM" % (number / 1000000.0)).replace(".0M", "M")
 
 
+#: How full a context is when it is worth saying so, and when it is nearly gone
+#: - shares of the model's window.
+CONTEXT_WARN, CONTEXT_FULL = 0.80, 0.95
+
+
+def context_share(context):
+    """How much of its window the context fills, 0-1 and more; None when the
+    window is not known."""
+    context = context or {}
+    used, window = context.get("used"), context.get("window")
+    if not isinstance(used, int) or not isinstance(window, int) or isinstance(used, bool) \
+            or isinstance(window, bool) or window <= 0 or used <= 0:
+        return None
+    return used / window
+
+
+def context_level(context):
+    """``"full"`` from 95%, ``"warn"`` from 80%, otherwise ``""``."""
+    share = context_share(context)
+    if share is None:
+        return ""
+    return "full" if share >= CONTEXT_FULL else "warn" if share >= CONTEXT_WARN else ""
+
+
 def context_text(context):
     """How full the agent's context is: ``25k of 200k``, or the size alone."""
     context = context or {}

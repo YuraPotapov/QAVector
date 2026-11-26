@@ -149,6 +149,7 @@ class Reader:
         self._writing = {}              # tool call id -> the path it asked to write
         self._refused = {}              # tool call id -> why the program would not run it
         self._context = 0               # how full the agent's context was at its last request
+        self._compacted = False         # the provider compacted the conversation in this turn
         self._hidden = set()            # calls of the program's own tools, never shown
         # What the conversation had cost before this turn, as the program last
         # reported it: a program continuing a conversation reports the whole
@@ -165,6 +166,10 @@ class Reader:
             if event["type"] == "context":
                 self._context = event.get("used") or self._context
                 continue
+            if event["type"] == "compacted":
+                # What the context holds now: the summary, and what came after it.
+                self._compacted = True
+                self._context = event.get("after") or 0
             if (event["type"] == "tool.started"
                     and event.get("name") in getattr(self.adapter, "HIDDEN_TOOLS", ())):
                 self._hidden.add(event.get("id"))
@@ -206,8 +211,10 @@ class Reader:
             if scope == "session" and isinstance(before, (int, float)) and 0 <= before <= total:
                 event["cost_usd"] = round(total - before, 6)
         window = event.pop("context_window", 0)
-        if self._context:
+        if self._context or self._compacted:
             event["context"] = {"used": self._context, "window": window or 0}
+            if self._compacted:
+                event["context"]["compacted"] = True
         return event
 
 
@@ -243,8 +250,12 @@ TRIGGERS = ("tasks_finished",)
 
 def send(root, session_id, message, agents_path=None, mode=None, model=None,
          effort=None, skills=None, skills_root=None, emit=None, stop=None, attachments=None,
-         plan=None, qavector=None, trigger=None, read_tasks=None, follow_ups=None):
+         plan=None, qavector=None, trigger=None, read_tasks=None, follow_ups=None, compact=False):
     """Take one turn. Returns ``{"session", "turn"}``; raises :class:`Refused`.
+
+    ``compact`` makes it a turn that only has the provider compact the
+    conversation it already holds: ``message`` is then what to keep (for a
+    provider that takes it), not something said to the agent.
 
     ``mode``, ``model``, ``effort``, ``skills`` (names in the library at
     ``skills_root``) and ``plan``, when given, are what the session uses from
@@ -269,7 +280,7 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
     chosen = {"mode": mode, "model": model, "effort": effort, "skills": skills, "plan": plan,
               "skills_root": skills_root, "attachments": attachments if attachments is not None else [],
               "qavector": qavector, "trigger": trigger if trigger in TRIGGERS else None,
-              "follow_ups": follow_ups}
+              "follow_ups": follow_ups, "compact": compact is True}
     try:
         sessions.load(root, session_id)             # not there: said before the lock
         with sessions.lock(root, session_id):
@@ -277,7 +288,9 @@ def send(root, session_id, message, agents_path=None, mode=None, model=None,
             session = sessions.load(root, session_id)
             task_refs = (session.get("source") or {}).get("task_refs") or []
             chosen["task_refs"] = task_refs if not session.get("turns") else []
-            if not message.strip() and not attachments and not chosen["task_refs"]:
+            if chosen["compact"]:
+                chosen["task_refs"] = []
+            elif not message.strip() and not attachments and not chosen["task_refs"]:
                 raise Refused("invalid", "There is nothing to send.")
             chosen["read_tasks"] = read_tasks
             turn = _turn(root, session, message, agents_path, chosen, emit, stop)
@@ -340,6 +353,17 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     resume = bool(session.get("provider_started") and session.get("provider_session"))
     if resume and not features.resume:
         raise Refused("unsupported", "%s cannot resume this conversation." % adapter.NAME)
+    compacting = chosen["compact"]
+    if compacting:
+        if not features.compact:
+            raise Refused("unsupported", "%s cannot compact a conversation." % adapter.NAME)
+        if not resume:
+            raise Refused("invalid", "There is nothing to compact yet.")
+        if message.strip() and not features.compact_hint:
+            raise Refused("unsupported", "%s compacts without being told what to keep." % adapter.NAME)
+        # Not a turn of the agent's own: it works nothing out and asks nothing.
+        planning = False
+        message = ("/compact " + message.strip()).strip()
     try:
         staged = adapter.stage_skills(
             os.path.join(sessions.directory(root, session["id"]), "skills"),
@@ -393,7 +417,8 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     # QAVector, on its first such turn and whenever the list changed. In the
     # prompt only; what the person wrote is recorded as they wrote it.
     told = session.get("others_told") or ""
-    if chosen.get("qavector") and not planning and sessions.others_of(session, connection) != "deny":
+    if chosen.get("qavector") and not planning and not compacting \
+            and sessions.others_of(session, connection) != "deny":
         from . import roles as roles_mod
         try:
             preface, fingerprint = roles_mod.preface(agents_path, connection)
@@ -410,7 +435,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     try:
         argv = adapter.turn_argv(binary, mode, used_model, used_effort, session=provider,
                                  resume=resume, skills_dir=staged, attachments_dir=attachments_dir,
-                                 plan=planning, **qavector_args)
+                                 plan=planning, **qavector_args, **({"compact": True} if compacting else {}))
     except Unsupported as exc:
         raise Refused("unsupported", str(exc)) from None
 
@@ -424,10 +449,13 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             "steps": None, "error": ""}
     if attached:
         turn["attachments"] = attached
+    if compacting:
+        turn["compact"] = True
     if trigger in TRIGGERS:
         turn["trigger"] = trigger         # started by QAVector, not the person (ADR-009)
     session.update(others_told=told, mode=mode, model=session_model, effort=session_effort, skills=names,
-                   plan=planning, provider_session=provider, updated=turn["started"],
+                   plan=session.get("plan") if compacting else planning, provider_session=provider,
+                   updated=turn["started"],
                    title=session.get("title") or sessions.title_from(
                        message or ", ".join(one["name"] for one in attached)))
     session.setdefault("turns", []).append(turn)
@@ -462,6 +490,8 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
             said["trigger"] = trigger
         if planning:
             said["plan"] = True
+        if compacting:
+            said["compact"] = True
         if names:
             said["skills"] = names
         if attached:
@@ -477,7 +507,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
                        cost_before=sessions.cost_so_far(session) if resume else None,
                        # A planning turn answers in a shape of its own: what is
                        # said meanwhile waits for the next turn.
-                       follow_ups=None if planning else chosen.get("follow_ups"))
+                       follow_ups=None if planning or compacting else chosen.get("follow_ups"))
         if before is not None:
             turn["changes"] = _changed(session_dir, where, folder, before, written)
             emit(record.add(dict(turn["changes"], type="changes")))
@@ -504,7 +534,7 @@ def _turn(root, session, message, agents_path, chosen, emit, stop):
     # What the conversation waits for now: answers to the agent's questions,
     # a word on its plan - or nothing, once it was given work or answered.
     session.update(updated=turn["ended"], state=turn["state"],
-                   phase=outcome.get("asked") or "")
+                   phase=session.get("phase", "") if compacting else outcome.get("asked") or "")
     sessions.settle(session)
     sessions.save(root, session)
     return dict(turn)
@@ -683,6 +713,10 @@ def _run(adapter, argv, folder, effective, seen, message, where, record, emit, s
                 for event in reader.events(raw.decode("utf-8", "replace")):
                     if event.get("provider_session"):
                         outcome["provider_session"] = event["provider_session"]
+                    if event["type"] == "compacted":
+                        # Kept as soon as it is said: a turn cut off after it
+                        # still left the context smaller.
+                        outcome["context"] = {"used": event.get("after") or 0, "window": 0, "compacted": True}
                     if event["type"] == "background.tasks":
                         background_count = event["count"]
                         if awaiting_reply and not background_count:
